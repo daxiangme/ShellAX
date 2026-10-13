@@ -37,3 +37,4 @@ pub mod broadcast;
 pub mod snapshot;
 pub mod notify_rules;
 pub mod graphics;
+pub mod ctxmenu;
