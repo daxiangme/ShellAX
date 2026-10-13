@@ -629,3 +629,7 @@
 "term.search_hint" = "正则 · Enter 下一个 · Shift+Enter 上一个 · Esc 关闭"
 "ui.block_select" = "矩形选择"
 "ui.block_select_desc" = "拖动时按住此键；若窗口管理器占用 Alt+拖动（如 Xfwm），改用 Ctrl"
+"ui.deny_with_reason" = "拒绝并告诉 Agent 原因…"
+"ui.deny_send_reason" = "拒绝并发送原因"
+"ui.deny_reason_placeholder" = "回传给 Agent 的原因（例如：先 dry-run）"
+"ui.allow_session_prefix" = "本会话总是允许 “{p}”"

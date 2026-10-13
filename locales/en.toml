@@ -629,3 +629,7 @@
 "term.search_hint" = "regex · Enter next · Shift+Enter prev · Esc"
 "ui.block_select" = "Rectangular selection"
 "ui.block_select_desc" = "Hold this key while dragging; use Ctrl if your window manager grabs Alt+drag"
+"ui.deny_with_reason" = "Deny and tell the agent why…"
+"ui.deny_send_reason" = "Deny with reason"
+"ui.deny_reason_placeholder" = "Reason sent back to the agent (e.g. use a dry run first)"
+"ui.allow_session_prefix" = "Always allow “{p}” this session"

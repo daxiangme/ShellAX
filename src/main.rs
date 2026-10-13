@@ -87,6 +87,8 @@ pub(crate) struct Root {
     auth_save: bool,
     hk_pending: Vec<HostKeyPrompt>,
     approvals: Vec<ssh_term_proto::policy_server::Approval>,
+    /// 'deny and tell the agent why' input (shown after clicking that button)
+    deny_reason: Option<Entity<InputState>>,
     pub(crate) policy_port: Option<u16>,
     overlay: Overlay,
     host_search: Entity<InputState>,
@@ -443,11 +445,12 @@ impl Root {
         });
     }
 
-    fn answer_approval(&mut self, allow: bool, cx: &mut Context<Self>) {
+    fn answer_approval(&mut self, ans: ssh_term_proto::policy_server::Answer, cx: &mut Context<Self>) {
         if !self.approvals.is_empty() {
             let a = self.approvals.remove(0);
-            let _ = a.reply.send(allow);
+            let _ = a.reply.send(ans);
         }
+        self.deny_reason = None;
         cx.notify();
     }
 
@@ -951,9 +954,21 @@ impl Render for Root {
                 .child(div().text_size(px(12.5)).text_color(c(th.subtext)).child(tf("main.approval_who", &[("agent", &a.principal), ("host", &a.host), ("tool", &a.req.tool), ("risk", &a.risk.label())])))
                 .child(div().p_3().rounded_md().bg(c(th.mantle)).text_size(px(12.5)).text_color(c(th.text)).font_family(SharedString::from(s.font.family.clone())).child(a.req.command.clone()))
                 .child(div().text_size(px(11.5)).text_color(c(th.overlay1)).child(tf("main.approval_why", &[("why", &a.reason), ("cwd", &a.req.cwd)])))
+                .when_some(self.deny_reason.clone(), |d, inp| d.child(div().flex().items_center().gap_2()
+                    .child(div().flex_1().child(gpui_component::input::Input::new(&inp)))
+                    .child(ui::button("ap-deny-send", t("ui.deny_send_reason"), 2).on_click(cx.listener(|this, _, _w, cx| {
+                        let why = this.deny_reason.as_ref().map(|i| i.read(cx).value().to_string()).unwrap_or_default();
+                        this.answer_approval(ssh_term_proto::policy_server::Answer::Deny(why), cx);
+                    })))))
                 .child(div().flex().gap_2().justify_end()
-                    .child(ui::button("ap-deny", t("ui.deny"), 0).on_click(cx.listener(|this, _, _w, cx| this.answer_approval(false, cx))))
-                    .child(ui::button("ap-allow", t("ui.allow_once"), 1).on_click(cx.listener(|this, _, _w, cx| this.answer_approval(true, cx)))))));
+                    .child(ui::button("ap-deny", t("ui.deny"), 0).on_click(cx.listener(|this, _, _w, cx| this.answer_approval(ssh_term_proto::policy_server::Answer::Deny(String::new()), cx))))
+                    .child(ui::button("ap-deny-why", t("ui.deny_with_reason"), 0).on_click(cx.listener(|this, _, w, cx| {
+                        let inp = cx.new(|cx| InputState::new(w, cx).placeholder(t("ui.deny_reason_placeholder")));
+                        inp.update(cx, |i, cx| i.focus(w, cx));
+                        this.deny_reason = Some(inp); cx.notify();
+                    })))
+                    .child(ui::button("ap-session", tf("ui.allow_session_prefix", &[("p", &ssh_term_proto::policy_server::command_prefix(&a.req.command))]), 0).on_click(cx.listener(|this, _, _w, cx| this.answer_approval(ssh_term_proto::policy_server::Answer::Session, cx))))
+                    .child(ui::button("ap-allow", t("ui.allow_once"), 1).on_click(cx.listener(|this, _, _w, cx| this.answer_approval(ssh_term_proto::policy_server::Answer::Once, cx)))))));
         } }
         if self.quit_confirm {
             let agents = self.running_agents(cx);
@@ -1011,7 +1026,7 @@ fn main() {
                     let audit = audit_log();
                     let mut root = Root {
                         rt, default_target, tabs: vec![], active: 0, themes, histories: HashMap::new(),
-                        manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], policy_port: None, overlay: Overlay::None, sftp_views: HashMap::new(), sftp_current: None, port_view: None, quit_confirm: false, quit_ok: false, chat_view: None,
+                        manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], deny_reason: None, policy_port: None, overlay: Overlay::None, sftp_views: HashMap::new(), sftp_current: None, port_view: None, quit_confirm: false, quit_ok: false, chat_view: None,
                         host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., collapsed: HashSet::new(), sidebar_visible: true, audit, audit_verify: None,
                         settings_dirty: vec![], toast: None, toast_seq: 0, _subs: vec![],
                     };

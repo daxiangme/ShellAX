@@ -47,7 +47,20 @@ pub struct Approval {
     pub risk: Risk,
     pub reason: String,
     pub deadline: Instant,
-    pub reply: flume::Sender<bool>,
+    pub reply: flume::Sender<Answer>,
+}
+
+/// User's answer on the approval card (PRD 3.4: once / always this prefix for the session / reject
+/// with feedback). The deny reason is passed back to the agent verbatim.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Answer { Once, Session, Deny(String) }
+
+/// Command prefix used for "always allow this prefix in this session": the program plus its
+/// sub-command when there is one (`git push`, `kubectl get`, `rm`).
+pub fn command_prefix(cmd: &str) -> String {
+    let mut it = cmd.split_whitespace().filter(|w| !w.contains('='));
+    let a = it.next().unwrap_or("");
+    match it.next() { Some(b) if !b.starts_with('-') && b.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') => format!("{a} {b}"), _ => a.to_string() }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -76,7 +89,7 @@ pub fn start(bind: &str, token: Option<String>, ctx: CtxFn, approvals: Option<fl
         let ep = Endpoint { url: format!("http://127.0.0.1:{port}"), token: token.clone(), pid: std::process::id(), host: String::new() };
         write_private(p, &serde_json::to_string_pretty(&ep)?)?;
     }
-    let shared = Arc::new(Shared { token: token.clone(), ctx, approvals, audit, next: AtomicU64::new(1) });
+    let shared = Arc::new(Shared { token: token.clone(), ctx, approvals, audit, next: AtomicU64::new(1), session_allow: Default::default() });
     std::thread::Builder::new().name("policy-server".into()).spawn(move || {
         for s in listener.incoming().flatten() {
             let sh = shared.clone();
@@ -100,7 +113,9 @@ fn write_private(p: &Path, text: &str) -> Result<()> {
     Ok(())
 }
 
-struct Shared { token: String, ctx: CtxFn, approvals: Option<flume::Sender<Approval>>, audit: Arc<AuditLog>, next: AtomicU64 }
+struct Shared { token: String, ctx: CtxFn, approvals: Option<flume::Sender<Approval>>, audit: Arc<AuditLog>, next: AtomicU64,
+    /// (principal, agent session, command prefix) → highest risk the user allowed for it
+    session_allow: std::sync::Mutex<std::collections::HashMap<(String, String, String), Risk>> }
 
 fn ct_eq(a: &str, b: &str) -> bool { a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0 }
 
@@ -182,6 +197,14 @@ impl Shared {
         } else {
             policy::decide_ctx(ctx.mode, ctx.max_auto, &ctx.rules, principal, &req.action, &req.command, ctx.dangerous_confirm, prod)
         };
+        let skey = (principal.to_string(), if req.session.is_empty() { "-".to_string() } else { req.session.clone() }, command_prefix(&req.command));
+        if eff == Effect::Ask {
+            // "always allow this prefix for this session" — never across a higher risk level
+            if let Some(max) = self.session_allow.lock().unwrap().get(&skey) { if risk <= *max {
+                eff = Effect::Allow; reason = format!("{reason} → allowed for this session ({:?})", skey.2);
+                let _ = self.audit.append("hook.approval", "user", &format!("session-rule session={} prefix={:?} command={:?}", skey.1, skey.2, req.command));
+            } }
+        }
         if eff == Effect::Ask && interactive {
             if let Some(tx) = &self.approvals {
                 let (rtx, rrx) = flume::bounded(1);
@@ -191,8 +214,17 @@ impl Shared {
                 if tx.send(a).is_ok() {
                     let got = if ctx.timeout_deny { rrx.recv_timeout(ctx.approval_timeout).ok() } else { rrx.recv().ok() };
                     match got {
-                        Some(true) => { eff = Effect::Allow; reason = format!("{reason} → approved by user"); let _ = self.audit.append("hook.approval", "user", &format!("id={id} allow command={:?}", req.command)); }
-                        Some(false) => { eff = Effect::Deny; reason = format!("{reason} → denied by user"); let _ = self.audit.append("hook.approval", "user", &format!("id={id} deny command={:?}", req.command)); }
+                        Some(Answer::Once) => { eff = Effect::Allow; reason = format!("{reason} → approved by user"); let _ = self.audit.append("hook.approval", "user", &format!("id={id} allow session={} command={:?}", skey.1, req.command)); }
+                        Some(Answer::Session) => {
+                            eff = Effect::Allow; reason = format!("{reason} → approved by user for this session ({:?})", skey.2);
+                            let _ = self.audit.append("hook.approval", "user", &format!("id={id} allow-session session={} prefix={:?} command={:?}", skey.1, skey.2, req.command));
+                            self.session_allow.lock().unwrap().insert(skey.clone(), risk);
+                        }
+                        Some(Answer::Deny(why)) => {
+                            eff = Effect::Deny;
+                            reason = if why.trim().is_empty() { format!("{reason} → denied by user") } else { format!("denied by user: {}", why.trim()) };
+                            let _ = self.audit.append("hook.approval", "user", &format!("id={id} deny session={} feedback={:?} command={:?}", skey.1, why.trim(), req.command));
+                        }
                         None => { eff = Effect::Deny; reason = format!("{reason} → no answer within {}s, denied", ctx.approval_timeout.as_secs()); let _ = self.audit.append("hook.approval", "policy", &format!("id={id} timeout deny")); }
                     }
                 }
@@ -258,11 +290,40 @@ mod tests {
         let (s, dir) = srv(PolicyCtx { approval_timeout: Duration::from_millis(600), ..Default::default() }, Some(tx));
         let url = format!("http://127.0.0.1:{}", s.port);
         let tok = s.token.clone();
-        std::thread::spawn(move || { let a = rx.recv().unwrap(); assert_eq!(a.req.command, "rm a"); a.reply.send(true).unwrap(); let _b = rx.recv().unwrap(); /* never answer */ std::thread::sleep(Duration::from_secs(2)); });
+        std::thread::spawn(move || { let a = rx.recv().unwrap(); assert_eq!(a.req.command, "rm a"); a.reply.send(Answer::Once).unwrap(); let _b = rx.recv().unwrap(); /* never answer */ std::thread::sleep(Duration::from_secs(2)); });
         let (_, b, _) = post(&url, "/v1/hook/claude", &tok, None, r#"{"tool_name":"Bash","tool_input":{"command":"rm a"}}"#, Duration::from_secs(5)).unwrap();
         assert!(b.contains("\"allow\"") && b.contains("approved"), "{b}");
         let (_, b, _) = post(&url, "/v1/hook/claude", &tok, None, r#"{"tool_name":"Bash","tool_input":{"command":"rm b"}}"#, Duration::from_secs(5)).unwrap();
         assert!(b.contains("\"deny\"") && b.contains("no answer"), "{b}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    #[test]
+    fn session_allow_and_deny_with_reason() {
+        let (tx, rx) = flume::unbounded::<Approval>();
+        let (s, dir) = srv(PolicyCtx { approval_timeout: Duration::from_secs(3), ..Default::default() }, Some(tx));
+        let url = format!("http://127.0.0.1:{}", s.port);
+        let tok = s.token.clone();
+        let asked = Arc::new(AtomicU64::new(0));
+        let a2 = asked.clone();
+        std::thread::spawn(move || while let Ok(a) = rx.recv() {
+            let n = a2.fetch_add(1, Ordering::SeqCst);
+            let ans = if n == 0 { Answer::Session } else { Answer::Deny("use trash-cli instead".into()) };
+            a.reply.send(ans).unwrap();
+        });
+        let t = Duration::from_secs(5);
+        let body = |sess: &str, cmd: &str| format!(r#"{{"session_id":"{sess}","tool_name":"Bash","tool_input":{{"command":"{cmd}"}}}}"#);
+        let (_, b, _) = post(&url, "/v1/hook/claude", &tok, None, &body("s1", "git push origin a"), t).unwrap();
+        assert!(b.contains("\"allow\"") && b.contains("this session"), "{b}");
+        let (_, b, _) = post(&url, "/v1/hook/claude", &tok, None, &body("s1", "git push origin b"), t).unwrap();
+        assert!(b.contains("\"allow\""), "{b}");
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+        let (_, b, _) = post(&url, "/v1/hook/claude", &tok, None, &body("s2", "git push origin c"), t).unwrap();
+        assert!(b.contains("\"deny\"") && b.contains("use trash-cli instead"), "{b}");
+        assert_eq!(asked.load(Ordering::SeqCst), 2);
+        assert_eq!(command_prefix("git push origin a"), "git push");
+        assert_eq!(command_prefix("FOO=1 rm -rf x"), "rm");
+        let log = std::fs::read_to_string(dir.join("audit.jsonl")).unwrap();
+        assert!(log.contains("allow-session") && log.contains("session-rule") && log.contains("feedback"));
         let _ = std::fs::remove_dir_all(dir);
     }
     #[test]
