@@ -669,3 +669,5 @@
 "chat.feedback_note" = "执行结果已回传给 AI（已脱敏；禁止读取输出的主机不含输出）"
 "ui.ai_feed_back" = "执行结果回传 AI"
 "ui.ai_feed_back_desc" = "逐条执行结束后，把退出码与脱敏输出（禁止读取输出的主机不含输出）回传到对话"
+"ui.keyword_highlight" = "关键词高亮"
+"ui.keyword_highlight_desc" = "输出中的 ERROR / WARN / OK 等着色；规则在 [[terminal.highlights]]（pattern、color = error|warning|success|info|accent|#rrggbb、bold）"

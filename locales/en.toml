@@ -669,3 +669,5 @@
 "chat.feedback_note" = "Step results sent back to AI (redacted; output withheld for no-output hosts)"
 "ui.ai_feed_back" = "Send step results back to AI"
 "ui.ai_feed_back_desc" = "After a step-by-step run, exit codes and redacted output (never for no-output hosts) go back to the chat"
+"ui.keyword_highlight" = "Keyword highlighting"
+"ui.keyword_highlight_desc" = "Colour ERROR / WARN / OK etc. in output; rules in [[terminal.highlights]] (pattern, color = error|warning|success|info|accent|#rrggbb, bold)"

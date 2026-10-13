@@ -211,6 +211,46 @@ fn paint_box(window: &mut Window, ch: char, x: Pixels, x_next: Pixels, y: Pixels
     }
 }
 
+thread_local! {
+    static HL_RULES: RefCell<(u64, Rc<Vec<ssh_term_proto::highlight::Rule>>)> = RefCell::new((u64::MAX, Rc::new(vec![])));
+}
+/// Compiled keyword-highlight rules for the current settings generation.
+fn hl_rules() -> Rc<Vec<ssh_term_proto::highlight::Rule>> {
+    let gen = config::generation();
+    HL_RULES.with(|h| {
+        let mut h = h.borrow_mut();
+        if h.0 != gen {
+            let cfg = config::get();
+            let rules = if cfg.terminal.keyword_highlight { ssh_term_proto::highlight::compile(cfg.terminal.highlights.iter().map(|r| (r.pattern.as_str(), r.color.as_str(), r.bold))).0 } else { vec![] };
+            *h = (gen, Rc::new(rules));
+        }
+        h.1.clone()
+    })
+}
+type HlCell = Option<(ssh_term_proto::highlight::Color, bool)>;
+/// Per-column highlight (colour, bold) for a grid row; wide-char spacers are skipped so CJK
+/// keywords match.
+fn row_highlights(row: &alacritty_terminal::grid::Row<alacritty_terminal::term::cell::Cell>, ncols: usize) -> Vec<HlCell> {
+    let rules = hl_rules();
+    if rules.is_empty() { return vec![]; }
+    let (mut chars, mut cols) = (Vec::with_capacity(ncols), Vec::with_capacity(ncols));
+    for col in 0..ncols {
+        let cell = &row[Column(col)];
+        if cell.flags.contains(Flags::WIDE_CHAR_SPACER) { continue; }
+        chars.push(if cell.c == '\0' { ' ' } else { cell.c }); cols.push(col);
+    }
+    let mut out: Vec<HlCell> = vec![None; ncols];
+    for (a, b, ri) in ssh_term_proto::highlight::spans(&rules, &chars) {
+        let (c0, c1) = (cols[a], if b < cols.len() { cols[b] } else { ncols });
+        for o in &mut out[c0..c1] { *o = Some((rules[ri].color.clone(), rules[ri].bold)); }
+    }
+    out
+}
+fn hl_color(th: &Theme, col: ssh_term_proto::highlight::Color) -> Hsla {
+    use ssh_term_proto::highlight::Color as H;
+    c(match col { H::Error => th.error, H::Warning => th.warning, H::Success => th.success, H::Info => th.info, H::Accent => th.accent, H::Rgb(v) => v })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_row(g: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::Cell>, line: i32, ncols: usize, th: &Theme,
              sel: Option<(BPoint, BPoint)>, block: bool, hover: Option<(i32, usize, usize)>, cw: f32, window: &mut Window) -> RowPaint {
@@ -224,6 +264,7 @@ fn build_row(g: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::
     let mut bgs = Vec::new();
     let mut bg_start = 0usize;
     let mut bg_cur: Option<Hsla> = None;
+    let hl = row_highlights(row, ncols);
     let mut push = |text: &mut String, runs: &mut Vec<TextRun>, ch: char, st: &Style| {
         let len = ch.len_utf8();
         text.push(ch);
@@ -246,7 +287,9 @@ fn build_row(g: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::
             } else if link {
                 Some(UnderlineStyle { thickness: px(1.), color: Some(ucolor.opacity(0.7)), wavy: false })
             } else { None };
-            let st = Style { fg, bold: cell.flags.contains(Flags::BOLD), italic: cell.flags.contains(Flags::ITALIC), underline, strike: cell.flags.contains(Flags::STRIKEOUT) };
+            let mut hl_bold = false;
+            if let Some((color, b)) = hl.get(col).cloned().flatten() { if !in_sel(sel, block, (line, col)) && !cell.flags.contains(Flags::INVERSE) { fg = hl_color(th, color); hl_bold = b; } }
+            let st = Style { fg, bold: hl_bold || cell.flags.contains(Flags::BOLD), italic: cell.flags.contains(Flags::ITALIC), underline, strike: cell.flags.contains(Flags::STRIKEOUT) };
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
             } else if cell.flags.contains(Flags::WIDE_CHAR) {
                 let mut gs = String::new();

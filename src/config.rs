@@ -87,8 +87,15 @@ pub struct Terminal {
     /// modifier for rectangular selection drag: alt (default) | ctrl (for desktops whose window
     /// manager grabs Alt+drag, e.g. Xfwm / many Linux WMs)
     pub block_select: String,
+    /// Keyword highlighting on/off and the rules (regex, colour role or #rrggbb, bold).
+    pub keyword_highlight: bool,
+    pub highlights: Vec<HighlightRule>,
 }
-impl Default for Terminal { fn default() -> Self { Self { shell: String::new(), scrollback: u_scroll(), cursor_style: s_block(), cursor_blink: t(), bell: s_visual(), copy_on_select: false, paste_confirm: t(), mouse_reporting: t(), shell_integration: s_auto(), osc52_write: "ask".into(), osc52_read: false, block_select: "alt".into() } } }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct HighlightRule { pub pattern: String, pub color: String, pub bold: bool }
+fn default_highlights() -> Vec<HighlightRule> { ssh_term_proto::highlight::DEFAULTS.iter().map(|(p, c, b)| HighlightRule { pattern: p.to_string(), color: c.to_string(), bold: *b }).collect() }
+impl Default for Terminal { fn default() -> Self { Self { keyword_highlight: t(), highlights: default_highlights(), shell: String::new(), scrollback: u_scroll(), cursor_style: s_block(), cursor_blink: t(), bell: s_visual(), copy_on_select: false, paste_confirm: t(), mouse_reporting: t(), shell_integration: s_auto(), osc52_write: "ask".into(), osc52_read: false, block_select: "alt".into() } } }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]

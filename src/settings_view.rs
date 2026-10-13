@@ -194,6 +194,7 @@ impl SettingsView {
             r(Ai, t("ui.context_scope"), t("ai.context.d"), Ctl::Choice("ai.context", opts(&[("none", t("ai.ctx_none")), ("command", t("ui.last_command")), ("selection", t("ui.selection_only")), ("screen", t("ui.current_screen"))]))),
             r(Ai, t("ai.context_lines"), t("ai.context_lines.d"), Ctl::Text("ai.context_lines", "40")),
             r(Ai, t("ui.allow_sending_command_output"), t("ui.when_off_only_the_command"), Ctl::Toggle("ai.send_output")),
+            r(Terminal, t("ui.keyword_highlight"), t("ui.keyword_highlight_desc"), Ctl::Toggle("terminal.keyword_highlight")),
             r(Ai, t("ui.ai_no_output_hosts"), t("ui.ai_no_output_hosts_desc"), Ctl::Text("ai.no_output_hosts", "prod-*, db-*")),
             r(Ai, t("ui.ai_feed_back"), t("ui.ai_feed_back_desc"), Ctl::Toggle("ai.feed_back_results")),
             r(Ai, t("ui.ai_first_send_ack"), t("ui.ai_first_send_ack_desc"), Ctl::Toggle("ai.first_send_ack")),

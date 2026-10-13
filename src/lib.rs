@@ -25,3 +25,4 @@ pub mod session_store;
 pub mod forward;
 pub mod suggest;
 pub mod term;
+pub mod highlight;
