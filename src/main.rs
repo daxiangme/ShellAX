@@ -213,7 +213,7 @@ impl Root {
                 }
                 termview::TermEvent::Audit(kind, detail) => { this.log(kind, detail); return; }
                 termview::TermEvent::Keyword(title, line) => {
-                    let line = ssh_term_proto::ai::redact(&line).0;
+                    let line = ssh_term_proto::ai::redact(line).0;
                     this.log("notify.keyword", format!("rule={title:?} line={line:?}"));
                     this.notify_kind(&format!("{title}: {line}"), false, cx);
                     this.toast(format!("🔔 {title}: {line}"), cx);
@@ -570,7 +570,8 @@ impl Root {
     fn recent_dirs(&self, cx: &App) -> Vec<String> {
         let mut v: Vec<String> = self.tabs.iter().flat_map(|t| t.layout.leaves()).filter_map(|p| p.read(cx).session.as_ref().and_then(|s| s.cwd_probe.lock().unwrap().as_ref().and_then(|f| f()))).collect();
         let st = ssh_term_proto::snapshot::Store::load(&Self::snapshots_path());
-        for sn in st.snaps { let s = sn.layout.to_string(); for m in regex::Regex::new(r#""cwd":"([^"]+)""#).unwrap().captures_iter(&s) { v.push(m[1].to_string()); } }
+        let re = regex::Regex::new(r#""cwd":"([^"]+)""#).unwrap();
+        for sn in st.snaps { let s = sn.layout.to_string(); for m in re.captures_iter(&s) { v.push(m[1].to_string()); } }
         let mut seen = HashSet::new(); v.retain(|d| seen.insert(d.clone())); v
     }
     fn close_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {

@@ -20,7 +20,7 @@ mod tests {
     fn gating() {
         let a = Target { id: 1, label: "local".into(), production: false };
         let b = Target { id: 2, label: "db1".into(), production: true };
-        assert_eq!(start(&[a.clone()], false), Start::TooFew);
+        assert_eq!(start(std::slice::from_ref(&a), false), Start::TooFew);
         assert_eq!(start(&[a.clone(), b.clone()], false), Start::NeedConfirm(vec!["db1".into()]));
         assert_eq!(start(&[a.clone(), b], true), Start::Ok(vec![1, 2]));
         assert_eq!(start(&[a.clone(), Target { id: 3, ..a }], false), Start::Ok(vec![1, 3]));

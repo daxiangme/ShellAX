@@ -121,7 +121,7 @@ fn hls(hd: usize, l: usize, s: usize) -> [u8; 3] {
     let (h, l, s) = (((hd + 240) % 360) as f32 / 360., l.min(100) as f32 / 100., s.min(100) as f32 / 100.);
     if s == 0. { let v = (l * 255.) as u8; return [v, v, v]; }
     let q = if l < 0.5 { l * (1. + s) } else { l + s - l * s }; let p = 2. * l - q;
-    let f = |mut t: f32| { if t < 0. { t += 1. } if t > 1. { t -= 1. } (255. * if t < 1. / 6. { p + (q - p) * 6. * t } else if t < 0.5 { q } else if t < 2. / 3. { p + (q - p) * (2. / 3. - t) * 6. } else { p }) as u8 };
+    let f = |mut t: f32| { if t < 0. { t += 1. } else if t > 1. { t -= 1. } (255. * if t < 1. / 6. { p + (q - p) * 6. * t } else if t < 0.5 { q } else if t < 2. / 3. { p + (q - p) * (2. / 3. - t) * 6. } else { p }) as u8 };
     [f(h + 1. / 3.), f(h), f(h - 1. / 3.)]
 }
 
