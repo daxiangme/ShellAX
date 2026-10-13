@@ -13,5 +13,5 @@ fn main() {
     let mut ds = vec![models::ModelInfo { id: "deepseek-chat".into(), name: String::new(), context: None, price_in: None, price_out: None, usage: models::Use::Chat }];
     models::enrich(&mut ds, "deepseek", &meta);
     println!("deepseek-chat via models.dev: ctx={:?} in={:?} out={:?}", ds[0].context, ds[0].price_in, ds[0].price_out);
-    m.truncate(0);
+    m.clear();
 }

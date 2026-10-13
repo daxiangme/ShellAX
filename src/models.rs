@@ -208,9 +208,12 @@ pub fn is_fresh(e: &CacheEntry, now: i64, ttl_secs: i64) -> bool { now - e.fetch
 
 // ---------------------------------------------------------------- models.dev metadata
 pub const MODELS_DEV_URL: &str = "https://models.dev/api.json";
+/// context window, $/1M input, $/1M output per model id
+pub type ModelsDevMeta = HashMap<String, (Option<u64>, Option<f64>, Option<f64>)>;
+
 /// model id -> (context, $/1M in, $/1M out) from models.dev's api.json
 /// (`{provider: {models: {id: {limit:{context}, cost:{input,output}}}}}`, costs already per 1M).
-pub fn parse_models_dev(v: &Value) -> HashMap<String, (Option<u64>, Option<f64>, Option<f64>)> {
+pub fn parse_models_dev(v: &Value) -> ModelsDevMeta {
     let mut out = HashMap::new();
     let Some(provs) = v.as_object() else { return out };
     for (pid, prov) in provs {
@@ -227,7 +230,7 @@ pub fn parse_models_dev(v: &Value) -> HashMap<String, (Option<u64>, Option<f64>,
     out
 }
 /// Fill missing context / price from models.dev (by "<preset>/<id>", then by bare id).
-pub fn enrich(models: &mut [ModelInfo], preset: &str, meta: &HashMap<String, (Option<u64>, Option<f64>, Option<f64>)>) {
+pub fn enrich(models: &mut [ModelInfo], preset: &str, meta: &ModelsDevMeta) {
     for m in models {
         let hit = meta.get(&format!("{preset}/{}", m.id)).or_else(|| meta.get(&m.id))
             .or_else(|| m.id.split_once('/').and_then(|(_, b)| meta.get(b)));
@@ -239,7 +242,7 @@ pub fn enrich(models: &mut [ModelInfo], preset: &str, meta: &HashMap<String, (Op
     }
 }
 /// Fetch models.dev (cached in `dir/models-dev.json` for `ttl_secs`).
-pub fn models_dev(dir: &Path, now: i64, ttl_secs: i64) -> Option<HashMap<String, (Option<u64>, Option<f64>, Option<f64>)>> {
+pub fn models_dev(dir: &Path, now: i64, ttl_secs: i64) -> Option<ModelsDevMeta> {
     let path = dir.join("models-dev.json");
     let fresh = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| (now - d.as_secs() as i64) < ttl_secs).unwrap_or(false);

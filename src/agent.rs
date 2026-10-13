@@ -9,6 +9,7 @@
 //!   - removed remote manifest updates, overrides, explain/diagnostics, version gating;
 //!   - agents are keyed by manifest id (string) instead of herdr's `Agent` enum;
 //!   - added `identify()` (process name / command word / title hint) and `AgentInfo`.
+//!
 //! Everything outside the functions marked "[herdr]" is original AgentShell code.
 
 use crate::i18n::t;

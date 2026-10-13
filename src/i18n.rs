@@ -44,7 +44,7 @@ pub fn t(key: &str) -> &'static str {
     // unknown key: leak once so callers can keep &'static str (keys are a small fixed set)
     static MISSING: OnceLock<std::sync::Mutex<HashMap<String, &'static str>>> = OnceLock::new();
     let mut m = MISSING.get_or_init(Default::default).lock().unwrap();
-    *m.entry(key.to_string()).or_insert_with(|| Box::leak(key.to_string().into_boxed_str()))
+    m.entry(key.to_string()).or_insert_with(|| Box::leak(key.to_string().into_boxed_str()))
 }
 pub fn tf(key: &str, args: &[(&str, &dyn std::fmt::Display)]) -> String {
     let mut s = t(key).to_string();

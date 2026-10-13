@@ -79,7 +79,7 @@ pub fn normalize(binding: &str) -> String {
     let mut parts: Vec<&str> = b.split('-').filter(|p| !p.is_empty()).collect();
     if b.ends_with("--") { parts.push("-"); }
     let key = parts.pop().unwrap_or("");
-    let has = |m: &str| parts.iter().any(|p| *p == m);
+    let has = |m: &str| parts.contains(&m);
     let mut s = String::new();
     if has("ctrl") || has("control") { s.push_str("ctrl-"); }
     if has("alt") || has("option") { s.push_str("alt-"); }

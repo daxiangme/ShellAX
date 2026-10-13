@@ -174,7 +174,7 @@ mod tests {
         assert!(Spec { dest_port: 0, ..s.clone() }.validate().is_err());
         assert!(Spec { kind: Kind::D, dest_host: String::new(), dest_port: 0, ..s.clone() }.validate().is_ok());
         let p = std::env::temp_dir().join(format!("stp-fwd-{}.toml", std::process::id()));
-        save(&p, &[s.clone()]).unwrap();
+        save(&p, std::slice::from_ref(&s)).unwrap();
         assert_eq!(load(&p), vec![s]);
         let _ = std::fs::remove_file(p);
     }

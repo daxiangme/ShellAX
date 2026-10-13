@@ -149,7 +149,7 @@ fn classify_redirect(n: tree_sitter::Node, src: &str) -> Risk {
         || target.contains(".ssh/") || target.ends_with(".bashrc") || target.ends_with(".zshrc") || target.ends_with(".profile") {
         return Risk::R3;
     }
-    if t.starts_with(">>") { Risk::R1 } else { Risk::R1 }
+    Risk::R1
 }
 
 const WRAPPERS: &[&str] = &["nohup", "time", "nice", "ionice", "stdbuf", "timeout", "command", "builtin", "exec", "env", "caffeinate", "chronic"];

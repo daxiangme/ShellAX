@@ -3,7 +3,7 @@
 use std::sync::{Arc, RwLock};
 
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
-use gpui::{rgb, Hsla, Rgba};
+use gpui::{rgb, Hsla};
 use serde::Deserialize;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -207,7 +207,7 @@ pub fn cur() -> Arc<Theme> {
     CURRENT.read().unwrap().clone().unwrap_or_else(|| Arc::new(Theme::from_toml(BUILTIN[0]).unwrap()))
 }
 
-pub fn c(hex: u32) -> Hsla { Rgba::from(rgb(hex)).into() }
+pub fn c(hex: u32) -> Hsla { rgb(hex).into() }
 
 fn xterm256(t: &Theme, i: u8) -> u32 {
     match i {

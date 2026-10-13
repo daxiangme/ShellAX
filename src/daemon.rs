@@ -100,8 +100,7 @@ fn handle(c: UnixStream, map: Map) -> Result<()> {
                 p.client = Some(c.try_clone()?);
             }
             // input loop
-            loop {
-                let Ok((k, d)) = read_frame(&mut rd) else { break };
+            while let Ok((k, d)) = read_frame(&mut rd) {
                 let mut p = pty.lock().unwrap();
                 match k {
                     0 => { let _ = p.writer.write_all(&d); let _ = p.writer.flush(); }
@@ -225,7 +224,7 @@ pub fn attach(sock: &Path, id: &str, size: Size, shell: &str, cwd: &str) -> Resu
             let r = match m {
                 BackendMsg::Close => break,
                 BackendMsg::Input(b) => frame(&mut c, 0, &b),
-                BackendMsg::Resize { cols, rows } => { let mut d = (cols as u16).to_be_bytes().to_vec(); d.extend_from_slice(&(rows as u16).to_be_bytes()); frame(&mut c, 1, &d) }
+                BackendMsg::Resize { cols, rows } => { let mut d = { cols }.to_be_bytes().to_vec(); d.extend_from_slice(&rows.to_be_bytes()); frame(&mut c, 1, &d) }
             };
             if r.is_err() { break; }
         }

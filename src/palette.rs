@@ -41,7 +41,7 @@ impl Palette {
         for (idx, (name, detail)) in self.hosts.iter().enumerate() {
             if let Some(s) = fuzzy(&q, &tf("palette.connect_search", &[("name", name), ("detail", detail)])) { v.push((s - 2, Item::Host(idx, name.clone(), detail.clone()))); }
         }
-        if !q.trim().is_empty() { v.sort_by(|a, b| b.0.cmp(&a.0)); }
+        if !q.trim().is_empty() { v.sort_by_key(|x| std::cmp::Reverse(x.0)); }
         v
     }
 

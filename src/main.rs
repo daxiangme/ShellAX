@@ -1041,7 +1041,7 @@ fn main() {
                     }
                     cx.spawn(async move |this, cx| {
                         while let Ok(a) = ap_rx.recv_async().await {
-                            if this.update(cx, |r, cx| { r.approvals.push(a); r.notify_desktop(&t("ui.approval_title"), cx); cx.notify(); }).is_err() { break; }
+                            if this.update(cx, |r, cx| { r.approvals.push(a); r.notify_desktop(t("ui.approval_title"), cx); cx.notify(); }).is_err() { break; }
                         }
                     }).detach();
                     cx.spawn(async move |this, cx| loop {

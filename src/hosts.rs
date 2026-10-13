@@ -45,7 +45,8 @@ pub fn expand_tilde(p: &str) -> PathBuf {
 /// Parse an ssh_config body into concrete host entries.
 pub fn parse_ssh_config(body: &str) -> Vec<HostEntry> {
     // collect blocks: (patterns, options)
-    let mut blocks: Vec<(Vec<String>, Vec<(String, String)>)> = vec![(vec!["*".into()], vec![])];
+    type Block = (Vec<String>, Vec<(String, String)>);
+    let mut blocks: Vec<Block> = vec![(vec!["*".into()], vec![])];
     let mut in_match = false;
     for raw in body.lines() {
         let line = raw.trim();

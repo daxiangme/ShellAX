@@ -65,10 +65,13 @@ fn plain_run(len: usize, fg: Hsla) -> TextRun { text_run(len, &Style { fg, bold:
 
 /// What a pane connects to (used to open more panes of the same kind).
 #[derive(Clone)]
+#[allow(clippy::large_enum_variant)] // one per pane
 pub enum Spec { Local, Ssh(SshTarget) }
 impl Spec {
     pub fn history_key(&self) -> String { match self { Spec::Local => "local".into(), Spec::Ssh(t) => t.label() } }
 }
+
+type RowCache = (Option<CacheKey>, Vec<Option<RowPaint>>);
 
 /// Buffer coordinate: grid line (negative = scrollback) and column.
 type BPoint = (i32, usize);
@@ -102,7 +105,7 @@ struct CacheKey { cols: usize, rows: usize, theme: SharedString, cw: u32, gen: u
 pub struct GridLayer {
     session: Option<Arc<Session>>,
     st: Rc<RefCell<PaintState>>,
-    cache: Rc<RefCell<(Option<CacheKey>, Vec<Option<RowPaint>>)>>,
+    cache: Rc<RefCell<RowCache>>,
 }
 
 fn in_sel(sel: Option<(BPoint, BPoint)>, p: BPoint) -> bool {
@@ -157,8 +160,8 @@ impl Render for GridLayer {
                 if full { cache.0 = Some(key); cache.1.clear(); }
                 cache.1.resize_with(nrows, || None);
                 let g = term.grid();
-                for l in 0..nrows {
-                    if dirty[l] || cache.1[l].is_none() {
+                for (l, &d) in dirty.iter().enumerate().take(nrows) {
+                    if d || cache.1[l].is_none() {
                         let line = l as i32 - offset as i32;
                         cache.1[l] = Some(build_row(g, line, ncols, &th, sel, hover, cw, window));
                         ROWS_BUILT.fetch_add(1, Ordering::Relaxed);
@@ -415,7 +418,7 @@ impl TermView {
     pub fn shown_title(&self) -> SharedString {
         match (&self.spec, self.title.rsplit_once(" · ")) {
             (Spec::Local, Some((_, sh))) => tf("main.local_title", &[("shell", &sh)]).into(),
-            _ => self.title.clone().into(),
+            _ => self.title.clone(),
         }
     }
 }
@@ -1342,6 +1345,20 @@ impl Render for TermView {
     }
 }
 
+/// Short system sound (notify.sound / terminal.bell = "sound"). Best effort, never blocks the UI.
+pub fn play_sound() {
+    std::thread::spawn(|| {
+        #[cfg(target_os = "macos")]
+        let tries: &[&[&str]] = &[&["afplay", "/System/Library/Sounds/Ping.aiff"]];
+        #[cfg(not(target_os = "macos"))]
+        let tries: &[&[&str]] = &[&["canberra-gtk-play", "-i", "bell"], &["paplay", "/usr/share/sounds/freedesktop/stereo/bell.oga"], &["aplay", "-q", "/usr/share/sounds/alsa/Front_Center.wav"]];
+        for t in tries {
+            if std::process::Command::new(t[0]).args(&t[1..]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success()) { return; }
+        }
+        eprint!("\x07");
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1358,18 +1375,4 @@ mod tests {
         assert_eq!(encode_mouse(0, false, 0, 0, false)[3], 35);
         assert_eq!(encode_mouse(64, true, 1, 1, true), b"\x1b[<64;2;2M");
     }
-}
-
-/// Short system sound (notify.sound / terminal.bell = "sound"). Best effort, never blocks the UI.
-pub fn play_sound() {
-    std::thread::spawn(|| {
-        #[cfg(target_os = "macos")]
-        let tries: &[&[&str]] = &[&["afplay", "/System/Library/Sounds/Ping.aiff"]];
-        #[cfg(not(target_os = "macos"))]
-        let tries: &[&[&str]] = &[&["canberra-gtk-play", "-i", "bell"], &["paplay", "/usr/share/sounds/freedesktop/stereo/bell.oga"], &["aplay", "-q", "/usr/share/sounds/alsa/Front_Center.wav"]];
-        for t in tries {
-            if std::process::Command::new(t[0]).args(&t[1..]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success()) { return; }
-        }
-        eprint!("\x07");
-    });
 }

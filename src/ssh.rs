@@ -206,7 +206,7 @@ impl Conn {
         ch.data(content).await?;
         ch.eof().await?;
         let mut code = None;
-        let _ = tokio::time::timeout(Duration::from_secs(10), async { while let Some(m) = ch.wait().await { if let ChannelMsg::ExitStatus { exit_status } = m { code = Some(exit_status); } if matches!(m, ChannelMsg::Close) { break; } } }).await;
+        let _ = tokio::time::timeout(Duration::from_secs(10), async { while let Some(m) = ch.wait().await { if let ChannelMsg::ExitStatus { exit_status } = m { code = Some(exit_status); } else if matches!(m, ChannelMsg::Close) { break; } } }).await;
         if code.unwrap_or(1) != 0 { bail!("remote write {path} failed"); }
         Ok(())
     }

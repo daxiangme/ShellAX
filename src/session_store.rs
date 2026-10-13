@@ -20,6 +20,7 @@ impl PaneSave {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "node", rename_all = "lowercase")]
+#[allow(clippy::large_enum_variant)] // a handful per layout file
 pub enum NodeSave {
     Leaf { pane: PaneSave },
     Split { vertical: bool, #[serde(default = "half")] ratio: f32, a: Box<NodeSave>, b: Box<NodeSave> },
