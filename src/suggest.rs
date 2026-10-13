@@ -1,0 +1,220 @@
+//! History-based autosuggestions (fish / zsh-autosuggestions style), implemented from scratch.
+//!
+//! Pieces:
+//! - [`History`]: per-host command list, newest last, deduplicated, with a sensitive-command filter.
+//! - [`InputTracker`]: figures out "what the user has typed on the prompt line" either from an
+//!   OSC 133;B prompt mark (shell integration) or from a keystroke buffer that is cross-checked
+//!   against the screen (works over SSH with no remote install, and naturally skips unechoed
+//!   password input).
+
+/// Maximum entries kept per history.
+pub const MAX_HISTORY: usize = 5000;
+
+#[derive(Default, Debug, Clone)]
+pub struct History {
+    entries: Vec<String>,
+}
+
+impl History {
+    pub fn new() -> Self { Self::default() }
+
+    /// Load from a bash-style history file body (one command per line; `#<epoch>` lines skipped).
+    pub fn extend_from_bash_history(&mut self, body: &str) {
+        for line in body.lines() {
+            if line.starts_with('#') { continue; }
+            self.add(line);
+        }
+    }
+
+    /// Record a command. Returns false if it was filtered out.
+    pub fn add(&mut self, cmd: &str) -> bool {
+        // Leading space = user asked not to record (bash HISTCONTROL=ignorespace convention).
+        if cmd.starts_with(' ') { return false; }
+        let cmd = cmd.trim_end();
+        if cmd.trim().is_empty() || cmd.len() > 1000 || is_sensitive(cmd) { return false; }
+        self.entries.retain(|e| e != cmd);
+        self.entries.push(cmd.to_string());
+        if self.entries.len() > MAX_HISTORY { self.entries.remove(0); }
+        true
+    }
+
+    pub fn len(&self) -> usize { self.entries.len() }
+    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+
+    /// Remaining text to suggest for `input`, newest matching entry wins.
+    pub fn suggest(&self, input: &str) -> Option<String> {
+        if input.trim().is_empty() { return None; }
+        self.entries.iter().rev()
+            .find(|e| e.len() > input.len() && e.starts_with(input))
+            .map(|e| e[input.len()..].to_string())
+    }
+}
+
+/// Heuristic filter for commands that likely contain secrets. Such commands are neither stored
+/// nor suggested.
+pub fn is_sensitive(cmd: &str) -> bool {
+    let l = cmd.to_ascii_lowercase();
+    const WORDS: &[&str] = &[
+        "password", "passwd=", "pwd=", "secret", "token", "api_key", "apikey", "access_key",
+        "private_key", "authorization:", "bearer ", "sshpass", "aws_secret",
+    ];
+    if WORDS.iter().any(|w| l.contains(w)) { return true; }
+    // mysql -pSECRET / mysql --password=...
+    if (l.starts_with("mysql") || l.contains(" mysql ")) && l.split_whitespace().any(|t| t.starts_with("-p") && t.len() > 2) { return true; }
+    // curl -u user:pass, URLs with inline credentials
+    if l.split_whitespace().collect::<Vec<_>>().windows(2).any(|w| (w[0] == "-u" || w[0] == "--user") && w[1].contains(':')) { return true; }
+    if l.contains("://") && l.split("://").nth(1).is_some_and(|r| r.split('/').next().is_some_and(|h| h.contains(':') && h.contains('@'))) { return true; }
+    // export FOO_KEY=... style assignments
+    l.split_whitespace().any(|t| t.contains('=') && {
+        let k = t.split('=').next().unwrap_or("");
+        k.ends_with("_key") || k.ends_with("_pass") || k.ends_with("_pw")
+    })
+}
+
+/// How we currently know the input line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source { Osc133, Keystrokes }
+
+/// Tracks the user's in-progress command line for one terminal pane.
+#[derive(Debug, Default, Clone)]
+pub struct InputTracker {
+    buf: String,
+    /// false once the user did something we can't model (history nav, Ctrl-R, Tab completion, cursor moves…)
+    valid: bool,
+}
+
+pub enum Key<'a> { Text(&'a str), Backspace, Enter, Interrupt, KillLine, Other }
+
+impl InputTracker {
+    pub fn new() -> Self { Self { buf: String::new(), valid: true } }
+
+    /// Feed a key the user typed. Returns the submitted command on Enter (if we knew it).
+    pub fn key(&mut self, k: Key) -> Option<String> {
+        match k {
+            Key::Text(t) => { if t.chars().any(|c| c.is_control()) { self.valid = false } else { self.buf.push_str(t) } None }
+            Key::Backspace => { self.buf.pop(); None }
+            Key::KillLine | Key::Interrupt => { self.reset(); None }
+            Key::Enter => { let out = self.valid.then(|| self.buf.clone()); self.reset(); out }
+            Key::Other => { self.valid = false; None }
+        }
+    }
+    pub fn reset(&mut self) { self.buf.clear(); self.valid = true; }
+    pub fn buffer(&self) -> Option<&str> { self.valid.then_some(self.buf.as_str()) }
+
+    /// Decide the current input given the screen text left of the cursor on the cursor row.
+    /// `prompt_col` is the OSC 133;B column on this row, if shell integration reported one.
+    /// Returns None when we are not confident (e.g. typed text is not echoed => password prompt).
+    pub fn current_input(&self, before_cursor: &str, prompt_col: Option<usize>) -> Option<(String, Source)> {
+        if let Some(col) = prompt_col {
+            let s: String = before_cursor.chars().skip(col).collect();
+            return Some((s, Source::Osc133));
+        }
+        let b = self.buffer()?;
+        if b.is_empty() || !before_cursor.ends_with(b) { return None; }
+        Some((b.to_string(), Source::Keystrokes))
+    }
+}
+
+impl InputTracker {
+    /// Like [`current_input`](Self::current_input) but for the moment Enter is pressed: the echo of
+    /// the last few keystrokes may still be in flight (fast typing over SSH), so accept the buffer if
+    /// the screen already shows at least half of it (and at least one char). Unechoed input
+    /// (passwords) shows nothing and is therefore never recorded.
+    pub fn submitted_input(&self, before_cursor: &str, prompt_col: Option<usize>) -> Option<String> {
+        if let Some((s, Source::Osc133)) = self.current_input(before_cursor, prompt_col) {
+            // with OSC 133 the screen is authoritative, but pending echo may truncate it: prefer the
+            // keystroke buffer when it extends what is on screen
+            if let Some(b) = self.buffer() { if b.starts_with(s.as_str()) && !b.is_empty() { return Some(b.to_string()); } }
+            return Some(s);
+        }
+        let b = self.buffer()?;
+        let n = b.chars().count();
+        let shown = (1..=n).rev().find(|&k| {
+            let pre: String = b.chars().take(k).collect();
+            before_cursor.ends_with(&pre)
+        })?;
+        (shown * 2 >= n).then(|| b.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn submitted_tolerates_pending_echo_but_not_passwords() {
+        let mut t = InputTracker::new();
+        for ch in ["l", "s", " ", "-", "l", "a"] { t.key(Key::Text(ch)); }
+        assert_eq!(t.submitted_input("$ ls -l", None).as_deref(), Some("ls -la"));
+        assert_eq!(t.submitted_input("$ l", None), None, "too little echoed");
+        assert_eq!(t.submitted_input("Password: ", None), None);
+    }
+
+
+    #[test]
+    fn suggests_newest_prefix_match() {
+        let mut h = History::new();
+        h.add("git status");
+        h.add("git stash pop");
+        h.add("ls -la");
+        assert_eq!(h.suggest("git st").as_deref(), Some("ash pop"));
+        h.add("git status");
+        assert_eq!(h.suggest("git st").as_deref(), Some("atus"));
+        assert_eq!(h.suggest("ls -la"), None, "exact match has nothing left");
+        assert_eq!(h.suggest(""), None);
+        assert_eq!(h.suggest("   "), None);
+        assert_eq!(h.len(), 3, "dedup");
+    }
+
+    #[test]
+    fn filters_sensitive_and_ignorespace() {
+        let mut h = History::new();
+        assert!(!h.add(" rm -rf secret-dir"));
+        assert!(!h.add("export GITHUB_TOKEN=abc"));
+        assert!(!h.add("mysql -uroot -phunter2"));
+        assert!(!h.add("curl -u bob:pw https://x"));
+        assert!(!h.add("git clone https://bob:pw@example.com/r.git"));
+        assert!(!h.add("export DB_PASS=x"));
+        assert!(h.add("mysql -uroot -p"));
+        assert!(h.add("curl https://example.com"));
+        assert_eq!(h.len(), 2);
+    }
+
+    #[test]
+    fn bash_history_import_skips_timestamps() {
+        let mut h = History::new();
+        h.extend_from_bash_history("#1700000000\nls\ncd /tmp\n");
+        assert_eq!(h.len(), 2);
+        assert_eq!(h.suggest("cd").as_deref(), Some(" /tmp"));
+    }
+
+    #[test]
+    fn tracker_keystrokes_and_echo_check() {
+        let mut t = InputTracker::new();
+        t.key(Key::Text("g")); t.key(Key::Text("ix")); t.key(Key::Backspace); t.key(Key::Text("t"));
+        assert_eq!(t.buffer(), Some("git"));
+        // echoed on screen after a prompt
+        assert_eq!(t.current_input("user@h:~$ git", None).map(|x| x.0).as_deref(), Some("git"));
+        // not echoed (password prompt) => no suggestion
+        assert_eq!(t.current_input("[sudo] password for user: ", None), None);
+        assert_eq!(t.key(Key::Enter).as_deref(), Some("git"));
+        assert_eq!(t.buffer(), Some(""));
+    }
+
+    #[test]
+    fn tracker_invalidated_by_unknown_keys() {
+        let mut t = InputTracker::new();
+        t.key(Key::Text("ls"));
+        t.key(Key::Other); // e.g. Up arrow recalled history
+        assert_eq!(t.buffer(), None);
+        assert_eq!(t.current_input("$ cargo build", None), None);
+        assert_eq!(t.key(Key::Enter), None, "unknown command line is not recorded");
+        assert_eq!(t.buffer(), Some(""), "valid again after Enter");
+    }
+
+    #[test]
+    fn osc133_mark_wins() {
+        let t = InputTracker::new();
+        let (s, src) = t.current_input("$ cargo bu", Some(2)).unwrap();
+        assert_eq!((s.as_str(), src), ("cargo bu", Source::Osc133));
+    }
+}
