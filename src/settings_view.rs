@@ -65,7 +65,7 @@ struct Row { cat: Cat, label: &'static str, desc: &'static str, ctl: Ctl, soon: 
 
 fn opts(v: &[(&str, &str)]) -> Vec<(String, String)> { v.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect() }
 
-pub enum SettingsEvent { Changed(String), Close, OpenAudit }
+pub enum SettingsEvent { Changed(String), Close, OpenAudit, ThemesChanged }
 
 pub struct SettingsView {
     pub cat: Cat,
@@ -93,6 +93,7 @@ pub struct SettingsView {
     ai_url_gen: u64,
     key_pass: Entity<InputState>,
     key_import: Entity<InputState>,
+    theme_import: Entity<InputState>,
     _subs: Vec<Subscription>,
 }
 
@@ -111,7 +112,8 @@ impl SettingsView {
         subs.push(cx.subscribe_in(&ai_model_search, window, |_, _, ev: &InputEvent, _, cx| if matches!(ev, InputEvent::Change) { cx.notify() }));
         let key_pass = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder(t("ui.key_passphrase_optional")));
         let key_import = cx.new(|cx| InputState::new(window, cx).placeholder(t("ui.key_import_path")));
-        let mut me = Self { key_pass, key_import, cat, search, inputs: HashMap::new(), errors: HashMap::new(), theme_names, new_rule, new_effect: Effect::Allow, tester, notice: None,
+        let theme_import = cx.new(|cx| InputState::new(window, cx).placeholder(t("ui.theme_import_path")));
+        let mut me = Self { key_pass, key_import, theme_import, cat, search, inputs: HashMap::new(), errors: HashMap::new(), theme_names, new_rule, new_effect: Effect::Allow, tester, notice: None,
             ai_sel: config::get().ai.default_provider().map(|p| p.id.clone()), ai_key, ai_keys: HashMap::new(), ai_note: None, ai_test: HashMap::new(), ai_testing: None, lang_seen: ssh_term_proto::i18n::current() as u8,
             ai_models: HashMap::new(), ai_dropdown: None, ai_model_search, ai_url_gen: 0, _subs: subs };
         if let Some(id) = me.ai_sel.clone() { me.load_models(&id, false, cx); }
@@ -519,6 +521,31 @@ impl SettingsView {
         div().flex().flex_col().child(Self::section_title(t("ui.app_shortcuts_ctrl_shift_c"))).child(list).into_any_element()
     }
 
+    fn appearance_extra(&self, cx: &mut Context<Self>) -> AnyElement {
+        let th = cur();
+        div().flex().flex_col().child(Self::section_title(t("ui.theme_import")))
+            .child(div().text_size(px(12.)).text_color(c(th.subtext)).pb_2().child(t("ui.theme_import_desc")))
+            .child(div().flex().items_center().gap_2()
+                .child(div().flex_1().child(Input::new(&self.theme_import)))
+                .child(ui::button("theme-import", t("ui.import"), 0).on_click(cx.listener(move |this, _, window, cx| {
+                    let src = ssh_term_proto::hosts::expand_tilde(this.theme_import.read(cx).value().trim());
+                    let Some(dir) = crate::theme::user_dir() else { return };
+                    this.notice = Some(match crate::theme::import_file(&src, &dir) {
+                        Ok((p, name, dark)) => {
+                            let _ = crate::audit_log().append("theme.import", "user", &format!("{} -> {}", src.display(), p.display()));
+                            if !this.theme_names.iter().any(|n| n.0 == name) { this.theme_names.push((name.clone(), dark)); }
+                            cx.emit(SettingsEvent::ThemesChanged);
+                            tf("settings.theme_imported", &[("name", &name), ("path", &p.display())])
+                        }
+                        Err(e) => tf("settings.theme_import_failed", &[("e", &format!("{e:#}"))]),
+                    });
+                    this.theme_import.update(cx, |i, cx| i.set_value("", window, cx));
+                    cx.notify();
+                }))))
+            .children(self.notice.clone().map(|n| div().pt_2().text_size(px(12.)).text_color(c(th.subtext)).child(n)))
+            .into_any_element()
+    }
+
     fn audit_extra(&self, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
         let path = config::get().audit_path();
@@ -654,6 +681,7 @@ impl Render for SettingsView {
                 Cat::Audit => Some(self.audit_extra(cx)),
                 Cat::Suggest => Some(self.suggest_extra(cx)),
                 Cat::About => Some(self.about_extra()),
+                Cat::Appearance => Some(self.appearance_extra(cx)),
                 Cat::Ai => Some(self.ai_extra(window, cx)),
                 _ => None,
             };

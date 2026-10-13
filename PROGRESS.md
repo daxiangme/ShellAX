@@ -40,8 +40,8 @@
 - ☑ 7.1 桌面通知：Agent 状态变化（等待输入/完成，agents.notify_state）、长命令结束（notify.long_command_secs，基于 OSC 133;D）、notify.sound 与 bell=sound（canberra/paplay/afplay，尽力而为）；可见且聚焦的窗格不打扰；写审计 notify
 - ☑ 7.2 IME 预编辑：TermView 实现 EntityInputHandler，预编辑文本在光标处带下划线绘制、不发送，提交后写入 PTY；候选框定位到光标单元格（本机无 IME 守护进程，预编辑路径未实测）
 - ☑ 7.3 分屏拖拽比例（分隔条拖动，Node::Split.ratio 0.1–0.9，随布局保存）
-- ☐ 7.4 标签标题随语言
-- ☐ 7.5 iTerm2 主题导入
+- ☑ 7.4 标签/窗格标题随语言即时切换（shown_title 按当前语言重渲染“本地 · bash”）
+- ☑ 7.5 iTerm2 主题导入：.itermcolors plist 解析（自写，无第三方代码）、设置-外观“导入主题”复制到 ~/.config/agentshell/themes 并即时出现在主题列表；Alacritty/自有 TOML 同入口
 - ☐ 7.6 更新检查
 - ☐ 7.7 审计保留期
 - ☐ 7.8 配置写回保留注释（toml_edit）

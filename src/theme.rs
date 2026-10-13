@@ -81,6 +81,22 @@ impl Theme {
         for (i, n) in names.iter().enumerate() { ansi[i] = get("normal", n)?; ansi[i + 8] = get("bright", n)?; }
         let fg = get("primary", "foreground")?;
         let bg = get("primary", "background")?;
+        Ok(Self::derive(name, fg, bg, ansi, get("cursor", "cursor").ok(), get("cursor", "text").ok(), get("selection", "background").ok()))
+    }
+
+    /// Import an iTerm2 `.itermcolors` file (XML plist of `<key>Ansi 0 Color</key><dict>…Red Component…</dict>`).
+    pub fn from_itermcolors(name: &str, src: &str) -> anyhow::Result<Theme> {
+        let colors = parse_itermcolors(src)?;
+        let get = |k: &str| colors.iter().find(|(n, _)| n == k).map(|(_, c)| *c);
+        let mut ansi = [0u32; 16];
+        for (i, a) in ansi.iter_mut().enumerate() { *a = get(&format!("Ansi {i} Color")).ok_or_else(|| anyhow::anyhow!("missing Ansi {i} Color"))?; }
+        let fg = get("Foreground Color").ok_or_else(|| anyhow::anyhow!("missing Foreground Color"))?;
+        let bg = get("Background Color").ok_or_else(|| anyhow::anyhow!("missing Background Color"))?;
+        Ok(Self::derive(name, fg, bg, ansi, get("Cursor Color"), get("Cursor Text Color"), get("Selection Color")))
+    }
+
+    /// UI tokens derived from a terminal palette (used by the Alacritty / iTerm2 importers).
+    fn derive(name: &str, fg: u32, bg: u32, ansi: [u32; 16], cursor: Option<u32>, cursor_text: Option<u32>, selection: Option<u32>) -> Theme {
         let light = luma(bg) > 0.5;
         let mix = |a: u32, b: u32, t: f32| -> u32 {
             let ch = |s: u32| -> [f32; 3] { [((s >> 16) & 255) as f32, ((s >> 8) & 255) as f32, (s & 255) as f32] };
@@ -88,17 +104,75 @@ impl Theme {
             let m: Vec<u32> = (0..3).map(|i| (x[i] + (y[i] - x[i]) * t).round() as u32).collect();
             (m[0] << 16) | (m[1] << 8) | m[2]
         };
-        Ok(Theme {
+        Theme {
             name: name.into(), appearance: if light { Appearance::Light } else { Appearance::Dark },
             crust: mix(bg, if light { 0xffffff } else { 0 }, 0.35), mantle: mix(bg, if light { 0xffffff } else { 0 }, 0.18), base: bg,
             surface0: mix(bg, fg, 0.12), surface1: mix(bg, fg, 0.2), surface2: mix(bg, fg, 0.3),
             overlay0: mix(bg, fg, 0.45), overlay1: mix(bg, fg, 0.55), text: fg, subtext: mix(bg, fg, 0.75),
             accent: ansi[4], success: ansi[2], error: ansi[1], warning: ansi[3], info: ansi[6],
-            fg, bg, cursor: get("cursor", "cursor").unwrap_or(fg), cursor_text: get("cursor", "text").unwrap_or(bg),
-            selection: get("selection", "background").unwrap_or(mix(bg, fg, 0.3)), suggestion: mix(bg, fg, 0.45),
+            fg, bg, cursor: cursor.unwrap_or(fg), cursor_text: cursor_text.unwrap_or(bg),
+            selection: selection.unwrap_or(mix(bg, fg, 0.3)), suggestion: mix(bg, fg, 0.45),
             ansi,
-        })
+        }
     }
+}
+
+/// Minimal plist reader for .itermcolors: top-level `<key>Name</key><dict>` blocks with
+/// `Red/Green/Blue Component` reals (0..1). Returns (name, 0xRRGGBB).
+fn parse_itermcolors(src: &str) -> anyhow::Result<Vec<(String, u32)>> {
+    fn between<'a>(s: &'a str, open: &str, close: &str) -> Option<(&'a str, &'a str)> {
+        let a = s.find(open)? + open.len();
+        let b = s[a..].find(close)? + a;
+        Some((&s[a..b], &s[b + close.len()..]))
+    }
+    let start = src.find("<dict>").ok_or_else(|| anyhow::anyhow!("not a plist"))? + 6;
+    let mut rest = &src[start..];
+    let mut out = Vec::new();
+    while let Some((key, after)) = between(rest, "<key>", "</key>") {
+        let Some((body, after2)) = between(after, "<dict>", "</dict>") else { break };
+        let mut comp = [None::<f32>; 3];
+        let mut b = body;
+        while let Some((k, a)) = between(b, "<key>", "</key>") {
+            // the value is everything up to the next <key> (a <real>, <integer>, <string>, ...)
+            let end = a.find("<key>").unwrap_or(a.len());
+            let (val, a2) = (&a[..end], &a[end..]);
+            let v = between(val, "<real>", "</real>").or_else(|| between(val, "<integer>", "</integer>")).map(|x| x.0).unwrap_or("");
+            let i = match k.trim() { "Red Component" => Some(0), "Green Component" => Some(1), "Blue Component" => Some(2), _ => None };
+            if let (Some(i), Ok(x)) = (i, v.trim().parse::<f32>()) { comp[i] = Some(x); }
+            b = a2;
+        }
+        if let [Some(r), Some(g), Some(bl)] = comp {
+            let ch = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u32;
+            out.push((key.trim().to_string(), (ch(r) << 16) | (ch(g) << 8) | ch(bl)));
+        }
+        rest = after2;
+    }
+    anyhow::ensure!(!out.is_empty(), "no colors found");
+    Ok(out)
+}
+
+/// `~/.config/agentshell/themes`
+pub fn user_dir() -> Option<std::path::PathBuf> {
+    std::env::var("HOME").ok().map(|h| std::path::Path::new(&h).join(".config/agentshell/themes"))
+}
+
+/// Parse any supported theme file (AgentShell TOML, Alacritty TOML, iTerm2 .itermcolors).
+pub fn parse_file(p: &std::path::Path) -> anyhow::Result<Theme> {
+    let src = std::fs::read_to_string(p)?;
+    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("imported");
+    match p.extension().and_then(|x| x.to_str()) {
+        Some("itermcolors") => Theme::from_itermcolors(stem, &src),
+        _ => Theme::from_toml(&src).or_else(|_| Theme::from_alacritty_toml(stem, &src)),
+    }
+}
+
+/// Validate and copy a theme file into the user theme dir. Returns (dest, theme name).
+pub fn import_file(src: &std::path::Path, dir: &std::path::Path) -> anyhow::Result<(std::path::PathBuf, String, bool)> {
+    let th = parse_file(src)?;
+    std::fs::create_dir_all(dir)?;
+    let dest = dir.join(src.file_name().ok_or_else(|| anyhow::anyhow!("no file name"))?);
+    std::fs::copy(src, &dest)?;
+    Ok((dest, th.name, th.appearance == Appearance::Dark))
 }
 
 fn luma(c: u32) -> f32 {
@@ -114,17 +188,12 @@ pub const BUILTIN: &[&str] = &[
 
 pub fn load_all() -> Vec<Arc<Theme>> {
     let mut v: Vec<Arc<Theme>> = BUILTIN.iter().map(|s| Arc::new(Theme::from_toml(s).expect("builtin theme"))).collect();
-    if let Ok(home) = std::env::var("HOME") {
-        let dir = std::path::Path::new(&home).join(".config/agentshell/themes");
+    if let Some(dir) = user_dir() {
         if let Ok(rd) = std::fs::read_dir(dir) {
             for e in rd.flatten() {
                 let p = e.path();
-                if p.extension().and_then(|x| x.to_str()) == Some("toml") {
-                    if let Ok(src) = std::fs::read_to_string(&p) {
-                        let t = Theme::from_toml(&src).or_else(|_| Theme::from_alacritty_toml(
-                            p.file_stem().and_then(|s| s.to_str()).unwrap_or("imported"), &src));
-                        match t { Ok(t) => v.push(Arc::new(t)), Err(e) => eprintln!("theme {}: {e:#}", p.display()) }
-                    }
+                if matches!(p.extension().and_then(|x| x.to_str()), Some("toml" | "itermcolors")) {
+                    match parse_file(&p) { Ok(t) => v.push(Arc::new(t)), Err(e) => eprintln!("theme {}: {e:#}", p.display()) }
                 }
             }
         }
@@ -206,5 +275,27 @@ white="#ffffff"
         assert_eq!(t.bg, 0x282c34);
         assert_eq!(t.ansi[9], 0xe06c75);
         assert_eq!(t.appearance, Appearance::Dark);
+    }
+}
+
+#[cfg(test)]
+mod iterm_tests {
+    use super::*;
+    fn entry(name: &str, r: f32, g: f32, b: f32) -> String {
+        format!("<key>{name}</key>\n<dict>\n<key>Alpha Component</key><real>1</real>\n<key>Blue Component</key><real>{b}</real>\n<key>Color Space</key><string>sRGB</string>\n<key>Green Component</key><real>{g}</real>\n<key>Red Component</key><real>{r}</real>\n</dict>\n")
+    }
+    #[test]
+    fn imports_itermcolors() {
+        let mut body = String::new();
+        for i in 0..16 { body += &entry(&format!("Ansi {i} Color"), i as f32 / 15.0, 0.0, 1.0); }
+        body += &entry("Background Color", 0.0, 0.0, 0.0);
+        body += &entry("Foreground Color", 1.0, 1.0, 1.0);
+        body += &entry("Cursor Color", 1.0, 0.0, 0.0);
+        let src = format!("<?xml version=\"1.0\"?>\n<plist version=\"1.0\">\n<dict>\n{body}</dict>\n</plist>\n");
+        let t = Theme::from_itermcolors("x", &src).unwrap();
+        assert_eq!(t.bg, 0x000000); assert_eq!(t.fg, 0xffffff); assert_eq!(t.cursor, 0xff0000);
+        assert_eq!(t.ansi[0], 0x0000ff); assert_eq!(t.ansi[15], 0xff00ff);
+        assert_eq!(t.appearance, Appearance::Dark);
+        assert!(Theme::from_itermcolors("x", "<plist><dict></dict></plist>").is_err());
     }
 }

@@ -409,6 +409,16 @@ pub enum TermEvent { Explain, Agent(String, AgentState), LongDone(String, u64, i
 
 /// IME support (PRD 3.3: IME must work for agents too). Committed text goes to the PTY like typing;
 /// composition text is only drawn (never sent) until the IME commits it.
+impl TermView {
+    /// Pane title in the current UI language (follows a language switch without reopening).
+    pub fn shown_title(&self) -> SharedString {
+        match (&self.spec, self.title.rsplit_once(" · ")) {
+            (Spec::Local, Some((_, sh))) => tf("main.local_title", &[("shell", &sh)]).into(),
+            _ => self.title.clone().into(),
+        }
+    }
+}
+
 impl gpui::EntityInputHandler for TermView {
     fn text_for_range(&mut self, _r: std::ops::Range<usize>, _a: &mut Option<std::ops::Range<usize>>, _w: &mut Window, _cx: &mut Context<Self>) -> Option<String> { None }
     fn selected_text_range(&mut self, _i: bool, _w: &mut Window, _cx: &mut Context<Self>) -> Option<gpui::UTF16Selection> {
@@ -1298,7 +1308,7 @@ impl Render for TermView {
         let mut header = div().h(px(26.)).px_3().flex().items_center().gap_2().bg(c(th.mantle)).text_size(px(11.5))
             .text_color(if focused { c(th.text) } else { c(th.overlay1) })
             .child(div().size(px(7.)).rounded_full().bg(scolor))
-            .child(self.title.clone())
+            .child(self.shown_title())
             .child(div().text_color(c(th.overlay0)).child(status));
         if let Some((name, st)) = self.agent_label() {
             let col = match st { AgentState::Working => c(th.warning), AgentState::Blocked => c(th.error), AgentState::Idle => c(th.success), _ => c(th.overlay1) };

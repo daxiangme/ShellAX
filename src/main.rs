@@ -488,6 +488,7 @@ impl Root {
         self._subs.push(cx.subscribe_in(&v, window, |this, _, ev: &SettingsEvent, window, cx| match ev {
             SettingsEvent::Close => this.close_overlay(window, cx),
             SettingsEvent::OpenAudit => { this.close_overlay(window, cx); this.overlay = Overlay::Audit; }
+            SettingsEvent::ThemesChanged => { this.themes = theme::load_all(); cx.notify(); }
             SettingsEvent::Changed(path) => {
                 this.settings_dirty.push(path.clone());
                 if path == "suggest.clear_history" { for h in this.histories.values() { h.lock().unwrap().clear(); } }
@@ -775,7 +776,7 @@ impl Render for Root {
             let active = i == self.active;
             let panes = t.layout.leaves();
             let title: SharedString = {
-                let first = panes[0].read(cx).title.clone();
+                let first = shown_title(panes[0].read(cx));
                 if panes.len() > 1 { format!("{first} +{}", panes.len() - 1).into() } else { first }
             };
             let agent = panes.iter().filter_map(|p| p.read(cx).agent_label())
@@ -831,7 +832,7 @@ impl Render for Root {
                 let (st, col) = v.status(&th);
                 let d = v.session.as_ref().map(|s| { let z = s.size(); format!("{}×{}", z.cols, z.rows) }).unwrap_or_default();
                 let n = v.history.lock().unwrap().len();
-                (st, col, d, v.title.clone(), tf("main.history_n", &[("n", &n)]))
+                (st, col, d, shown_title(v), tf("main.history_n", &[("n", &n)]))
             }
             None => ("—", c(th.overlay0), String::new(), SharedString::from(""), String::new()),
         };
@@ -1059,3 +1060,5 @@ fn main() {
         cx.activate(true);
     });
 }
+
+fn shown_title(v: &TermView) -> SharedString { v.shown_title() }
