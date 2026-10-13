@@ -46,6 +46,7 @@ fn main() {
     // behave like other CLI tools when piped into `head` etc. (no EPIPE panic)
     #[cfg(unix)]
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL); }
+    let _ = ssh_term_proto::managed::load();
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() { usage() }
     let cmd = args.remove(0);
@@ -98,7 +99,7 @@ fn check(mut args: Vec<String>, s: &config::Settings) {
             // no running app: evaluate locally with the same engine (nothing is audited here)
             let c = s.policy_ctx();
             let prod = c.prod_confirm && host.as_deref().is_some_and(|h| c.prod_hosts.iter().any(|p| p == h || ssh_term_proto::policy::glob(p, h)));
-            let (e, r) = ssh_term_proto::policy::decide_ctx(c.mode, c.max_auto, &c.rules, &principal, "exec", &command, c.dangerous_confirm, prod);
+            let (e, r) = ssh_term_proto::policy::decide_host(c.mode, c.max_auto, &c.rules, &principal, "exec", &command, c.dangerous_confirm, prod, host.as_deref().unwrap_or(""));
             (e, ssh_term_proto::policy::classify(&command).label().to_string(), format!("{r} (offline)"))
         }
     };

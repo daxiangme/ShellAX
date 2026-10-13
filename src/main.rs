@@ -441,6 +441,7 @@ impl Root {
     fn set_mode(&mut self, m: Mode, cx: &mut Context<Self>) {
         let old = config::get().permissions.mode;
         if old == m { return; }
+        if let Some(mp) = ssh_term_proto::managed::get() { if !mp.mode_allowed(m) { self.log("permission.mode", format!("{} refused by organization policy", m.label())); return self.toast(tf("main.org_mode_refused", &[("m", &m.label())]), cx); } }
         let err = config::update(|s| s.permissions.mode = m);
         self.log("permission.mode", format!("{} → {}", old.label(), m.label()));
         self.report(err, cx);
@@ -578,7 +579,7 @@ impl Root {
             }
             Action::CycleTheme => self.cycle_theme(window, cx),
             Action::ThemeSystem => { self.report(config::update(|s| s.appearance.theme = "system".into()), cx); self.apply_theme(window, cx); self.refresh_all(cx); }
-            Action::CyclePermissionMode => { let m = config::get().permissions.mode.next(); self.set_mode(m, cx); }
+            Action::CyclePermissionMode => { let mut m = config::get().permissions.mode.next(); if let Some(o) = ssh_term_proto::managed::get() { for _ in 0..3 { if o.mode_allowed(m) { break; } m = m.next(); } } self.set_mode(m, cx); }
             Action::ModeAsk => self.set_mode(Mode::Ask, cx),
             Action::ModePlan => self.set_mode(Mode::Plan, cx),
             Action::ModeAuto => self.set_mode(Mode::Auto, cx),
@@ -878,7 +879,8 @@ impl Render for Root {
             None => ("—", c(th.overlay0), String::new(), SharedString::from(""), String::new()),
         };
         let theme_label = if s.appearance.theme == "system" { tf("main.theme_system", &[("name", &th.name)]) } else { th.name.clone() };
-        let mode = s.permissions.mode;
+        let org = ssh_term_proto::managed::get();
+        let mode = org.as_ref().map_or(s.permissions.mode, |m| m.clamp_mode(s.permissions.mode));
         let mode_col = match mode { Mode::Ask => c(th.accent), Mode::Plan => c(th.info), Mode::Auto => c(th.warning) };
         let sb_btn = |id: &'static str| div().id(id).px_2().h(px(20.)).rounded_md().flex().items_center().gap_1().cursor_pointer().hover(|s| s.bg(c(cur().surface0)));
         let statusbar = div().h(px(26.)).px_3().flex().items_center().gap_3().bg(c(th.crust)).border_t_1().border_color(c(th.surface0))
@@ -892,7 +894,8 @@ impl Render for Root {
             .child(sb_btn("theme-btn").on_click(cx.listener(|this, _, w, cx| this.cycle_theme(w, cx))).child(icon(IconName::Palette, 12., c(th.overlay1))).child(theme_label))
             .child(sb_btn("mode-btn").bg(mode_col.opacity(0.16)).text_color(mode_col).font_weight(FontWeight::SEMIBOLD)
                 .on_click(cx.listener(|this, _, w, cx| this.run(Action::CyclePermissionMode, w, cx)))
-                .child(icon(IconName::Shield, 12., mode_col)).child(tf("main.perm_status", &[("mode", &mode.label())])));
+                .child(icon(IconName::Shield, 12., mode_col)).child(tf("main.perm_status", &[("mode", &mode.label())]))
+                .when(org.is_some(), |d| d.child(div().pl_1().child(t("main.org_badge")))));
 
         let mut root = div().size_full().relative().flex().flex_row().bg(c(th.crust).opacity(op)).font_family(SharedString::from("Inter")).text_size(px(s.appearance.ui_font_size.clamp(10., 20.))).text_color(c(th.text))
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, w, cx| {
@@ -1022,6 +1025,8 @@ impl Render for Root {
 }
 
 fn main() {
+    // organization policy first: read-only, highest priority (PRD 6.5)
+    let _ = ssh_term_proto::managed::load();
     let (settings, load_err) = config::Settings::load();
     if let Some(e) = &load_err { eprintln!("{e}"); }
     config::install(settings);
@@ -1070,7 +1075,7 @@ fn main() {
                         }
                     }).detach();
                     // audit retention (audit.retention_days)
-                    match root.audit.prune(config::get().audit.retention_days) { Ok(0) => {}, Ok(n) => eprintln!("audit: pruned {n} records"), Err(e) => eprintln!("audit prune: {e}") }
+                    match root.audit.prune(ssh_term_proto::managed::get().and_then(|m| m.retention_floor()).map_or(config::get().audit.retention_days, |f| config::get().audit.retention_days.max(f))) { Ok(0) => {}, Ok(n) => eprintln!("audit: pruned {n} records"), Err(e) => eprintln!("audit prune: {e}") }
                     // update check (general.check_updates); quiet on network errors
                     if config::get().general.check_updates && std::env::var_os("AGENTSHELL_NO_UPDATE_CHECK").is_none() {
                         let url = config::get().general.manifest_url();
@@ -1139,6 +1144,10 @@ fn main() {
                                 cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
                             }
                         }).detach();
+                    }
+                    if let Some(m) = ssh_term_proto::managed::get() {
+                        match &m.error { Some(e) => { root.log("policy.managed", format!("path={} error={e:?} fail-closed", m.path.display())); root.toast(tf("main.org_policy_error", &[("e", e)]), cx); }
+                            None => root.log("policy.managed", format!("path={} hard_deny={} modes={:?} hosts={} retention_floor={:?}", m.path.display(), m.hard_deny.len(), m.mode.allowed, m.hosts.len(), m.audit.retention_days)) }
                     }
                     if let Some(e) = load_err.clone() { root.toast(e, cx); }
                     let st = config::get();

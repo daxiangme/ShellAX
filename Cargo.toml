@@ -39,6 +39,7 @@ tree-sitter-bash = "0.25"
 notify-rust = "4"
 russh-sftp = "3"
 getrandom = { version = "0.4", features = ["sys_rng"] }
+serde_yaml = "0.9"
 
 # Distribution build (installer payload): `cargo build --profile dist`.
 # Kept separate from `release` so day-to-day release builds/tests stay fast.

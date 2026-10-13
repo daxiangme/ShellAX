@@ -263,7 +263,7 @@ impl Shared {
             // non-shell, non-write tools: only explicit rules decide; otherwise no opinion (allow)
             match policy::evaluate(&ctx.rules, principal, "tool", &req.command) { Some((_, r)) => (r.effect, format!("rule {}", r.id)), None => (Effect::Allow, "not a shell/write tool".into()) }
         } else {
-            policy::decide_ctx(ctx.mode, ctx.max_auto, &ctx.rules, principal, &req.action, &req.command, ctx.dangerous_confirm, prod)
+            policy::decide_host(ctx.mode, ctx.max_auto, &ctx.rules, principal, &req.action, &req.command, ctx.dangerous_confirm, prod, host)
         };
         let skey = (principal.to_string(), if req.session.is_empty() { "-".to_string() } else { req.session.clone() }, command_prefix(&req.command));
         if eff == Effect::Ask {

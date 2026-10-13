@@ -54,6 +54,8 @@ Copyright 2025, Command Line Inc.
 | ureq 2.12.1 (AI HTTP client) | MIT OR Apache-2.0 |
 | rustls 0.23 (via ureq "tls") | Apache-2.0 OR ISC OR MIT |
 | socks 0.3.4 (via ureq "socks-proxy"; SOCKS5 for AI/update requests) | MIT OR Apache-2.0 |
+| serde_yaml 0.9.34 (managed-policy.yaml) | MIT OR Apache-2.0 |
+| unsafe-libyaml 0.2.11 (via serde_yaml) | MIT |
 | ksni 0.3.6 (Linux tray, StatusNotifierItem) | Unlicense (public-domain dedication; permissive) |
 | zbus 4.4 / 5.19 (D-Bus, via ksni; zbus 5 also as dev-dependency for the test watcher) | MIT |
 | pastey 0.2.3 (via ksni) | MIT OR Apache-2.0 |

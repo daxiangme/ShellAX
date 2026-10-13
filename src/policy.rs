@@ -283,6 +283,25 @@ pub fn decide(mode: Mode, max_auto: Risk, rules: &[Rule], principal: &str, actio
 /// anything above R0, and an Allow rule for an R2+ command becomes Ask.
 #[allow(clippy::too_many_arguments)]
 pub fn decide_ctx(mode: Mode, max_auto: Risk, rules: &[Rule], principal: &str, action: &str, command: &str, dangerous_confirm: bool, prod: bool) -> (Effect, String) {
+    decide_host(mode, max_auto, rules, principal, action, command, dangerous_confirm, prod, "")
+}
+
+/// [`decide_ctx`] plus the host name, for organization host rules. The managed policy
+/// (`/etc/agentshell/managed-policy.yaml`) is applied first and cannot be loosened by user rules.
+#[allow(clippy::too_many_arguments)]
+pub fn decide_host(mode: Mode, max_auto: Risk, rules: &[Rule], principal: &str, action: &str, command: &str, dangerous_confirm: bool, prod: bool, host: &str) -> (Effect, String) {
+    let Some(m) = crate::managed::get() else { return decide_user(mode, max_auto, rules, principal, action, command, dangerous_confirm, prod) };
+    if let Some(p) = m.hard_deny_hit(command) { return (Effect::Deny, tf("policy.org_hard_deny", &[("p", &p)])); }
+    let risk = classify(command);
+    if let Some(min) = m.host_deny_from(host, prod) { if risk >= min && risk != Risk::Hard { return (Effect::Deny, tf("policy.org_host_deny", &[("risk", &risk.label()), ("min", &min.label())])); } }
+    let eff_mode = m.clamp_mode(mode);
+    let (e, why) = decide_user(eff_mode, max_auto, rules, principal, action, command, dangerous_confirm, prod);
+    if eff_mode != mode { return (e, format!("{why} · {}", tf("policy.org_mode", &[("m", &eff_mode.label())]))); }
+    (e, why)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decide_user(mode: Mode, max_auto: Risk, rules: &[Rule], principal: &str, action: &str, command: &str, dangerous_confirm: bool, prod: bool) -> (Effect, String) {
     let risk = classify(command);
     if risk == Risk::Hard { return (Effect::Deny, tf("policy.hard", &[("risk", &risk.label())])); }
     if mode == Mode::Plan && risk > Risk::R0 { return (Effect::Deny, tf("policy.plan_deny", &[("risk", &risk.label())])); }

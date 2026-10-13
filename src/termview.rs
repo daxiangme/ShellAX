@@ -1181,7 +1181,7 @@ impl TermView {
         let cfg = config::get();
         let max = match cfg.permissions.max_auto_risk.as_str() { "R0" => Risk::R0, "R2" => Risk::R2, _ => Risk::R1 };
         let prod = cfg.permissions.prod_confirm && matches!(&self.spec, Spec::Ssh(t) if t.production);
-        let (eff, reason) = policy::decide_ctx(cfg.permissions.mode, max, &cfg.permissions.rules, "ai", "exec", command, cfg.permissions.dangerous_confirm, prod);
+        let (eff, reason) = policy::decide_host(cfg.permissions.mode, max, &cfg.permissions.rules, "ai", "exec", command, cfg.permissions.dangerous_confirm, prod, &self.audit_host());
         (eff, policy::classify(command), reason)
     }
     /// Host name used in audit records ("local" for local panes), matching AGENTSHELL_HOST.
@@ -1192,7 +1192,7 @@ impl TermView {
         let cfg = config::get();
         let max = match cfg.permissions.max_auto_risk.as_str() { "R0" => Risk::R0, "R2" => Risk::R2, _ => Risk::R1 };
         let prod = cfg.permissions.prod_confirm && matches!(&self.spec, Spec::Ssh(t) if t.production);
-        let (eff, reason) = policy::decide_ctx(cfg.permissions.mode, max, &cfg.permissions.rules, "ai", "exec", &command, cfg.permissions.dangerous_confirm, prod);
+        let (eff, reason) = policy::decide_host(cfg.permissions.mode, max, &cfg.permissions.rules, "ai", "exec", &command, cfg.permissions.dangerous_confirm, prod, &self.audit_host());
         let risk = policy::classify(&command);
         let _ = crate::audit_log().append("ai.exec.decision", "policy", &format!("mode={} host={} risk={} effect={:?} command={command:?} reason={reason:?}", cfg.permissions.mode.label(), self.audit_host(), risk.label(), eff));
         match eff {
@@ -1209,7 +1209,8 @@ impl TermView {
     /// otherwise the input is held for the card (ask) or dropped (deny), audited either way.
     fn pty_gate(&mut self, text: &str, enter: bool, by: &str, tx: Option<flume::Sender<StepOutput>>, cx: &mut Context<Self>) -> Result<Option<flume::Sender<StepOutput>>, Option<flume::Sender<StepOutput>>> {
         let agent = self.agent.map(|(i, _)| agent::display_name(&self.manifests[i].id).to_string());
-        let mode = config::get().agents.write_to_pty.clone();
+        let mut mode = config::get().agents.write_to_pty.clone();
+        if let Some(m) = ssh_term_proto::managed::get() { mode = m.cap_pty_write(&mode); }
         match policy::write_to_pty(&mode, agent.is_some(), self.pty_write_ok) {
             Effect::Allow => { if let Some(a) = &agent { let _ = crate::audit_log().append("write_to_pty", by, &format!("allow mode={mode} agent={a} host={} chars={}", self.audit_host(), text.chars().count())); } Ok(tx) }
             Effect::Ask => {
