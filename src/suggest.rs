@@ -13,21 +13,66 @@ pub const MAX_HISTORY: usize = 5000;
 #[derive(Default, Debug, Clone)]
 pub struct History {
     entries: Vec<String>,
+    /// Our own history file (append-only, one command per line, mode 0600). None = memory only.
+    path: Option<std::path::PathBuf>,
+}
+
+/// Strip zsh EXTENDED_HISTORY prefix ": <epoch>:<duration>;".
+fn strip_zsh_prefix(line: &str) -> &str {
+    if let Some(rest) = line.strip_prefix(": ") {
+        if let Some(i) = rest.find(';') {
+            let meta = &rest[..i];
+            if meta.split(':').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())) { return &rest[i + 1..]; }
+        }
+    }
+    line
 }
 
 impl History {
     pub fn new() -> Self { Self::default() }
 
-    /// Load from a bash-style history file body (one command per line; `#<epoch>` lines skipped).
+    /// Open (or create) a persistent history file and load it.
+    pub fn open(path: impl Into<std::path::PathBuf>) -> Self {
+        let path = path.into();
+        let mut h = Self::default();
+        if let Ok(body) = std::fs::read_to_string(&path) {
+            for l in body.lines() { h.insert(l); }
+            // compact when the file grew far past the cap
+            if body.lines().count() > MAX_HISTORY * 2 { let _ = std::fs::write(&path, h.entries.join("\n") + "\n"); }
+        }
+        h.path = Some(path);
+        h
+    }
+
+    /// Load from a bash- or zsh-style history file body (`#<epoch>` lines skipped, zsh
+    /// `: ts:0;cmd` prefixes stripped, zsh multi-line continuations dropped). Not persisted.
     pub fn extend_from_bash_history(&mut self, body: &str) {
+        let mut cont = false;
         for line in body.lines() {
-            if line.starts_with('#') { continue; }
-            self.add(line);
+            let was_cont = cont;
+            cont = line.ends_with('\\');
+            if was_cont || cont || line.starts_with('#') { continue; }
+            self.insert(strip_zsh_prefix(line));
         }
     }
 
-    /// Record a command. Returns false if it was filtered out.
+    /// Record a command typed in this app (persisted when a file is attached). Returns false if filtered out.
     pub fn add(&mut self, cmd: &str) -> bool {
+        let ok = self.insert(cmd);
+        if ok {
+            if let Some(p) = &self.path {
+                use std::io::Write;
+                let mut o = std::fs::OpenOptions::new();
+                o.create(true).append(true);
+                #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; o.mode(0o600); }
+                if let Some(dir) = p.parent() { let _ = std::fs::create_dir_all(dir); }
+                if let Ok(mut f) = o.open(p) { let _ = writeln!(f, "{}", cmd.trim_end()); }
+            }
+        }
+        ok
+    }
+
+    fn insert(&mut self, cmd: &str) -> bool {
         // Leading space = user asked not to record (bash HISTCONTROL=ignorespace convention).
         if cmd.starts_with(' ') { return false; }
         let cmd = cmd.trim_end();
@@ -140,6 +185,24 @@ impl InputTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zsh_history_and_persistence() {
+        let mut h = History::new();
+        h.extend_from_bash_history(": 1700000000:0;git status\n: 1700000001:0;echo a \\\nb\nls -la\n");
+        assert_eq!(h.suggest("git s").as_deref(), Some("tatus"));
+        assert_eq!(h.suggest("ls -").as_deref(), Some("la"));
+        assert!(h.suggest("b").is_none());
+        let p = std::env::temp_dir().join(format!("as-hist-{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        let mut a = History::open(&p);
+        assert!(a.add("cargo build --release"));
+        assert!(!a.add("export TOKEN=abc"));
+        let b = History::open(&p);
+        assert_eq!(b.suggest("cargo b").as_deref(), Some("uild --release"));
+        assert_eq!(b.len(), 1);
+        let _ = std::fs::remove_file(&p);
+    }
     #[test]
     fn submitted_tolerates_pending_echo_but_not_passwords() {
         let mut t = InputTracker::new();

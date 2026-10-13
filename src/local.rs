@@ -1,5 +1,5 @@
 use std::io::{Read, Write};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
@@ -18,57 +18,103 @@ if [ "$__as_ps1_done" = 0 ]; then
 fi
 "#;
 
+/// zsh integration via a temporary ZDOTDIR: sources the user's real .zshenv/.zshrc, then adds
+/// precmd/preexec hooks. 133;B is (re)appended in precmd because prompt themes rebuild PS1 there.
+pub const ZSH_ZSHENV: &str = r#"
+__as_orig="${AGENTSHELL_ORIG_ZDOTDIR:-$HOME}"
+[ -f "$__as_orig/.zshenv" ] && . "$__as_orig/.zshenv"
+"#;
+pub const ZSH_ZSHRC: &str = r#"
+__as_orig="${AGENTSHELL_ORIG_ZDOTDIR:-$HOME}"
+ZDOTDIR="$__as_orig"
+[ -f "$__as_orig/.zshrc" ] && . "$__as_orig/.zshrc"
+: ${HISTFILE:=$__as_orig/.zsh_history}
+__as_precmd() {
+  print -n '\e]133;A\a'
+  [[ "$PS1" == *'133;B'* ]] || PS1="$PS1"$'%{\e]133;B\a%}'
+}
+__as_preexec() { print -n '\e]133;C\a' }
+autoload -Uz add-zsh-hook
+add-zsh-hook precmd __as_precmd
+add-zsh-hook preexec __as_preexec
+"#;
+
+fn home() -> Option<std::path::PathBuf> { std::env::var_os("HOME").map(Into::into) }
+
 /// Spawn the user's shell in a local PTY and wire it to a new Session.
+/// `shell`: explicit shell path; None = $SHELL (bash/zsh get OSC 133 integration).
 pub fn spawn_local(size: Size, shell: Option<&str>) -> Result<Arc<Session>> {
     let (session, out_tx, from_ui) = Session::new(size);
     let pty = native_pty_system();
     let pair = pty.openpty(PtySize { rows: size.rows as u16, cols: size.cols as u16, pixel_width: 0, pixel_height: 0 })?;
-    let mut cmd = match shell {
-        Some(s) => CommandBuilder::new(s),
-        None => {
-            let sh = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
-            if sh.ends_with("bash") {
-                // shell integration: OSC 133 A/B/C marks via a wrapper rcfile (sources the user's ~/.bashrc first)
-                let rc = std::env::temp_dir().join("agentshell-bash-integration.sh");
-                let _ = std::fs::write(&rc, BASH_INTEGRATION);
-                let mut c = CommandBuilder::new(&sh);
-                c.args(["--rcfile", rc.to_str().unwrap_or_default()]);
-                c
-            } else { CommandBuilder::new(&sh) }
-        }
-    };
+    let sh = shell.map(str::to_string).unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into()));
+    let integrate = shell.is_none() || std::env::var("AGENTSHELL_INTEGRATE").is_ok();
+    let mut cmd = CommandBuilder::new(&sh);
+    let mut hist_file = ".bash_history";
+    if integrate && sh.ends_with("bash") {
+        let rc = std::env::temp_dir().join("agentshell-bash-integration.sh");
+        let _ = std::fs::write(&rc, BASH_INTEGRATION);
+        cmd.args(["--rcfile", rc.to_str().unwrap_or_default()]);
+    } else if integrate && sh.ends_with("zsh") {
+        let dir = std::env::temp_dir().join("agentshell-zsh");
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join(".zshenv"), ZSH_ZSHENV);
+        let _ = std::fs::write(dir.join(".zshrc"), ZSH_ZSHRC);
+        if let Ok(z) = std::env::var("ZDOTDIR") { cmd.env("AGENTSHELL_ORIG_ZDOTDIR", z); }
+        cmd.env("ZDOTDIR", dir.as_os_str());
+        hist_file = ".zsh_history";
+    }
+    if sh.ends_with("zsh") { hist_file = ".zsh_history"; }
     cmd.env("TERM", "xterm-256color");
-    if let Ok(home) = std::env::var("HOME") { cmd.cwd(home); }
+    cmd.env("COLORTERM", "truecolor");
+    if let Some(h) = home() { cmd.cwd(h); }
     let mut child = pair.slave.spawn_command(cmd)?;
-    if let Ok(home) = std::env::var("HOME") {
-        if let Ok(body) = std::fs::read_to_string(std::path::Path::new(&home).join(".bash_history")) {
-            *session.history_seed.lock().unwrap() = Some(body);
+    if let Some(h) = home() {
+        if let Ok(body) = std::fs::read(h.join(hist_file)) {
+            *session.history_seed.lock().unwrap() = Some(String::from_utf8_lossy(&body).into_owned());
         }
     }
     drop(pair.slave);
+    session.connected.store(true, std::sync::atomic::Ordering::Release);
     let mut reader = pair.master.try_clone_reader()?;
     let mut writer = pair.master.take_writer()?;
-    let master = pair.master;
+    let master = Arc::new(Mutex::new(pair.master));
+    {
+        // foreground process of the pty (tcgetpgrp) -> /proc/<pid>/comm; used for agent identification
+        let m = master.clone();
+        *session.fg_probe.lock().unwrap() = Some(Box::new(move || {
+            let pid = m.lock().ok()?.process_group_leader()?;
+            let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+            let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+            // node-based CLIs show up as "node"; use the script basename from argv then
+            let args: Vec<String> = cmdline.split(|b| *b == 0).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
+            let comm = comm.trim().to_string();
+            if matches!(comm.as_str(), "node" | "bun" | "python3" | "python") {
+                if let Some(a) = args.get(1) { return Some(a.rsplit('/').next().unwrap_or(a).to_string()); }
+            }
+            Some(comm)
+        }));
+    }
 
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 8192];
+    std::thread::Builder::new().name("pty-reader".into()).spawn(move || {
+        let mut buf = vec![0u8; 64 * 1024];
         loop {
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => { if out_tx.send(buf[..n].to_vec()).is_err() { break; } }
             }
         }
-    });
-    std::thread::spawn(move || {
+    })?;
+    std::thread::Builder::new().name("pty-writer".into()).spawn(move || {
         while let Ok(msg) = from_ui.recv() {
             match msg {
                 BackendMsg::Input(b) => { let _ = writer.write_all(&b); let _ = writer.flush(); }
                 BackendMsg::Resize { cols, rows } => {
-                    let _ = master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+                    let _ = master.lock().unwrap().resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
                 }
             }
         }
         let _ = child.kill();
-    });
+    })?;
     Ok(session)
 }

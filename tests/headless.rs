@@ -25,23 +25,104 @@ fn local_pty_ls() {
     assert_eq!(s.size(), Size { cols: 120, rows: 30 });
 }
 
-#[test]
-fn ssh_localhost_ls() {
-    let Ok(port) = std::env::var("TEST_SSH_PORT") else { eprintln!("TEST_SSH_PORT unset, skipping"); return };
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let target = ssh::SshTarget {
+fn test_target(known_hosts: std::path::PathBuf) -> Option<ssh::SshTarget> {
+    let port = std::env::var("TEST_SSH_PORT").ok()?;
+    Some(ssh::SshTarget {
         host: "127.0.0.1".into(),
         port: port.parse().unwrap(),
         user: std::env::var("TEST_SSH_USER").unwrap(),
-        key: std::env::var("TEST_SSH_KEY").unwrap().into(),
-    };
-    let s = ssh::spawn_ssh(rt.handle(), target, Size { cols: 100, rows: 30 }).unwrap();
+        keys: vec![std::env::var("TEST_SSH_KEY").unwrap().into()],
+        known_hosts,
+    })
+}
+
+#[test]
+fn ssh_localhost_ls_and_known_hosts_tofu() {
+    let kh = std::env::temp_dir().join(format!("stp-kh-{}", std::process::id()));
+    let _ = std::fs::remove_file(&kh);
+    let Some(target) = test_target(kh.clone()) else { eprintln!("TEST_SSH_PORT unset, skipping"); return };
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let (tx, rx) = flume::unbounded::<ssh::HostKeyPrompt>();
+    let prompts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let p2 = prompts.clone();
+    std::thread::spawn(move || while let Ok(p) = rx.recv() {
+        assert!(p.fingerprint.starts_with("SHA256:"));
+        p2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _ = p.reply.send(ssh::HostKeyDecision::AcceptAndSave);
+    });
+    // 1st connection: unknown host -> prompt -> saved
+    let s = ssh::spawn_ssh(rt.handle(), target.clone(), Size { cols: 100, rows: 30 }, tx.clone());
+    let txt = wait_for(&s, "$", 10);
     s.resize(Size { cols: 90, rows: 25 });
     s.write("stty size; ls\r");
-    let txt = wait_for(&s, "hello_from_sshd.txt", 10);
-    println!("{txt}");
-    assert!(txt.contains("hello_from_sshd.txt"), "remote ls output not in grid");
-    assert!(txt.contains("25 90"), "window_change not applied on remote pty");
+    let txt2 = wait_for(&s, "hello_from_sshd.txt", 10);
+    println!("{txt}\n{txt2}");
+    assert!(txt2.contains("hello_from_sshd.txt"), "remote ls output not in grid");
+    assert!(txt2.contains("25 90"), "window_change not applied on remote pty");
+    assert_eq!(prompts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(std::fs::read_to_string(&kh).unwrap().contains("ssh-ed25519"));
+    // 2nd connection: known -> no prompt
+    let s2 = ssh::spawn_ssh(rt.handle(), target.clone(), Size { cols: 80, rows: 24 }, tx.clone());
+    s2.write("echo second_ok\r");
+    assert!(wait_for(&s2, "second_ok", 10).contains("second_ok"));
+    assert_eq!(prompts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    // changed key: record a different ed25519 key for this host -> refused, no prompt
+    let other = std::fs::read_to_string(std::env::var("TEST_SSH_KEY").unwrap() + ".pub").unwrap();
+    let mut parts = other.split_whitespace();
+    let line = format!("[127.0.0.1]:{} {} {}\n", target.port, parts.next().unwrap(), parts.next().unwrap());
+    std::fs::write(&kh, line).unwrap();
+    let s3 = ssh::spawn_ssh(rt.handle(), target, Size { cols: 80, rows: 24 }, tx);
+    let t0 = Instant::now();
+    while s3.conn_error.lock().unwrap().is_none() && t0.elapsed() < Duration::from_secs(10) { std::thread::sleep(Duration::from_millis(100)); }
+    let err = s3.conn_error.lock().unwrap().clone().expect("changed key must be refused");
+    assert!(err.contains("主机密钥已变更"), "{err}");
+    assert_eq!(prompts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let _ = std::fs::remove_file(&kh);
+}
+
+#[test]
+fn scrollback_keeps_history() {
+    let s = local::spawn_local(Size { cols: 80, rows: 10 }, Some("/bin/bash")).unwrap();
+    s.write("seq 1 300\r");
+    wait_for(&s, "300", 10);
+    let mut t = s.term.lock().unwrap();
+    use alacritty_terminal::grid::{Dimensions, Scroll};
+    assert!(t.grid().history_size() >= 290, "history {}", t.grid().history_size());
+    t.scroll_display(Scroll::Delta(5));
+    assert_eq!(t.grid().display_offset(), 5);
+}
+
+#[test]
+fn local_zsh_integration_and_history() {
+    if !std::path::Path::new("/usr/bin/zsh").exists() { eprintln!("no zsh, skipping"); return; }
+    std::env::set_var("AGENTSHELL_INTEGRATE", "1");
+    let s = local::spawn_local(Size { cols: 100, rows: 30 }, Some("/usr/bin/zsh")).unwrap();
+    let t0 = Instant::now();
+    while s.prompt_mark.lock().unwrap().is_none() && t0.elapsed() < Duration::from_secs(10) {
+        if t0.elapsed() > Duration::from_secs(2) { s.write("q"); } // dismiss zsh-newuser-install if it shows up
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(s.prompt_mark.lock().unwrap().is_some(), "zsh integration should emit OSC 133;B\n{}", s.screen_text());
+}
+
+#[test]
+fn local_agent_identified_by_foreground_process() {
+    let dir = std::env::temp_dir().join(format!("stp-agent-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = dir.join("grok");
+    std::fs::write(&fake, "#!/bin/bash\nprintf '\\033]0;\\342\\240\\231 Working - grok\\007'\nsleep 5\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let s = local::spawn_local(Size { cols: 100, rows: 30 }, Some("/bin/bash")).unwrap();
+    s.write(format!("{}\r", fake.display()));
+    let t0 = Instant::now();
+    while s.foreground_process().as_deref() != Some("grok") && t0.elapsed() < Duration::from_secs(5) { std::thread::sleep(Duration::from_millis(100)); }
+    assert_eq!(s.foreground_process().as_deref(), Some("grok"));
+    std::thread::sleep(Duration::from_millis(300));
+    let m = ssh_term_proto::agent::bundled();
+    let i = ssh_term_proto::agent::identify(&m, s.foreground_process().as_deref(), None, &s.title()).unwrap();
+    let d = m[i].detect(ssh_term_proto::agent::DetectionInput { screen: &s.screen_text(), osc_title: &s.title(), osc_progress: "" });
+    assert_eq!(d.state, ssh_term_proto::agent::AgentState::Working, "title={:?}", s.title());
 }
 
 #[test]
