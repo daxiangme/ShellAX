@@ -67,33 +67,12 @@ impl Root {
     }
 
     pub(crate) fn sftp_panel(&mut self, cx: &mut Context<Root>) -> AnyElement {
+        if let Some(v) = self.sftp_current.clone() { return ui::modal(v).into_any_element(); }
         let th = cur();
-        let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
-        let mut entries: Vec<(String, bool, u64)> = std::fs::read_dir(&home).map(|d| d.filter_map(Result::ok)
-            .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
-            .map(|e| { let md = e.metadata().ok(); (e.file_name().to_string_lossy().to_string(), md.as_ref().is_some_and(|m| m.is_dir()), md.map(|m| m.len()).unwrap_or(0)) }).collect()).unwrap_or_default();
-        entries.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-        let pane = |title: String, body: AnyElement| div().flex_1().h_full().flex().flex_col().border_1().border_color(c(th.surface0)).rounded_lg().overflow_hidden()
-            .child(div().h(px(32.)).px_3().flex().items_center().gap_2().bg(c(th.mantle)).text_size(px(12.)).text_color(c(th.subtext)).child(title))
-            .child(body);
-        let mut local = div().id("sftp-local").flex_1().overflow_y_scroll().flex().flex_col();
-        for (i, (name, dir, size)) in entries.iter().enumerate().take(200) {
-            local = local.child(div().id(("lf", i)).h(px(28.)).px_3().flex().items_center().gap_2().text_size(px(12.)).text_color(c(th.text)).hover(|d| d.bg(c(cur().surface0)))
-                .child(icon(if *dir { IconName::Folder } else { IconName::FileText }, 14., if *dir { c(th.warning) } else { c(th.overlay1) }))
-                .child(div().flex_1().child(name.clone()))
-                .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(if *dir { "—".to_string() } else { human(*size) })));
-        }
-        let target = self.focused_ssh_label(cx).unwrap_or_else(|| t("ui.current_tab_is_not_an").into());
-        let remote = div().flex_1().flex().flex_col().items_center().justify_center().gap_2()
+        let body = div().flex_1().flex().flex_col().items_center().justify_center().gap_2()
             .child(icon(IconName::FolderSync, 28., c(th.overlay0)))
-            .child(div().text_size(px(12.5)).text_color(c(th.subtext)).child(t("ui.remote_browsing_reuses_the_sftp")))
-            .child(ui::soon());
-        let body = div().flex_1().min_h_0().p_4().flex().gap_3()
-            .child(pane(tf("panels.local_pane", &[("path", &home.display())]), local.into_any_element()))
-            .child(div().w(px(36.)).flex().flex_col().items_center().justify_center().gap_2().opacity(0.4)
-                .child(icon(IconName::Upload, 16., c(th.overlay1))).child(icon(IconName::Download, 16., c(th.overlay1))))
-            .child(pane(tf("panels.remote_pane", &[("target", &target)]), remote.into_any_element()));
-        ui::modal(panel_shell(t("ui.sftp_files"), IconName::FolderSync, t("ui.local_listing_is_real_remote"), cx).child(body)).into_any_element()
+            .child(div().text_size(px(12.5)).text_color(c(th.subtext)).child(t("sftp.need_ssh")));
+        ui::modal(panel_shell(t("ui.sftp_files"), IconName::FolderSync, t("ui.remote_browsing_reuses_the_sftp"), cx).child(body)).into_any_element()
     }
 
     pub(crate) fn port_panel(&mut self, cx: &mut Context<Root>) -> AnyElement {
@@ -152,9 +131,6 @@ impl Root {
     }
 }
 
-fn human(n: u64) -> String {
-    if n < 1024 { format!("{n} B") } else if n < 1 << 20 { format!("{:.1} KB", n as f64 / 1024.0) } else if n < 1 << 30 { format!("{:.1} MB", n as f64 / 1048576.0) } else { format!("{:.1} GB", n as f64 / 1073741824.0) }
-}
 
 #[allow(dead_code)]
 fn _unused(_: Overlay) {}

@@ -6,6 +6,7 @@ mod host_dialog;
 mod palette;
 mod panels;
 mod settings_view;
+mod sftp_view;
 mod termview;
 mod theme;
 mod ui;
@@ -88,6 +89,8 @@ pub(crate) struct Root {
     settings_dirty: Vec<String>,
     toast: Option<(String, u64)>,
     toast_seq: u64,
+    pub(crate) sftp_views: HashMap<String, Entity<sftp_view::SftpView>>,
+    pub(crate) sftp_current: Option<Entity<sftp_view::SftpView>>,
     _subs: Vec<gpui::Subscription>,
 }
 
@@ -160,9 +163,24 @@ impl Root {
         let tab = self.tabs.get(self.active)?;
         tab.layout.leaves().into_iter().find(|p| p.read(cx).focus.is_focused(window)).or_else(|| Some(tab.focused.clone()))
     }
-    pub(crate) fn focused_ssh_label(&self, cx: &App) -> Option<String> {
-        let tab = self.tabs.get(self.active)?;
-        match &tab.focused.read(cx).spec { Spec::Ssh(t) => Some(t.label()), _ => None }
+    /// SSH target of the focused tab, else of any SSH tab, else the env default target.
+    pub(crate) fn ssh_target_for_tools(&self, cx: &App) -> Option<SshTarget> {
+        let of = |v: &Entity<TermView>| match &v.read(cx).spec { Spec::Ssh(t) => Some(t.clone()), _ => None };
+        self.tabs.get(self.active).and_then(|t| of(&t.focused))
+            .or_else(|| self.tabs.iter().flat_map(|t| t.layout.leaves()).find_map(|v| of(&v)))
+            .or_else(|| self.default_target.clone())
+    }
+    fn open_sftp(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sftp_current = self.ssh_target_for_tools(cx).map(|t| {
+            let key = t.pool_key();
+            if let Some(v) = self.sftp_views.get(&key) { return v.clone(); }
+            let (rt, pr) = (self.rt.handle().clone(), self.prompts.clone());
+            let v = cx.new(|cx| sftp_view::SftpView::new(t, rt, pr, window, cx));
+            self._subs.push(cx.subscribe_in(&v, window, |this, _, _ev: &sftp_view::SftpEvent, w, cx| this.close_overlay(w, cx)));
+            self.sftp_views.insert(key, v.clone());
+            v
+        });
+        self.overlay = Overlay::Sftp;
     }
     fn split(&mut self, dir: Option<Dir>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(target) = self.focused_pane(window, cx) else { return self.new_tab(Spec::Local, window, cx) };
@@ -349,7 +367,7 @@ impl Root {
             Action::ModeAsk => self.set_mode(Mode::Ask, cx),
             Action::ModePlan => self.set_mode(Mode::Plan, cx),
             Action::ModeAuto => self.set_mode(Mode::Auto, cx),
-            Action::OpenSftp => self.overlay = Overlay::Sftp,
+            Action::OpenSftp => self.open_sftp(window, cx),
             Action::OpenPortForward => self.overlay = Overlay::Port,
             Action::OpenAi => self.overlay = Overlay::Ai,
             Action::AiCommand => {
@@ -756,7 +774,7 @@ fn main() {
                     let audit = audit_log();
                     let mut root = Root {
                         rt, default_target, tabs: vec![], active: 0, themes, histories: HashMap::new(),
-                        manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], policy_port: None, overlay: Overlay::None,
+                        manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], policy_port: None, overlay: Overlay::None, sftp_views: HashMap::new(), sftp_current: None,
                         host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, collapsed: HashSet::new(), sidebar_visible: true, audit, audit_verify: None,
                         settings_dirty: vec![], toast: None, toast_seq: 0, _subs: vec![],
                     };

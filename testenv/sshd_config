@@ -7,3 +7,5 @@ PubkeyAuthentication yes
 AuthorizedKeysFile .ssh/authorized_keys
 UsePAM no
 PidFile /workspace/ssh-term-proto/testenv/sshd.pid
+Subsystem sftp internal-sftp
+AllowTcpForwarding yes

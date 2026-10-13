@@ -19,8 +19,8 @@
 - ☑ 2.5 keepalive、断线重连、连接复用
 
 ## 3 SFTP（P1）
-- ☐ 3.1 双栏浏览、新建/重命名/删除/权限（删除需确认）
-- ☐ 3.2 上传下载、队列与进度、断点续传、拖放
+- ☑ 3.1 双栏浏览、新建/重命名/删除/权限（删除需确认）：src/sftp.rs + src/sftp_view.rs，复用连接池；GUI 实测 chmod 600、确认后删除（screenshot-final-sftp*.png）
+- ☑ 3.2 上传下载、队列与进度、暂停/继续、断点续传（按目标已有大小续传）、两栏拖放 + 系统文件拖入远端栏；tests/ssh_features.rs::sftp_ops_and_resumable_transfers；GUI 拖拽上传 40MB sha256 一致
 
 ## 4 端口转发（P1）
 - ☐ 4.1 本地 / 远程 / 动态 SOCKS；列表启停、状态、自动启动

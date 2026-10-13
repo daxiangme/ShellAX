@@ -15,5 +15,7 @@ pub mod keygen;
 pub mod layout;
 pub mod local;
 pub mod ssh;
+pub mod sftp;
+pub mod forward;
 pub mod suggest;
 pub mod term;

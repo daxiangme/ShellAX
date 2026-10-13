@@ -11,3 +11,4 @@ AllowTcpForwarding yes
 AllowAgentForwarding yes
 PermitUserEnvironment no
 AcceptEnv AGENTSHELL_HOST LANG
+Subsystem sftp internal-sftp

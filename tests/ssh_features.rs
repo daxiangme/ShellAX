@@ -131,3 +131,104 @@ fn connection_reuse() {
     let (b, rb) = rt.block_on(ssh::connect_shared(&t, &p)).unwrap();
     if ssh::REUSE.load(std::sync::atomic::Ordering::Relaxed) { assert!(!ra && rb && Arc::ptr_eq(&a, &b)); }
 }
+
+#[test]
+fn sftp_ops_and_resumable_transfers() {
+    use ssh_term_proto::sftp::{self, Dir, JobState, Queue, Side};
+    let (Some(port), Some(key)) = (env("TEST_SSH_PORT"), env("TEST_SSH_KEY")) else { eprintln!("skip"); return };
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let t = SshTarget { auth: "key".into(), keys: vec![key.into()], ..base(&port) };
+    let (p, _) = prompts(vec![]);
+    rt.block_on(async {
+        let c = ssh::connect(&t, &p).await.unwrap();
+        let s = c.sftp().await.unwrap();
+        let home = s.canonicalize(".").await.unwrap();
+        let dir = sftp::join(&home, &format!("stp-sftp-{}", std::process::id()));
+        let _ = sftp::remove(Some(&s), Side::Remote, &dir).await;
+        sftp::mkdir(Some(&s), Side::Remote, &dir).await.unwrap();
+        // 3 MB file, upload interrupted half-way then resumed
+        let ld = std::env::temp_dir().join(format!("stp-sftp-l-{}", std::process::id()));
+        std::fs::create_dir_all(&ld).unwrap();
+        let data: Vec<u8> = (0..3_000_000u32).map(|i| (i * 7 % 251) as u8).collect();
+        std::fs::write(ld.join("big.bin"), &data).unwrap();
+        let remote = sftp::join(&dir, "big.bin");
+        { use tokio::io::AsyncWriteExt; let mut f = s.create(remote.clone()).await.unwrap(); f.write_all(&data[..1_000_000]).await.unwrap(); f.shutdown().await.unwrap(); } // simulate a partial earlier upload
+        let q = Queue::default();
+        let j = q.push(Dir::Upload, ld.join("big.bin"), remote.clone());
+        q.drain(&s).await;
+        assert_eq!(j.state(), JobState::Done);
+        assert_eq!(j.resumed_from.load(std::sync::atomic::Ordering::Relaxed), 1_000_000);
+        assert_eq!(s.read(remote.clone()).await.unwrap(), data);
+        // download with a partial local copy → resume
+        std::fs::write(ld.join("down.bin"), &data[..123_456]).unwrap();
+        let j2 = q.push(Dir::Download, ld.join("down.bin"), remote.clone());
+        q.drain(&s).await;
+        assert_eq!(j2.resumed_from.load(std::sync::atomic::Ordering::Relaxed), 123_456);
+        assert_eq!(std::fs::read(ld.join("down.bin")).unwrap(), data);
+        // rename / chmod / listing / recursive delete
+        let renamed = sftp::join(&dir, "renamed.bin");
+        sftp::rename(Some(&s), Side::Remote, &remote, &renamed).await.unwrap();
+        sftp::chmod(Some(&s), Side::Remote, &renamed, 0o600).await.unwrap();
+        sftp::mkdir(Some(&s), Side::Remote, &sftp::join(&dir, "sub")).await.unwrap();
+        let ls = sftp::list_remote(&s, &dir, false).await.unwrap();
+        assert_eq!(ls[0].name, "sub");
+        assert!(ls[0].is_dir);
+        assert_eq!(ls[1].name, "renamed.bin");
+        assert_eq!(ls[1].mode, 0o600);
+        assert_eq!(ls[1].size, 3_000_000);
+        // tree download
+        let n = q.push_download_tree(&s, &dir, &ld.join("tree")).await.unwrap();
+        q.drain(&s).await;
+        assert_eq!(n, 1);
+        assert!(ld.join("tree/sub").is_dir());
+        sftp::remove(Some(&s), Side::Remote, &dir).await.unwrap();
+        assert!(!s.try_exists(dir.clone()).await.unwrap());
+        let _ = std::fs::remove_dir_all(&ld);
+    });
+}
+
+#[test]
+fn port_forwards_local_remote_socks() {
+    use ssh_term_proto::forward::{Kind, Running, Spec, State};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (Some(port), Some(key)) = (env("TEST_SSH_PORT2").or(env("TEST_SSH_PORT")), env("TEST_SSH_KEY")) else { eprintln!("skip"); return };
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let t = SshTarget { auth: "key".into(), keys: vec![key.into()], ..base(&port) };
+    let (p, _) = prompts(vec![]);
+    rt.block_on(async {
+        let c = ssh::connect(&t, &p).await.unwrap();
+        // echo server on this machine
+        let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ep = echo.local_addr().unwrap().port();
+        tokio::spawn(async move { loop { let (mut s, _) = echo.accept().await.unwrap(); tokio::spawn(async move { let mut b = [0u8; 64]; while let Ok(n) = s.read(&mut b).await { if n == 0 { break } let _ = s.write_all(&b[..n]).await; } }); } });
+        async fn roundtrip(port: u16, socks: Option<u16>) -> Vec<u8> {
+            let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            if let Some(dp) = socks {
+                s.write_all(&[5, 1, 0]).await.unwrap(); let mut r = [0u8; 2]; s.read_exact(&mut r).await.unwrap();
+                s.write_all(&[5, 1, 0, 1, 127, 0, 0, 1]).await.unwrap(); s.write_all(&dp.to_be_bytes()).await.unwrap();
+                let mut r = [0u8; 10]; s.read_exact(&mut r).await.unwrap(); assert_eq!(r[1], 0);
+            }
+            s.write_all(b"ping").await.unwrap(); let mut b = [0u8; 4]; s.read_exact(&mut b).await.unwrap(); b.to_vec()
+        }
+        let free = { let x = std::net::TcpListener::bind("127.0.0.1:0").unwrap(); x.local_addr().unwrap().port() };
+        let l = Running::new(Spec { kind: Kind::L, bind_addr: "127.0.0.1".into(), bind_port: free, dest_host: "127.0.0.1".into(), dest_port: ep, ..Default::default() });
+        let lp = l.start(c.clone()).await.unwrap();
+        assert_eq!(roundtrip(lp, None).await, b"ping");
+        assert!(matches!(l.state(), State::Running { .. }));
+        l.stop().await;
+        assert_eq!(l.state(), State::Stopped);
+        assert!(tokio::net::TcpStream::connect(("127.0.0.1", lp)).await.is_err());
+        let free = { let x = std::net::TcpListener::bind("127.0.0.1:0").unwrap(); x.local_addr().unwrap().port() };
+        let d = Running::new(Spec { kind: Kind::D, bind_addr: "127.0.0.1".into(), bind_port: free, ..Default::default() });
+        let dp = d.start(c.clone()).await.unwrap();
+        assert_eq!(roundtrip(dp, Some(ep)).await, b"ping");
+        // -R: remote port 0 → server picks; reach it from the server side via a second -L
+        let r = Running::new(Spec { kind: Kind::R, bind_addr: "127.0.0.1".into(), bind_port: 0, dest_host: "127.0.0.1".into(), dest_port: ep, ..Default::default() });
+        let rp = r.start(c.clone()).await.unwrap();
+        assert!(rp > 0);
+        let (code, out) = c.exec(&format!("exec 3<>/dev/tcp/127.0.0.1/{rp}; printf ping >&3; head -c4 <&3"), Duration::from_secs(5)).await.unwrap();
+        assert_eq!((code, out), (Some(0), b"ping".to_vec()));
+        r.stop().await;
+        d.stop().await;
+    });
+}
