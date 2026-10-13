@@ -163,3 +163,15 @@ fn local_pty_graphics_record_notify() {
     let c = ssh_term_proto::asciicast::parse(&rec).unwrap();
     assert_eq!((c.width, c.height), (80, 24));
 }
+
+#[test]
+fn graphics_in_single_chunk_keep_order() {
+    let (s, out, _rx) = ssh_term_proto::term::Session::new(Size { cols: 40, rows: 20 });
+    out.send(b"A\r\n\x1bPq\"1;1;2;6#1!2~\x1b\\B\r\n\x1b_Ga=T,f=24,s=1,v=1;AP8A\x1b\\C\r\n".to_vec()).unwrap();
+    let txt = wait_for(&s, "C", 5);
+    let imgs = s.images.lock().unwrap().clone();
+    let line_of = |w: &str| txt.lines().position(|l| l.trim() == w).unwrap() as i64;
+    assert_eq!(imgs.len(), 2);
+    assert!(imgs[0].row > line_of("A") && imgs[0].row < line_of("B"), "{txt}");
+    assert!(imgs[1].row > line_of("B") && imgs[1].row < line_of("C"), "{txt}");
+}

@@ -6,7 +6,8 @@
 #[derive(Clone, Debug, PartialEq)]
 pub enum Pixels { Rgba { w: u32, h: u32, data: Vec<u8> }, Png(Vec<u8>) }
 #[derive(Clone, Debug, PartialEq)]
-pub struct Image { pub pixels: Pixels, pub proto: &'static str }
+pub struct Image { pub pixels: Pixels, pub proto: &'static str, /// Offset in the passthrough bytes of this feed where the image belongs.
+    pub at: usize }
 
 #[derive(Default)]
 pub struct Extractor { state: St, buf: Vec<u8>, kitty_chunks: Vec<u8>, kitty_keys: String }
@@ -52,7 +53,7 @@ impl Extractor {
         if dcs {
             // Sixel: params then 'q'. Anything else is passed through untouched.
             let q = body.iter().position(|c| !(c.is_ascii_digit() || *c == b';'));
-            if q.is_some_and(|i| body[i] == b'q') { if let Some(p) = decode_sixel(&body[q.unwrap() + 1..]) { imgs.push(Image { pixels: p, proto: "sixel" }); } return; }
+            if q.is_some_and(|i| body[i] == b'q') { if let Some(p) = decode_sixel(&body[q.unwrap() + 1..]) { imgs.push(Image { pixels: p, proto: "sixel", at: out.len() }); } return; }
             out.extend_from_slice(b"\x1bP"); out.extend_from_slice(&body); out.extend_from_slice(b"\x1b\\");
         } else if body.first() == Some(&b'G') {
             let s = String::from_utf8_lossy(&body[1..]).into_owned();
@@ -61,7 +62,7 @@ impl Extractor {
             self.kitty_chunks.extend_from_slice(payload.as_bytes());
             if kv(keys, "m") == Some("1") { return; }
             let keys = std::mem::take(&mut self.kitty_keys); let b64 = std::mem::take(&mut self.kitty_chunks);
-            if let Some(p) = decode_kitty(&keys, &b64) { imgs.push(Image { pixels: p, proto: "kitty" }); }
+            if let Some(p) = decode_kitty(&keys, &b64) { imgs.push(Image { pixels: p, proto: "kitty", at: out.len() }); }
         } // other APC strings are dropped (as xterm does)
     }
 }
@@ -134,12 +135,12 @@ mod tests {
         let (o1, i1) = e.feed(b"hi\x1bPq\"1;1;2;6#1;2;100;0;0#1!2");
         let (o2, i2) = e.feed(b"~\x1b\\there\x1b[0m");
         assert_eq!([o1, o2].concat(), b"hithere\x1b[0m".to_vec());
-        assert!(i1.is_empty() && i2.len() == 1);
+        assert!(i1.is_empty() && i2.len() == 1 && i2[0].at == 0);
         let Pixels::Rgba { w, h, data } = &i2[0].pixels else { panic!() };
         assert_eq!((*w, *h), (2, 6)); assert_eq!(&data[..4], &[255, 0, 0, 255]);
         // Kitty: 1x1 RGB pixel in two chunks.
         let (o, im) = e.feed(b"a\x1b_Ga=T,f=24,s=1,v=1,m=1;AP8\x1b\\\x1b_Gm=0;A\x1b\\b");
-        assert_eq!(o, b"ab"); assert_eq!(im[0].pixels, Pixels::Rgba { w: 1, h: 1, data: vec![0, 255, 0, 255] });
+        assert_eq!(o, b"ab"); assert_eq!(im[0].at, 1); assert_eq!(im[0].pixels, Pixels::Rgba { w: 1, h: 1, data: vec![0, 255, 0, 255] });
         assert_eq!(base64(b"aGk=").unwrap(), b"hi");
         // Non-sixel DCS passes through.
         let (o, im) = e.feed(b"\x1bP+q544e\x1b\\"); assert!(im.is_empty() && o == b"\x1bP+q544e\x1b\\");
