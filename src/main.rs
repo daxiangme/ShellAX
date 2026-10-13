@@ -919,7 +919,7 @@ impl Render for Root {
                 ssh::AuthKind::Passphrase(path) => (t("ui.auth_passphrase_title"), tf("main.auth_passphrase_for", &[("key", &path.display())])),
                 ssh::AuthKind::Interactive { instructions, prompt, .. } => {
                     let mut d = tf("main.auth_kbd_for", &[("target", &p.label), ("prompt", prompt)]);
-                    if !instructions.is_empty() { d = format!("{instructions}\n{d}").into(); }
+                    if !instructions.is_empty() { d = format!("{instructions}\n{d}"); }
                     (t("ui.auth_kbd_title"), d)
                 }
             };
