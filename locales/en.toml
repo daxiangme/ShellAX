@@ -749,7 +749,7 @@
 "qs.cols2" = "Two columns"
 "qs.main3" = "Main + two"
 "qs.grid4" = "2×2 grid"
-"qs.agent" = "Shell + Agent"
+"qs.agent" = "Agent + tail -f log"
 "pf.node_local" = "Local listener"
 "pf.node_remote" = "Remote listener"
 "pf.node_ssh" = "SSH server"

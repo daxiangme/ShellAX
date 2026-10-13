@@ -749,7 +749,7 @@
 "qs.cols2" = "左右两栏"
 "qs.main3" = "主 + 两侧"
 "qs.grid4" = "2×2 网格"
-"qs.agent" = "终端 + Agent"
+"qs.agent" = "Agent + 日志 tail -f"
 "pf.node_local" = "本机监听"
 "pf.node_remote" = "远端监听"
 "pf.node_ssh" = "SSH 服务器"

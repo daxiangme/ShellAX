@@ -62,6 +62,13 @@ pub(crate) fn data_dir() -> std::path::PathBuf {
         .join("agentshell")
 }
 
+/// Newest `*.log` directly in `dir` or in `dir/logs` (quick start "Agent + tail -f").
+fn newest_log(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    [dir.to_path_buf(), dir.join("logs")].iter().filter_map(|d| std::fs::read_dir(d).ok()).flat_map(|r| r.flatten())
+        .filter(|e| e.path().extension().is_some_and(|x| x == "log") && e.path().is_file())
+        .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok()).map(|e| e.path())
+}
+
 // ---------------------------------------------------------------- app shell
 #[derive(Default)]
 struct PaneInit { cwd: Option<String>, daemon_id: Option<String>, resume: Option<String> }
@@ -484,7 +491,7 @@ impl Root {
         let leaf = |r: &mut Self, window: &mut Window, cx: &mut Context<Self>| Node::Leaf(r.open_pane_with(Spec::Local, pi(), window, cx));
         let sp = |dir, a, b| Node::Split { dir, ratio: 0.5, a: Box::new(a), b: Box::new(b) };
         let layout = match preset {
-            "cols2" => { let a = leaf(self, window, cx); let b = leaf(self, window, cx); sp(Dir::Vertical, a, b) }
+            "cols2" | "agent" => { let a = leaf(self, window, cx); let b = leaf(self, window, cx); sp(Dir::Vertical, a, b) }
             "main3" => { let a = leaf(self, window, cx); let b = leaf(self, window, cx); let c2 = leaf(self, window, cx); sp(Dir::Vertical, a, sp(Dir::Horizontal, b, c2)) }
             "grid4" => { let a = leaf(self, window, cx); let b = leaf(self, window, cx); let c2 = leaf(self, window, cx); let d = leaf(self, window, cx); sp(Dir::Horizontal, sp(Dir::Vertical, a, b), sp(Dir::Vertical, c2, d)) }
             _ => leaf(self, window, cx),
@@ -494,8 +501,20 @@ impl Root {
         self.active = self.tabs.len() - 1;
         self.log("quickstart.open", format!("dir={dir:?} preset={preset}"));
         if preset == "agent" {
-            // shell + configured Agent 1 side by side, both in `dir`
-            self.launch_agent(0, window, cx);
+            // left: configured Agent 1; right: shell following the newest *.log in dir (or logs/)
+            let panes = self.tabs[self.active].layout.leaves();
+            let agent_cmd = config::get().agents.quick_launch.first().map(|q| q.command.trim().replace(['\r', '\n'], " ")).filter(|c| !c.is_empty());
+            let tail = newest_log(std::path::Path::new(&dir)).map(|p| format!("tail -F -n 100 '{}'", p.display().to_string().replace('\'', "'\\''")));
+            self.log("agent.launch", format!("quickstart command={agent_cmd:?} tail={tail:?}"));
+            for (pane, cmd) in [(panes[0].clone(), agent_cmd), (panes[1].clone(), tail)] {
+                let Some(cmd) = cmd else { continue };
+                cx.spawn(async move |_, cx| {
+                    for _ in 0..100 {
+                        if let Some(s) = pane.update(cx, |v, _| v.session.clone()) { cx.background_executor().timer(std::time::Duration::from_millis(400)).await; s.write(format!("{cmd}\r").into_bytes()); return; }
+                        cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
+                    }
+                }).detach();
+            }
         }
         self.focus_active(window, cx);
         cx.notify();
