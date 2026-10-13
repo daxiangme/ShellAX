@@ -615,3 +615,7 @@
 "chat.empty" = "Ask about the current terminal, errors or commands. Context is redacted before sending; suggested commands are only inserted, never executed."
 "chat.subtitle" = "Streaming · redacted context · insert-only"
 "chat.open" = "Open chat"
+"ssh.kbd_rejected" = "keyboard-interactive answers rejected"
+"ssh.kbd_cancelled" = "keyboard-interactive prompt cancelled"
+"ui.auth_kbd_title" = "Verification"
+"main.auth_kbd_for" = "{target}: {prompt}"

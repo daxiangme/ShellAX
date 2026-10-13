@@ -454,10 +454,13 @@ impl Root {
         if self.auth_pending.is_empty() { return; }
         let p = self.auth_pending.remove(0);
         let val = self.auth_input.as_ref().map(|i| i.read(cx).value().to_string()).unwrap_or_default();
-        let what = match &p.kind { ssh::AuthKind::Password => "ssh.auth.password", ssh::AuthKind::Passphrase(_) => "ssh.auth.passphrase" };
+        let what = match &p.kind { ssh::AuthKind::Password => "ssh.auth.password", ssh::AuthKind::Passphrase(_) => "ssh.auth.passphrase", ssh::AuthKind::Interactive { .. } => "ssh.auth.kbd" };
         // the secret itself is never logged
         self.log(what, format!("{} {} save={}", p.label, if submit { "submitted" } else { "cancelled" }, self.auth_save && submit));
-        let _ = p.reply.send(if submit && !val.is_empty() { Some((val, self.auth_save)) } else { None });
+        let interactive = matches!(p.kind, ssh::AuthKind::Interactive { .. });
+        // keyboard-interactive answers may legitimately be empty and are never saved
+        let ok = submit && (interactive || !val.is_empty());
+        let _ = p.reply.send(if ok { Some((val, self.auth_save && !interactive)) } else { None });
         self.auth_input = None;
         cx.notify();
     }
@@ -905,7 +908,8 @@ impl Render for Root {
         // password / passphrase prompt
         if self.hk_pending.is_empty() && !self.auth_pending.is_empty() {
             if self.auth_input.is_none() {
-                let inp = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder(t("ui.auth_placeholder")));
+                let masked = !matches!(self.auth_pending[0].kind, ssh::AuthKind::Interactive { echo: true, .. });
+                let inp = cx.new(|cx| InputState::new(window, cx).masked(masked).placeholder(t("ui.auth_placeholder")));
                 inp.update(cx, |i, cx| i.focus(window, cx));
                 self.auth_input = Some(inp);
             }
@@ -913,16 +917,22 @@ impl Render for Root {
             let (title, detail) = match &p.kind {
                 ssh::AuthKind::Password => (t("ui.auth_password_title"), tf("main.auth_password_for", &[("target", &p.label)])),
                 ssh::AuthKind::Passphrase(path) => (t("ui.auth_passphrase_title"), tf("main.auth_passphrase_for", &[("key", &path.display())])),
+                ssh::AuthKind::Interactive { instructions, prompt, .. } => {
+                    let mut d = tf("main.auth_kbd_for", &[("target", &p.label), ("prompt", prompt)]);
+                    if !instructions.is_empty() { d = format!("{instructions}\n{d}").into(); }
+                    (t("ui.auth_kbd_title"), d)
+                }
             };
+            let can_save = !matches!(p.kind, ssh::AuthKind::Interactive { .. });
             let inp = self.auth_input.clone().unwrap();
             root = root.child(ui::modal(ui::card(480.).p_5().gap_3()
                 .child(div().flex().items_center().gap_2().child(icon(IconName::KeyRound, 16., c(th.accent)))
                     .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(title)))
                 .child(div().text_size(px(12.5)).text_color(c(th.subtext)).child(detail))
                 .child(gpui_component::input::Input::new(&inp))
-                .child(div().flex().items_center().gap_2()
+                .when(can_save, |d| d.child(div().flex().items_center().gap_2()
                     .child(gpui_component::switch::Switch::new("auth-save").checked(self.auth_save).on_click(cx.listener(|this, v: &bool, _w, cx| { this.auth_save = *v; cx.notify(); })))
-                    .child(div().text_size(px(12.)).text_color(c(th.subtext)).child(t("ui.auth_save"))))
+                    .child(div().text_size(px(12.)).text_color(c(th.subtext)).child(t("ui.auth_save")))))
                 .child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(t("ui.auth_note")))
                 .child(div().flex().gap_2().justify_end()
                     .child(ui::button("au-cancel", t("ui.cancel"), 0).on_click(cx.listener(|this, _, _w, cx| this.answer_auth(false, cx))))

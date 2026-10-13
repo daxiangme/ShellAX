@@ -53,7 +53,8 @@ pub fn passphrase_secret(path: &std::path::Path) -> String { format!("ssh-passph
 /// or anything an agent can read); with `save` it goes to the OS keychain (or encrypted file).
 pub struct AuthPrompt { pub label: String, pub kind: AuthKind, pub reply: flume::Sender<Option<(String, bool)>> }
 #[derive(Debug, Clone, PartialEq)]
-pub enum AuthKind { Password, Passphrase(PathBuf) }
+pub enum AuthKind { Password, Passphrase(PathBuf), /// keyboard-interactive (2FA / OTP / PAM) prompt; never saved
+    Interactive { instructions: String, prompt: String, echo: bool } }
 
 /// Channels to the UI for interactive questions during connect.
 #[derive(Clone)]
@@ -297,6 +298,13 @@ pub fn connect<'a>(tg: &'a SshTarget, prompts: &'a Prompts) -> std::pin::Pin<Box
 async fn authenticate(h: &mut client::Handle<Handler>, tg: &SshTarget, prompts: &Prompts) -> Result<()> {
     let (mode, no_agent) = match tg.auth.as_str() { "" => ("auto", false), "auto-noagent" => ("auto", true), m => (m, false) };
     let mut errors: Vec<String> = Vec::new();
+    // ask the server which methods it offers ("none" probe), so we never prompt for a password
+    // the server would not accept (e.g. a PAM / 2FA-only host)
+    let offered: Option<Vec<russh::MethodKind>> = match h.authenticate_none(&tg.user).await? {
+        russh::client::AuthResult::Success => return Ok(()),
+        russh::client::AuthResult::Failure { remaining_methods, .. } => Some(remaining_methods.to_vec()),
+    };
+    let offers = |m: russh::MethodKind| offered.as_ref().is_none_or(|v| v.is_empty() || v.contains(&m));
     // 1. ssh-agent
     #[cfg(unix)]
     if matches!(mode, "auto" | "agent") && !no_agent {
@@ -346,7 +354,7 @@ async fn authenticate(h: &mut client::Handle<Handler>, tg: &SshTarget, prompts: 
         }
     }
     // 3. password (keychain first, then prompt up to 3 times)
-    if matches!(mode, "auto" | "password") {
+    if matches!(mode, "auto" | "password") && offers(russh::MethodKind::Password) {
         let name = tg.password_secret();
         if let Some((pw, _)) = SECRETS.get().and_then(|s| s.get(&name)) {
             if h.authenticate_password(&tg.user, pw).await?.success() { return Ok(()); }
@@ -359,6 +367,31 @@ async fn authenticate(h: &mut client::Handle<Handler>, tg: &SshTarget, prompts: 
                 return Ok(());
             }
             errors.push(t("ssh.password_rejected").into());
+        }
+    }
+    // 4. keyboard-interactive (2FA / OTP / PAM): each server prompt goes to the UI, answers are never stored
+    if matches!(mode, "auto" | "password" | "kbd") && offers(russh::MethodKind::KeyboardInteractive) {
+        use russh::client::KeyboardInteractiveAuthResponse as R;
+        let mut r = h.authenticate_keyboard_interactive_start(&tg.user, None::<String>).await?;
+        let mut rounds = 0;
+        loop {
+            match r {
+                R::Success => return Ok(()),
+                R::Failure { .. } => { if rounds > 0 { errors.push(t("ssh.kbd_rejected").into()); } break }
+                R::InfoRequest { name, instructions, prompts: ps } => {
+                    rounds += 1;
+                    if rounds > 6 { break }
+                    let head = [name, instructions].into_iter().filter(|s| !s.trim().is_empty()).collect::<Vec<_>>().join("\n");
+                    let mut answers = Vec::with_capacity(ps.len());
+                    for p in ps {
+                        let Some((a, _)) = ask(prompts, tg.label(), AuthKind::Interactive { instructions: head.clone(), prompt: p.prompt.trim().to_string(), echo: p.echo }).await else {
+                            bail!(tf("ssh.auth_failed", &[("err", &t("ssh.kbd_cancelled"))]))
+                        };
+                        answers.push(a);
+                    }
+                    r = h.authenticate_keyboard_interactive_respond(answers).await?;
+                }
+            }
         }
     }
     if errors.is_empty() { errors.push(t("ssh.no_key").into()); }

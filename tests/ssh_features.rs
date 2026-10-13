@@ -232,3 +232,27 @@ fn port_forwards_local_remote_socks() {
         d.stop().await;
     });
 }
+
+/// keyboard-interactive (PAM) on TEST_SSH_PORT3 (testenv/sshd3_config, password/pubkey off):
+/// the server prompt reaches the UI channel, the answer is not saved, wrong answers fail cleanly.
+#[test]
+fn keyboard_interactive_auth() {
+    let (Some(port3), Some(pw)) = (env("TEST_SSH_PORT3"), env("TEST_SSH_PASSWORD")) else { eprintln!("skip"); return };
+    secrets_init();
+    ssh::REUSE.store(false, std::sync::atomic::Ordering::Relaxed);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let t = SshTarget { auth: "password".into(), ..base(&port3) };
+    let kbd = AuthKind::Interactive { instructions: String::new(), prompt: String::new(), echo: false };
+    let (p, n) = prompts(vec![(kbd.clone(), pw.clone(), true)]);
+    let c = rt.block_on(ssh::connect(&t, &p)).expect("keyboard-interactive auth");
+    let (code, out) = rt.block_on(c.exec("echo kbd_ok", Duration::from_secs(5))).unwrap();
+    assert_eq!((code, String::from_utf8_lossy(&out).trim()), (Some(0), "kbd_ok"));
+    assert!(n.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+    // never stored: a second connection prompts again
+    let (p2, n2) = prompts(vec![(kbd.clone(), pw, true)]);
+    rt.block_on(ssh::connect(&t, &p2)).expect("again");
+    assert!(n2.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+    // wrong answer → clean error
+    let (p3, _) = prompts(vec![(kbd, "wrong".into(), false)]);
+    assert!(rt.block_on(ssh::connect(&t, &p3)).is_err());
+}

@@ -615,3 +615,7 @@
 "chat.empty" = "可询问当前终端、错误或命令。上下文发送前会脱敏；建议的命令只插入、不执行。"
 "chat.subtitle" = "流式 · 脱敏上下文 · 只插入不执行"
 "chat.open" = "打开对话"
+"ssh.kbd_rejected" = "键盘交互验证被拒绝"
+"ssh.kbd_cancelled" = "已取消键盘交互验证"
+"ui.auth_kbd_title" = "身份验证"
+"main.auth_kbd_for" = "{target}：{prompt}"
