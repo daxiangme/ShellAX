@@ -243,6 +243,8 @@ impl Session {
             if !f.is_empty() { self.notices.lock().unwrap().extend(f); }
         }
         if !b.contains(&0x1b) && !gfx.busy() { return (b, vec![]); }
+        // Erase display / scrollback / full reset drops inline images (they belong to the erased text).
+        if b.windows(4).any(|w| w == b"\x1b[2J" || w == b"\x1b[3J") || b.windows(2).any(|w| w == b"\x1bc") { self.images.lock().unwrap().clear(); }
         gfx.feed(&b)
     }
     pub fn start_recording(&self, path: &std::path::Path, title: &str, redact: bool) -> std::io::Result<()> {

@@ -24,7 +24,9 @@ impl Recorder {
         self.hidden = false;
         let s = String::from_utf8_lossy(data);
         let s = if self.redact { crate::ai::redact(&s).0 } else { s.into_owned() };
-        writeln!(self.w, "{}", serde_json::json!([round(t), kind, s]))
+        writeln!(self.w, "{}", serde_json::json!([round(t), kind, s]))?;
+        // keep the file usable while recording (crash / live tail)
+        self.w.flush()
     }
     pub fn resize(&mut self, cols: u16, rows: u16) -> std::io::Result<()> { writeln!(self.w, "{}", serde_json::json!([round(self.start.elapsed().as_secs_f64()), "r", format!("{cols}x{rows}")])) }
     pub fn finish(mut self) -> std::io::Result<()> { self.w.flush() }

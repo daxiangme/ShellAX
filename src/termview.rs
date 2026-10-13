@@ -1585,12 +1585,14 @@ impl Render for TermView {
         if let Some(sess) = &self.session {
             let rec = sess.is_recording();
             let bc = in_broadcast(sess);
-            if bc || rec {
-                let mut bar = div().absolute().top_0().left_0().right_0().h(px(22.)).px_2().flex().items_center().gap_3().text_size(px(11.5)).font_weight(FontWeight::SEMIBOLD);
-                if bc { bar = bar.bg(c(th.error).opacity(0.92)).text_color(c(th.base)).child(tf("bc.banner", &[("n", &broadcast_count())])); }
-                if rec { bar = bar.child(div().text_color(if bc { c(th.base) } else { c(th.error) }).child(t("rec.indicator"))); }
-                body = body.child(bar);
-                if bc { body = body.child(div().absolute().top_0().left_0().size_full().border_2().border_color(c(th.error))); }
+            if bc {
+                body = body.child(div().absolute().bottom(px(6.)).left(px(8.)).right(px(8.)).h(px(24.)).px_3().rounded_md().flex().items_center().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD)
+                    .bg(c(th.error).opacity(0.92)).text_color(c(th.base)).child(tf("bc.banner", &[("n", &broadcast_count())])));
+                body = body.child(div().absolute().top_0().left_0().size_full().border_2().border_color(c(th.error)));
+            }
+            if rec {
+                body = body.child(div().absolute().top(px(4.)).right(px(16.)).px_2().py(px(1.)).rounded_md().bg(c(th.error).opacity(0.12)).border_1().border_color(c(th.error))
+                    .text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.error)).child(t("rec.indicator")));
             }
         }
         if let Some(e) = &self.error {

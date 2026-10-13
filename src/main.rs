@@ -213,7 +213,8 @@ impl Root {
                 }
                 termview::TermEvent::Audit(kind, detail) => { this.log(kind, detail); return; }
                 termview::TermEvent::Keyword(title, line) => {
-                    this.log("notify.keyword", format!("rule={title:?} line={:?}", ssh_term_proto::ai::redact(&line).0));
+                    let line = ssh_term_proto::ai::redact(&line).0;
+                    this.log("notify.keyword", format!("rule={title:?} line={line:?}"));
                     this.notify_kind(&format!("{title}: {line}"), false, cx);
                     this.toast(format!("🔔 {title}: {line}"), cx);
                     return;
