@@ -624,3 +624,8 @@
 "ui.osc52_read" = "OSC 52 读剪贴板"
 "ui.osc52_read_desc" = "允许程序读取本机剪贴板（关闭时忽略请求）"
 "term.osc52_ask" = "程序请求写入剪贴板 {n} 字节：{preview}"
+"term.search_found" = "已找到"
+"term.search_none" = "无匹配"
+"term.search_hint" = "正则 · Enter 下一个 · Shift+Enter 上一个 · Esc 关闭"
+"ui.block_select" = "矩形选择"
+"ui.block_select_desc" = "拖动时按住此键；若窗口管理器占用 Alt+拖动（如 Xfwm），改用 Ctrl"

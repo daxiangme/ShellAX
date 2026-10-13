@@ -624,3 +624,8 @@
 "ui.osc52_read" = "OSC 52 clipboard read"
 "ui.osc52_read_desc" = "Let programs read your clipboard (off: requests are ignored)"
 "term.osc52_ask" = "The program wants to copy {n} bytes to the clipboard: {preview}"
+"term.search_found" = "match"
+"term.search_none" = "no match"
+"term.search_hint" = "regex · Enter next · Shift+Enter prev · Esc"
+"ui.block_select" = "Rectangular selection"
+"ui.block_select_desc" = "Hold this key while dragging; use Ctrl if your window manager grabs Alt+drag"

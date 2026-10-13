@@ -239,6 +239,62 @@ impl Session {
     }
 }
 
+/// Smart case (PRD 3.2): a pattern without upper-case letters matches case-insensitively.
+pub fn smart_case(p: &str) -> String { if p.chars().any(|c| c.is_uppercase()) { p.to_string() } else { format!("(?i){p}") } }
+
+/// Regex search over screen + scrollback. Returns the match as ((line, col), (line, col)) in grid
+/// coordinates (negative lines = scrollback). `from` is where the previous match started.
+pub fn search<L: alacritty_terminal::event::EventListener>(term: &Term<L>, pattern: &str, from: Option<(i32, usize)>, forward: bool) -> Option<((i32, usize), (i32, usize))> {
+    use alacritty_terminal::index::{Direction, Point, Side};
+    use alacritty_terminal::term::search::RegexSearch;
+    if pattern.is_empty() { return None; }
+    let mut re = RegexSearch::new(&smart_case(pattern)).ok()?;
+    let g = term.grid();
+    let origin = match from {
+        Some((l, c)) => {
+            let p = Point::new(Line(l), Column(c));
+            if forward { p.add(g, alacritty_terminal::index::Boundary::None, 1) } else { p.sub(g, alacritty_terminal::index::Boundary::None, 1) }
+        }
+        None => if forward { Point::new(g.topmost_line(), Column(0)) } else { Point::new(g.bottommost_line(), Column(g.columns() - 1)) },
+    };
+    let m = term.search_next(&mut re, origin, if forward { Direction::Right } else { Direction::Left }, Side::Left, None)?;
+    Some(((m.start().line.0, m.start().column.0), (m.end().line.0, m.end().column.0)))
+}
+
+/// Selection hit test; `block` = rectangular (Alt+drag) selection.
+pub fn in_selection(sel: Option<((i32, usize), (i32, usize))>, p: (i32, usize), block: bool) -> bool {
+    let Some((a, b)) = sel else { return false };
+    if block {
+        let (l0, l1) = (a.0.min(b.0), a.0.max(b.0));
+        let (c0, c1) = (a.1.min(b.1), a.1.max(b.1));
+        return p.0 >= l0 && p.0 <= l1 && p.1 >= c0 && p.1 <= c1;
+    }
+    let (s, e) = if a <= b { (a, b) } else { (b, a) };
+    p >= s && p <= e
+}
+
+/// Plain-text URL under column `col` of `line` (one char per column). Returns (start, end_exclusive, url).
+pub fn url_at(line: &str, col: usize) -> Option<(usize, usize, String)> {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r#"(?:https?|ftp|file)://[^\s<>"'`|]+|www\.[A-Za-z0-9-]+\.[^\s<>"'`|]+"#).unwrap());
+    let chars: Vec<char> = line.chars().collect();
+    let s: String = chars.iter().collect();
+    for m in RE.find_iter(&s) {
+        let a = s[..m.start()].chars().count();
+        let mut url = m.as_str().to_string();
+        // trailing punctuation is usually prose, keep balanced closing parens
+        while let Some(c) = url.chars().last() {
+            let unbalanced = c == ')' && url.matches('(').count() < url.matches(')').count();
+            if ".,;:!?'\"".contains(c) || unbalanced || c == ']' { url.pop(); } else { break }
+        }
+        let b = a + url.chars().count();
+        if col >= a && col < b {
+            if url.starts_with("www.") { url = format!("https://{url}"); }
+            return Some((a, b, url));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,5 +330,43 @@ mod tests {
         assert_eq!(osc52_write_decision("ask", 10), ClipDecision::Ask);
         assert_eq!(osc52_write_decision("deny", 10), ClipDecision::Deny);
         assert_eq!(osc52_write_decision("allow", OSC52_MAX + 1), ClipDecision::Deny);
+    }
+
+    #[test]
+    fn url_detection() {
+        let l = "see https://example.com/a_(b)?x=1, or www.rust-lang.org. done";
+        let (a, b, u) = url_at(l, 6).unwrap();
+        assert_eq!((a, u.as_str()), (4, "https://example.com/a_(b)?x=1"));
+        assert_eq!(b, 4 + u.chars().count());
+        assert_eq!(url_at(l, 40).unwrap().2, "https://www.rust-lang.org");
+        assert!(url_at(l, 0).is_none());
+        assert!(url_at("中文 http://x.cn/路径 尾", 4).unwrap().2.starts_with("http://x.cn/"));
+    }
+
+    #[test]
+    fn block_selection_hit_test() {
+        let sel = Some(((0, 5), (2, 2)));
+        assert!(in_selection(sel, (1, 3), true));
+        assert!(!in_selection(sel, (1, 6), true));
+        assert!(in_selection(sel, (1, 6), false)); // linear selection covers the whole middle line
+        assert!(!in_selection(sel, (0, 1), false));
+    }
+
+    #[test]
+    fn regex_search_smart_case_and_direction() {
+        let (sess, out, _rx) = Session::new(Size { cols: 30, rows: 4 });
+        out.send(b"alpha Foo\r\nbeta foo\r\ngamma FOO\r\n".to_vec()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let t = sess.term.lock().unwrap();
+        let a = search(&*t, "foo", None, true).unwrap();
+        let b = search(&*t, "foo", Some(a.0), true).unwrap();
+        assert!(b.0 > a.0, "{a:?} {b:?}");
+        // smart case: "Foo" only matches the exact case
+        let only: Vec<_> = { let mut v = vec![]; let mut at = None; for _ in 0..4 { let Some(m) = search(&*t, "Foo", at, true) else { break }; if v.contains(&m) { break } at = Some(m.0); v.push(m); } v };
+        assert_eq!(only.len(), 1);
+        assert_eq!(only[0], ((0, 6), (0, 8)));
+        // backwards from the end finds the last one
+        assert_eq!(search(&*t, "foo", None, false).unwrap().0 .0, 2);
+        assert_eq!(smart_case("abc"), "(?i)abc");
     }
 }

@@ -88,6 +88,8 @@ pub struct PaintState {
     /// IME composition text (pre-edit), drawn at the cursor and underlined until committed.
     pub preedit: Option<String>,
     pub sel: Option<(BPoint, BPoint)>,
+    /// rectangular (Alt+drag) selection
+    pub sel_block: bool,
     pub hover_link: Option<(i32, usize, usize)>,
 }
 
@@ -100,7 +102,7 @@ struct RowPaint {
 }
 
 #[derive(PartialEq, Clone)]
-struct CacheKey { cols: usize, rows: usize, theme: SharedString, cw: u32, gen: u64, offset: usize, sel: Option<(BPoint, BPoint)>, hover: Option<(i32, usize, usize)> }
+struct CacheKey { cols: usize, rows: usize, theme: SharedString, cw: u32, gen: u64, offset: usize, sel: Option<(BPoint, BPoint)>, block: bool, hover: Option<(i32, usize, usize)> }
 
 pub struct GridLayer {
     session: Option<Arc<Session>>,
@@ -108,11 +110,13 @@ pub struct GridLayer {
     cache: Rc<RefCell<RowCache>>,
 }
 
-fn in_sel(sel: Option<(BPoint, BPoint)>, p: BPoint) -> bool {
-    let Some((a, b)) = sel else { return false };
-    let (s, e) = if a <= b { (a, b) } else { (b, a) };
-    p >= s && p <= e
+/// One char per column (wide-char spacers become spaces) so string offsets equal columns.
+fn row_chars(g: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::Cell>, line: i32) -> String {
+    let r = &g[Line(line)];
+    (0..g.columns()).map(|c| { let cell = &r[Column(c)]; if cell.c == '\0' || cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) { ' ' } else { cell.c } }).collect()
 }
+
+fn in_sel(sel: Option<(BPoint, BPoint)>, block: bool, p: BPoint) -> bool { ssh_term_proto::term::in_selection(sel, p, block) }
 
 impl Render for GridLayer {
     fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
@@ -143,11 +147,11 @@ impl Render for GridLayer {
                 window.paint_quad(fill(bounds, base));
                 let Some(s) = session else { return };
                 let st = st2.borrow();
-                let (cw, origin, sel, hover) = (st.cell_w, st.origin, st.sel, st.hover_link);
+                let (cw, origin, sel, block, hover) = (st.cell_w, st.origin, st.sel, st.sel_block, st.hover_link);
                 drop(st);
                 let mut term = s.term.lock().unwrap();
                 let (ncols, nrows, offset, history) = { let g = term.grid(); (g.columns(), g.screen_lines(), g.display_offset(), g.history_size()) };
-                let key = CacheKey { cols: ncols, rows: nrows, theme: th.name.clone().into(), cw: cw.to_bits(), gen: config::generation(), offset, sel, hover };
+                let key = CacheKey { cols: ncols, rows: nrows, theme: th.name.clone().into(), cw: cw.to_bits(), gen: config::generation(), offset, sel, block, hover };
                 let mut cache = cache.borrow_mut();
                 let full = cache.0.as_ref() != Some(&key) || offset != 0;
                 let mut dirty = vec![full; nrows];
@@ -164,7 +168,7 @@ impl Render for GridLayer {
                 for (l, &d) in dirty.iter().enumerate().take(nrows) {
                     if d || cache.1[l].is_none() {
                         let line = l as i32 - offset as i32;
-                        cache.1[l] = Some(build_row(g, line, ncols, &th, sel, hover, cw, window));
+                        cache.1[l] = Some(build_row(g, line, ncols, &th, sel, block, hover, cw, window));
                         ROWS_BUILT.fetch_add(1, Ordering::Relaxed);
                     }
                 }
@@ -209,7 +213,7 @@ fn paint_box(window: &mut Window, ch: char, x: Pixels, x_next: Pixels, y: Pixels
 
 #[allow(clippy::too_many_arguments)]
 fn build_row(g: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::Cell>, line: i32, ncols: usize, th: &Theme,
-             sel: Option<(BPoint, BPoint)>, hover: Option<(i32, usize, usize)>, cw: f32, window: &mut Window) -> RowPaint {
+             sel: Option<(BPoint, BPoint)>, block: bool, hover: Option<(i32, usize, usize)>, cw: f32, window: &mut Window) -> RowPaint {
     let row = &g[Line(line)];
     let base = c(th.bg);
     let mut text = String::new();
@@ -233,7 +237,7 @@ fn build_row(g: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::
             bg = term_color(th, cell.bg, false);
             if cell.flags.contains(Flags::DIM) { fg = fg.opacity(0.65); }
             if cell.flags.contains(Flags::INVERSE) { std::mem::swap(&mut fg, &mut bg); }
-            if in_sel(sel, (line, col)) { bg = c(th.selection); }
+            if in_sel(sel, block, (line, col)) { bg = c(th.selection); }
             let link = cell.hyperlink().is_some();
             let hovered = hover.is_some_and(|(l, a, b)| l == line && col >= a && col < b);
             let ucolor = cell.underline_color().map(|u| term_color(th, u, true)).unwrap_or(fg);
@@ -384,6 +388,8 @@ pub struct TermView {
     pub resume_offer: Option<String>,
     /// OSC 52 write waiting for the user (terminal.osc52_write = ask)
     pub clip_ask: Option<String>,
+    /// terminal search (Ctrl+Shift+F): query, current match, last result
+    pub search: Option<SearchBar>,
     /// Last command failed (OSC 133;D non-zero): (command, exit code) → "Explain" button.
     pub failed: Option<(String, i32)>,
     exit_seen: u64,
@@ -411,6 +417,9 @@ pub enum AiCard {
 
 /// Snapshot of what the input line looks like right now.
 struct LineState { before_cursor: String, at_eol: bool, prompt_col: Option<usize>, alt_screen: bool }
+
+#[derive(Default, Clone)]
+pub struct SearchBar { pub query: String, pub cur: Option<(BPoint, BPoint)>, pub found: Option<bool> }
 
 pub enum TermEvent { Explain, Agent(String, AgentState), LongDone(String, u64, i32), Audit(&'static str, String) }
 
@@ -488,7 +497,7 @@ impl TermView {
             selecting: false, scroll_drag: false, history, tracker: InputTracker::new(),
             last_activity: Instant::now(), blink_running: false, software_gpu: std::env::var("AGENTSHELL_FORCE_BLINK").ok().map(|_| false), last_mouse_cell: None, mouse_down_btn: None,
             manifests, last_command: None, agent: None, agent_seen: Instant::now(), last_detect: Instant::now() - Duration::from_secs(5),
-            detect_scheduled: false, pending_paste: None, ai: None, daemon_id: None, resume_offer: None, clip_ask: None, last_agent: None, failed: None, exit_seen: 0, ai_inline_seq: 0, ai_inline: None, bell_until: None, cmd_started: None, _subs: subs,
+            detect_scheduled: false, pending_paste: None, ai: None, daemon_id: None, resume_offer: None, clip_ask: None, search: None, last_agent: None, failed: None, exit_seen: 0, ai_inline_seq: 0, ai_inline: None, bell_until: None, cmd_started: None, _subs: subs,
         }
     }
 
@@ -524,6 +533,39 @@ impl TermView {
                 cx.emit(TermEvent::Audit("osc52.read", "denied (terminal.osc52_read = false)".into()));
             }
         }
+    }
+
+    /// Search bar input: typing edits the query (incremental), Enter / Shift+Enter = next / previous,
+    /// Escape closes. Matches are shown as the selection and scrolled into view.
+    fn search_key(&mut self, k: &gpui::Keystroke, cx: &mut Context<Self>) {
+        let Some(bar) = self.search.as_mut() else { return };
+        let forward = match k.key.as_str() {
+            "escape" => { self.search = None; cx.notify(); return; }
+            "enter" => !k.modifiers.shift,
+            "backspace" => { bar.query.pop(); bar.cur = None; false }
+            _ => {
+                let Some(ch) = k.key_char.as_ref().filter(|_| !k.modifiers.control && !k.modifiers.platform) else { return };
+                bar.query.push_str(ch); bar.cur = None; false
+            }
+        };
+        self.search_step(forward, cx);
+    }
+    pub fn search_step(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let Some(s) = self.session.clone() else { return };
+        let Some(bar) = self.search.as_mut() else { return };
+        let mut t = s.term.lock().unwrap();
+        // a fresh query searches backwards from the bottom (newest output first)
+        let m = ssh_term_proto::term::search(&*t, &bar.query, bar.cur.map(|c| c.0), forward);
+        bar.found = (!bar.query.is_empty()).then_some(m.is_some());
+        if let Some((a, b)) = m {
+            bar.cur = Some((a, b));
+            t.scroll_to_point(alacritty_terminal::index::Point::new(Line(a.0), Column(a.1)));
+            drop(t);
+            let mut st = self.st.borrow_mut();
+            st.sel = Some((a, b)); st.sel_block = false;
+        } else { drop(t); }
+        self.repaint_grid(cx);
+        cx.notify();
     }
 
     fn repaint_grid(&self, cx: &mut Context<Self>) { self.grid.update(cx, |_, cx| cx.notify()); self.cursor.update(cx, |_, cx| cx.notify()); }
@@ -745,7 +787,8 @@ impl TermView {
     // ---------------- clipboard
     pub fn selection_text(&self) -> Option<String> {
         let (a, b) = self.st.borrow().sel?;
-        let (s, e) = if a <= b { (a, b) } else { (b, a) };
+        let block = self.st.borrow().sel_block;
+        let (s, e) = if block { ((a.0.min(b.0), a.1.min(b.1)), (a.0.max(b.0), a.1.max(b.1))) } else if a <= b { (a, b) } else { (b, a) };
         let sess = self.session.as_ref()?;
         let t = sess.term.lock().unwrap();
         let g = t.grid();
@@ -754,8 +797,8 @@ impl TermView {
         for l in s.0..=e.0 {
             if l < g.topmost_line().0 || l > g.bottommost_line().0 { continue; }
             let row = &g[Line(l)];
-            let c0 = if l == s.0 { s.1 } else { 0 };
-            let c1 = if l == e.0 { e.1.min(ncols - 1) } else { ncols - 1 };
+            let c0 = if block || l == s.0 { s.1 } else { 0 };
+            let c1 = if block || l == e.0 { e.1.min(ncols - 1) } else { ncols - 1 };
             let mut line = String::new();
             for col in c0..=c1 {
                 let cell = &row[Column(col)];
@@ -764,6 +807,7 @@ impl TermView {
                 if let Some(z) = cell.zerowidth() { line.extend(z.iter()); }
             }
             let wrapped = row[Column(ncols - 1)].flags.contains(Flags::WRAPLINE);
+            if block { out.push_str(line.trim_end()); if l != e.0 { out.push('\n'); } continue; }
             if wrapped && l != e.0 { out.push_str(&line); } else { out.push_str(line.trim_end()); if l != e.0 { out.push('\n'); } }
         }
         Some(out)
@@ -805,9 +849,11 @@ impl TermView {
                 _ => {}
             }
         }
+        if self.search.is_some() { self.search_key(k, cx); cx.stop_propagation(); return; }
         // app shortcuts
         if m.control && m.shift && !m.alt {
             match k.key.to_ascii_lowercase().as_str() {
+                "f" => { self.search = Some(SearchBar::default()); cx.notify(); cx.stop_propagation(); return; }
                 "c" => { self.copy(cx); cx.stop_propagation(); return; }
                 "v" => { self.paste(cx); cx.stop_propagation(); return; }
                 _ => {}
@@ -1141,6 +1187,8 @@ impl TermView {
                 }
                 let p = self.to_buf(cell);
                 let mut st = self.st.borrow_mut();
+                let block_mod = if config::get().terminal.block_select == "ctrl" { ev.modifiers.control } else { ev.modifiers.alt };
+                st.sel_block = block_mod && ev.click_count < 2;
                 st.sel = if ev.click_count >= 2 { Some(((p.0, 0), (p.0, usize::MAX >> 1))) } else { Some((p, p)) };
                 drop(st);
                 self.selecting = ev.click_count < 2;
@@ -1156,7 +1204,8 @@ impl TermView {
         let t = s.term.lock().unwrap();
         let g = t.grid();
         let line = row as i32 - g.display_offset() as i32;
-        g[Line(line)][Column(col)].hyperlink().map(|h| h.uri().to_string())
+        if let Some(h) = g[Line(line)][Column(col)].hyperlink() { return Some(h.uri().to_string()); }
+        ssh_term_proto::term::url_at(&row_chars(g, line), col).map(|(_, _, u)| u)
     }
 
     fn link_span(&self, (row, col): (usize, usize)) -> Option<(i32, usize, usize)> {
@@ -1165,7 +1214,9 @@ impl TermView {
         let g = t.grid();
         let line = row as i32 - g.display_offset() as i32;
         let r = &g[Line(line)];
-        let h = r[Column(col)].hyperlink()?;
+        let Some(h) = r[Column(col)].hyperlink() else {
+            return ssh_term_proto::term::url_at(&row_chars(g, line), col).map(|(a, b, _)| (line, a, b));
+        };
         let same = |c: usize| r[Column(c)].hyperlink().is_some_and(|x| x == h);
         let mut a = col; while a > 0 && same(a - 1) { a -= 1; }
         let mut b = col + 1; while b < g.columns() && same(b) { b += 1; }
@@ -1336,6 +1387,17 @@ impl Render for TermView {
                     .on_click(cx.listener(|v, _, _w, cx| { if let (Some(cmd), Some(s)) = (v.resume_offer.take(), v.session.clone()) { s.write(format!("{cmd}\r").into_bytes()); } cx.notify(); })))
                 .child(div().id("resume-dismiss").px_2().py(px(3.)).rounded_md().cursor_pointer().bg(c(th.surface0)).child(t("term.dismiss"))
                     .on_click(cx.listener(|v, _, _w, cx| { v.resume_offer = None; cx.notify(); }))));
+        }
+        if let Some(bar) = self.search.clone() {
+            let status = match bar.found { Some(true) => t("term.search_found"), Some(false) => t("term.search_none"), None => t("term.search_hint") };
+            body = body.child(div().id("search-bar").occlude().absolute().top(px(6.)).right(px(16.)).w(px(360.)).p_2().rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.accent))
+                .flex().items_center().gap_2().text_size(px(12.)).text_color(c(th.text))
+                .child(crate::ui::icon(crate::ui::IconName::Search, 13., c(th.overlay1)))
+                .child(div().flex_1().px_1().rounded_sm().bg(c(th.base)).font_family(SharedString::from(config::get().font.family.clone())).child(format!("{}▏", bar.query)))
+                .child(div().text_color(if bar.found == Some(false) { c(th.error) } else { c(th.subtext) }).child(status))
+                .child(div().id("search-prev").px_1().cursor_pointer().child("↑").on_click(cx.listener(|v, _, _w, cx| v.search_step(false, cx))))
+                .child(div().id("search-next").px_1().cursor_pointer().child("↓").on_click(cx.listener(|v, _, _w, cx| v.search_step(true, cx))))
+                .child(div().id("search-close").px_1().cursor_pointer().child("✕").on_click(cx.listener(|v, _, _w, cx| { v.search = None; cx.notify(); }))));
         }
         if let Some(text) = self.clip_ask.clone() {
             let preview: String = text.chars().take(80).collect::<String>().replace(['\n', '\r'], " ");

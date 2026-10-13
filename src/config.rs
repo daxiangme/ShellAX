@@ -84,8 +84,11 @@ pub struct Terminal {
     pub osc52_write: String,
     /// OSC 52 clipboard read (programs reading your clipboard); off by default
     pub osc52_read: bool,
+    /// modifier for rectangular selection drag: alt (default) | ctrl (for desktops whose window
+    /// manager grabs Alt+drag, e.g. Xfwm / many Linux WMs)
+    pub block_select: String,
 }
-impl Default for Terminal { fn default() -> Self { Self { shell: String::new(), scrollback: u_scroll(), cursor_style: s_block(), cursor_blink: t(), bell: s_visual(), copy_on_select: false, paste_confirm: t(), mouse_reporting: t(), shell_integration: s_auto(), osc52_write: "ask".into(), osc52_read: false } } }
+impl Default for Terminal { fn default() -> Self { Self { shell: String::new(), scrollback: u_scroll(), cursor_style: s_block(), cursor_blink: t(), bell: s_visual(), copy_on_select: false, paste_confirm: t(), mouse_reporting: t(), shell_integration: s_auto(), osc52_write: "ask".into(), osc52_read: false, block_select: "alt".into() } } }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
