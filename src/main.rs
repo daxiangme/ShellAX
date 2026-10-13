@@ -1009,6 +1009,20 @@ fn main() {
                             if this.update(cx, |r, cx| { r.hk_pending.push(p); cx.notify(); }).is_err() { break; }
                         }
                     }).detach();
+                    // audit retention (audit.retention_days)
+                    match root.audit.prune(config::get().audit.retention_days) { Ok(0) => {}, Ok(n) => eprintln!("audit: pruned {n} records"), Err(e) => eprintln!("audit prune: {e}") }
+                    // update check (general.check_updates); quiet on network errors
+                    if config::get().general.check_updates && std::env::var_os("AGENTSHELL_NO_UPDATE_CHECK").is_none() {
+                        let url = config::get().general.manifest_url();
+                        cx.spawn(async move |this, cx| {
+                            let r = cx.background_executor().spawn(async move { ssh_term_proto::update::check(&url) }).await;
+                            match r {
+                                Ok(Some(m)) => { let _ = this.update(cx, |r, cx| { r.log("update.available", &m.version); r.toast(tf("main.update_available", &[("v", &m.version), ("url", &m.url)]), cx); }); }
+                                Ok(None) => {}
+                                Err(e) => eprintln!("update check: {e:#}"),
+                            }
+                        }).detach();
+                    }
                     // local policy service for external agents' hooks
                     let (ap_tx, ap_rx) = flume::unbounded::<ssh_term_proto::policy_server::Approval>();
                     let ctx: ssh_term_proto::policy_server::CtxFn = Arc::new(|| config::get().policy_ctx());

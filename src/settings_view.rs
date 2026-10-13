@@ -135,8 +135,8 @@ impl SettingsView {
         vec![
             r(General, t("ui.interface_language"), t("ui.applies_immediately_follow_system_reads"), Ctl::Choice("general.language", opts(&[("system", t("ui.follow_system")), ("zh-CN", "简体中文"), ("en", "English")])), false),
             r(General, t("ui.on_startup"), t("ui.what_to_open_when_the"), Ctl::Choice("general.startup", opts(&[("local", t("ui.local_terminal")), ("restore", t("ui.restore_layout")), ("blank", t("ui.blank"))])), false),
-            r(General, t("ui.check_for_updates_automatically"), "", Ctl::Toggle("general.check_updates"), true),
-            r(General, t("ui.update_channel"), "", Ctl::Choice("general.update_channel", opts(&[("stable", t("ui.stable")), ("beta", t("ui.beta"))])), true),
+            r(General, t("ui.check_for_updates_automatically"), "", Ctl::Toggle("general.check_updates"), false),
+            r(General, t("ui.update_channel"), "", Ctl::Choice("general.update_channel", opts(&[("stable", t("ui.stable")), ("beta", t("ui.beta"))])), false),
             r(General, t("ui.config_file"), t("ui.all_settings_are_stored_here"), Ctl::Info(config::config_path().display().to_string()), false),
 
             r(Appearance, t("ui.theme"), t("ui.follow_system_switches_with_the"), Ctl::Choice("appearance.theme", themes), false),
@@ -204,8 +204,8 @@ impl SettingsView {
             r(Permissions, t("ui.double_confirm_dangerous_commands"), t("ui.r4_actions_need_confirmation_even"), Ctl::Toggle("permissions.dangerous_confirm"), false),
 
             r(Audit, t("ui.log_directory"), "", Ctl::Text("audit.dir", "~/.local/share/agentshell/audit"), false),
-            r(Audit, t("ui.retention_days"), "", Ctl::Text("audit.retention_days", "90"), true),
-            r(Audit, t("ui.log_manually_typed_commands"), t("ui.by_default_only_connections_permissions"), Ctl::Toggle("audit.log_commands"), true),
+            r(Audit, t("ui.retention_days"), "", Ctl::Text("audit.retention_days", "90"), false),
+            r(Audit, t("ui.log_manually_typed_commands"), t("ui.by_default_only_connections_permissions"), Ctl::Toggle("audit.log_commands"), false),
 
             r(Session, t("ui.persistent_sessions"), t("ui.resume_via_remote_tmux_after"), Ctl::Choice("session.persistent", opts(&[("off", t("ui.off")), ("tmux", "tmux")])), false),
             r(Session, t("ui.local_daemon"), t("ui.local_daemon.d"), Ctl::Toggle("session.local_daemon"), false),
@@ -521,6 +521,28 @@ impl SettingsView {
         div().flex().flex_col().child(Self::section_title(t("ui.app_shortcuts_ctrl_shift_c"))).child(list).into_any_element()
     }
 
+    fn general_extra(&self, cx: &mut Context<Self>) -> AnyElement {
+        let th = cur();
+        div().flex().flex_col().child(Self::section_title(t("ui.updates")))
+            .child(div().text_size(px(12.)).text_color(c(th.subtext)).pb_2().child(tf("settings.update_source", &[("v", &ssh_term_proto::update::CURRENT), ("url", &config::get().general.manifest_url())])))
+            .child(div().flex().gap_2().child(ui::button("check-update", t("ui.check_now"), 1).on_click(cx.listener(|this, _, _w, cx| {
+                this.notice = Some(t("settings.update_checking").into());
+                let url = config::get().general.manifest_url();
+                cx.spawn(async move |this, cx| {
+                    let r = cx.background_executor().spawn(async move { ssh_term_proto::update::check(&url) }).await;
+                    let msg = match r {
+                        Ok(Some(m)) => tf("main.update_available", &[("v", &m.version), ("url", &m.url)]),
+                        Ok(None) => tf("settings.update_latest", &[("v", &ssh_term_proto::update::CURRENT)]),
+                        Err(e) => tf("settings.update_failed", &[("e", &format!("{e:#}"))]),
+                    };
+                    let _ = this.update(cx, |v, cx| { v.notice = Some(msg); cx.notify(); });
+                }).detach();
+                cx.notify();
+            }))))
+            .children(self.notice.clone().map(|n| div().pt_2().text_size(px(12.)).text_color(c(th.subtext)).child(n)))
+            .into_any_element()
+    }
+
     fn appearance_extra(&self, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
         div().flex().flex_col().child(Self::section_title(t("ui.theme_import")))
@@ -682,6 +704,7 @@ impl Render for SettingsView {
                 Cat::Suggest => Some(self.suggest_extra(cx)),
                 Cat::About => Some(self.about_extra()),
                 Cat::Appearance => Some(self.appearance_extra(cx)),
+                Cat::General => Some(self.general_extra(cx)),
                 Cat::Ai => Some(self.ai_extra(window, cx)),
                 _ => None,
             };

@@ -818,6 +818,7 @@ impl TermView {
                         if let Some(cmd) = self.tracker.submitted_input(&ls.before_cursor, ls.prompt_col) {
                             self.history.lock().unwrap().add(&cmd);
                             // remember the command word for agent identification over SSH (not while an agent runs)
+                            if config::get().audit.log_commands { let _ = crate::audit_log().append("command", "user", &ssh_term_proto::ai::redact(&cmd).0); }
                             if self.agent.is_none() { self.cmd_started = Some((Instant::now(), cmd.clone())); self.last_command = Some(cmd); }
                         }
                     }

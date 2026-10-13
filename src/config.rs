@@ -41,8 +41,15 @@ d!(u_10, u64, 10);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
-pub struct General { pub language: String, pub startup: String, pub check_updates: bool, pub update_channel: String }
-impl Default for General { fn default() -> Self { Self { language: s_system(), startup: s_restore(), check_updates: t(), update_channel: s_stable() } } }
+pub struct General { pub language: String, pub startup: String, pub check_updates: bool, pub update_channel: String, pub update_url: String }
+impl Default for General { fn default() -> Self { Self { language: s_system(), startup: s_restore(), check_updates: t(), update_channel: s_stable(), update_url: String::new() } } }
+impl General {
+    /// Manifest URL for the selected channel (AGENTSHELL_UPDATE_URL > general.update_url > built-in).
+    pub fn manifest_url(&self) -> String {
+        let tpl = std::env::var("AGENTSHELL_UPDATE_URL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| if self.update_url.is_empty() { ssh_term_proto::update::DEFAULT_URL.into() } else { self.update_url.clone() });
+        ssh_term_proto::update::url_for(&tpl, &self.update_channel)
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]

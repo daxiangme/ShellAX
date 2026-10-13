@@ -15,6 +15,7 @@ pub mod keygen;
 pub mod layout;
 pub mod local;
 pub mod ssh;
+pub mod update;
 pub mod sftp;
 #[cfg(unix)]
 pub mod daemon;
