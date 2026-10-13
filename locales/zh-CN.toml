@@ -666,3 +666,6 @@
 "ui.deny_send_reason" = "拒绝并发送原因"
 "ui.deny_reason_placeholder" = "回传给 Agent 的原因（例如：先 dry-run）"
 "ui.allow_session_prefix" = "本会话总是允许 “{p}”"
+"chat.feedback_note" = "执行结果已回传给 AI（已脱敏；禁止读取输出的主机不含输出）"
+"ui.ai_feed_back" = "执行结果回传 AI"
+"ui.ai_feed_back_desc" = "逐条执行结束后，把退出码与脱敏输出（禁止读取输出的主机不含输出）回传到对话"

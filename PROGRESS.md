@@ -62,3 +62,8 @@
   - ☐ 10.5b 托盘、Agent 快速启动、write_to_pty 权限、关键词高亮、SFTP 内置编辑
 - ☐ 10.6 P2：组织策略文件、ssh:// sftp:// 链接、主机侧工具
 - ☐ 10.7 收尾：release/clippy、3 轮全量测试 + e2e_hooks、TEST_REPORT、截图、PRD/README
+
+# 第 11 轮（安全修复 + 剩余 P1/P2 + 收尾）
+- ☑ 11.A1 调用方断开自动撤销审批卡：policy_server 等待审批时每 200ms 探测 TCP 对端（非阻塞 peek=EOF），断开即丢弃应答通道（界面 1 秒内移除卡片）、判拒绝并审计 `hook.approval id=N withdrawn caller-disconnected`；/v1/exec 等远端操作在批准后再次检查调用方，已断开则不执行（审计 effect=Cancelled）；测试 policy_server::tests::approval_withdrawn_when_caller_disconnects（exec 与 hook 两路，迟到的“允许”不执行）
+- ☑ 11.A2 代理覆盖 AI 请求与更新检查：proxy::ureq_builder（ssh.proxy 的 http:// / socks5://，遵守 ssh.no_proxy 通配）用于 ai::chat / chat_stream / update::check；ureq 开启 socks-proxy（socks 0.3.4，MIT/Apache，已登记）；测试 proxy::tests::http_clients_use_proxy_and_no_proxy；tools/mock_proxy.py 支持绝对 URI 的明文 HTTP
+- ☑ 11.A3 AI 逐条执行结果回传：步骤串行执行，OSC 133;D 到达后截取该命令输出（最后 200 行，脱敏；ai.send_output 关闭或主机在 ai.no_output_hosts 时只回传退出码、标注 withheld），计划结束后把每步退出码/输出/拒绝/跳过汇总作为下一轮 user 消息发给 AI（ai.feed_back_results，默认开，设置-AI 可关）；审计 ai.exec.result / ai.exec.feedback；无 shell 集成时 120 秒超时；测试 chat_view::tests::plan_steps_and_approvals；GUI 实测 df -h 自动→systemctl 跳过→uptime 自动→mock 日志收到汇总并回复；截图 screenshot-v11-ai-feedback.png

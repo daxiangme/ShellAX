@@ -401,6 +401,8 @@ pub struct TermView {
     bell_until: Option<Instant>,
     /// command submitted at the prompt and when (for notify.long_command_secs)
     cmd_started: Option<(Instant, String)>,
+    /// AI plan step being captured: (absolute start line, command, where to send the result).
+    ai_capture: Option<(usize, String, flume::Sender<StepOutput>)>,
     _subs: Vec<Subscription>,
 }
 
@@ -422,6 +424,10 @@ struct LineState { before_cursor: String, at_eol: bool, prompt_col: Option<usize
 
 #[derive(Default, Clone)]
 pub struct SearchBar { pub query: String, pub cur: Option<(BPoint, BPoint)>, pub found: Option<bool> }
+
+/// Result of one executed AI plan step (already redacted / withheld per policy).
+#[derive(Clone, Debug, PartialEq)]
+pub struct StepOutput { pub cmd: String, pub exit: Option<i32>, pub output: String, pub withheld: bool }
 
 pub enum TermEvent { Explain, Agent(String, AgentState), LongDone(String, u64, i32), Audit(&'static str, String) }
 
@@ -499,7 +505,7 @@ impl TermView {
             selecting: false, scroll_drag: false, history, tracker: InputTracker::new(),
             last_activity: Instant::now(), blink_running: false, software_gpu: std::env::var("AGENTSHELL_FORCE_BLINK").ok().map(|_| false), last_mouse_cell: None, mouse_down_btn: None,
             manifests, last_command: None, agent: None, agent_seen: Instant::now(), last_detect: Instant::now() - Duration::from_secs(5),
-            detect_scheduled: false, pending_paste: None, ai: None, daemon_id: None, resume_offer: None, clip_ask: None, search: None, last_agent: None, failed: None, exit_seen: 0, ai_inline_seq: 0, ai_inline: None, bell_until: None, cmd_started: None, _subs: subs,
+            detect_scheduled: false, pending_paste: None, ai: None, daemon_id: None, resume_offer: None, clip_ask: None, search: None, last_agent: None, failed: None, exit_seen: 0, ai_inline_seq: 0, ai_inline: None, bell_until: None, cmd_started: None, ai_capture: None, _subs: subs,
         }
     }
 
@@ -601,6 +607,7 @@ impl TermView {
                     let lim = config::get().notify.long_command_secs;
                     if lim > 0 && secs >= lim && self.agent.is_none() { cx.emit(TermEvent::LongDone(cmd, secs, code.unwrap_or(0))); }
                 }
+                if let Some((start, cmd, tx)) = self.ai_capture.take() { let _ = tx.send(self.step_output(start, cmd, code)); }
                 let was = self.failed.is_some();
                 self.failed = match (code, &self.last_command) { (Some(c), Some(cmd)) if c != 0 && self.agent.is_none() => Some((cmd.clone(), c)), _ => None };
                 if was || self.failed.is_some() { cx.notify(); }
@@ -998,6 +1005,35 @@ impl TermView {
             ("redact", &if cfg.ai.redact { t("ai.consent_redact_on") } else { t("ai.consent_redact_off") })])
     }
     /// Redacted terminal context per the AI settings: (text, redactions, host label).
+    /// Absolute line index (scrollback + screen) of the cursor, matching `screen_lines()` indices.
+    fn abs_cursor_line(&self) -> usize {
+        let Some(s) = &self.session else { return 0 };
+        let t = s.term.lock().unwrap();
+        let g = t.grid();
+        (g.cursor.point.line.0 - g.topmost_line().0).max(0) as usize
+    }
+    /// Output of an AI plan step for feeding back to the model: lines after the command line up
+    /// to the new prompt (last 200), redacted; withheld for no-output hosts / ai.send_output off.
+    fn step_output(&self, start: usize, cmd: String, code: Option<i32>) -> StepOutput {
+        let allowed = self.ai_output_allowed();
+        let output = if !allowed { String::new() } else {
+            let lines = self.screen_lines();
+            let end = self.abs_cursor_line().min(lines.len());
+            let from = (start + 1).min(end);
+            let body: Vec<&str> = lines[from..end].iter().map(String::as_str).collect();
+            let body = &body[body.len().saturating_sub(200)..];
+            ssh_term_proto::ai::redact(body.join("\n").trim_end()).0
+        };
+        StepOutput { cmd: ssh_term_proto::ai::redact(&cmd).0, exit: code, output, withheld: !allowed }
+    }
+    /// Run an approved AI plan step and report its exit code and output when the shell signals
+    /// completion (OSC 133;D).
+    pub(crate) fn ai_run_capture(&mut self, command: String, approved_by: &str, tx: flume::Sender<StepOutput>, cx: &mut Context<Self>) {
+        if self.session.is_none() { let _ = tx.send(StepOutput { cmd: command, exit: None, output: String::new(), withheld: true }); return; }
+        let start = self.abs_cursor_line();
+        self.ai_capture = Some((start, command.clone(), tx));
+        self.ai_run(command, approved_by, cx);
+    }
     pub fn ai_context(&self) -> (String, usize, String) {
         let cfg = config::get();
         let screen = self.screen_lines();

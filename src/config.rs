@@ -141,8 +141,11 @@ pub struct Ai {
     /// Hosts (names / addresses, glob, comma separated) whose terminal output is never sent to
     /// AI, even with send_output on: only typed commands are included.
     pub no_output_hosts: String,
+    /// After an AI plan finishes, send each step's exit code (and redacted output, unless the
+    /// host may not share output) back to the model as the next turn.
+    pub feed_back_results: bool,
 }
-impl Default for Ai { fn default() -> Self { Self { enabled: t(), default_provider: String::new(), providers: vec![], redact: t(), context: s_screen(), context_lines: u_40(), send_output: false, nl_prefix: "#".into(), chat_models_only: t(), models_cache_hours: 24, first_send_ack: false, no_output_hosts: String::new() } } }
+impl Default for Ai { fn default() -> Self { Self { enabled: t(), default_provider: String::new(), providers: vec![], redact: t(), context: s_screen(), context_lines: u_40(), send_output: false, nl_prefix: "#".into(), chat_models_only: t(), models_cache_hours: 24, first_send_ack: false, no_output_hosts: String::new(), feed_back_results: true } } }
 impl Ai {
     /// May terminal output of this host (any of the given names) be sent to AI?
     pub fn output_allowed(&self, names: &[&str]) -> bool {

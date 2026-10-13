@@ -666,3 +666,6 @@
 "ui.deny_send_reason" = "Deny with reason"
 "ui.deny_reason_placeholder" = "Reason sent back to the agent (e.g. use a dry run first)"
 "ui.allow_session_prefix" = "Always allow “{p}” this session"
+"chat.feedback_note" = "Step results sent back to AI (redacted; output withheld for no-output hosts)"
+"ui.ai_feed_back" = "Send step results back to AI"
+"ui.ai_feed_back_desc" = "After a step-by-step run, exit codes and redacted output (never for no-output hosts) go back to the chat"

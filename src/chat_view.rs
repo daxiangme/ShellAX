@@ -8,7 +8,7 @@ use ssh_term_proto::i18n::{t, tf};
 use ssh_term_proto::policy::Effect;
 
 use crate::config;
-use crate::termview::TermView;
+use crate::termview::{StepOutput, TermView};
 use crate::theme::{c, cur};
 use crate::ui::{self, icon, IconName};
 
@@ -23,25 +23,27 @@ pub struct Msg { pub role: &'static str, pub text: String, pub note: Option<Stri
 #[derive(Clone, Debug, PartialEq)]
 pub enum StepState { Pending, Ask(String), Ran(&'static str), Denied(String), Skipped }
 #[derive(Clone, Debug, PartialEq)]
-pub struct Step { pub cmd: String, pub risk: String, pub state: StepState }
+pub struct Step { pub cmd: String, pub risk: String, pub state: StepState, pub result: Option<StepOutput> }
 #[derive(Clone, Debug, PartialEq, Default)]
-pub struct Plan { pub steps: Vec<Step> }
+pub struct Plan { pub steps: Vec<Step>, pub running: bool, pub reported: bool }
 
 impl Plan {
-    pub fn new(cmds: Vec<String>) -> Self { Self { steps: cmds.into_iter().map(|cmd| Step { cmd, risk: String::new(), state: StepState::Pending }).collect() } }
+    pub fn new(cmds: Vec<String>) -> Self { Self { steps: cmds.into_iter().map(|cmd| Step { cmd, risk: String::new(), state: StepState::Pending, result: None }).collect(), running: false, reported: false } }
     pub fn current(&self) -> Option<usize> { self.steps.iter().position(|s| matches!(s.state, StepState::Pending | StepState::Ask(_))) }
     pub fn done(&self) -> bool { self.current().is_none() }
-    /// Evaluate pending steps in order; returns the commands to run now (auto-allowed ones),
-    /// stopping at the first step that needs the user's approval.
+    /// Evaluate pending steps in order; returns the command to run now (auto-allowed), stopping
+    /// at the first step that needs the user's approval. One step runs at a time: nothing is
+    /// evaluated while a step is still running (its output may change what should happen next).
     pub fn advance(&mut self, decide: impl Fn(&str) -> (Effect, String, String)) -> Vec<String> {
         let mut run = vec![];
+        if self.running { return run; }
         while let Some(i) = self.current() {
             let st = &mut self.steps[i];
             if matches!(st.state, StepState::Ask(_)) { break; }
             let (eff, risk, reason) = decide(&st.cmd);
             st.risk = risk;
             match eff {
-                Effect::Allow => { st.state = StepState::Ran("policy"); run.push(st.cmd.clone()); }
+                Effect::Allow => { st.state = StepState::Ran("policy"); run.push(st.cmd.clone()); self.running = true; break; }
                 Effect::Ask => { st.state = StepState::Ask(reason); break; }
                 Effect::Deny => { st.state = StepState::Denied(reason); }
             }
@@ -53,11 +55,37 @@ impl Plan {
         let i = self.current()?;
         let st = &mut self.steps[i];
         if !matches!(st.state, StepState::Ask(_)) { return None; }
-        if allow { st.state = StepState::Ran("user"); Some(st.cmd.clone()) } else { st.state = StepState::Skipped; None }
+        if allow { st.state = StepState::Ran("user"); self.running = true; Some(st.cmd.clone()) } else { st.state = StepState::Skipped; None }
+    }
+    /// Record the result of the running step.
+    pub fn finish(&mut self, out: StepOutput) {
+        self.running = false;
+        if let Some(st) = self.steps.iter_mut().rev().find(|s| matches!(s.state, StepState::Ran(_)) && s.result.is_none()) { st.result = Some(out); }
+    }
+    /// Message reporting executed steps back to the model (once, when the plan is done).
+    pub fn report(&mut self) -> Option<String> {
+        if !self.done() || self.running || self.reported || self.steps.iter().all(|s| s.result.is_none() && !matches!(s.state, StepState::Denied(_) | StepState::Skipped)) { return None; }
+        self.reported = true;
+        let mut m = String::from("Results of the commands from your previous reply (output redacted by AgentShell):\n");
+        for s in &self.steps {
+            match (&s.state, &s.result) {
+                (_, Some(r)) => {
+                    m.push_str(&format!("\n$ {}\nexit: {}\n", r.cmd, r.exit.map(|c| c.to_string()).unwrap_or_else(|| "unknown".into())));
+                    if r.withheld { m.push_str("output: [withheld — output from this host is not shared with AI]\n"); }
+                    else { m.push_str(&format!("```\n{}\n```\n", r.output)); }
+                }
+                (StepState::Denied(why), _) => m.push_str(&format!("\n$ {}\nnot run: denied by policy ({why})\n", crate_redact(&s.cmd))),
+                (StepState::Skipped, _) => m.push_str(&format!("\n$ {}\nnot run: skipped by the user\n", crate_redact(&s.cmd))),
+                _ => {}
+            }
+        }
+        Some(m)
     }
     /// Stop the rest of the plan.
     pub fn cancel(&mut self) { for s in &mut self.steps { if matches!(s.state, StepState::Pending | StepState::Ask(_)) { s.state = StepState::Skipped; } } }
 }
+
+fn crate_redact(s: &str) -> String { ssh_term_proto::ai::redact(s).0 }
 
 /// Every command line in every fenced code block of a reply (comments and blanks skipped).
 pub fn code_commands(s: &str) -> Vec<String> {
@@ -147,8 +175,32 @@ impl ChatView {
         let host = tvr.audit_host();
         let auto = plan.advance(|c| { let (e, r, why) = tvr.ai_policy(c); let _ = crate::audit_log().append("ai.exec.decision", "policy", &format!("plan=1 host={host} risk={} effect={e:?} command={c:?} reason={why:?}", r.label())); (e, r.label().to_string(), why) });
         run.extend(auto.into_iter().map(|c| (c, "policy")));
-        for (c, by) in run { tv.update(cx, |t, cx| t.ai_run(c, by, cx)); }
+        let report = plan.report();
+        for (c, by) in run {
+            let (tx, rx) = flume::bounded::<StepOutput>(1);
+            tv.update(cx, |t, cx| t.ai_run_capture(c.clone(), by, tx, cx));
+            cx.spawn(async move |this, cx| {
+                // no shell integration (no OSC 133;D) → give up waiting after 120 s
+                let (wtx, wrx) = flume::bounded(1);
+                std::thread::spawn(move || { let _ = wtx.send(rx.recv_timeout(std::time::Duration::from_secs(120)).ok()); });
+                let out = wrx.recv_async().await.ok().flatten();
+                let out = out.unwrap_or(StepOutput { cmd: crate_redact(&c), exit: None, output: "[no completion signal from the shell within 120 s]".into(), withheld: false });
+                let _ = this.update(cx, |v, cx| {
+                    let _ = crate::audit_log().append("ai.exec.result", "policy", &format!("exit={:?} chars={} withheld={} command={:?}", out.exit, out.output.chars().count(), out.withheld, out.cmd));
+                    if let Some(p) = v.msgs.get_mut(i).and_then(|m| m.plan.as_mut()) { p.finish(out); }
+                    v.step(i, None, cx);
+                });
+            }).detach();
+        }
+        if let Some(r) = report { self.feed_back(r, cx); }
         cx.notify();
+    }
+    /// Send executed-step results back to the model as the next user turn.
+    fn feed_back(&mut self, report: String, cx: &mut Context<Self>) {
+        if self.busy || !config::get().ai.feed_back_results { return; }
+        let _ = crate::audit_log().append("ai.exec.feedback", "user", &format!("chars={}", report.chars().count()));
+        self.msgs.push(Msg { role: "user", text: report.clone(), note: Some(t("chat.feedback_note").to_string()), plan: None });
+        self.run(ssh_term_proto::ai::CHAT_SYSTEM_PROMPT, report, cx);
     }
 
     fn run(&mut self, system: &'static str, last_content: String, cx: &mut Context<Self>) {
@@ -307,19 +359,33 @@ mod tests {
         assert_eq!(cmds, vec!["df -h", "systemctl restart nginx", "rm -rf /", "uptime"]);
         let decide = |c: &str| { let r = ssh_term_proto::policy::classify(c); let (e, why) = ssh_term_proto::policy::decide_ctx(ssh_term_proto::policy::Mode::Ask, ssh_term_proto::policy::Risk::R1, &[], "ai", "exec", c, true, false); (e, r.label().to_string(), why) };
         let mut p = Plan::new(cmds);
+        let out = |c: &str, e: i32, o: &str| StepOutput { cmd: c.into(), exit: Some(e), output: o.into(), withheld: false };
         assert_eq!(p.advance(decide), vec!["df -h".to_string()]);
+        assert_eq!(p.advance(decide), Vec::<String>::new(), "one step at a time");
+        p.finish(out("df -h", 0, "/dev/sda1 50%"));
+        assert_eq!(p.advance(decide), Vec::<String>::new());
         assert!(matches!(p.steps[1].state, StepState::Ask(_)));
         assert_eq!(p.advance(decide), Vec::<String>::new(), "waits for approval");
         assert_eq!(p.answer(true), Some("systemctl restart nginx".into()));
+        assert!(p.report().is_none());
+        p.finish(StepOutput { cmd: "systemctl restart nginx".into(), exit: Some(1), output: String::new(), withheld: true });
         // hard-denied step is skipped with its reason, then the next one asks or runs
         let next = p.advance(decide);
         assert!(matches!(p.steps[2].state, StepState::Denied(_)));
         assert_eq!(next, vec!["uptime".to_string()]);
-        assert!(p.done());
+        assert!(p.done() && p.report().is_none(), "uptime still running");
+        p.finish(out("uptime", 0, "up 3 days"));
+        let r = p.report().unwrap();
+        assert!(r.contains("$ df -h\nexit: 0") && r.contains("/dev/sda1 50%") && r.contains("up 3 days"), "{r}");
+        assert!(r.contains("exit: 1\noutput: [withheld"), "{r}");
+        assert!(r.contains("rm -rf /\nnot run: denied by policy"), "{r}");
+        assert!(p.report().is_none(), "reported once");
         let mut p = Plan::new(vec!["rm -r build".into(), "ls".into()]);
         p.advance(decide); assert_eq!(p.answer(false), None);
         assert_eq!(p.steps[0].state, StepState::Skipped);
         assert_eq!(p.advance(decide), vec!["ls".to_string()]);
+        p.finish(out("ls", 0, "a\nb"));
+        assert!(p.report().unwrap().contains("rm -r build\nnot run: skipped"));
         let mut p = Plan::new(vec!["rm -r build".into(), "ls".into()]);
         p.advance(decide); p.cancel(); assert!(p.done()); assert_eq!(p.steps[1].state, StepState::Skipped);
     }
