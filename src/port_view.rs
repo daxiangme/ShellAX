@@ -122,6 +122,7 @@ impl Render for PortView {
                 .child(icon(IconName::ArrowLeftRight, 14., col))
                 .child(div().flex_1().flex().flex_col()
                     .child(div().child(r.spec.describe()))
+                    .child(diagram(&r.spec, match &st { State::Running { port } => Some(*port), _ => None }, on && matches!(st, State::Running { .. })))
                     .child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(format!("{} · {}{}", r.spec.host, stats, if r.spec.auto_start { format!(" · {}", t("pf.auto_start")) } else { String::new() })))
                     .when_some(match &st { State::Error(e) => Some(e.clone()), _ => None }, |d, e| d.child(div().text_size(px(11.)).text_color(c(th.error)).child(e))))
                 .child(ui::tag(label, col))
@@ -140,4 +141,23 @@ impl Render for PortView {
                     .child(icon(IconName::X, 16., c(th.overlay1)))))
             .child(form).child(list).child(div().h(px(16.)))
     }
+}
+
+/// Port-forward diagram: [listener] ══ssh tunnel══ [ssh server] ──► [destination].
+fn diagram(spec: &ssh_term_proto::forward::Spec, port: Option<u16>, live: bool) -> impl IntoElement {
+    let th = cur();
+    let (nodes, _) = spec.diagram(port);
+    let role = |r: &str| match r { "local" => t("pf.node_local"), "remote" => t("pf.node_remote"), "ssh" => t("pf.node_ssh"), "remote-side" => t("pf.node_remote_side"), "local-side" => t("pf.node_local_side"), _ => t("pf.node_any") };
+    let col = |i: usize| match i { 0 => c(th.accent), 1 => c(th.warning), _ => c(th.success) };
+    let boxn = |i: usize, title: &str, addr: &str| div().px_2().py(px(3.)).rounded_md().border_1().border_color(col(i)).bg(col(i).opacity(0.08)).flex().flex_col()
+        .child(div().text_size(px(10.)).text_color(col(i)).child(role(title).to_string())).child(div().text_size(px(11.5)).text_color(c(th.text)).child(addr.to_string()));
+    let line = if live { c(th.success) } else { c(th.overlay0) };
+    let arrow = |label: String, thick: bool| div().flex().flex_col().items_center().min_w(px(90.))
+        .child(div().text_size(px(9.5)).text_color(c(th.overlay1)).child(label))
+        .child(div().flex().items_center().w_full().child(div().flex_1().h(px(if thick { 3. } else { 1.5 })).bg(line)).child(div().text_size(px(11.)).text_color(line).child("▶")));
+    let dir_label = match spec.kind { ssh_term_proto::forward::Kind::R => t("pf.tunnel_back").to_string(), _ => t("pf.tunnel").to_string() };
+    div().mt_1().flex().items_center().gap_1()
+        .child(boxn(0, &nodes[0].1, &nodes[0].2)).child(arrow(dir_label, true))
+        .child(boxn(1, &nodes[1].1, &nodes[1].2)).child(arrow(t("pf.then").to_string(), false))
+        .child(boxn(2, &nodes[2].1, &nodes[2].2))
 }

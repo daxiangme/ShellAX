@@ -34,6 +34,17 @@ impl Spec {
             Kind::D => format!("D SOCKS5 {}:{}", self.bind_addr, self.bind_port),
         }
     }
+    /// Diagram nodes left→right: (role, title, address). Traffic flows from the first node to the
+    /// last; `listen` is the index of the listening side. The SSH tunnel sits between node 0/1 and the server.
+    pub fn diagram(&self, port: Option<u16>) -> (Vec<(&'static str, String, String)>, usize) {
+        let bp = port.filter(|p| *p != 0).unwrap_or(self.bind_port);
+        let ssh = self.host.rsplit('@').next().unwrap_or(&self.host).to_string();
+        match self.kind {
+            Kind::L => (vec![("client", "local".into(), format!("{}:{bp}", self.bind_addr)), ("ssh", "ssh".into(), ssh), ("dest", "remote-side".into(), format!("{}:{}", self.dest_host, self.dest_port))], 0),
+            Kind::R => (vec![("client", "remote".into(), format!("{}:{bp}", self.bind_addr)), ("ssh", "ssh".into(), ssh), ("dest", "local-side".into(), format!("{}:{}", self.dest_host, self.dest_port))], 0),
+            Kind::D => (vec![("client", "local".into(), format!("SOCKS5 {}:{bp}", self.bind_addr)), ("ssh", "ssh".into(), ssh), ("dest", "any".into(), "*:*".into())], 0),
+        }
+    }
     pub fn validate(&self) -> Result<()> {
         if self.bind_addr.trim().is_empty() { bail!("bind address is empty"); }
         if self.kind != Kind::R && self.bind_port == 0 { bail!("port must be 1-65535"); }
@@ -167,6 +178,12 @@ pub fn save(path: &std::path::Path, specs: &[Spec]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn diagram_nodes() {
+        let s = super::Spec { host: "u@db:22".into(), kind: super::Kind::R, bind_addr: "0.0.0.0".into(), bind_port: 0, dest_host: "127.0.0.1".into(), dest_port: 3000, ..Default::default() };
+        let (n, l) = s.diagram(Some(41234));
+        assert_eq!(l, 0); assert_eq!(n[0].2, "0.0.0.0:41234"); assert_eq!(n[1].2, "db:22"); assert_eq!(n[2].2, "127.0.0.1:3000");
+    }
     use super::*;
     #[test]
     fn spec_roundtrip_and_validate() {
