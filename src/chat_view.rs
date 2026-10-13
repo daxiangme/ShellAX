@@ -5,6 +5,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::switch::Switch;
 use gpui_component::Sizable;
 use ssh_term_proto::i18n::{t, tf};
+use ssh_term_proto::policy::Effect;
 
 use crate::config;
 use crate::termview::TermView;
@@ -15,7 +16,59 @@ pub enum ChatEvent { Close, Insert(String) }
 impl gpui::EventEmitter<ChatEvent> for ChatView {}
 
 #[derive(Clone)]
-pub struct Msg { pub role: &'static str, pub text: String, pub note: Option<String> }
+pub struct Msg { pub role: &'static str, pub text: String, pub note: Option<String>, pub plan: Option<Plan> }
+
+/// US-08: commands proposed in a reply, executed one by one. Every step is evaluated by the
+/// permission engine when it becomes current; "ask" steps wait for the user's per-step approval.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StepState { Pending, Ask(String), Ran(&'static str), Denied(String), Skipped }
+#[derive(Clone, Debug, PartialEq)]
+pub struct Step { pub cmd: String, pub risk: String, pub state: StepState }
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Plan { pub steps: Vec<Step> }
+
+impl Plan {
+    pub fn new(cmds: Vec<String>) -> Self { Self { steps: cmds.into_iter().map(|cmd| Step { cmd, risk: String::new(), state: StepState::Pending }).collect() } }
+    pub fn current(&self) -> Option<usize> { self.steps.iter().position(|s| matches!(s.state, StepState::Pending | StepState::Ask(_))) }
+    pub fn done(&self) -> bool { self.current().is_none() }
+    /// Evaluate pending steps in order; returns the commands to run now (auto-allowed ones),
+    /// stopping at the first step that needs the user's approval.
+    pub fn advance(&mut self, decide: impl Fn(&str) -> (Effect, String, String)) -> Vec<String> {
+        let mut run = vec![];
+        while let Some(i) = self.current() {
+            let st = &mut self.steps[i];
+            if matches!(st.state, StepState::Ask(_)) { break; }
+            let (eff, risk, reason) = decide(&st.cmd);
+            st.risk = risk;
+            match eff {
+                Effect::Allow => { st.state = StepState::Ran("policy"); run.push(st.cmd.clone()); }
+                Effect::Ask => { st.state = StepState::Ask(reason); break; }
+                Effect::Deny => { st.state = StepState::Denied(reason); }
+            }
+        }
+        run
+    }
+    /// User answer for the current "ask" step. Returns the command when approved.
+    pub fn answer(&mut self, allow: bool) -> Option<String> {
+        let i = self.current()?;
+        let st = &mut self.steps[i];
+        if !matches!(st.state, StepState::Ask(_)) { return None; }
+        if allow { st.state = StepState::Ran("user"); Some(st.cmd.clone()) } else { st.state = StepState::Skipped; None }
+    }
+    /// Stop the rest of the plan.
+    pub fn cancel(&mut self) { for s in &mut self.steps { if matches!(s.state, StepState::Pending | StepState::Ask(_)) { s.state = StepState::Skipped; } } }
+}
+
+/// Every command line in every fenced code block of a reply (comments and blanks skipped).
+pub fn code_commands(s: &str) -> Vec<String> {
+    let mut out = vec![]; let mut in_code = false;
+    for line in s.lines() {
+        if line.trim_start().starts_with("```") { in_code = !in_code; continue; }
+        let l = line.trim().trim_start_matches("$ ").trim();
+        if in_code && !l.is_empty() && !l.starts_with('#') { out.push(l.to_string()); }
+    }
+    out
+}
 
 pub struct ChatView {
     pub msgs: Vec<Msg>,
@@ -47,21 +100,50 @@ impl ChatView {
         let (q_sent, n2) = if cfg.ai.redact { ssh_term_proto::ai::redact(&q) } else { (q.clone(), 0) };
         let content = if ctx.is_empty() { q_sent.clone() } else { format!("Terminal context from {host} (redacted):\n```\n{ctx}\n```\n\n{q_sent}") };
         let note = (!ctx.is_empty()).then(|| tf("chat.ctx_note", &[("host", &host), ("n", &ctx.chars().count()), ("r", &(n_red + n2))]));
-        self.msgs.push(Msg { role: "user", text: q, note });
+        self.msgs.push(Msg { role: "user", text: q, note, plan: None });
         self.run(ssh_term_proto::ai::CHAT_SYSTEM_PROMPT, content, cx);
     }
     /// Explain a failed command (from the terminal's "Explain failure" button).
     pub fn explain(&mut self, cmd: String, code: i32, out: String, host: String, cx: &mut Context<Self>) {
         if self.busy { return; }
-        self.msgs.push(Msg { role: "user", text: tf("chat.explain_q", &[("cmd", &cmd), ("code", &code)]), note: Some(tf("chat.ctx_note", &[("host", &host), ("n", &out.chars().count()), ("r", &"✓")])) });
+        self.msgs.push(Msg { role: "user", text: tf("chat.explain_q", &[("cmd", &cmd), ("code", &code)]), note: Some(tf("chat.ctx_note", &[("host", &host), ("n", &out.chars().count()), ("r", &"✓")])), plan: None });
         let prompt = ssh_term_proto::ai::build_explain_prompt(&cmd, code, &host, &out);
         self.run(ssh_term_proto::ai::EXPLAIN_SYSTEM_PROMPT, prompt, cx);
+    }
+
+    /// Start step-by-step execution of the commands in message `i` (in the source terminal).
+    pub fn start_plan(&mut self, i: usize, cx: &mut Context<Self>) {
+        let Some(m) = self.msgs.get_mut(i) else { return };
+        let cmds = code_commands(&m.text);
+        if cmds.is_empty() { return; }
+        let _ = crate::audit_log().append("ai.plan", "user", &format!("steps={}", cmds.len()));
+        m.plan = Some(Plan::new(cmds));
+        self.step(i, None, cx);
+    }
+    /// Advance plan `i`; `answer` is the user's per-step approval for the current ask step.
+    pub fn step(&mut self, i: usize, answer: Option<bool>, cx: &mut Context<Self>) {
+        let Some(tv) = self.source.as_ref().and_then(|w| w.upgrade()) else {
+            if let Some(p) = self.msgs.get_mut(i).and_then(|m| m.plan.as_mut()) { p.cancel(); }
+            cx.notify(); return;
+        };
+        let Some(plan) = self.msgs.get_mut(i).and_then(|m| m.plan.as_mut()) else { return };
+        let mut run: Vec<(String, &'static str)> = vec![];
+        if let Some(a) = answer {
+            let cur = plan.current().map(|k| plan.steps[k].cmd.clone()).unwrap_or_default();
+            match plan.answer(a) { Some(c) => run.push((c, "user")), None => { let _ = crate::audit_log().append("ai.exec.rejected", "user", &format!("host={} command={cur:?}", tv.read(cx).audit_host())); } }
+        }
+        let tvr = tv.read(cx);
+        let host = tvr.audit_host();
+        let auto = plan.advance(|c| { let (e, r, why) = tvr.ai_policy(c); let _ = crate::audit_log().append("ai.exec.decision", "policy", &format!("plan=1 host={host} risk={} effect={e:?} command={c:?} reason={why:?}", r.label())); (e, r.label().to_string(), why) });
+        run.extend(auto.into_iter().map(|c| (c, "policy")));
+        for (c, by) in run { tv.update(cx, |t, cx| t.ai_run(c, by, cx)); }
+        cx.notify();
     }
 
     fn run(&mut self, system: &'static str, last_content: String, cx: &mut Context<Self>) {
         let cfg = config::get();
         let Some(provider) = cfg.ai.default_provider().cloned().filter(|_| cfg.ai.enabled) else {
-            self.msgs.push(Msg { role: "assistant", text: t(if cfg.ai.enabled { "ai.no_provider" } else { "ai.disabled" }).into(), note: None });
+            self.msgs.push(Msg { role: "assistant", text: t(if cfg.ai.enabled { "ai.no_provider" } else { "ai.disabled" }).into(), note: None, plan: None });
             cx.notify(); return;
         };
         let key = crate::secret_store().get(&provider.secret_name()).map(|x| x.0).unwrap_or_default();
@@ -69,7 +151,7 @@ impl ChatView {
         let mut hist: Vec<(String, String)> = self.msgs[..self.msgs.len() - 1].iter().filter(|m| !m.text.is_empty()).map(|m| (m.role.to_string(), m.text.clone())).collect();
         hist.push(("user".into(), last_content.clone()));
         let _ = crate::audit_log().append("ai.chat", "user", &format!("provider={} model={} turns={} chars={}", provider.name, provider.model, hist.len(), last_content.chars().count()));
-        self.msgs.push(Msg { role: "assistant", text: String::new(), note: Some(format!("{} · {}", provider.name, provider.model)) });
+        self.msgs.push(Msg { role: "assistant", text: String::new(), note: Some(format!("{} · {}", provider.name, provider.model)), plan: None });
         self.busy = true;
         self.stop.store(false, std::sync::atomic::Ordering::Relaxed);
         let stop = self.stop.clone();
@@ -88,6 +170,40 @@ impl ChatView {
             let _ = this.update(cx, |v, cx| { v.busy = false; let _ = crate::audit_log().append("ai.chat.response", "ai", &format!("chars={}", v.msgs.last().map(|m| m.text.chars().count()).unwrap_or(0))); cx.notify(); });
         }).detach();
         cx.notify();
+    }
+}
+
+impl ChatView {
+    fn plan_el(&self, i: usize, m: &Msg, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let plan = m.plan.as_ref()?;
+        let th = cur();
+        let mono = SharedString::from(config::get().font.family.clone());
+        let mut col = div().mt_2().pt_2().border_t_1().border_color(c(th.surface0)).flex().flex_col().gap_1()
+            .child(div().flex().gap_2().items_center().text_size(px(11.)).text_color(c(th.overlay1)).child(tf("chat.plan_title", &[("n", &plan.steps.len())]))
+                .when(plan.done(), |d| d.child(ui::tag(t("chat.plan_done"), c(th.success)))));
+        for (k, st) in plan.steps.iter().enumerate() {
+            let (mark, col_c, why) = match &st.state {
+                StepState::Pending => ("·", c(th.overlay1), String::new()),
+                StepState::Ask(r) => ("?", c(th.warning), r.clone()),
+                StepState::Ran(by) => ("✓", c(th.success), if *by == "user" { t("chat.step_user").to_string() } else { t("chat.step_auto").to_string() }),
+                StepState::Denied(r) => ("✗", c(th.error), r.clone()),
+                StepState::Skipped => ("–", c(th.overlay0), t("chat.step_skipped").to_string()),
+            };
+            let mut row = div().flex().flex_col().gap(px(2.)).p_2().rounded_md().bg(c(th.crust))
+                .child(div().flex().items_center().gap_2()
+                    .child(div().w(px(14.)).text_color(col_c).child(mark))
+                    .child(div().flex_1().font_family(mono.clone()).text_size(px(12.)).child(st.cmd.clone()))
+                    .when(!st.risk.is_empty(), |d| d.child(ui::tag(st.risk.clone(), col_c))));
+            if !why.is_empty() { row = row.child(div().pl(px(22.)).text_size(px(10.5)).text_color(c(th.overlay1)).child(why)); }
+            if matches!(st.state, StepState::Ask(_)) {
+                row = row.child(div().pl(px(22.)).pt_1().flex().gap_2()
+                    .child(ui::button(("plan-allow", i * 1000 + k), t("chat.step_allow"), 1).h(px(22.)).on_click(cx.listener(move |v, _, _, cx| v.step(i, Some(true), cx))))
+                    .child(ui::button(("plan-skip", i * 1000 + k), t("chat.step_skip"), 0).h(px(22.)).on_click(cx.listener(move |v, _, _, cx| v.step(i, Some(false), cx))))
+                    .child(ui::button(("plan-stop", i * 1000 + k), t("chat.step_stop"), 2).h(px(22.)).on_click(cx.listener(move |v, _, _, cx| { if let Some(p) = v.msgs.get_mut(i).and_then(|m| m.plan.as_mut()) { p.cancel(); } let _ = crate::audit_log().append("ai.plan.stop", "user", ""); cx.notify(); }))));
+            }
+            col = col.child(row);
+        }
+        Some(col.into_any_element())
     }
 }
 
@@ -119,13 +235,17 @@ impl Render for ChatView {
             }
             if m.text.is_empty() { body = body.child(div().text_color(c(th.overlay1)).child("…")); }
             let code = (!user).then(|| first_code_block(&m.text)).flatten();
+            let streaming = self.busy && i + 1 == n;
+            let plan_el = (!user && !streaming).then(|| self.plan_el(i, m, cx)).flatten();
             list = list.child(div().flex().when(user, |d| d.justify_end()).child(
                 div().max_w(px(640.)).p_3().rounded_lg().text_size(px(12.5)).text_color(c(th.text))
                     .bg(if user { c(th.accent).opacity(0.14) } else { c(th.mantle) }).border_1().border_color(c(th.surface0))
                     .child(body)
                     .when_some(m.note.clone(), |d, note| d.child(div().pt_1().text_size(px(10.5)).text_color(c(th.overlay0)).child(note)))
                     .when_some(code.filter(|_| !(self.busy && i + 1 == n)), |d, code| d.child(div().pt_2().flex().gap_2()
-                        .child(ui::button(("chat-ins", i), t("chat.insert"), 0).h(px(22.)).on_click(cx.listener(move |_, _, _, cx| cx.emit(ChatEvent::Insert(code.clone())))))))));
+                        .child(ui::button(("chat-ins", i), t("chat.insert"), 0).h(px(22.)).on_click(cx.listener(move |_, _, _, cx| cx.emit(ChatEvent::Insert(code.clone())))))
+                        .when(m.plan.is_none(), |d| d.child(ui::button(("chat-plan", i), t("chat.run_steps"), 1).h(px(22.)).on_click(cx.listener(move |v, _, _, cx| v.start_plan(i, cx)))))))
+                    .when_some(plan_el, |d, p| d.child(p))));
         }
         let src = self.source.as_ref().and_then(|w| w.upgrade()).map(|v| v.read(cx).title.to_string()).unwrap_or_else(|| t("chat.no_terminal").into());
         let bar = div().p_3().border_t_1().border_color(c(th.surface0)).flex().flex_col().gap_2()
@@ -156,5 +276,28 @@ mod tests {
     fn code_block() {
         assert_eq!(super::first_code_block("x\n```bash\nls -la\n```\n"), Some("ls -la".into()));
         assert_eq!(super::first_code_block("none"), None);
+    }
+    #[test]
+    fn plan_steps_and_approvals() {
+        use super::*;
+        let cmds = code_commands("do:\n```bash\n# check\ndf -h\n$ systemctl restart nginx\n```\nthen\n```\nrm -rf /\nuptime\n```");
+        assert_eq!(cmds, vec!["df -h", "systemctl restart nginx", "rm -rf /", "uptime"]);
+        let decide = |c: &str| { let r = ssh_term_proto::policy::classify(c); let (e, why) = ssh_term_proto::policy::decide_ctx(ssh_term_proto::policy::Mode::Ask, ssh_term_proto::policy::Risk::R1, &[], "ai", "exec", c, true, false); (e, r.label().to_string(), why) };
+        let mut p = Plan::new(cmds);
+        assert_eq!(p.advance(decide), vec!["df -h".to_string()]);
+        assert!(matches!(p.steps[1].state, StepState::Ask(_)));
+        assert_eq!(p.advance(decide), Vec::<String>::new(), "waits for approval");
+        assert_eq!(p.answer(true), Some("systemctl restart nginx".into()));
+        // hard-denied step is skipped with its reason, then the next one asks or runs
+        let next = p.advance(decide);
+        assert!(matches!(p.steps[2].state, StepState::Denied(_)));
+        assert_eq!(next, vec!["uptime".to_string()]);
+        assert!(p.done());
+        let mut p = Plan::new(vec!["rm -r build".into(), "ls".into()]);
+        p.advance(decide); assert_eq!(p.answer(false), None);
+        assert_eq!(p.steps[0].state, StepState::Skipped);
+        assert_eq!(p.advance(decide), vec!["ls".to_string()]);
+        let mut p = Plan::new(vec!["rm -r build".into(), "ls".into()]);
+        p.advance(decide); p.cancel(); assert!(p.done()); assert_eq!(p.steps[1].state, StepState::Skipped);
     }
 }

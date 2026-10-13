@@ -55,7 +55,7 @@
 # 第 10 轮（按 PRD v1.0 补齐）
 - ☑ 10.1 审计按主机/会话/决策过滤：audit::field/Record::{host,session,decision}/Filter/facets；hook.request/decision/approval、ai.exec* 记录写入 host= session=；审计面板“决策/主机/会话”筛选条（全部 N 条中显示 M 条）；测试 audit::tests::filter_by_host_session_decision；截图 screenshot-v10-audit-filter-host.png / -deny.png / screenshot-v10-approval-card-buttons.png
 - ☑ 10.2 agentshell hosts/exec/upload/download（US-10）：src/broker.rs（Ops trait + SshOps，复用 ssh::connect_shared 连接池与 App 的主机/凭据，CLI 只传主机名）；策略服务 /v1/hosts|exec|upload|download 走 decide()+审批卡，审计 agentshell.*（含 host/session）；远端回传调用者禁止 upload/download（403）；exec 退出码透传、拒绝 126；测试 policy_server::tests::remote_ops_go_through_policy；GUI 实测 hosts、exec uname、上传/下载 300KB sha256 一致、R2 无应答超时拒绝；截图 screenshot-v10-agentshell-upload-approval.png
-- ☐ 10.3 内置 AI 对话中发起执行并逐条审批（US-08）
+- ☑ 10.3 内置 AI 对话中发起执行并逐条审批（US-08）：chat_view::Plan（code_commands 提取全部代码块命令→逐条经 TermView::ai_policy 判定；Allow 自动执行、Ask 停下显示“允许此步/跳过/停止”、Deny 显示原因并继续下一条）；在来源终端执行并审计 ai.plan / ai.exec.decision(plan=1) / ai.exec / ai.exec.rejected；测试 chat_view::tests::plan_steps_and_approvals；GUI 实测 df -h 自动、systemctl restart 询问→跳过、uptime 自动；截图 screenshot-v10-ai-chat-step-approval.png / -plan-done.png
 - ☐ 10.4 AI 首次发送前提示、按主机禁止读取输出
 - ☐ 10.5 P1：HTTP/SOCKS 出站代理、托盘、Agent 快速启动、write_to_pty 权限、关键词高亮、SFTP 内置编辑
 - ☐ 10.6 P2：组织策略文件、ssh:// sftp:// 链接、主机侧工具

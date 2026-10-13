@@ -61,6 +61,8 @@ class H(BaseHTTPRequestHandler):
             elif 'explain' in system.lower():
                 text = ('The command exited with a non-zero status. Most likely cause: the file or directory does not exist '
                         '(see "No such file or directory" in the output).\n\nFix:\n```\nls -la\n```')
+            elif any(k in (user.splitlines()[-1] if user else '').lower() for k in ['steps', '步骤', '排查']):
+                text = ('Plan: check disk, then restart the service, then verify.\n\n```bash\ndf -h\nsystemctl restart nginx\nuptime\n```')
             else:
                 last = user.splitlines()[-1] if user else ''
                 text = ('Mock assistant (streamed). You asked: "%s". I received %d context chars, %d redacted secret(s), %d message(s) of history.\n\n```\ndf -h\n```'

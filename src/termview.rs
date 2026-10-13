@@ -1044,6 +1044,14 @@ impl TermView {
         self.ai = None;
         cx.notify();
     }
+    /// Permission-engine verdict for an AI-proposed command in this pane (mode, rules, production host).
+    pub fn ai_policy(&self, command: &str) -> (Effect, Risk, String) {
+        let cfg = config::get();
+        let max = match cfg.permissions.max_auto_risk.as_str() { "R0" => Risk::R0, "R2" => Risk::R2, _ => Risk::R1 };
+        let prod = cfg.permissions.prod_confirm && matches!(&self.spec, Spec::Ssh(t) if t.production);
+        let (eff, reason) = policy::decide_ctx(cfg.permissions.mode, max, &cfg.permissions.rules, "ai", "exec", command, cfg.permissions.dangerous_confirm, prod);
+        (eff, policy::classify(command), reason)
+    }
     /// Host name used in audit records ("local" for local panes), matching AGENTSHELL_HOST.
     pub fn audit_host(&self) -> String { match &self.spec { Spec::Local => "local".into(), Spec::Ssh(t) => t.host.clone() } }
     /// Execute: the permission engine decides (mode + rules); every outcome is audited.
@@ -1065,7 +1073,7 @@ impl TermView {
         let Some(AiCard::Confirm { command, .. }) = self.ai.clone() else { return };
         self.ai_run(command, "user", cx);
     }
-    fn ai_run(&mut self, command: String, approved_by: &str, cx: &mut Context<Self>) {
+    pub(crate) fn ai_run(&mut self, command: String, approved_by: &str, cx: &mut Context<Self>) {
         let Some(s) = self.session.clone() else { return };
         let one_line = command.replace(['\r', '\n'], " ");
         let _ = crate::audit_log().append("ai.exec", approved_by, &format!("host={} command={one_line:?}", self.audit_host()));
