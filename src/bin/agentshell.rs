@@ -40,6 +40,9 @@ fn opt(args: &mut Vec<String>, name: &str) -> Option<String> {
 }
 
 fn main() {
+    // behave like other CLI tools when piped into `head` etc. (no EPIPE panic)
+    #[cfg(unix)]
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL); }
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() { usage() }
     let cmd = args.remove(0);

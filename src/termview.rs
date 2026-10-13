@@ -138,7 +138,8 @@ impl Render for GridLayer {
             move |bounds, session, window, cx| {
                 GRID_PAINTS.fetch_add(1, Ordering::Relaxed);
                 let lh = line_h();
-                let base = c(th.bg);
+                // appearance.opacity: the grid background carries the window alpha
+                let base = c(th.bg).opacity(config::get().appearance.opacity.clamp(0.5, 1.0));
                 window.paint_quad(fill(bounds, base));
                 let Some(s) = session else { return };
                 let st = st2.borrow();
@@ -1338,7 +1339,7 @@ impl Render for TermView {
             .on_mouse_up(MouseButton::Right, cx.listener(|v, ev, w, cx| v.on_mouse_up(MouseButton::Right, ev, w, cx)))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
-            .flex_1().size_full().flex().flex_col().bg(c(th.bg).opacity(crate::config::get().appearance.opacity.clamp(0.5, 1.0))).overflow_hidden()
+            .flex_1().size_full().flex().flex_col().bg(c(th.bg).opacity(config::get().appearance.opacity.clamp(0.5, 1.0))).overflow_hidden()
             .border_t_2().border_color(if focused { c(th.accent) } else { c(th.bg) })
             .child(header)
             .child(body)
