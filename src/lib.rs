@@ -1,5 +1,6 @@
 //! ssh-term-proto core: backend-agnostic terminal session (alacritty_terminal grid)
 //! fed by either a local PTY (portable-pty) or an SSH channel (russh).
+pub mod outline;
 pub mod agent;
 pub mod ai;
 pub mod models;

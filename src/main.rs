@@ -70,6 +70,27 @@ struct PaneInit { cwd: Option<String>, daemon_id: Option<String>, resume: Option
 struct DividerDrag { tab: usize, path: Vec<bool> }
 impl Render for DividerDrag { fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement { div() } }
 
+/// Dragging a tab onto an edge of a pane in the active tab moves it there as a split (PRD US-03).
+#[derive(Clone)]
+struct TabDrag { idx: usize, title: SharedString }
+impl Render for TabDrag {
+    fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let th = cur();
+        div().px_3().py_1().rounded_lg().bg(c(th.base)).border_1().border_color(c(th.accent)).text_size(px(12.)).text_color(c(th.text)).child(self.title.clone())
+    }
+}
+/// Dragging a config host onto a group header moves it into that group.
+#[derive(Clone)]
+struct HostDrag { name: String }
+impl Render for HostDrag {
+    fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let th = cur();
+        div().px_3().py_1().rounded_lg().bg(c(th.base)).border_1().border_color(c(th.accent)).text_size(px(12.)).text_color(c(th.text)).child(self.name.clone())
+    }
+}
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Edge { Left, Right, Top, Bottom }
+
 struct Tab { layout: Node<Entity<TermView>>, focused: Entity<TermView> }
 
 pub(crate) enum Overlay { None, Settings(Entity<SettingsView>), Palette(Entity<Palette>), Host(Entity<HostDialog>), Audit, Sftp, Port, Ai, Chat, HostTools(Entity<host_tools_view::HostToolsView>) }
@@ -97,6 +118,9 @@ pub(crate) struct Root {
     bg_seen: Option<gpui::WindowBackgroundAppearance>,
     ui_size_seen: f32,
     collapsed: HashSet<String>,
+    /// OS id per SSH target label from a one-shot probe (sidebar badge).
+    host_os: Arc<Mutex<HashMap<String, String>>>,
+    os_probing: HashSet<String>,
     sidebar_visible: bool,
     audit: Arc<AuditLog>,
     pub(crate) audit_verify: Option<Result<usize, (usize, String)>>,
@@ -367,6 +391,49 @@ impl Root {
         }
         self.focus_active(window, cx);
         cx.notify();
+    }
+    /// Move tab `src` into the active tab as a split at `edge` of `target`.
+    fn drop_tab(&mut self, src: usize, target: Entity<TermView>, edge: Edge, window: &mut Window, cx: &mut Context<Self>) {
+        if src == self.active || src >= self.tabs.len() { return; }
+        let moved = self.tabs.remove(src);
+        if src < self.active { self.active -= 1; }
+        let (dir, before) = match edge { Edge::Left => (Dir::Vertical, true), Edge::Right => (Dir::Vertical, false), Edge::Top => (Dir::Horizontal, true), Edge::Bottom => (Dir::Horizontal, false) };
+        let focus = moved.focused.clone();
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            if tab.layout.insert_at(&target, moved.layout, dir, before) { tab.focused = focus; }
+        }
+        self.log("layout.tab_drop", format!("edge={edge:?}"));
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+    /// Move a config host into `group` ("" = ungrouped) and save.
+    fn move_host_to_group(&mut self, name: &str, group: &str, cx: &mut Context<Self>) {
+        let g = ssh_term_proto::outline::normalize(group);
+        let r = config::update(|s| if let Some(h) = s.hosts.iter_mut().find(|h| h.name == name) { h.group = (!g.is_empty()).then(|| g.clone()); });
+        if let Some(e) = r { self.toast(e, cx); }
+        self.log("hosts.move", format!("host={name} group={g:?}"));
+        cx.notify();
+    }
+    /// Probe the OS of connected SSH panes once per target (read-only `uname`), for the sidebar badge.
+    fn probe_os(&mut self, cx: &mut Context<Self>) {
+        let todo: Vec<SshTarget> = self.tabs.iter().flat_map(|t| t.layout.leaves()).filter_map(|p| {
+            let v = p.read(cx);
+            match &v.spec { Spec::Ssh(t) if v.session.as_ref().is_some_and(|s| s.connected.load(Ordering::Acquire)) => Some(t.clone()), _ => None }
+        }).collect();
+        for tg in todo {
+            let label = tg.label();
+            if !self.os_probing.insert(label.clone()) { continue; }
+            self.log("hosts.os_probe", format!("host={label} command={:?}", ssh_term_proto::outline::PROBE));
+            let (map, p) = (self.host_os.clone(), self.prompts.clone());
+            let ent = cx.entity().downgrade();
+            let (tx, rx) = flume::bounded::<()>(1);
+            self.rt.spawn(async move {
+                let r = async { let (c, _) = ssh::connect_shared(&tg, &p).await?; c.exec(ssh_term_proto::outline::PROBE, std::time::Duration::from_secs(10)).await }.await;
+                if let Ok((_, o)) = r { if let Some(os) = ssh_term_proto::outline::os_from_probe(&String::from_utf8_lossy(&o)) { map.lock().unwrap().insert(label, os); } }
+                let _ = tx.send(());
+            });
+            cx.spawn(async move |_, cx| { let _ = rx.recv_async().await; let _ = ent.update(cx, |_, cx| cx.notify()); }).detach();
+        }
     }
     /// A pane is closed by the user: stop its backend (a daemon pane is killed in the daemon too).
     fn end_pane(&self, v: &Entity<TermView>, cx: &App) {
@@ -668,6 +735,8 @@ impl Root {
 
         // groups: (group name, entries)
         struct E { name: String, detail: String, spec: Spec, letter: &'static str, prod: bool, edit: Option<HostEntry>, label: String }
+        let ungrouped = t("ui.ungrouped").to_string();
+        let mut nested_paths: Vec<String> = vec![];
         let mut groups: Vec<(String, Vec<E>)> = vec![];
         let mut push = |g: &str, e: E| {
             if !q.is_empty() && !format!("{} {}", e.name, e.detail).to_lowercase().contains(&q) { return; }
@@ -679,7 +748,9 @@ impl Root {
             push(t("ui.quick_connect"), E { name: dt.label(), detail: t("ui.ssh_host_environment_variable").into(), label: dt.label(), spec: Spec::Ssh(dt), letter: "S", prod: false, edit: None });
         }
         for (h, t) in self.host_targets() {
-            let g = if h.source == "config" { h.group.clone().unwrap_or_else(|| ssh_term_proto::i18n::t("ui.ungrouped").into()) } else { "~/.ssh/config".into() };
+            let g = if h.source == "config" {
+                match h.group.as_deref().map(ssh_term_proto::outline::normalize).filter(|g| !g.is_empty()) { Some(g) => { nested_paths.push(g.clone()); format!("\u{1}{g}") } None => ungrouped.clone() }
+            } else { "~/.ssh/config".into() };
             let edit = (h.source == "config").then(|| h.clone());
             push(&g, E { name: h.name.clone(), detail: t.label(), label: t.label(), spec: Spec::Ssh(t), letter: "S", prod: h.production, edit });
         }
@@ -699,30 +770,62 @@ impl Root {
 
         let mut list = div().id("host-list").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().pb_2();
         let mut idx = 0usize;
-        for (gname, entries) in groups {
+        // section order: quick connect, nested config groups (a/b/c tree, PRD 3.1), ungrouped, ~/.ssh/config
+        let host_os = self.host_os.lock().unwrap().clone();
+        let mut groups: HashMap<String, Vec<E>> = groups.into_iter().collect();
+        struct Sec { key: String, name: String, depth: usize, drop: Option<String>, count: usize }
+        let mut secs: Vec<Sec> = vec![];
+        let qc = t("ui.quick_connect").to_string();
+        let flat = |k: &str, drop: Option<String>, secs: &mut Vec<Sec>, groups: &HashMap<String, Vec<E>>| if let Some(v) = groups.get(k) { secs.push(Sec { key: k.into(), name: k.into(), depth: 0, drop, count: v.len() }); };
+        flat(&qc, None, &mut secs, &groups);
+        let host_groups: Vec<String> = { let mut v = nested_paths.clone(); if !q.is_empty() { v.retain(|p| groups.contains_key(&format!("\u{1}{p}"))); } v };
+        for r in ssh_term_proto::outline::rows(&host_groups) {
+            let count = ssh_term_proto::outline::count_under(&r.path, &host_groups);
+            secs.push(Sec { key: format!("\u{1}{}", r.path), name: r.name, depth: r.depth, drop: Some(r.path), count });
+        }
+        flat(&ungrouped, Some(String::new()), &mut secs, &groups);
+        flat("~/.ssh/config", None, &mut secs, &groups);
+        let collapsed_set = self.collapsed.clone();
+        for sec in secs {
+            let gname = sec.key.clone();
             let collapsed = self.collapsed.contains(&gname) && q.is_empty();
+            if q.is_empty() && sec.depth > 0 {
+                let path = gname.trim_start_matches('\u{1}').to_string();
+                let parent = path.rsplit_once('/').map(|(p, _)| p.to_string()).unwrap_or_default();
+                if ssh_term_proto::outline::hidden_by(&parent, &|p| collapsed_set.contains(&format!("\u{1}{p}"))) { continue; }
+            }
             let g2 = gname.clone();
-            list = list.child(div().id(SharedString::from(format!("grp-{gname}"))).mx_2().mt_2().px_2().h(px(24.)).flex().items_center().gap_1().cursor_pointer().rounded_md()
+            let mut hdr = div().id(SharedString::from(format!("grp-{gname}"))).mx_2().mt_2().pr_2().pl(px(8. + 12. * sec.depth as f32)).h(px(24.)).flex().items_center().gap_1().cursor_pointer().rounded_md()
                 .hover(|d| d.bg(c(cur().surface0).opacity(0.5)))
                 .on_click(cx.listener(move |this, _, _w, cx| { if !this.collapsed.remove(&g2) { this.collapsed.insert(g2.clone()); } cx.notify(); }))
                 .child(icon(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown }, 12., c(th.overlay0)))
-                .child(div().text_size(px(10.5)).font_weight(FontWeight::MEDIUM).text_color(c(th.overlay0)).child(gname.clone()))
+                .when(sec.drop.is_some() && !sec.key.starts_with(&ungrouped), |d| d.child(icon(IconName::Folder, 11., c(th.overlay0))))
+                .child(div().text_size(px(10.5)).font_weight(FontWeight::MEDIUM).text_color(c(th.overlay0)).child(sec.name.clone()))
                 .child(div().flex_1())
-                .child(div().text_size(px(10.5)).text_color(c(th.overlay0)).child(entries.len().to_string())));
+                .child(div().text_size(px(10.5)).text_color(c(th.overlay0)).child(sec.count.to_string()));
+            if let Some(target) = sec.drop.clone() {
+                hdr = hdr.drag_over::<HostDrag>(|st, _, _, _| st.bg(c(cur().accent).opacity(0.25)))
+                    .on_drop(cx.listener(move |this, d: &HostDrag, _w, cx| this.move_host_to_group(&d.name, &target, cx)));
+            }
+            list = list.child(hdr);
+            let entries = groups.remove(&gname).unwrap_or_default();
             if collapsed { continue; }
             for e in entries {
                 let accent = if matches!(e.spec, Spec::Local) { c(th.info) } else if e.prod { c(th.error) } else { c(th.warning) };
                 let dot = if online(&e.label) { c(th.success) } else { c(th.surface2) };
                 let spec = e.spec.clone();
                 let gid = SharedString::from(format!("host-row-{idx}"));
-                let mut row = div().id(("host", idx)).group(gid.clone()).mx_2().px_2().py(px(5.)).rounded_lg().flex().items_center().gap_3().cursor_pointer()
+                let os = host_os.get(&e.label).map(|s| s.as_str());
+                let mut row = div().id(("host", idx)).group(gid.clone()).mx_2().px_2().pl(px(8. + 12. * sec.depth as f32)).py(px(5.)).rounded_lg().flex().items_center().gap_3().cursor_pointer()
                     .hover(|s| s.bg(c(cur().surface0)))
                     .on_click(cx.listener(move |this, _, w, cx| this.new_tab(spec.clone(), w, cx)))
-                    .child(div().size(px(26.)).rounded_md().flex().items_center().justify_center().bg(accent.opacity(0.18)).text_color(accent).text_size(px(12.)).font_weight(FontWeight::BOLD).child(e.letter))
+                    .child(div().size(px(26.)).rounded_md().flex().items_center().justify_center().bg(accent.opacity(0.18)).text_color(accent).text_size(px(if os.is_some() { 10.5 } else { 12. })).font_weight(FontWeight::BOLD)
+                        .child(os.map(|o| ssh_term_proto::outline::badge(o).0).unwrap_or(e.letter)))
                     .child(div().flex_1().min_w_0().flex().flex_col().overflow_hidden()
                         .child(div().flex().items_center().gap_1().child(div().text_size(px(12.5)).text_color(c(th.text)).child(e.name.clone()))
                             .when(e.prod, |d| d.child(ui::tag(t("ui.prod"), c(th.error)))))
-                        .child(div().text_size(px(10.5)).text_color(c(th.overlay0)).child(e.detail.clone())));
+                        .child(div().text_size(px(10.5)).text_color(c(th.overlay0)).child(match os { Some(o) => format!("{} · {}", e.detail, ssh_term_proto::outline::badge(o).1), None => e.detail.clone() })));
+                if let Some(h) = &e.edit { let d = HostDrag { name: h.name.clone() }; row = row.on_drag(d, |d: &HostDrag, _, _, cx| cx.new(|_| d.clone())); }
                 if let Some(h) = e.edit.clone() {
                     row = row.child(div().id(("host-edit", idx)).size(px(22.)).rounded_md().flex().items_center().justify_center().invisible()
                         .group_hover(gid, |s| s.visible()).hover(|s| s.bg(c(cur().surface1)))
@@ -797,7 +900,25 @@ pub(crate) fn sync_component_theme(th: &Theme, cx: &mut App) {
 impl Root {
     fn render_node(&self, tab: usize, node: &Node<Entity<TermView>>, path: Vec<bool>, th: &Theme, cx: &mut Context<Self>) -> AnyElement {
         match node {
-            Node::Leaf(p) => div().flex_1().size_full().flex().overflow_hidden().child(p.clone()).into_any_element(),
+            Node::Leaf(p) => {
+                let mut d = div().relative().flex_1().size_full().flex().overflow_hidden().child(p.clone());
+                if cx.has_active_drag() && self.tabs.len() > 1 {
+                    // drop zones for a dragged tab: left/right quarter, top/bottom half of the middle (PRD US-03)
+                    for (i, edge) in [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom].into_iter().enumerate() {
+                        let z = div().id(SharedString::from(format!("dz-{tab}-{}-{i}", p.entity_id()))).absolute();
+                        let z = match edge {
+                            Edge::Left => z.top_0().left_0().h_full().w(gpui::relative(0.25)),
+                            Edge::Right => z.top_0().right_0().h_full().w(gpui::relative(0.25)),
+                            Edge::Top => z.top_0().left(gpui::relative(0.25)).w(gpui::relative(0.5)).h(gpui::relative(0.5)),
+                            Edge::Bottom => z.bottom_0().left(gpui::relative(0.25)).w(gpui::relative(0.5)).h(gpui::relative(0.5)),
+                        };
+                        let target = p.clone();
+                        d = d.child(z.drag_over::<TabDrag>(|st, _, _, _| st.bg(c(cur().accent).opacity(0.28)))
+                            .on_drop(cx.listener(move |this, dd: &TabDrag, w, cx| this.drop_tab(dd.idx, target.clone(), edge, w, cx))));
+                    }
+                }
+                d.into_any_element()
+            }
             Node::Split { dir, ratio, a, b } => {
                 let vertical = *dir == Dir::Vertical;
                 let id = SharedString::from(format!("split-{tab}-{}", path.iter().map(|b| if *b { '1' } else { '0' }).collect::<String>()));
@@ -839,6 +960,7 @@ impl Render for Root {
         }
         let th = cur();
         let s = config::get();
+        self.probe_os(cx);
         // appearance.opacity: transparent window background, terminal area drawn with alpha
         let op = s.appearance.opacity.clamp(0.5, 1.0);
         let want = if op < 0.999 { gpui::WindowBackgroundAppearance::Transparent } else { gpui::WindowBackgroundAppearance::Opaque };
@@ -866,11 +988,13 @@ impl Render for Root {
                 .hover(|s| s.bg(c(cur().mantle)))
                 .on_click(cx.listener(move |this, _, w, cx| { this.active = i; this.focus_active(w, cx); cx.notify(); }))
                 .child(div().size(px(6.)).rounded_full().bg(if active { c(th.accent) } else { c(th.surface2) }))
-                .child(div().text_size(px(12.)).text_color(if active { c(th.text) } else { c(th.overlay1) }).child(title));
+                .child(div().text_size(px(12.)).text_color(if active { c(th.text) } else { c(th.overlay1) }).child(title.clone()));
             if let Some((name, st)) = agent {
                 let col = state_color(st, &th);
                 tabel = tabel.child(div().px(px(6.)).rounded_md().bg(col.opacity(0.18)).text_color(col).text_size(px(11.)).child(format!("● {name} {}", st.label())));
             }
+            let drag = TabDrag { idx: i, title: title.clone() };
+            tabel = tabel.on_drag(drag, |d: &TabDrag, _, _, cx| cx.new(|_| d.clone()));
             tabel = tabel.child(div().id(("close", i)).size(px(20.)).rounded_md().flex().items_center().justify_center()
                 .hover(|s| s.bg(c(cur().surface1)))
                 .on_click(cx.listener(move |this, _, w, cx| {
@@ -1104,7 +1228,7 @@ fn main() {
                     let mut root = Root {
                         rt, default_target, tabs: vec![], active: 0, themes, histories: HashMap::new(),
                         manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], deny_reason: None, policy_port: None, overlay: Overlay::None, sftp_views: HashMap::new(), sftp_current: None, port_view: None, quit_confirm: false, quit_ok: false, chat_view: None,
-                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., collapsed: HashSet::new(), sidebar_visible: true, audit, audit_verify: None, audit_filter: Default::default(),
+                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., collapsed: HashSet::new(), host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: true, audit, audit_verify: None, audit_filter: Default::default(),
                         settings_dirty: vec![], toast: None, toast_seq: 0, _subs: vec![],
                     };
                     root.apply_theme(window, cx);

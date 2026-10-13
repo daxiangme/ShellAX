@@ -50,6 +50,20 @@ impl<T: Clone + PartialEq> Node<T> {
             Node::Split { a, b, .. } => a.split(target, new.clone(), dir) || b.split(target, new, dir),
         }
     }
+    /// Replace leaf `target` with a split of (target, `sub`); `before` puts `sub` first (left/top).
+    /// Used when a whole tab is dragged onto an edge of a pane.
+    pub fn insert_at(&mut self, target: &T, sub: Node<T>, dir: Dir, before: bool) -> bool {
+        match self {
+            Node::Leaf(t) if t == target => {
+                let old = Node::Leaf(t.clone());
+                let (a, b) = if before { (sub, old) } else { (old, sub) };
+                *self = Node::Split { dir, ratio: 0.5, a: Box::new(a), b: Box::new(b) };
+                true
+            }
+            Node::Leaf(_) => false,
+            Node::Split { a, b, .. } => if a.leaves().contains(target) { a.insert_at(target, sub, dir, before) } else { b.insert_at(target, sub, dir, before) },
+        }
+    }
     /// Set the ratio of the split at `path` (false = first child, true = second). Clamped.
     pub fn set_ratio(&mut self, path: &[bool], r: f32) -> bool {
         match (self, path.split_first()) {
@@ -79,6 +93,16 @@ mod tests {
         assert_eq!(auto_direction(40, 200), Some(Dir::Vertical));
         assert_eq!(auto_direction(50, 100), Some(Dir::Horizontal));
         assert_eq!(auto_direction(15, 50), None);
+    }
+    #[test]
+    fn insert_subtree_at_edges() {
+        let mut n = Node::Leaf(1);
+        let mut sub = Node::Leaf(5); sub.split(&5, 6, Dir::Horizontal);
+        assert!(n.insert_at(&1, sub, Dir::Vertical, true));
+        assert_eq!(n.leaves(), vec![5, 6, 1]);
+        assert!(n.insert_at(&6, Node::Leaf(7), Dir::Horizontal, false));
+        assert_eq!(n.leaves(), vec![5, 6, 7, 1]);
+        assert!(!n.insert_at(&9, Node::Leaf(8), Dir::Vertical, false));
     }
     #[test]
     fn split_and_remove() {
