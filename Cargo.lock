@@ -7303,6 +7303,7 @@ dependencies = [
  "gpui-kit-assets",
  "gpui-pre",
  "gpui-pre-platform",
+ "image",
  "keyring",
  "ksni",
  "libc",

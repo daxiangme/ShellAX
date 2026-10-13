@@ -108,6 +108,19 @@ pub struct GridLayer {
     session: Option<Arc<Session>>,
     st: Rc<RefCell<PaintState>>,
     cache: Rc<RefCell<RowCache>>,
+    /// Decoded inline images by placement id.
+    images: Rc<RefCell<std::collections::HashMap<u64, Option<Arc<gpui::RenderImage>>>>>,
+}
+
+/// Inline image → gpui frame (BGRA).
+fn render_image(img: &ssh_term_proto::graphics::Image) -> Option<Arc<gpui::RenderImage>> {
+    use ssh_term_proto::graphics::Pixels as P;
+    let mut rgba = match &img.pixels {
+        P::Rgba { w, h, data } => image::RgbaImage::from_raw(*w, *h, data.clone())?,
+        P::Png(b) => image::load_from_memory_with_format(b, image::ImageFormat::Png).ok()?.to_rgba8(),
+    };
+    for p in rgba.pixels_mut() { p.0.swap(0, 2); }
+    Some(Arc::new(gpui::RenderImage::new(vec![image::Frame::new(rgba)])))
 }
 
 /// One char per column (wide-char spacers become spaces) so string offsets equal columns.
@@ -124,6 +137,7 @@ impl Render for GridLayer {
         let st = self.st.clone();
         let st2 = self.st.clone();
         let cache = self.cache.clone();
+        let images = self.images.clone();
         let th = cur();
         canvas(
             move |bounds, window, _cx| {
@@ -136,7 +150,7 @@ impl Render for GridLayer {
                 s.origin = bounds.origin + point(px(PAD), px(PAD));
                 let cols = ((f32::from(bounds.size.width) - 2.0 * PAD - SCROLLBAR_W) / cw).floor().max(10.0) as usize;
                 let rows = ((f32::from(bounds.size.height) - 2.0 * PAD) / line_h()).floor().max(3.0) as usize;
-                if let Some(s) = &session { s.resize(Size { cols, rows }); }
+                if let Some(s) = &session { s.resize(Size { cols, rows }); *s.cell_px.lock().unwrap() = (cw * window.scale_factor(), line_h() * window.scale_factor()); }
                 session
             },
             move |bounds, session, window, cx| {
@@ -185,6 +199,21 @@ impl Render for GridLayer {
                         let _ = t.paint(point(origin.x + px(*col as f32 * cw + (2.0 * cw - w) / 2.0), y), px(lh), TextAlign::Left, None, window, cx);
                     }
                     for &(col, ch, color) in &row.boxes { paint_box(window, ch, origin.x + px(col as f32 * cw), origin.x + px((col + 1) as f32 * cw), y, lh, color); }
+                }
+                // Inline Sixel/Kitty images at their anchored rows (natural pixel size).
+                let placed = s.images.lock().unwrap().clone();
+                if !placed.is_empty() {
+                    let hist_now = s.term.lock().unwrap().grid().history_size() as i64;
+                    let mut cache = images.borrow_mut();
+                    let sf = window.scale_factor();
+                    for p in &placed {
+                        let line = p.row - hist_now + offset as i64;
+                        if line + p.rows as i64 <= 0 || line >= nrows as i64 { continue; }
+                        let Some(ri) = cache.entry(p.id).or_insert_with(|| render_image(&p.image)).clone() else { continue };
+                        let (w, h) = p.image.size();
+                        let ib = Bounds::new(point(origin.x + px(p.col as f32 * cw), origin.y + px(line as f32 * lh)), size(px(w as f32 / sf), px(h as f32 / sf)));
+                        let _ = window.paint_image(bounds, ib, gpui::Corners::default(), ri, 0, false);
+                    }
                 }
                 // scrollbar (only when there is scrollback)
                 if history > 0 {
@@ -476,7 +505,7 @@ pub struct SearchBar { pub query: String, pub cur: Option<(BPoint, BPoint)>, pub
 #[derive(Clone, Debug, PartialEq)]
 pub struct StepOutput { pub cmd: String, pub exit: Option<i32>, pub output: String, pub withheld: bool }
 
-pub enum TermEvent { Explain, Agent(String, AgentState), LongDone(String, u64, i32), Audit(&'static str, String) }
+pub enum TermEvent { Keyword(String, String), Explain, Agent(String, AgentState), LongDone(String, u64, i32), Audit(&'static str, String) }
 
 /// IME support (PRD 3.3: IME must work for agents too). Committed text goes to the PTY like typing;
 /// composition text is only drawn (never sent) until the IME commits it.
@@ -502,7 +531,7 @@ impl gpui::EntityInputHandler for TermView {
     fn unmark_text(&mut self, _w: &mut Window, cx: &mut Context<Self>) { self.st.borrow_mut().preedit = None; self.cursor.update(cx, |_, cx| cx.notify()); }
     fn replace_text_in_range(&mut self, _r: Option<std::ops::Range<usize>>, text: &str, _w: &mut Window, cx: &mut Context<Self>) {
         self.st.borrow_mut().preedit = None;
-        if let Some(s) = self.session.clone() { if !text.is_empty() { self.tracker.key(Key::Text(text)); s.write(text.as_bytes().to_vec()); self.scroll_to_bottom(cx); } }
+        if let Some(s) = self.session.clone() { if !text.is_empty() { self.tracker.key(Key::Text(text)); fanout(&s, text.as_bytes().to_vec()); self.scroll_to_bottom(cx); } }
         self.cursor.update(cx, |_, cx| cx.notify());
     }
     fn replace_and_mark_text_in_range(&mut self, _r: Option<std::ops::Range<usize>>, text: &str, _sel: Option<std::ops::Range<usize>>, _w: &mut Window, cx: &mut Context<Self>) {
@@ -525,8 +554,12 @@ impl TermView {
                manifests: Arc<Vec<Manifest>>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (session, error) = match session { Ok(s) => (Some(s), None), Err(e) => (None, Some(format!("{e:#}"))) };
         let st = Rc::new(RefCell::new(PaintState { cell_w: 8.0, blink_on: true, ..Default::default() }));
-        let grid = cx.new(|_| GridLayer { session: session.clone(), st: st.clone(), cache: Default::default() });
+        let grid = cx.new(|_| GridLayer { session: session.clone(), st: st.clone(), cache: Default::default(), images: Default::default() });
         let cursor = cx.new(|_| CursorLayer { session: session.clone(), st: st.clone() });
+        if let Some(s) = session.clone() {
+            let rules: Vec<(String, String)> = config::get().notify.keywords.iter().filter(|k| !k.pattern.is_empty()).map(|k| (k.pattern.clone(), k.title.clone())).collect();
+            if !rules.is_empty() { *s.notifier.lock().unwrap() = Some(ssh_term_proto::notify_rules::Notifier::new(rules)); }
+        }
         if let Some(s) = session.clone() {
             // event-driven: wake only when the parser has new content; coalesce to <= ~120 Hz
             cx.spawn(async move |this, cx| {
@@ -630,6 +663,8 @@ impl TermView {
         if let Some(s) = &self.session {
             if let Some(seed) = s.history_seed.lock().unwrap().take() { if config::get().suggest.remote_history { self.history.lock().unwrap().extend_from_bash_history(&seed); } }
             if s.exited.load(Ordering::Acquire) || s.conn_error.lock().unwrap().is_some() { cx.notify(); }
+            let fired: Vec<_> = std::mem::take(&mut *s.notices.lock().unwrap());
+            for (title, line) in fired { cx.emit(TermEvent::Keyword(title, line)); }
         }
         if let Some(s) = self.session.clone() { self.handle_osc52(&s, cx); }
         if let Some(s) = &self.session {
@@ -889,7 +924,7 @@ impl TermView {
         let bytes = paste_bytes(&text, self.mode().contains(TermMode::BRACKETED_PASTE));
         self.tracker.key(Key::Other); // pasted text can't be tracked reliably
         self.scroll_to_bottom(cx);
-        s.write(bytes);
+        fanout(&s, bytes);
     }
 
     // ---------------- keyboard
@@ -972,7 +1007,7 @@ impl TermView {
         }
         if self.st.borrow().sel.is_some() { self.st.borrow_mut().sel = None; self.grid.update(cx, |_, cx| cx.notify()); }
         self.scroll_to_bottom(cx);
-        s.write(bytes);
+        fanout(&s, bytes);
         cx.stop_propagation();
     }
 
@@ -1528,6 +1563,18 @@ pub fn key_to_bytes(k: &gpui::Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
     Some(out)
 }
 
+// ---------------- broadcast input (P2): one keystroke stream to every pane in the group
+static BROADCAST: std::sync::Mutex<Vec<std::sync::Weak<Session>>> = std::sync::Mutex::new(Vec::new());
+/// Replace the broadcast group (empty = off).
+pub fn set_broadcast(members: &[Arc<Session>]) { *BROADCAST.lock().unwrap() = members.iter().map(Arc::downgrade).collect(); }
+pub fn broadcast_count() -> usize { BROADCAST.lock().unwrap().iter().filter(|w| w.strong_count() > 0).count() }
+pub fn in_broadcast(s: &Arc<Session>) -> bool { BROADCAST.lock().unwrap().iter().any(|w| std::ptr::eq(w.as_ptr(), Arc::as_ptr(s))) }
+/// Write user input: to every live member when `s` is broadcasting, else to `s` only.
+fn fanout(s: &Arc<Session>, bytes: Vec<u8>) {
+    let members: Vec<Arc<Session>> = { let g = BROADCAST.lock().unwrap(); if !g.iter().any(|w| std::ptr::eq(w.as_ptr(), Arc::as_ptr(s))) { drop(g); return s.write(bytes); } g.iter().filter_map(|w| w.upgrade()).collect() };
+    for m in members { if !m.exited.load(Ordering::Acquire) { m.write(bytes.clone()); } }
+}
+
 impl Render for TermView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
@@ -1535,6 +1582,17 @@ impl Render for TermView {
         let mut body = div().flex_1().size_full().relative()
             .child(self.grid.clone().cached(StyleRefinement::default().size_full()))
             .child(div().absolute().top_0().left_0().size_full().child(self.cursor.clone()));
+        if let Some(sess) = &self.session {
+            let rec = sess.is_recording();
+            let bc = in_broadcast(sess);
+            if bc || rec {
+                let mut bar = div().absolute().top_0().left_0().right_0().h(px(22.)).px_2().flex().items_center().gap_3().text_size(px(11.5)).font_weight(FontWeight::SEMIBOLD);
+                if bc { bar = bar.bg(c(th.error).opacity(0.92)).text_color(c(th.base)).child(tf("bc.banner", &[("n", &broadcast_count())])); }
+                if rec { bar = bar.child(div().text_color(if bc { c(th.base) } else { c(th.error) }).child(t("rec.indicator"))); }
+                body = body.child(bar);
+                if bc { body = body.child(div().absolute().top_0().left_0().size_full().border_2().border_color(c(th.error))); }
+            }
+        }
         if let Some(e) = &self.error {
             body = body.child(div().absolute().top(px(16.)).left(px(16.)).right(px(16.)).p_3().rounded_md()
                 .bg(c(th.mantle)).border_1().border_color(c(th.error)).text_color(c(th.error)).text_sm().child(tf("term.connect_failed", &[("e", &e)])));

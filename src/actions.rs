@@ -9,6 +9,7 @@ pub enum Action {
     OpenSftp, OpenPortForward, OpenHostTools, OpenAi, AiCommand, OpenAudit, OpenAbout, ClearHistory, ToggleSidebar,
     SettingsPermissions, SettingsAppearance, SettingsTerminal, SettingsSsh, SettingsKeys,
     LaunchAgent1, LaunchAgent2, LaunchAgent3,
+    ToggleBroadcast, ToggleRecording, PlayRecording, SnapshotLayout, RollbackLayout, QuickStart,
 }
 
 pub struct Info { pub id: &'static str, pub label: &'static str, pub group: &'static str, pub key: &'static str, pub icon: IconName }
@@ -21,6 +22,7 @@ impl Action {
         Action::OpenAi, Action::AiCommand, Action::OpenAudit, Action::ClearHistory,
         Action::SettingsPermissions, Action::SettingsAppearance, Action::SettingsTerminal, Action::SettingsSsh, Action::SettingsKeys,
         Action::LaunchAgent1, Action::LaunchAgent2, Action::LaunchAgent3,
+        Action::ToggleBroadcast, Action::ToggleRecording, Action::PlayRecording, Action::SnapshotLayout, Action::RollbackLayout, Action::QuickStart,
     ];
     pub fn info(self) -> Info {
         use IconName as I;
@@ -59,6 +61,12 @@ impl Action {
             Action::LaunchAgent1 => i("launch_agent_1", t("ui.launch_agent_1"), t("ui.agents_group"), "ctrl-alt-1", I::Bot),
             Action::LaunchAgent2 => i("launch_agent_2", t("ui.launch_agent_2"), t("ui.agents_group"), "ctrl-alt-2", I::Bot),
             Action::LaunchAgent3 => i("launch_agent_3", t("ui.launch_agent_3"), t("ui.agents_group"), "ctrl-alt-3", I::Bot),
+            Action::ToggleBroadcast => i("broadcast", t("bc.action"), t("ui.terminal"), "ctrl-shift-b", I::Radio),
+            Action::ToggleRecording => i("record", t("rec.action"), t("ui.terminal"), "ctrl-shift-r", I::CircleDot),
+            Action::PlayRecording => i("play_recording", t("rec.play_action"), t("ui.terminal"), "", I::Play),
+            Action::SnapshotLayout => i("layout_snapshot", t("snap.action"), t("ui.terminal"), "", I::Camera),
+            Action::RollbackLayout => i("layout_rollback", t("snap.rollback_action"), t("ui.terminal"), "", I::RotateCcw),
+            Action::QuickStart => i("quick_start", t("qs.action"), t("ui.terminal"), "ctrl-shift-o", I::FolderOpen),
         }
     }
     /// Effective binding (user override from settings.keys, else default; "" = unbound).

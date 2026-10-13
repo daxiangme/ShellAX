@@ -206,13 +206,29 @@ impl Default for SessionCfg { fn default() -> Self { Self { persistent: s_off(),
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
-pub struct Notify { pub desktop: bool, pub agent_blocked: bool, pub long_command_secs: u64, pub sound: bool }
-impl Default for Notify { fn default() -> Self { Self { desktop: t(), agent_blocked: t(), long_command_secs: u_10(), sound: false } } }
+pub struct Notify { pub desktop: bool, pub agent_blocked: bool, pub long_command_secs: u64, pub sound: bool,
+    /// Keyword-triggered notifications: regex matched against each output line (rate-limited 10s per rule).
+    pub keywords: Vec<KeywordNotify> }
+impl Default for Notify { fn default() -> Self { Self { desktop: t(), agent_blocked: t(), long_command_secs: u_10(), sound: false, keywords: default_keywords() } } }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct KeywordNotify { pub pattern: String, pub title: String }
+fn default_keywords() -> Vec<KeywordNotify> {
+    vec![KeywordNotify { pattern: r"(?i)\b(build|deploy|deployment) (failed|succeeded|finished|done)\b".into(), title: "Build/Deploy".into() },
+         KeywordNotify { pattern: r"(?i)\b(out of memory|segmentation fault|kernel panic)\b".into(), title: "Crash".into() }]
+}
+/// Recording (asciicast v2).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Recording { pub redact: bool, pub dir: String }
+impl Default for Recording { fn default() -> Self { Self { redact: true, dir: String::new() } } }
+
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
 pub struct Settings {
     pub general: General,
+    pub recording: Recording,
     pub appearance: Appearance,
     pub font: Font,
     pub terminal: Terminal,

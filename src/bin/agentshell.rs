@@ -31,7 +31,7 @@ fn data_dir() -> PathBuf {
 fn home() -> PathBuf { PathBuf::from(std::env::var("HOME").unwrap_or_default()) }
 
 fn usage() -> ! {
-    eprintln!("usage:\n  agentshell status\n  agentshell check [--host H] [--principal P] -- <command…>\n  agentshell hook <claude|codex|grok> [event]\n  agentshell install <claude|codex|grok|all> [--uninstall] [--dry-run] [--home DIR]\n  agentshell serve [--bind ADDR]\n  agentshell hosts [--json]\n  agentshell exec <host> [--timeout S] -- <command…>\n  agentshell upload <host> <local> <remote>\n  agentshell download <host> <remote> <local>");
+    eprintln!("usage:\n  agentshell status\n  agentshell check [--host H] [--principal P] -- <command…>\n  agentshell hook <claude|codex|grok> [event]\n  agentshell install <claude|codex|grok|all> [--uninstall] [--dry-run] [--home DIR]\n  agentshell serve [--bind ADDR]\n  agentshell hosts [--json]\n  agentshell exec <host> [--timeout S] -- <command…>\n  agentshell upload <host> <local> <remote>\n  agentshell download <host> <remote> <local>\n  agentshell play <file.cast> [--speed N] [--idle S]");
     std::process::exit(64)
 }
 
@@ -61,6 +61,7 @@ fn main() {
         "daemon" => { let sock = args.first().map(PathBuf::from).unwrap_or_else(|| ssh_term_proto::daemon::socket_path(&data_dir())); if let Err(e) = ssh_term_proto::daemon::serve(&sock) { eprintln!("agentshell daemon: {e:#}"); std::process::exit(1) } }
         "serve" => serve(args, settings),
         "hosts" | "exec" | "upload" | "download" => remote(&cmd, args),
+        "play" => std::process::exit(play(args)),
         "-h" | "--help" | "help" => usage(),
         _ => usage(),
     }
@@ -221,4 +222,27 @@ fn remote(cmd: &str, mut args: Vec<String>) {
         std::process::exit(v["exit"].as_i64().map(|x| x as i32).unwrap_or(255));
     }
     println!("{} bytes", v["bytes"]);
+}
+
+/// Replay an asciicast v2 file to stdout with its timing (idle gaps capped).
+fn play(args: Vec<String>) -> i32 {
+    let mut file = None; let (mut speed, mut idle) = (1.0f64, 2.0f64);
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() { "--speed" => speed = it.next().and_then(|v| v.parse().ok()).unwrap_or(1.0f64).max(0.01), "--idle" => idle = it.next().and_then(|v| v.parse().ok()).unwrap_or(2.0), _ => file = Some(a) }
+    }
+    let Some(f) = file else { usage() };
+    let cast = match std::fs::read_to_string(&f).map_err(anyhow::Error::from).and_then(|t| ssh_term_proto::asciicast::parse(&t)) { Ok(c) => c, Err(e) => { eprintln!("play: {e:#}"); return 1; } };
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    let start = std::time::Instant::now(); let mut i = 0;
+    while i < cast.events.len() {
+        let next = cast.compressed_time(i, idle) / speed;
+        let el = start.elapsed().as_secs_f64();
+        if next > el { std::thread::sleep(std::time::Duration::from_secs_f64(next - el)); }
+        let (s, j) = cast.due(i, start.elapsed().as_secs_f64() * speed, idle);
+        let _ = out.write_all(s.as_bytes()); let _ = out.flush(); i = j.max(i + 1);
+    }
+    let _ = writeln!(out, "\r\n\x1b[2m[playback finished: {}]\x1b[0m", cast.title);
+    0
 }

@@ -91,6 +91,9 @@ impl Render for HostDrag {
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Edge { Left, Right, Top, Bottom }
 
+#[derive(Clone)]
+enum Modal { Broadcast(Vec<String>), Snapshots, Recordings, QuickStart { dir: String } }
+
 struct Tab { layout: Node<Entity<TermView>>, focused: Entity<TermView> }
 
 pub(crate) enum Overlay { None, Settings(Entity<SettingsView>), Palette(Entity<Palette>), Host(Entity<HostDialog>), Audit, Sftp, Port, Ai, Chat, HostTools(Entity<host_tools_view::HostToolsView>) }
@@ -132,6 +135,8 @@ pub(crate) struct Root {
     pub(crate) port_view: Option<Entity<port_view::PortView>>,
     pub(crate) chat_view: Option<Entity<chat_view::ChatView>>,
     quit_confirm: bool,
+    /// Generic confirmation / picker modal (broadcast prod warning, snapshots, recordings, quick start).
+    modal: Option<Modal>,
     quit_ok: bool,
     pub(crate) sftp_current: Option<Entity<sftp_view::SftpView>>,
     _subs: Vec<gpui::Subscription>,
@@ -207,6 +212,12 @@ impl Root {
                     return;
                 }
                 termview::TermEvent::Audit(kind, detail) => { this.log(kind, detail); return; }
+                termview::TermEvent::Keyword(title, line) => {
+                    this.log("notify.keyword", format!("rule={title:?} line={:?}", ssh_term_proto::ai::redact(&line).0));
+                    this.notify_kind(&format!("{title}: {line}"), false, cx);
+                    this.toast(format!("🔔 {title}: {line}"), cx);
+                    return;
+                }
                 termview::TermEvent::Explain => {}
             }
             let fc = pane.update(cx, |p, cx| { let f = p.failure_context(); p.failed = None; cx.notify(); f });
@@ -379,6 +390,188 @@ impl Root {
             }
         }).detach();
     }
+    // ---- broadcast input (P2)
+    fn toggle_broadcast(&mut self, confirmed: bool, cx: &mut Context<Self>) {
+        use ssh_term_proto::broadcast::{start, Start, Target};
+        if termview::broadcast_count() > 0 && !confirmed {
+            termview::set_broadcast(&[]); self.log("broadcast.stop", "user"); self.toast(t("bc.stopped").into(), cx); self.refresh_all(cx); return;
+        }
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        let panes: Vec<_> = tab.layout.leaves().into_iter().filter_map(|v| { let r = v.read(cx); r.session.clone().map(|s| (s, r.spec.clone(), r.audit_host())) }).collect();
+        let targets: Vec<Target> = panes.iter().enumerate().map(|(i, (_, sp, h))| Target { id: i as u64, label: h.clone(), production: matches!(sp, Spec::Ssh(t) if t.production) }).collect();
+        match start(&targets, confirmed) {
+            Start::TooFew => self.toast(t("bc.too_few").into(), cx),
+            Start::NeedConfirm(prod) => { self.log("broadcast.confirm", format!("prod={prod:?}")); self.modal = Some(Modal::Broadcast(prod)); }
+            Start::Ok(ids) => {
+                let members: Vec<_> = ids.iter().map(|&i| panes[i as usize].0.clone()).collect();
+                termview::set_broadcast(&members);
+                self.log("broadcast.start", format!("panes={} hosts={:?} prod_confirmed={confirmed}", members.len(), targets.iter().map(|t| &t.label).collect::<Vec<_>>()));
+                self.modal = None; self.refresh_all(cx);
+            }
+        }
+        cx.notify();
+    }
+    // ---- asciicast recording (P2)
+    fn recordings_dir() -> std::path::PathBuf {
+        let d = config::get().recording.dir.clone();
+        if d.trim().is_empty() { data_dir().join("recordings") } else { ssh_term_proto::hosts::expand_tilde(&d) }
+    }
+    fn toggle_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(p) = self.focused_pane(window, cx) else { return };
+        let (sess, host) = { let v = p.read(cx); (v.session.clone(), v.audit_host()) };
+        let Some(s) = sess else { return };
+        if s.stop_recording() { self.log("record.stop", format!("host={host}")); self.toast(t("rec.stopped").into(), cx); }
+        else {
+            let safe: String = host.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' }).collect();
+            let path = Self::recordings_dir().join(format!("{}-{safe}.cast", chrono::Local::now().format("%Y%m%d-%H%M%S")));
+            let redact = config::get().recording.redact;
+            match s.start_recording(&path, &host, redact) {
+                Ok(()) => { self.log("record.start", format!("host={host} file={} redact={redact}", path.display())); self.toast(tf("rec.started", &[("f", &path.display())]), cx); }
+                Err(e) => self.toast(format!("{e}"), cx),
+            }
+        }
+        p.update(cx, |_, cx| cx.notify());
+    }
+    fn list_recordings() -> Vec<std::path::PathBuf> {
+        let mut v: Vec<_> = std::fs::read_dir(Self::recordings_dir()).map(|d| d.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "cast")).collect()).unwrap_or_default();
+        v.sort(); v.reverse(); v.truncate(12); v
+    }
+    /// Replay in a new tab via `agentshell play` (real terminal timing, idle capped at 2s).
+    fn play_recording(&mut self, path: std::path::PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.modal = None;
+        let bin = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("agentshell"))).filter(|p| p.exists()).map(|p| p.display().to_string()).unwrap_or_else(|| "agentshell".into());
+        self.new_tab(Spec::Local, window, cx);
+        let Some(pane) = self.tabs.get(self.active).map(|t| t.focused.clone()) else { return };
+        self.log("record.play", format!("file={}", path.display()));
+        let cmd = format!("clear; '{bin}' play '{}'", path.display().to_string().replace('\'', ""));
+        cx.spawn(async move |_, cx| {
+            for _ in 0..100 {
+                if let Some(s) = pane.update(cx, |v, _| v.session.clone()) { cx.background_executor().timer(std::time::Duration::from_millis(400)).await; s.write(format!("{cmd}\r").into_bytes()); return; }
+                cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
+            }
+        }).detach();
+    }
+    // ---- layout snapshots (P2)
+    fn snapshots_path() -> std::path::PathBuf { data_dir().join("layout-snapshots.json") }
+    fn push_snapshot(&mut self, name: &str, cx: &mut Context<Self>) -> bool {
+        let l = self.snapshot(cx);
+        if l.tabs.is_empty() { return false; }
+        let Ok(v) = serde_json::to_value(&l) else { return false };
+        let mut st = ssh_term_proto::snapshot::Store::load(&Self::snapshots_path());
+        let mut l2 = v.clone(); l2["saved_at"] = serde_json::Value::Null;
+        let pushed = st.snaps.first().map(|f| { let mut a = f.layout.clone(); a["saved_at"] = serde_json::Value::Null; a != l2 }).unwrap_or(true)
+            && st.push(ssh_term_proto::snapshot::Snap { at: chrono::Local::now().timestamp(), name: format!("{name} · {} tabs / {} panes", l.tabs.len(), self.tabs.iter().map(|t| t.layout.leaves().len()).sum::<usize>()), layout: v }, 10);
+        if pushed { let _ = st.save(&Self::snapshots_path()); self.log("layout.snapshot", format!("name={name}")); }
+        pushed
+    }
+    fn rollback_to(&mut self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let st = ssh_term_proto::snapshot::Store::load(&Self::snapshots_path());
+        let Some(snap) = st.snaps.get(idx).cloned() else { return };
+        let Ok(l) = serde_json::from_value::<ssh_term_proto::session_store::LayoutSave>(snap.layout) else { return self.toast("snapshot unreadable".into(), cx) };
+        self.push_snapshot("before-rollback", cx);
+        termview::set_broadcast(&[]);
+        for v in self.tabs.iter().flat_map(|t| t.layout.leaves()).collect::<Vec<_>>() { if v.read(cx).daemon_id.is_none() { self.end_pane(&v, cx); } }
+        self.tabs.clear();
+        self.restore_from(l, window, cx);
+        self.log("layout.rollback", format!("to={:?}", snap.name));
+        self.modal = None;
+    }
+    // ---- quick start: directory + preset layout
+    fn quick_start(&mut self, dir: String, preset: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.modal = None;
+        let pi = || PaneInit { cwd: Some(dir.clone()), ..Default::default() };
+        let leaf = |r: &mut Self, window: &mut Window, cx: &mut Context<Self>| Node::Leaf(r.open_pane_with(Spec::Local, pi(), window, cx));
+        let sp = |dir, a, b| Node::Split { dir, ratio: 0.5, a: Box::new(a), b: Box::new(b) };
+        let layout = match preset {
+            "cols2" => { let a = leaf(self, window, cx); let b = leaf(self, window, cx); sp(Dir::Vertical, a, b) }
+            "main3" => { let a = leaf(self, window, cx); let b = leaf(self, window, cx); let c2 = leaf(self, window, cx); sp(Dir::Vertical, a, sp(Dir::Horizontal, b, c2)) }
+            "grid4" => { let a = leaf(self, window, cx); let b = leaf(self, window, cx); let c2 = leaf(self, window, cx); let d = leaf(self, window, cx); sp(Dir::Horizontal, sp(Dir::Vertical, a, b), sp(Dir::Vertical, c2, d)) }
+            _ => leaf(self, window, cx),
+        };
+        let focused = layout.leaves()[0].clone();
+        self.tabs.push(Tab { layout, focused });
+        self.active = self.tabs.len() - 1;
+        self.log("quickstart.open", format!("dir={dir:?} preset={preset}"));
+        if preset == "agent" {
+            // shell + configured Agent 1 side by side, both in `dir`
+            self.launch_agent(0, window, cx);
+        }
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+    fn render_modal(&mut self, m: Modal, cx: &mut Context<Self>) -> impl IntoElement {
+        let th = theme::cur();
+        let title = |ic, s: String, col| div().flex().items_center().gap_2().child(icon(ic, 16., col)).child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(s));
+        let note = |s: String| div().text_size(px(12.)).text_color(c(th.subtext)).child(s);
+        let row = |id: SharedString, main: String, sub: String| div().id(id).px_3().py_2().rounded_md().cursor_pointer().bg(c(th.surface0)).hover(|d| d.bg(c(th.surface1)))
+            .flex().flex_col().child(div().text_size(px(12.5)).text_color(c(th.text)).child(main)).child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(sub));
+        let cancel = ui::button("modal-cancel", t("ui.cancel"), 0).on_click(cx.listener(|this, _, w, cx| { this.modal = None; this.focus_active(w, cx); cx.notify(); }));
+        let mut card = ui::card(560.).p_5().gap_3();
+        match m {
+            Modal::Broadcast(prod) => {
+                card = card.child(title(IconName::TriangleAlert, t("bc.prod_title").into(), c(th.error)))
+                    .child(note(tf("bc.prod_body", &[("hosts", &prod.join(", "))])))
+                    .child(div().flex().gap_2().justify_end().child(cancel)
+                        .child(ui::button("bc-ok", t("bc.prod_ok"), 2).on_click(cx.listener(|this, _, w, cx| { this.toggle_broadcast(true, cx); this.focus_active(w, cx); }))));
+            }
+            Modal::Snapshots => {
+                let st = ssh_term_proto::snapshot::Store::load(&Self::snapshots_path());
+                card = card.child(title(IconName::RotateCcw, t("snap.title").into(), c(th.accent))).child(note(t("snap.body").into()));
+                if st.snaps.is_empty() { card = card.child(note(t("snap.none").into())); }
+                for (i, sn) in st.snaps.iter().enumerate() {
+                    let when = chrono::DateTime::from_timestamp(sn.at, 0).map(|d| d.with_timezone(&chrono::Local).format("%m-%d %H:%M:%S").to_string()).unwrap_or_default();
+                    card = card.child(row(format!("snap-{i}").into(), sn.name.clone(), when).on_click(cx.listener(move |this, _, w, cx| { this.rollback_to(i, w, cx); cx.notify(); })));
+                }
+                card = card.child(div().flex().gap_2().justify_end()
+                    .child(ui::button("snap-save", t("snap.action"), 1).on_click(cx.listener(|this, _, _w, cx| { if this.push_snapshot("manual", cx) { this.toast(t("snap.saved").into(), cx); } cx.notify(); })))
+                    .child(cancel));
+            }
+            Modal::Recordings => {
+                card = card.child(title(IconName::Play, t("rec.play_action").into(), c(th.accent))).child(note(tf("rec.dir", &[("d", &Self::recordings_dir().display())])));
+                let list = Self::list_recordings();
+                if list.is_empty() { card = card.child(note(t("rec.none").into())); }
+                for (i, p) in list.into_iter().enumerate() {
+                    let sz = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+                    let name = p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+                    card = card.child(row(format!("rec-{i}").into(), name, format!("{} KB", sz.div_ceil(1024))).on_click(cx.listener(move |this, _, w, cx| this.play_recording(p.clone(), w, cx))));
+                }
+                card = card.child(div().flex().justify_end().child(cancel));
+            }
+            Modal::QuickStart { dir } => {
+                card = card.child(title(IconName::FolderOpen, t("qs.action").into(), c(th.accent)));
+                let mut dirs: Vec<String> = vec![dir.clone()];
+                let home = std::env::var("HOME").unwrap_or_default();
+                for d in std::iter::once(home).chain(self.recent_dirs(cx)) { if !d.is_empty() && !dirs.contains(&d) { dirs.push(d); } }
+                let mut dl = div().flex().flex_wrap().gap_1();
+                for (i, d) in dirs.into_iter().take(8).enumerate() {
+                    let sel = d == dir;
+                    dl = dl.child(div().id(SharedString::from(format!("qs-dir-{i}"))).px_2().py(px(3.)).rounded_md().cursor_pointer().text_size(px(11.5))
+                        .bg(if sel { c(th.accent) } else { c(th.surface0) }).text_color(if sel { c(th.base) } else { c(th.text) }).child(d.clone())
+                        .on_click(cx.listener(move |this, _, _w, cx| { this.modal = Some(Modal::QuickStart { dir: d.clone() }); cx.notify(); })));
+                }
+                dl = dl.child(div().id("qs-browse").px_2().py(px(3.)).rounded_md().cursor_pointer().text_size(px(11.5)).bg(c(th.surface1)).text_color(c(th.text)).child(t("qs.browse"))
+                    .on_click(cx.listener(|_this, _, _w, cx| {
+                        let rx = cx.prompt_for_paths(gpui::PathPromptOptions { files: false, directories: true, multiple: false, prompt: None });
+                        cx.spawn(async move |this, cx| { if let Ok(Ok(Some(p))) = rx.await { if let Some(d) = p.first() { let d = d.display().to_string(); let _ = this.update(cx, |this, cx| { this.modal = Some(Modal::QuickStart { dir: d }); cx.notify(); }); } } }).detach();
+                    })));
+                card = card.child(note(t("qs.dir").into())).child(dl).child(note(t("qs.layout").into()));
+                let mut pl = div().flex().flex_wrap().gap_2();
+                for (id, key) in [("single", "qs.single"), ("cols2", "qs.cols2"), ("main3", "qs.main3"), ("grid4", "qs.grid4"), ("agent", "qs.agent")] {
+                    let d = dir.clone();
+                    pl = pl.child(ui::button(SharedString::from(format!("qs-{id}")), t(key), 1).on_click(cx.listener(move |this, _, w, cx| this.quick_start(d.clone(), id, w, cx))));
+                }
+                card = card.child(pl).child(div().flex().justify_end().child(cancel));
+            }
+        }
+        ui::modal(card)
+    }
+    /// Recent local working directories (open panes and layout snapshots).
+    fn recent_dirs(&self, cx: &App) -> Vec<String> {
+        let mut v: Vec<String> = self.tabs.iter().flat_map(|t| t.layout.leaves()).filter_map(|p| p.read(cx).session.as_ref().and_then(|s| s.cwd_probe.lock().unwrap().as_ref().and_then(|f| f()))).collect();
+        let st = ssh_term_proto::snapshot::Store::load(&Self::snapshots_path());
+        for sn in st.snaps { let s = sn.layout.to_string(); for m in regex::Regex::new(r#""cwd":"([^"]+)""#).unwrap().captures_iter(&s) { v.push(m[1].to_string()); } }
+        let mut seen = HashSet::new(); v.retain(|d| seen.insert(d.clone())); v
+    }
     fn close_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(target) = self.focused_pane(window, cx) else { return };
         self.end_pane(&target, cx);
@@ -467,11 +660,20 @@ impl Root {
         let l = self.snapshot(cx);
         if l.tabs.is_empty() { return; }
         if let Err(e) = ssh_term_proto::session_store::save(&data_dir().join("layout.json"), &l) { eprintln!("layout save: {e:#}"); }
+        if let Ok(v) = serde_json::to_value(&l) {
+            let mut st = ssh_term_proto::snapshot::Store::load(&Self::snapshots_path());
+            let same = st.snaps.first().is_some_and(|f| { let (mut a, mut b) = (f.layout.clone(), v.clone()); a["saved_at"] = serde_json::Value::Null; b["saved_at"] = serde_json::Value::Null; a == b });
+            if !same && st.push(ssh_term_proto::snapshot::Snap { at: chrono::Local::now().timestamp(), name: format!("auto · {} tabs", l.tabs.len()), layout: v }, 10) { let _ = st.save(&Self::snapshots_path()); }
+        }
     }
     /// Rebuild tabs from layout.json. Shells start fresh in the saved cwd; nothing is re-run.
     fn restore_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        use ssh_term_proto::session_store::{NodeSave, PaneSave};
         let Some(l) = ssh_term_proto::session_store::load(&data_dir().join("layout.json")) else { return false };
+        if l.tabs.is_empty() { return false; }
+        self.restore_from(l, window, cx)
+    }
+    fn restore_from(&mut self, l: ssh_term_proto::session_store::LayoutSave, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        use ssh_term_proto::session_store::{NodeSave, PaneSave};
         if l.tabs.is_empty() { return false; }
         fn build(r: &mut Root, n: &NodeSave, window: &mut Window, cx: &mut Context<Root>) -> Node<Entity<TermView>> {
             match n {
@@ -693,6 +895,15 @@ impl Root {
             Action::LaunchAgent1 => self.launch_agent(0, window, cx),
             Action::LaunchAgent2 => self.launch_agent(1, window, cx),
             Action::LaunchAgent3 => self.launch_agent(2, window, cx),
+            Action::ToggleBroadcast => self.toggle_broadcast(false, cx),
+            Action::ToggleRecording => self.toggle_recording(window, cx),
+            Action::PlayRecording => self.modal = Some(Modal::Recordings),
+            Action::SnapshotLayout => { if self.push_snapshot("manual", cx) { self.toast(t("snap.saved").into(), cx); } }
+            Action::RollbackLayout => self.modal = Some(Modal::Snapshots),
+            Action::QuickStart => {
+                let dir = self.focused_pane(window, cx).and_then(|p| p.read(cx).session.as_ref().and_then(|s| s.cwd_probe.lock().unwrap().as_ref().and_then(|f| f()))).unwrap_or_else(|| std::env::var("HOME").unwrap_or_default());
+                self.modal = Some(Modal::QuickStart { dir });
+            }
             Action::AiCommand => {
                 if let Some(v) = self.focused_pane(window, cx) { v.update(cx, |v, cx| v.ai_from_line(cx)); }
                 self.focus_active(window, cx);
@@ -1180,6 +1391,7 @@ impl Render for Root {
                         w.remove_window(); cx.quit();
                     }))))));
         }
+        if let Some(m) = self.modal.clone() { root = root.child(self.render_modal(m, cx)); }
         if let Some((msg, _)) = &self.toast {
             root = root.child(div().absolute().bottom(px(40.)).right(px(16.)).max_w(px(460.)).px_4().py_2().rounded_lg().bg(c(th.base)).border_1().border_color(c(th.surface1)).shadow_lg()
                 .flex().items_center().gap_2().text_size(px(12.)).text_color(c(th.text)).child(icon(IconName::Info, 14., c(th.accent))).child(msg.clone()));
@@ -1229,7 +1441,7 @@ fn main() {
                     let audit = audit_log();
                     let mut root = Root {
                         rt, default_target, tabs: vec![], active: 0, themes, histories: HashMap::new(),
-                        manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], deny_reason: None, policy_port: None, overlay: Overlay::None, sftp_views: HashMap::new(), sftp_current: None, port_view: None, quit_confirm: false, quit_ok: false, chat_view: None,
+                        manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], deny_reason: None, policy_port: None, overlay: Overlay::None, sftp_views: HashMap::new(), sftp_current: None, port_view: None, quit_confirm: false, modal: None, quit_ok: false, chat_view: None,
                         host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., collapsed: HashSet::new(), host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: true, audit, audit_verify: None, audit_filter: Default::default(),
                         settings_dirty: vec![], toast: None, toast_seq: 0, _subs: vec![],
                     };
