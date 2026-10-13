@@ -1044,6 +1044,8 @@ impl TermView {
         self.ai = None;
         cx.notify();
     }
+    /// Host name used in audit records ("local" for local panes), matching AGENTSHELL_HOST.
+    pub fn audit_host(&self) -> String { match &self.spec { Spec::Local => "local".into(), Spec::Ssh(t) => t.host.clone() } }
     /// Execute: the permission engine decides (mode + rules); every outcome is audited.
     pub fn ai_execute(&mut self, cx: &mut Context<Self>) {
         let Some(AiCard::Ready { command, .. }) = self.ai.clone() else { return };
@@ -1052,7 +1054,7 @@ impl TermView {
         let prod = cfg.permissions.prod_confirm && matches!(&self.spec, Spec::Ssh(t) if t.production);
         let (eff, reason) = policy::decide_ctx(cfg.permissions.mode, max, &cfg.permissions.rules, "ai", "exec", &command, cfg.permissions.dangerous_confirm, prod);
         let risk = policy::classify(&command);
-        let _ = crate::audit_log().append("ai.exec.decision", "policy", &format!("mode={} risk={} effect={:?} command={command:?} reason={reason}", cfg.permissions.mode.label(), risk.label(), eff));
+        let _ = crate::audit_log().append("ai.exec.decision", "policy", &format!("mode={} host={} risk={} effect={:?} command={command:?} reason={reason:?}", cfg.permissions.mode.label(), self.audit_host(), risk.label(), eff));
         match eff {
             Effect::Allow => self.ai_run(command, "policy", cx),
             Effect::Ask => { self.ai = Some(AiCard::Confirm { command, reason }); cx.notify(); }
@@ -1066,7 +1068,7 @@ impl TermView {
     fn ai_run(&mut self, command: String, approved_by: &str, cx: &mut Context<Self>) {
         let Some(s) = self.session.clone() else { return };
         let one_line = command.replace(['\r', '\n'], " ");
-        let _ = crate::audit_log().append("ai.exec", approved_by, &format!("command={one_line:?}"));
+        let _ = crate::audit_log().append("ai.exec", approved_by, &format!("host={} command={one_line:?}", self.audit_host()));
         self.tracker.key(Key::Text(&one_line));
         self.last_command = Some(one_line.clone());
         s.write(format!("{one_line}\r").into_bytes());
@@ -1100,7 +1102,7 @@ impl TermView {
                     .child(div().px_2().py_1().rounded_md().bg(c(th.bg)).font_family(mono).text_size(px(13.)).text_color(c(th.text)).child(command))
                     .child(div().text_color(c(th.warning)).child(reason)),
                 div().flex().gap_2()
-                    .child(btn("ai-cancel", t("ui.cancel"), 0).on_click(cx.listener(|v, _, _w, cx| { let _ = crate::audit_log().append("ai.exec.rejected", "user", ""); v.ai_cancel(cx) })))
+                    .child(btn("ai-cancel", t("ui.cancel"), 0).on_click(cx.listener(|v, _, _w, cx| { let _ = crate::audit_log().append("ai.exec.rejected", "user", &format!("host={}", v.audit_host())); v.ai_cancel(cx) })))
                     .child(btn("ai-confirm", t("ai.btn_confirm"), 2).on_click(cx.listener(|v, _, _w, cx| v.ai_confirm(cx))))),
             AiCard::Denied { command, reason } => (c(th.error), t("ai.card_denied").to_string(),
                 div().flex().flex_col().gap_1()

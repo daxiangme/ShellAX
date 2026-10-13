@@ -190,7 +190,7 @@ impl Shared {
         let prod = ctx.prod_confirm && !host.is_empty() && ctx.prod_hosts.iter().any(|h| h == host || policy::glob(h, host));
         let risk = if req.action == "exec" { policy::classify(&req.command) } else { Risk::R1 };
         let where_ = if host.is_empty() { "local".to_string() } else { host.to_string() };
-        let _ = self.audit.append("hook.request", principal, &format!("event={} tool={} action={} host={where_} cwd={:?} command={:?}", req.event, req.tool, req.action, req.cwd, req.command));
+        let _ = self.audit.append("hook.request", principal, &format!("event={} tool={} action={} host={where_} session={} cwd={:?} command={:?}", req.event, req.tool, req.action, if req.session.is_empty() { "-" } else { req.session.as_str() }, req.cwd, req.command));
         let (mut eff, mut reason) = if req.action == "tool" {
             // non-shell, non-write tools: only explicit rules decide; otherwise no opinion (allow)
             match policy::evaluate(&ctx.rules, principal, "tool", &req.command) { Some((_, r)) => (r.effect, format!("rule {}", r.id)), None => (Effect::Allow, "not a shell/write tool".into()) }
@@ -202,7 +202,7 @@ impl Shared {
             // "always allow this prefix for this session" — never across a higher risk level
             if let Some(max) = self.session_allow.lock().unwrap().get(&skey) { if risk <= *max {
                 eff = Effect::Allow; reason = format!("{reason} → allowed for this session ({:?})", skey.2);
-                let _ = self.audit.append("hook.approval", "user", &format!("session-rule session={} prefix={:?} command={:?}", skey.1, skey.2, req.command));
+                let _ = self.audit.append("hook.approval", "user", &format!("session-rule host={where_} session={} prefix={:?} command={:?}", skey.1, skey.2, req.command));
             } }
         }
         if eff == Effect::Ask && interactive {
@@ -214,23 +214,23 @@ impl Shared {
                 if tx.send(a).is_ok() {
                     let got = if ctx.timeout_deny { rrx.recv_timeout(ctx.approval_timeout).ok() } else { rrx.recv().ok() };
                     match got {
-                        Some(Answer::Once) => { eff = Effect::Allow; reason = format!("{reason} → approved by user"); let _ = self.audit.append("hook.approval", "user", &format!("id={id} allow session={} command={:?}", skey.1, req.command)); }
+                        Some(Answer::Once) => { eff = Effect::Allow; reason = format!("{reason} → approved by user"); let _ = self.audit.append("hook.approval", "user", &format!("id={id} allow host={where_} session={} command={:?}", skey.1, req.command)); }
                         Some(Answer::Session) => {
                             eff = Effect::Allow; reason = format!("{reason} → approved by user for this session ({:?})", skey.2);
-                            let _ = self.audit.append("hook.approval", "user", &format!("id={id} allow-session session={} prefix={:?} command={:?}", skey.1, skey.2, req.command));
+                            let _ = self.audit.append("hook.approval", "user", &format!("id={id} allow-session host={where_} session={} prefix={:?} command={:?}", skey.1, skey.2, req.command));
                             self.session_allow.lock().unwrap().insert(skey.clone(), risk);
                         }
                         Some(Answer::Deny(why)) => {
                             eff = Effect::Deny;
                             reason = if why.trim().is_empty() { format!("{reason} → denied by user") } else { format!("denied by user: {}", why.trim()) };
-                            let _ = self.audit.append("hook.approval", "user", &format!("id={id} deny session={} feedback={:?} command={:?}", skey.1, why.trim(), req.command));
+                            let _ = self.audit.append("hook.approval", "user", &format!("id={id} deny host={where_} session={} feedback={:?} command={:?}", skey.1, why.trim(), req.command));
                         }
-                        None => { eff = Effect::Deny; reason = format!("{reason} → no answer within {}s, denied", ctx.approval_timeout.as_secs()); let _ = self.audit.append("hook.approval", "policy", &format!("id={id} timeout deny")); }
+                        None => { eff = Effect::Deny; reason = format!("{reason} → no answer within {}s, denied", ctx.approval_timeout.as_secs()); let _ = self.audit.append("hook.approval", "policy", &format!("id={id} timeout deny session={} host={where_}", skey.1)); }
                     }
                 }
             }
         }
-        let _ = self.audit.append("hook.decision", "policy", &format!("principal={principal} risk={} effect={eff:?} reason={reason} command={:?}", risk.label(), req.command));
+        let _ = self.audit.append("hook.decision", "policy", &format!("principal={principal} host={where_} session={} risk={} effect={eff:?} reason={reason:?} command={:?}", skey.1, risk.label(), req.command));
         (eff, risk, reason)
     }
 }

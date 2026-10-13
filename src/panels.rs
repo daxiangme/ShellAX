@@ -27,7 +27,10 @@ impl Root {
     pub(crate) fn audit_panel(&mut self, cx: &mut Context<Root>) -> AnyElement {
         let th = cur();
         let path = config::get().audit_path();
-        let records = audit::read_all(&path);
+        let all = audit::read_all(&path);
+        let (hosts, sessions) = audit::facets(&all);
+        let filter = self.audit_filter.clone();
+        let records: Vec<audit::Record> = filter.apply(&all).into_iter().cloned().collect();
         let mono = SharedString::from(config::get().font.family.clone());
         let mut list = div().id("audit-list").flex_1().min_h_0().overflow_y_scroll().flex().flex_col();
         list = list.child(div().flex().items_center().gap_3().px_4().py(px(6.)).bg(c(th.mantle)).text_size(px(11.)).text_color(c(th.overlay1))
@@ -51,6 +54,7 @@ impl Root {
         };
         let toolbar = div().px_4().py_3().flex().items_center().gap_2().border_b_1().border_color(c(th.surface0))
             .child(div().text_size(px(12.)).text_color(c(th.subtext)).child(tf("panels.audit_total", &[("path", &path.display()), ("n", &records.len())])))
+            .child(div().text_size(px(12.)).text_color(c(th.overlay0)).child(tf("panels.audit_of", &[("n", &all.len())])))
             .child(div().flex_1()).child(verify_el)
             .child(ui::button("audit-verify", t("ui.verify_hash_chain"), 0).on_click(cx.listener(|this, _, _w, cx| {
                 this.audit_verify = Some(audit::verify(&config::get().audit_path()));
@@ -62,7 +66,26 @@ impl Root {
                     .join(format!("agentshell-audit-{}.jsonl", chrono::Local::now().format("%Y%m%d-%H%M%S")));
                 this.toast(match std::fs::copy(&src, &dst) { Ok(_) => tf("panels.exported", &[("path", &dst.display())]), Err(e) => tf("panels.export_failed", &[("e", &e)]) }, cx);
             })));
-        ui::modal(panel_shell(t("ui.audit_log"), IconName::ScrollText, t("ui.append_only_sha_256_hash"), cx).child(toolbar).child(list)).into_any_element()
+        // filter chips: decision / host / session (PRD 6.x audit filtering)
+        let chip = |id: (&'static str, usize), label: String, on: bool| ui::button(gpui::ElementId::from((SharedString::from(id.0), id.1)), label, if on { 1 } else { 3 }).h(px(24.));
+        let mut frow = div().px_4().py_2().flex().flex_wrap().items_center().gap_1().border_b_1().border_color(c(th.surface0)).text_size(px(11.))
+            .child(div().text_color(c(th.overlay1)).pr_1().child(t("panels.filter_decision").to_string()));
+        for (i, (val, key)) in [(None, "panels.filter_all"), (Some("allow"), "panels.filter_allow"), (Some("ask"), "panels.filter_ask"), (Some("deny"), "panels.filter_deny")].into_iter().enumerate() {
+            let on = filter.decision.as_deref() == val;
+            frow = frow.child(chip(("audit-dec", i), t(key).to_string(), on).on_click(cx.listener(move |this, _, _w, cx| { this.audit_filter.decision = val.map(String::from); cx.notify(); })));
+        }
+        for (label, base, vals, is_host) in [(t("panels.filter_host"), "audit-host", hosts, true), (t("panels.filter_session"), "audit-sess", sessions, false)] {
+            if vals.is_empty() { continue; }
+            frow = frow.child(div().w(px(10.))).child(div().text_color(c(th.overlay1)).pr_1().child(label.to_string()));
+            let cur_v = if is_host { filter.host.clone() } else { filter.session.clone() };
+            frow = frow.child(chip((base, 0), t("panels.filter_all").to_string(), cur_v.is_none()).on_click(cx.listener(move |this, _, _w, cx| { if is_host { this.audit_filter.host = None } else { this.audit_filter.session = None }; cx.notify(); })));
+            for (i, v) in vals.into_iter().take(12).enumerate() {
+                let on = cur_v.as_deref() == Some(v.as_str());
+                let shown: String = if v.chars().count() > 18 { format!("{}…", v.chars().take(17).collect::<String>()) } else { v.clone() };
+                frow = frow.child(chip((base, i + 1), shown, on).on_click(cx.listener(move |this, _, _w, cx| { let nv = if on { None } else { Some(v.clone()) }; if is_host { this.audit_filter.host = nv } else { this.audit_filter.session = nv }; cx.notify(); })));
+            }
+        }
+        ui::modal(panel_shell(t("ui.audit_log"), IconName::ScrollText, t("ui.append_only_sha_256_hash"), cx).child(toolbar).child(frow).child(list)).into_any_element()
     }
 
     pub(crate) fn sftp_panel(&mut self, cx: &mut Context<Root>) -> AnyElement {

@@ -51,3 +51,12 @@
 ## 8 整体测试
 - ☑ release 0 警告、clippy 0 警告、cargo test --release 94/94 无跳过（testenv/test.env，新增 sshd3 :2224 keyboard-interactive）、e2e_hooks 7/7；TEST_REPORT.md（通过 55 / 失败 12 / 未能验证 7）；新增截图 approval-card / hostkey / password-prompt / keyboard-interactive / credentials / agents-settings / agent-page；PRD v1.0（v0.8 备份 PRD-v0.8.md）、README
 - ☑ 8.1 本轮额外修复：SSH keyboard-interactive 认证（PRD 3.1 P0）、agentshell CLI EPIPE、透明度绘制到网格背景
+
+# 第 10 轮（按 PRD v1.0 补齐）
+- ☑ 10.1 审计按主机/会话/决策过滤：audit::field/Record::{host,session,decision}/Filter/facets；hook.request/decision/approval、ai.exec* 记录写入 host= session=；审计面板“决策/主机/会话”筛选条（全部 N 条中显示 M 条）；测试 audit::tests::filter_by_host_session_decision；截图 screenshot-v10-audit-filter-host.png / -deny.png / screenshot-v10-approval-card-buttons.png
+- ☐ 10.2 agentshell exec/hosts/upload/download（US-10）
+- ☐ 10.3 内置 AI 对话中发起执行并逐条审批（US-08）
+- ☐ 10.4 AI 首次发送前提示、按主机禁止读取输出
+- ☐ 10.5 P1：HTTP/SOCKS 出站代理、托盘、Agent 快速启动、write_to_pty 权限、关键词高亮、SFTP 内置编辑
+- ☐ 10.6 P2：组织策略文件、ssh:// sftp:// 链接、主机侧工具
+- ☐ 10.7 收尾：release/clippy、3 轮全量测试 + e2e_hooks、TEST_REPORT、截图、PRD/README

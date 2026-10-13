@@ -94,6 +94,78 @@ pub fn read_all(path: &Path) -> Vec<Record> {
     std::io::BufReader::new(f).lines().map_while(Result::ok).filter_map(|l| serde_json::from_str(&l).ok()).collect()
 }
 
+
+/// Value of `key=` inside a `k=v k2="quoted"` detail string (Debug-quoted values are unescaped).
+pub fn field(detail: &str, key: &str) -> Option<String> {
+    let pat = format!("{key}=");
+    let mut from = 0;
+    while let Some(i) = detail[from..].find(&pat) {
+        let at = from + i;
+        let ok_start = at == 0 || detail[..at].ends_with(' ');
+        let rest = &detail[at + pat.len()..];
+        if ok_start {
+            if let Some(q) = rest.strip_prefix('"') {
+                let mut out = String::new(); let mut esc = false;
+                for ch in q.chars() {
+                    if esc { out.push(match ch { 'n' => '\n', 'r' => '\r', 't' => '\t', o => o }); esc = false; }
+                    else if ch == '\\' { esc = true; } else if ch == '"' { return Some(out); } else { out.push(ch); }
+                }
+                return Some(out);
+            }
+            return Some(rest.split(' ').next().unwrap_or("").to_string());
+        }
+        from = at + pat.len();
+    }
+    None
+}
+
+impl Record {
+    /// Host the record refers to ("local" for local panes); None when not host-scoped.
+    pub fn host(&self) -> Option<String> { field(&self.detail, "host").filter(|h| !h.is_empty()) }
+    /// Agent / pane session id, when the record carries one.
+    pub fn session(&self) -> Option<String> { field(&self.detail, "session").filter(|s| !s.is_empty() && s != "-") }
+    /// Normalised decision: "allow" / "ask" / "deny"; None for non-decision records.
+    pub fn decision(&self) -> Option<&'static str> {
+        if let Some(e) = field(&self.detail, "effect") {
+            return match e.to_ascii_lowercase().as_str() { "allow" => Some("allow"), "ask" => Some("ask"), "deny" => Some("deny"), _ => None };
+        }
+        match self.kind.as_str() {
+            "hook.approval" | "agentshell.approval" => {
+                let d = &self.detail;
+                if d.contains(" deny") || d.contains("timeout") { Some("deny") } else if d.contains(" allow") || d.starts_with("session-rule") { Some("allow") } else { None }
+            }
+            "ai.exec.rejected" => Some("deny"),
+            "ai.exec" => Some("allow"),
+            _ => None,
+        }
+    }
+}
+
+/// Audit viewer filter (PRD 6.x: filter by host / session / decision). Empty fields match all.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Filter { pub host: Option<String>, pub session: Option<String>, pub decision: Option<String>, pub text: String }
+
+impl Filter {
+    pub fn matches(&self, r: &Record) -> bool {
+        if let Some(h) = &self.host { if r.host().as_deref() != Some(h.as_str()) { return false; } }
+        if let Some(s) = &self.session { if r.session().as_deref() != Some(s.as_str()) { return false; } }
+        if let Some(d) = &self.decision { if r.decision() != Some(d.as_str()) { return false; } }
+        if !self.text.is_empty() {
+            let q = self.text.to_lowercase();
+            if !(r.kind.to_lowercase().contains(&q) || r.detail.to_lowercase().contains(&q) || r.actor.to_lowercase().contains(&q)) { return false; }
+        }
+        true
+    }
+    pub fn apply<'a>(&self, rs: &'a [Record]) -> Vec<&'a Record> { rs.iter().filter(|r| self.matches(r)).collect() }
+}
+
+/// Distinct hosts and sessions present in the log (for the filter chips), sorted.
+pub fn facets(rs: &[Record]) -> (Vec<String>, Vec<String>) {
+    let mut h: Vec<String> = rs.iter().filter_map(|r| r.host()).collect(); h.sort(); h.dedup();
+    let mut s: Vec<String> = rs.iter().filter_map(|r| r.session()).collect(); s.sort(); s.dedup();
+    (h, s)
+}
+
 /// Verify the chain. Ok(count) or Err((line_no, reason)).
 pub fn verify(path: &Path) -> Result<usize, (usize, String)> {
     let Ok(f) = std::fs::File::open(path) else { return Ok(0) };
@@ -157,5 +229,33 @@ mod tests {
         assert_eq!(verify(&p), Ok(3));
         assert_eq!(log.prune(30).unwrap(), 0);
         let _ = std::fs::remove_file(&p); let _ = std::fs::remove_file(anchor_path(&p));
+    }
+
+    #[test]
+    fn filter_by_host_session_decision() {
+        let mk = |kind: &str, d: &str| Record { seq: 0, ts: String::new(), kind: kind.into(), actor: "x".into(), detail: d.into(), prev: String::new(), hash: String::new() };
+        let rs = vec![
+            mk("hook.request", "event=pre tool=Bash action=exec host=web1 session=s1 cwd=\"/\" command=\"ls\""),
+            mk("hook.decision", "principal=claude host=web1 session=s1 risk=R0 effect=Allow reason=auto command=\"ls\""),
+            mk("hook.decision", "principal=codex host=local session=s2 risk=R3 effect=Deny reason=x command=\"rm -rf /\""),
+            mk("hook.approval", "id=3 deny session=s2 host=local feedback=\"no\" command=\"rm\""),
+            mk("ai.exec.decision", "mode=ask host=db1 risk=R2 effect=Ask command=\"a b\" reason=r"),
+            mk("ssh.connect", "web1"),
+        ];
+        assert_eq!(field(&rs[0].detail, "cwd").as_deref(), Some("/"));
+        assert_eq!(field(&rs[1].detail, "session").as_deref(), Some("s1"));
+        assert_eq!(field("xhost=a host=b", "host").as_deref(), Some("b"));
+        let f = Filter { host: Some("web1".into()), ..Default::default() };
+        assert_eq!(f.apply(&rs).len(), 2);
+        let f = Filter { decision: Some("deny".into()), ..Default::default() };
+        assert_eq!(f.apply(&rs).len(), 2);
+        let f = Filter { session: Some("s2".into()), decision: Some("deny".into()), ..Default::default() };
+        assert_eq!(f.apply(&rs).len(), 2);
+        let f = Filter { decision: Some("ask".into()), host: Some("db1".into()), ..Default::default() };
+        assert_eq!(f.apply(&rs).len(), 1);
+        let f = Filter { text: "RM -RF".into(), ..Default::default() };
+        assert_eq!(f.apply(&rs).len(), 1);
+        let (h, s) = facets(&rs);
+        assert_eq!(h, vec!["db1", "local", "web1"]); assert_eq!(s, vec!["s1", "s2"]);
     }
 }

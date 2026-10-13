@@ -99,6 +99,7 @@ pub(crate) struct Root {
     sidebar_visible: bool,
     audit: Arc<AuditLog>,
     pub(crate) audit_verify: Option<Result<usize, (usize, String)>>,
+    pub(crate) audit_filter: ssh_term_proto::audit::Filter,
     settings_dirty: Vec<String>,
     toast: Option<(String, u64)>,
     toast_seq: u64,
@@ -1027,7 +1028,7 @@ fn main() {
                     let mut root = Root {
                         rt, default_target, tabs: vec![], active: 0, themes, histories: HashMap::new(),
                         manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], deny_reason: None, policy_port: None, overlay: Overlay::None, sftp_views: HashMap::new(), sftp_current: None, port_view: None, quit_confirm: false, quit_ok: false, chat_view: None,
-                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., collapsed: HashSet::new(), sidebar_visible: true, audit, audit_verify: None,
+                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., collapsed: HashSet::new(), sidebar_visible: true, audit, audit_verify: None, audit_filter: Default::default(),
                         settings_dirty: vec![], toast: None, toast_seq: 0, _subs: vec![],
                     };
                     root.apply_theme(window, cx);
