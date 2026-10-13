@@ -96,10 +96,13 @@ impl SftpView {
         let dels = plan.iter().filter(|o| o.is_delete()).count();
         if dels > 0 && !su.confirm_delete { su.confirm_delete = true; cx.notify(); return; }
         su.busy = true;
+        self.start_worker(cx);
+        let Some(su) = self.sync.as_ref() else { return };
         let (q, ld, rd, host) = (self.queue.clone(), self.local_dir.clone(), self.remote_dir.clone(), self.target.host.clone());
         let _ = crate::audit_log().append("sftp.sync", "user", &format!("host={host} local={:?} remote={rd:?} mode={:?} ops={} deletes={dels}", ld.display(), su.mode, plan.len()));
         self.remote_op(cx, async move { sftp::execute_sync(&s, &q, &ld, &rd, &plan).await }, |v, (q, d, c), cx| {
             v.sync = None;
+            v.start_worker(cx);
             v.after_change(tf("sync.done", &[("q", &q), ("d", &d), ("c", &c)]), cx);
         });
     }
