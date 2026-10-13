@@ -7,6 +7,7 @@
 两个终端都用 `alacritty_terminal` 解析，字符网格渲染是自己写的。
 
 ## 许可证与净室说明
+- v4 起移植了少量 Apache/MIT 代码：herdr（Agent manifest 引擎和 3 份规则）、zellij（分屏方向规则）。来源、commit、修改说明见 `THIRD_PARTY_NOTICES.md`，许可证全文在 `licenses/`。
 - 只用了 Apache/MIT 的依赖和官方示例：`gpui-pre`（Zed 的 GPUI 快照，Apache-2.0）的 `examples/`、russh 自带的 `examples/client_exec_interactive.rs`（Apache-2.0）、alacritty_terminal 公共 API。
 - **没有读过** Zed `crates/terminal`、`terminal_view`、`editor`，也没有读过 shell-rs / oxideterm / warp 的源码。
 
@@ -32,7 +33,12 @@ src/
              点击面板切换焦点；根据窗口 viewport 计算 cols/rows 并 resize
   theme.rs   主题系统：TOML 主题加载、Alacritty 导入、ANSI 16/256/真彩色映射
   config.rs  ~/.config/agentshell/config.toml（字体族/回退链/字号/行高/连字、默认主题）
-  suggest.rs 历史自动建议引擎：History（去重、敏感过滤）+ InputTracker（OSC 133 / 按键+回显校验）
+  suggest.rs 历史自动建议引擎：History（去重、敏感过滤、落盘）+ InputTracker（OSC 133 / 按键+回显校验）
+  termview.rs（v4）终端面板：GridLayer（可缓存的网格层，行级 damage）+ CursorLayer（光标和建议）+ 输入/鼠标/剪贴板/滚动
+  agent.rs   （v4）Agent 状态识别，移植自 herdr manifest 引擎；agents/*.toml 为 herdr 原样规则
+  layout.rs  （v4）分屏二叉树；auto_direction 移植自 zellij
+  hosts.rs   （v4）~/.ssh/config 解析和主机条目
+  boxdraw.rs （v4）框线、方块、Powerline 字形的像素栅格化
 themes/            内置主题：catppuccin-mocha/latte（MIT）、agentshell-midnight/daylight（自有）
 scripts/fonts.sh   中文/emoji/Nerd 图标/Powerline/连字测试文本
 scripts/colors.sh  打印 16/256/真彩色和粗体、暗淡、反色样例
@@ -141,3 +147,74 @@ Linux 构建依赖（Debian 13 上实际装的）：`libxkbcommon-dev libxkbcomm
 - zsh/fish 集成、zsh_history 格式、历史落盘都没做；远端 OSC 133 注入没做。
 - iTerm2 `.itermcolors` 导入没做（PRD 5.11 写了方案）。
 - 空闲时约 45% CPU（软件 Vulkan + 每 16ms 轮询 + 光标闪烁全量重绘），产品要改成事件驱动并做行缓存。
+
+## v4（2026-10-13）：性能与能力补齐
+
+截图（DISPLAY=:2 实跑，release 构建，都逐张看过）：
+- `screenshot-v4-hostkey.png`：首次连接弹出主机密钥确认（指纹和 `ssh-keygen -lf testenv/host_ed25519.pub` 一致）
+- `screenshot-v4-split-scroll.png`：同一标签里三个分屏；两个面板向上回看并显示滚动条；左下是下划线/双线/波浪线/删除线/斜体/OSC 8 和自绘框线、方块、Powerline（`scripts/deco.sh`）
+- `screenshot-v4-htop-vim.png`：htop 点 MEM% 表头排序、点行选中；vim `mouse=a` 滚轮滚动并点击定位（状态行 `cursor at line 94 col 20`）
+- `screenshot-v4-agents.png`：面板头和标签上的 Agent 状态（Claude 需要确认 / Grok 运行中 / Codex 运行中，Codex 在 SSH 侧）。**三个 Agent 都是 `/tmp/fakebin` 里的模拟脚本**，只模仿标题和提示文字
+- `screenshot-v4-suggest-wrap.png`：建议灰字超过行尾后折到下面两行
+
+### 运行（v4 新增变量）
+```bash
+cargo build --release
+SSH_PORT=2222 SSH_USER=sshtest SSH_KEY=$PWD/testenv/client_ed25519 \
+  AGENTSHELL_KNOWN_HOSTS=$PWD/testenv/known_hosts_demo \
+  AGENTSHELL_SSH_CONFIG=$PWD/testenv/ssh_config \
+  PERF_LOG=1 DISPLAY=:2 ./target/release/ssh-term-proto
+```
+- `AGENTSHELL_KNOWN_HOSTS`：known_hosts 路径（默认 `~/.ssh/known_hosts`）。删掉这个文件就会再次弹出确认框。
+- `AGENTSHELL_SSH_CONFIG`：ssh_config 路径（默认 `~/.ssh/config`）。`testenv/ssh_config` 是测试用的。
+- `PERF_LOG=1`：每秒在 stderr 输出 `grid_paints/s rows_built/s cursor_paints/s`，全为 0 时不输出。
+- `NO_SSH=1`：启动时只开本地面板。
+- config.toml 新增顶层键 `known_hosts`、`ssh_config` 和 `[[hosts]]` 数组（字段 name/host/user/port/identity_file），见 `src/config.rs` 文件头。
+
+快捷键：
+- Ctrl+Shift+D：分屏（按 zellij 规则自动选方向）；Ctrl+Shift+W：关闭分屏；标签栏右侧也有「左右 / 上下 / 关闭分屏」按钮。
+- Ctrl+Shift+C / Ctrl+Shift+V：复制 / 粘贴；Shift+Insert、中键也能粘贴。
+- Shift+PgUp / Shift+PgDn：回看翻页；也可以用滚轮和滚动条。
+- 按住 Shift 拖动：在 htop、vim 这类程序里也做本地选择。
+- Ctrl+点击：打开 OSC 8 链接。
+
+### 性能（前后对比，同一脚本 `/tmp/bench.sh` 各跑两次，软件 Vulkan）
+| 指标 | v3 | v4 |
+|---|---|---|
+| 空闲 CPU（聚焦，10 s 无输入后） | 17.6% / 17.9% | **0.2% / 0.2%** |
+| 光标闪烁期间 CPU | 17.4% / 19.1% | 17.1% / 18.3%（网格层没有重绘，开销来自 GPUI 整窗重绘 + llvmpipe） |
+| `seq 1 2000000` | 0.91 / 1.10 s | 0.97 / 1.08 s |
+| `cat` 38 MB | 2.56 / 2.58 s | 2.77 / 2.72 s |
+| 大量输出时网格帧率 | 无计数器（60 Hz 轮询上限） | 31–35 帧/s，每帧重建约 37 行 |
+| 打一个字符 | 整屏重排 | 1–2 行（alacritty damage） |
+
+结论：
+- 空闲功耗问题已解决。
+- 吞吐没有变化，瓶颈在解析和 pty 回压。
+- 闪烁的开销在软件渲染下没降下来，要在真 GPU 上复测。
+
+### 测试
+`TEST_SSH_PORT=2222 TEST_SSH_USER=sshtest TEST_SSH_KEY=$PWD/testenv/client_ed25519 cargo test` 结果：
+- lib 单元测试 21 个：建议引擎、zsh 历史、落盘、OSC 扫描、herdr 规则、ssh_config、分屏树、框线；
+- bin 单元测试 5 个：主题、bracketed paste、鼠标编码、config hosts；
+- 无界面测试 6 个：
+  - 本地 ls；
+  - SSH 测试（ls、window_change、known_hosts 首次确认、再次连接不询问、密钥变更被拒）；
+  - 回看；
+  - bash OSC 133；
+  - zsh OSC 133；
+  - 用模拟的 `grok` 进程测前台进程识别和 Working 状态。
+
+### v4 坑
+- 截图被缩放显示：窗口 1440 宽，看图工具按 1024 宽显示，算 xdotool 坐标时要乘 1440/1024。
+- 不要在模拟脚本还在 `read` 时修改它：bash 会接着从修改后的文件读，命令被吞。
+- 框线最初直接按 `col*cw` 画，会出现 1 px 缝。改成用相邻单元格边缘取整后计算宽度。
+- GPUI `PathBuilder` 画的三角形在这台机器上没有显示（原因没有深究），改为按像素行栅格化成矩形。
+
+### v4 已知问题
+- 圆角框线画成直角；双线交叉处有 1 px 毛刺；斜线 U+2571–2573 仍用字体。
+- 分屏比例不能拖拽。
+- 滚动条点击/拖动和 Shift+PgUp 已实现，但没有实测；Ctrl+点击打开链接也没有实测。
+- SSH 侧 Agent 识别依赖本面板里输入的命令首词或 OSC 标题，通过别名启动时识别不到。
+- zsh 只测了本地（无界面测试），远端 zsh 只读取历史文件。
+- IME 预编辑、macOS/Windows/Wayland 仍未验证。
