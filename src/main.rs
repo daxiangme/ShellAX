@@ -986,7 +986,9 @@ impl Root {
         }
     }
     fn apply_theme(&self, window: &Window, cx: &mut App) {
-        let th = self.themes[self.theme_index(window)].clone();
+        let mut th = self.themes[self.theme_index(window)].clone();
+        // macOS themes: accent follows the system accent color (default macOS blue)
+        if theme::is_macos_theme(&th) { if let Some(a) = theme::system_accent(th.appearance == Appearance::Dark) { let mut t = (*th).clone(); t.accent = a; th = Arc::new(t); } }
         theme::set_current(th.clone());
         sync_component_theme(&th, cx);
     }
@@ -1374,7 +1376,7 @@ pub(crate) fn sync_component_theme(th: &Theme, cx: &mut App) {
         t.colors.popover = c(th.base);
         t.colors.popover_foreground = c(th.text);
         t.font_size = px(config::get().appearance.ui_font_size.clamp(10., 20.));
-        t.font_family = SharedString::from("Inter");
+        t.font_family = theme::ui_font();
         t.radius = px(6.);
         t.focus_ring = false;
         t.shadow = false;
@@ -1543,7 +1545,7 @@ impl Render for Root {
                 .child(icon(IconName::Shield, 12., mode_col)).child(tf("main.perm_status", &[("mode", &mode.label())]))
                 .when(org.is_some(), |d| d.child(div().pl_1().child(t("main.org_badge")))));
 
-        let mut root = div().size_full().relative().flex().flex_row().bg(c(th.crust).opacity(op)).font_family(SharedString::from("Inter")).text_size(px(s.appearance.ui_font_size.clamp(10., 20.))).text_color(c(th.text))
+        let mut root = div().size_full().relative().flex().flex_row().bg(c(th.crust).opacity(op)).font_family(theme::ui_font()).text_size(px(s.appearance.ui_font_size.clamp(10., 20.))).text_color(c(th.text))
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, w, cx| {
                 if ev.keystroke.key == "escape" && !matches!(this.overlay, Overlay::None | Overlay::Palette(_)) {
                     this.close_overlay(w, cx);
@@ -1703,6 +1705,7 @@ fn main() {
     let default_target = if std::env::var("NO_SSH").is_ok() { None } else { env_target(&config::get().known_hosts_path()) };
     gpui_platform::application().with_assets(gpui_kit_assets::AllAssets).run(move |cx: &mut App| {
         gpui_component::init(cx);
+        theme::set_ui_font(theme::pick_ui_font(&cx.text_system().all_font_names()));
         let bounds = Bounds::centered(None, size(px(1440.), px(860.)), cx);
         cx.open_window(
             WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() },

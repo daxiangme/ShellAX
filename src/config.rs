@@ -56,7 +56,7 @@ impl General {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Appearance { pub theme: String, pub light_theme: String, pub dark_theme: String, pub opacity: f32, pub ui_font_size: f32 }
-impl Default for Appearance { fn default() -> Self { Self { theme: s_system(), light_theme: "Catppuccin Latte".into(), dark_theme: "Catppuccin Mocha".into(), opacity: f_one(), ui_font_size: f_ui() } } }
+impl Default for Appearance { fn default() -> Self { Self { theme: s_system(), light_theme: "macOS Light".into(), dark_theme: "macOS Dark".into(), opacity: f_one(), ui_font_size: f_ui() } } }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]

@@ -180,6 +180,8 @@ fn luma(c: u32) -> f32 {
 }
 
 pub const BUILTIN: &[&str] = &[
+    include_str!("../themes/macos-light.toml"),
+    include_str!("../themes/macos-dark.toml"),
     include_str!("../themes/catppuccin-mocha.toml"),
     include_str!("../themes/catppuccin-latte.toml"),
     include_str!("../themes/agentshell-midnight.toml"),
@@ -208,6 +210,53 @@ pub fn cur() -> Arc<Theme> {
 }
 
 pub fn c(hex: u32) -> Hsla { rgb(hex).into() }
+
+/// macOS-style themes get the system accent color (PRD 5.22).
+pub fn is_macos_theme(t: &Theme) -> bool { t.name.starts_with("macOS ") }
+
+/// System accent color. macOS: `defaults read -g AppleAccentColor` (-1 graphite … 6 pink; missing = blue);
+/// GNOME 47+: `gsettings get org.gnome.desktop.interface accent-color`. None = keep the theme's blue.
+pub fn accent_from(macos: Option<&str>, gnome: Option<&str>, dark: bool) -> Option<u32> {
+    let pick = |l: u32, d: u32| Some(if dark { d } else { l });
+    if let Some(v) = macos.map(str::trim).filter(|v| !v.is_empty()) {
+        return match v.parse::<i32>().ok()? {
+            -1 => pick(0x8c8c8c, 0x98989d), 0 => pick(0xff3b30, 0xff453a), 1 => pick(0xff9500, 0xff9f0a), 2 => pick(0xffcc00, 0xffd60a),
+            3 => pick(0x28cd41, 0x32d74b), 4 => pick(0x007aff, 0x0a84ff), 5 => pick(0xaf52de, 0xbf5af2), 6 => pick(0xff2d55, 0xff375f), _ => None,
+        };
+    }
+    let g = gnome?.trim().trim_matches('\'').to_ascii_lowercase();
+    match g.as_str() {
+        "blue" => pick(0x007aff, 0x0a84ff), "teal" => pick(0x30b0c7, 0x40c8e0), "green" => pick(0x28cd41, 0x32d74b), "yellow" => pick(0xffcc00, 0xffd60a),
+        "orange" => pick(0xff9500, 0xff9f0a), "red" => pick(0xff3b30, 0xff453a), "pink" => pick(0xff2d55, 0xff375f), "purple" => pick(0xaf52de, 0xbf5af2),
+        "slate" => pick(0x8c8c8c, 0x98989d), _ => None,
+    }
+}
+fn read_cmd(cmd: &str, args: &[&str]) -> Option<String> {
+    let o = std::process::Command::new(cmd).args(args).stderr(std::process::Stdio::null()).output().ok()?;
+    o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
+}
+/// Query the OS once (cached); `None` when the OS has no accent setting.
+pub fn system_accent(dark: bool) -> Option<u32> {
+    static RAW: std::sync::OnceLock<(Option<String>, Option<String>)> = std::sync::OnceLock::new();
+    let (m, g) = RAW.get_or_init(|| {
+        if std::env::var_os("AGENTSHELL_NO_SYSTEM_ACCENT").is_some() { return (None, None); }
+        if cfg!(target_os = "macos") { (Some(read_cmd("defaults", &["read", "-g", "AppleAccentColor"]).unwrap_or_else(|| "4".into())), None) }
+        else if cfg!(target_os = "linux") { (None, read_cmd("gsettings", &["get", "org.gnome.desktop.interface", "accent-color"])) }
+        else { (None, None) }
+    });
+    accent_from(m.as_deref(), g.as_deref(), dark)
+}
+
+/// UI font (PRD 5.22): system font, terminal font is separate. First installed family wins.
+pub fn pick_ui_font(installed: &[String]) -> String {
+    const CHAIN: &[&str] = &[".SystemUIFont", "SF Pro Text", "SF Pro", "PingFang SC", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI",
+        "Inter", "Cantarell", "Noto Sans", "Ubuntu", "Noto Sans CJK SC", "DejaVu Sans"];
+    if cfg!(target_os = "macos") { return ".SystemUIFont".into(); }
+    CHAIN.iter().find(|f| installed.iter().any(|i| i.eq_ignore_ascii_case(f))).map(|s| s.to_string()).unwrap_or_else(|| "Inter".into())
+}
+static UI_FONT: RwLock<Option<gpui::SharedString>> = RwLock::new(None);
+pub fn set_ui_font(f: String) { *UI_FONT.write().unwrap() = Some(f.into()); }
+pub fn ui_font() -> gpui::SharedString { UI_FONT.read().unwrap().clone().unwrap_or_else(|| "Inter".into()) }
 
 fn xterm256(t: &Theme, i: u8) -> u32 {
     match i {
@@ -246,6 +295,37 @@ mod tests {
     use super::*;
     #[test]
     fn builtins_parse() { for s in BUILTIN { Theme::from_toml(s).unwrap(); } }
+    #[test]
+    fn macos_themes() {
+        let l = Theme::from_toml(BUILTIN[0]).unwrap();
+        let d = Theme::from_toml(BUILTIN[1]).unwrap();
+        assert_eq!((l.name.as_str(), l.appearance, l.accent), ("macOS Light", Appearance::Light, 0x007aff));
+        assert_eq!((d.name.as_str(), d.appearance, d.accent), ("macOS Dark", Appearance::Dark, 0x0a84ff));
+        assert!(is_macos_theme(&l) && is_macos_theme(&d));
+        // Terminal.app-like basics: black on white / light on dark, red ≈ 0x990000
+        assert_eq!((l.fg, l.bg, l.ansi[1]), (0x000000, 0xffffff, 0x990000));
+        assert!(luma(d.bg) < 0.2 && luma(d.fg) > 0.8);
+    }
+    #[test]
+    fn accent_mapping() {
+        assert_eq!(accent_from(None, None, false), None);
+        assert_eq!(accent_from(Some("4"), None, false), Some(0x007aff));
+        assert_eq!(accent_from(Some("4"), None, true), Some(0x0a84ff));
+        assert_eq!(accent_from(Some("5\n"), None, false), Some(0xaf52de));
+        assert_eq!(accent_from(Some("-1"), None, false), Some(0x8c8c8c));
+        assert_eq!(accent_from(Some("x"), None, false), None);
+        assert_eq!(accent_from(None, Some("'green'\n"), false), Some(0x28cd41));
+        assert_eq!(accent_from(None, Some("'nonsense'"), false), None);
+    }
+    #[test]
+    fn ui_font_chain() {
+        if cfg!(target_os = "macos") { return; }
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(pick_ui_font(&v(&["DejaVu Sans", "Noto Sans", "Inter"])), "Inter");
+        assert_eq!(pick_ui_font(&v(&["DejaVu Sans", "pingfang sc"])), "PingFang SC");
+        assert_eq!(pick_ui_font(&v(&["Segoe UI", "Inter"])), "Segoe UI");
+        assert_eq!(pick_ui_font(&v(&[])), "Inter");
+    }
     #[test]
     fn alacritty_import() {
         let src = r##"
