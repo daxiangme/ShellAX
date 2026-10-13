@@ -174,12 +174,12 @@ fn handle(stream: TcpStream, sh: &Shared) -> Result<()> {
         let principal = if c.principal.is_empty() { "cli".to_string() } else { c.principal };
         let req = HookReq { event: "Check".into(), tool: "Bash".into(), command: c.command, action: if c.action.is_empty() { "exec".into() } else { c.action }, cwd: c.cwd, session: String::new() };
         let host = if c.host.is_empty() { host_hdr } else { c.host };
-        let (eff, risk, reason) = sh.decide(&principal, &req, &host, c.interactive.unwrap_or(true));
+        let (eff, risk, reason) = sh.decide_peer(&principal, &req, &host, c.interactive.unwrap_or(true), Some(&stream));
         let d = match eff { Effect::Allow => "allow", Effect::Ask => "ask", Effect::Deny => "deny" };
         return Ok(respond(stream, "200 OK", &json!({"decision": d, "risk": risk.label(), "reason": reason}).to_string(), &[])?);
     }
     if matches!(path.as_str(), "/v1/hosts" | "/v1/exec" | "/v1/upload" | "/v1/download") {
-        let (status, out) = remote_op(sh, &path, &body, &host_hdr);
+        let (status, out) = remote_op(sh, &path, &body, &host_hdr, Some(&stream));
         return Ok(respond(stream, status, &out.to_string(), &[])?);
     }
     if let Some(rest) = path.strip_prefix("/v1/hook/") {
@@ -187,7 +187,7 @@ fn handle(stream: TcpStream, sh: &Shared) -> Result<()> {
         let Some(agent) = it.next().and_then(Agent::parse) else { return Ok(respond(stream, "404 Not Found", r#"{"error":"unknown agent"}"#, &[])?) };
         let mut req = match hooks::parse_request(&body) { Ok(r) => r, Err(e) => return Ok(respond(stream, "400 Bad Request", &json!({"error": e.to_string()}).to_string(), &[])?) };
         if let Some(ev) = it.next().filter(|e| !e.is_empty()) { req.event = ev.to_string(); }
-        let (eff, _risk, reason) = sh.decide(agent.id(), &req, &host_hdr, true);
+        let (eff, _risk, reason) = sh.decide_peer(agent.id(), &req, &host_hdr, true, Some(&stream));
         let (out, code) = hooks::render(agent, &req.event, eff, &reason);
         return Ok(respond(stream, "200 OK", &out, &[("X-AgentShell-Exit", code.to_string())])?);
     }
@@ -196,7 +196,7 @@ fn handle(stream: TcpStream, sh: &Shared) -> Result<()> {
 
 /// US-10: agent-initiated remote operations. Every call names a host from the App's list and
 /// goes through the same permission engine (and approval card) as hook requests.
-fn remote_op(sh: &Shared, path: &str, body: &str, host_hdr: &str) -> (&'static str, serde_json::Value) {
+fn remote_op(sh: &Shared, path: &str, body: &str, host_hdr: &str, peer: Option<&TcpStream>) -> (&'static str, serde_json::Value) {
     #[derive(Deserialize, Default)]
     #[serde(default)]
     struct Op { principal: String, session: String, host: String, command: String, local: String, remote: String, timeout_secs: u64 }
@@ -218,7 +218,12 @@ fn remote_op(sh: &Shared, path: &str, body: &str, host_hdr: &str) -> (&'static s
     };
     if command.trim().is_empty() || (path != "/v1/exec" && (o.local.is_empty() || o.remote.is_empty())) { return ("400 Bad Request", json!({"error": "missing command / local / remote"})); }
     let req = HookReq { event: "agentshell".into(), tool: kind.trim_start_matches("agentshell.").into(), command: command.clone(), action: action.into(), cwd: String::new(), session: o.session.clone() };
-    let (eff, risk, reason) = sh.decide(&principal, &req, &o.host, true);
+    let (eff, risk, reason) = sh.decide_peer(&principal, &req, &o.host, true, peer);
+    // the caller may have gone away while the card was up: never run on its behalf
+    if eff == Effect::Allow && peer.is_some_and(peer_closed) {
+        let _ = sh.audit.append(kind, "policy", &format!("host={} session={} effect=Cancelled reason=\"caller disconnected\" command={command:?}", o.host, if o.session.is_empty() { "-" } else { &o.session }));
+        return ("499 Client Closed Request", json!({"decision": "deny", "reason": "caller disconnected"}));
+    }
     let d = match eff { Effect::Allow => "allow", Effect::Ask => "ask", Effect::Deny => "deny" };
     if eff != Effect::Allow { return ("200 OK", json!({"decision": d, "risk": risk.label(), "reason": reason})); }
     let r = match path {
@@ -236,8 +241,19 @@ fn remote_op(sh: &Shared, path: &str, body: &str, host_hdr: &str) -> (&'static s
     }
 }
 
+/// True when the HTTP caller has closed its end of the connection (EOF on a non-blocking peek).
+pub fn peer_closed(s: &TcpStream) -> bool {
+    if s.set_nonblocking(true).is_err() { return false; }
+    let mut b = [0u8; 1];
+    let r = s.peek(&mut b);
+    let _ = s.set_nonblocking(false);
+    match r { Ok(0) => true, Ok(_) => false, Err(e) => !matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) }
+}
+
 impl Shared {
-    fn decide(&self, principal: &str, req: &HookReq, host: &str, interactive: bool) -> (Effect, Risk, String) {
+    /// Decide; while an approval card is pending, watch `peer` — if the caller disconnects the
+    /// card is withdrawn (its reply channel is dropped, the UI removes it) and the request denied.
+    fn decide_peer(&self, principal: &str, req: &HookReq, host: &str, interactive: bool, peer: Option<&TcpStream>) -> (Effect, Risk, String) {
         let ctx = (self.ctx)();
         let prod = ctx.prod_confirm && !host.is_empty() && ctx.prod_hosts.iter().any(|h| h == host || policy::glob(h, host));
         let risk = if req.action == "exec" { policy::classify(&req.command) } else { Risk::R1 };
@@ -264,8 +280,24 @@ impl Shared {
                 let deadline = Instant::now() + ctx.approval_timeout;
                 let a = Approval { id, principal: principal.into(), req: req.clone(), host: where_.clone(), risk, reason: reason.clone(), deadline, reply: rtx };
                 if tx.send(a).is_ok() {
-                    let got = if ctx.timeout_deny { rrx.recv_timeout(ctx.approval_timeout).ok() } else { rrx.recv().ok() };
+                    let mut gone = false;
+                    let got = loop {
+                        let slice = Duration::from_millis(200);
+                        match rrx.recv_timeout(slice) {
+                            Ok(a) => break Some(a),
+                            Err(flume::RecvTimeoutError::Disconnected) => break None,
+                            Err(flume::RecvTimeoutError::Timeout) => {}
+                        }
+                        if peer.is_some_and(peer_closed) { gone = true; break None; }
+                        if ctx.timeout_deny && Instant::now() >= deadline { break None; }
+                    };
+                    drop(rrx); // withdraws the card: the UI drops approvals whose receiver is gone
+                    let got = if gone { Some(Answer::Deny("\u{0}gone".into())) } else { got };
                     match got {
+                        Some(Answer::Deny(w)) if w == "\u{0}gone" => {
+                            eff = Effect::Deny; reason = format!("{reason} → caller disconnected, approval withdrawn");
+                            let _ = self.audit.append("hook.approval", "policy", &format!("id={id} withdrawn caller-disconnected host={where_} session={} command={:?}", skey.1, req.command));
+                        }
                         Some(Answer::Once) => { eff = Effect::Allow; reason = format!("{reason} → approved by user"); let _ = self.audit.append("hook.approval", "user", &format!("id={id} allow host={where_} session={} command={:?}", skey.1, req.command)); }
                         Some(Answer::Session) => {
                             eff = Effect::Allow; reason = format!("{reason} → approved by user for this session ({:?})", skey.2);
@@ -423,5 +455,29 @@ mod tests {
         assert_eq!(calls, vec!["exec web1 uptime".to_string(), "up web1 /tmp/a /tmp/b".into()]);
         let log = std::fs::read_to_string(dir.join("audit.jsonl")).unwrap();
         assert!(log.contains("agentshell.exec") && log.contains("agentshell.upload") && log.contains("agentshell.hosts"));
+    }
+
+    #[test]
+    fn approval_withdrawn_when_caller_disconnects() {
+        let dir = std::env::temp_dir().join(format!("as-wd-{}-{}", std::process::id(), new_token()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let audit = Arc::new(AuditLog::new(dir.join("audit.jsonl")));
+        let ops = Arc::new(FakeOps(Default::default()));
+        let (ap_tx, ap_rx) = flume::unbounded::<Approval>();
+        let s = start_with_ops("127.0.0.1:0", None, Arc::new(PolicyCtx::default), Some(ap_tx), audit, None, Some(ops.clone())).unwrap();
+        for (path, body) in [("/v1/exec", r#"{"host":"web1","command":"systemctl restart nginx"}"#), ("/v1/hook/claude/PreToolUse", r#"{"tool_name":"Bash","tool_input":{"command":"rm -rf build"}}"#)] {
+            let mut c = TcpStream::connect(("127.0.0.1", s.port)).unwrap();
+            write!(c, "POST {path} HTTP/1.1\r\nAuthorization: Bearer {}\r\nContent-Length: {}\r\n\r\n{body}", s.token, body.len()).unwrap();
+            let a = ap_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(!a.reply.is_disconnected());
+            drop(c); // caller goes away (agent killed / Ctrl-C)
+            let t0 = Instant::now();
+            while !a.reply.is_disconnected() { assert!(t0.elapsed() < Duration::from_secs(3), "card not withdrawn"); std::thread::sleep(Duration::from_millis(50)); }
+            let _ = a.reply.send(Answer::Once); // a late click must not run anything
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(ops.0.lock().unwrap().is_empty());
+        let log = std::fs::read_to_string(dir.join("audit.jsonl")).unwrap();
+        assert_eq!(log.matches("withdrawn caller-disconnected").count(), 2, "{log}");
     }
 }
