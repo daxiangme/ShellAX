@@ -55,14 +55,18 @@ pub struct SftpView {
     /// Directory to open first (sftp:// link path) instead of the remote home.
     pub initial_dir: Option<String>,
     _subs: Vec<gpui::Subscription>,
+    /// Directory sync panel: Some when open.
+    sync: Option<SyncUi>,
 }
+/// Sync panel state: mode, delete flag, computed plan, delete confirmation pending.
+struct SyncUi { mode: ssh_term_proto::dirsync::Mode, delete: bool, plan: Option<Vec<ssh_term_proto::dirsync::Op>>, busy: bool, confirm_delete: bool }
 
 impl SftpView {
     /// Like [`new`] but does not connect yet (set `initial_dir`, then call [`start`]).
     pub fn new_deferred(target: SshTarget, rt: tokio::runtime::Handle, prompts: ssh::Prompts, _w: &mut Window, _cx: &mut Context<Self>) -> Self {
         let local_dir = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into()));
         let mut me = Self { target, rt, prompts, sess: None, conn: None, connecting: false, status: String::new(), error: false, local_dir, remote_dir: String::new(),
-            local: vec![], remote: vec![], sel: None, hidden: false, queue: Queue::default(), edit: None, confirm_delete: None, editor: None, ticking: false, initial_dir: None, _subs: vec![] };
+            local: vec![], remote: vec![], sel: None, hidden: false, queue: Queue::default(), edit: None, confirm_delete: None, editor: None, ticking: false, initial_dir: None, _subs: vec![], sync: None };
         me.refresh_local();
         me
     }
@@ -70,12 +74,67 @@ impl SftpView {
     pub fn new(target: SshTarget, rt: tokio::runtime::Handle, prompts: ssh::Prompts, _w: &mut Window, cx: &mut Context<Self>) -> Self {
         let local_dir = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into()));
         let mut me = Self { target, rt, prompts, sess: None, conn: None, connecting: false, status: String::new(), error: false, local_dir, remote_dir: String::new(),
-            local: vec![], remote: vec![], sel: None, hidden: false, queue: Queue::default(), edit: None, confirm_delete: None, editor: None, ticking: false, initial_dir: None, _subs: vec![] };
+            local: vec![], remote: vec![], sel: None, hidden: false, queue: Queue::default(), edit: None, confirm_delete: None, editor: None, ticking: false, initial_dir: None, _subs: vec![], sync: None };
         me.refresh_local();
         me.connect(cx);
         me
     }
     fn set_status(&mut self, s: String, err: bool) { self.status = s; self.error = err; }
+    fn sync_preview(&mut self, cx: &mut Context<Self>) {
+        let (Some(s), Some(su)) = (self.sess.clone(), self.sync.as_mut()) else { return };
+        su.busy = true; su.plan = None; su.confirm_delete = false;
+        let (mode, del, ld, rd) = (su.mode, su.delete, self.local_dir.clone(), self.remote_dir.clone());
+        self.remote_op(cx, async move {
+            let l = ssh_term_proto::dirsync::scan_local(&ld)?;
+            let r = sftp::scan_remote(&s, &rd).await?;
+            Ok(ssh_term_proto::dirsync::plan(&l, &r, mode, del))
+        }, |v, plan, _| { if let Some(su) = v.sync.as_mut() { su.busy = false; v.status = tf("sync.previewed", &[("n", &plan.len())]); su.plan = Some(plan); } });
+    }
+    fn sync_run(&mut self, cx: &mut Context<Self>) {
+        let (Some(s), Some(su)) = (self.sess.clone(), self.sync.as_mut()) else { return };
+        let Some(plan) = su.plan.clone() else { return };
+        let dels = plan.iter().filter(|o| o.is_delete()).count();
+        if dels > 0 && !su.confirm_delete { su.confirm_delete = true; cx.notify(); return; }
+        su.busy = true;
+        let (q, ld, rd, host) = (self.queue.clone(), self.local_dir.clone(), self.remote_dir.clone(), self.target.host.clone());
+        let _ = crate::audit_log().append("sftp.sync", "user", &format!("host={host} local={:?} remote={rd:?} mode={:?} ops={} deletes={dels}", ld.display(), su.mode, plan.len()));
+        self.remote_op(cx, async move { sftp::execute_sync(&s, &q, &ld, &rd, &plan).await }, |v, (q, d, c), cx| {
+            v.sync = None;
+            v.after_change(tf("sync.done", &[("q", &q), ("d", &d), ("c", &c)]), cx);
+        });
+    }
+    fn sync_panel(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        use ssh_term_proto::dirsync::Mode;
+        let su = self.sync.as_ref()?;
+        let th = cur();
+        let modes = vec![("up".to_string(), t("sync.up").to_string()), ("down".to_string(), t("sync.down").to_string()), ("both".to_string(), t("sync.both").to_string())];
+        let sel = match su.mode { Mode::LocalToRemote => "up", Mode::RemoteToLocal => "down", Mode::TwoWay => "both" };
+        let me = cx.entity().downgrade();
+        let mut list = div().id("sync-plan").max_h(px(180.)).overflow_y_scroll().flex().flex_col().text_size(px(11.5)).font_family("monospace");
+        if let Some(plan) = &su.plan {
+            if plan.is_empty() { list = list.child(div().text_color(c(th.success)).child(t("sync.in_sync"))); }
+            for op in plan.iter().take(300) {
+                let col = if op.is_delete() { c(th.error) } else if matches!(op, ssh_term_proto::dirsync::Op::Conflict(_)) { c(th.warning) } else { c(th.text) };
+                list = list.child(div().text_color(col).child(format!("{}  {}", op.sign(), op.path())));
+            }
+            if plan.len() > 300 { list = list.child(format!("… +{}", plan.len() - 300)); }
+        }
+        let dels = su.plan.as_ref().map(|p| p.iter().filter(|o| o.is_delete()).count()).unwrap_or(0);
+        let mut bar = div().flex().items_center().gap_2()
+            .child(ui::segmented("sync-mode", &modes, sel, move |v, _, cx| { let _ = me.update(cx, |p, cx| { if let Some(su) = p.sync.as_mut() { su.mode = match v.as_str() { "down" => Mode::RemoteToLocal, "both" => Mode::TwoWay, _ => Mode::LocalToRemote }; su.plan = None; } cx.notify() }); }))
+            .child(gpui_component::switch::Switch::new("sync-del").checked(su.delete).label(t("sync.delete_extra")).on_click(cx.listener(|v, on: &bool, _, cx| { if let Some(su) = v.sync.as_mut() { su.delete = *on; su.plan = None; } cx.notify() })))
+            .child(div().flex_1())
+            .child(ui::button("sync-preview", if su.busy { t("sync.scanning") } else { t("sync.preview") }, 0).on_click(cx.listener(|v, _, _, cx| v.sync_preview(cx))));
+        if su.plan.as_ref().is_some_and(|p| !p.is_empty()) {
+            bar = bar.child(ui::button("sync-run", if su.confirm_delete { tf("sync.confirm_delete", &[("n", &dels)]) } else { t("sync.run").to_string() }, if su.confirm_delete || dels > 0 { 2 } else { 1 }).on_click(cx.listener(|v, _, _, cx| v.sync_run(cx))));
+        }
+        bar = bar.child(ui::button("sync-close", t("ui.cancel"), 3).on_click(cx.listener(|v, _, _, cx| { v.sync = None; cx.notify() })));
+        Some(div().mx_4().mt_2().p_3().rounded_md().border_1().border_color(c(th.accent).opacity(0.5)).flex().flex_col().gap_2().text_size(px(12.)).text_color(c(th.text))
+            .child(div().font_weight(FontWeight::SEMIBOLD).child(tf("sync.title", &[("l", &self.local_dir.display()), ("r", &self.remote_dir)])))
+            .child(bar)
+            .children(su.confirm_delete.then(|| div().flex().items_center().gap_2().text_color(c(th.error)).child(icon(IconName::TriangleAlert, 14., c(th.error))).child(tf("sync.delete_warn", &[("n", &dels)]))))
+            .child(list))
+    }
     fn refresh_local(&mut self) {
         match sftp::list_local(&self.local_dir, self.hidden) { Ok(v) => self.local = v, Err(e) => { self.local.clear(); self.set_status(format!("{}: {e}", self.local_dir.display()), true) } }
     }
@@ -389,6 +448,7 @@ impl Render for SftpView {
                 match v.selected() { Some((side, e)) => v.confirm_delete = Some((side, v.path_of(side, &e.name))), None => v.set_status(t("sftp.select_first").into(), true) }
                 cx.notify();
             })))
+            .child(act("sftp-sync", IconName::RefreshCw, t("sync.button")).on_click(cx.listener(|v, _, _, cx| { v.sync = Some(SyncUi { mode: ssh_term_proto::dirsync::Mode::LocalToRemote, delete: false, plan: None, busy: false, confirm_delete: false }); cx.notify() })))
             .child(div().flex_1())
             .child(ui::button("sftp-hidden", if self.hidden { t("sftp.hide_hidden") } else { t("sftp.show_hidden") }, 3).on_click(cx.listener(|v, _, _, cx| { v.hidden = !v.hidden; v.refresh_local(); v.refresh_remote(cx); cx.notify() })))
             .child(ui::button("sftp-refresh", t("sftp.refresh"), 0).on_click(cx.listener(|v, _, _, cx| { v.refresh_local(); v.refresh_remote(cx); cx.notify() })));
@@ -422,6 +482,7 @@ impl Render for SftpView {
                     .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("sftp.editor_title"))))
                 .child(ed).child(status);
         }
+        let sync = self.sync_panel(cx);
         let body = div().flex_1().min_h_0().px_4().pt_3().flex().gap_3()
             .child(self.pane(Side::Local, cx))
             .child(div().w(px(28.)).flex().flex_col().items_center().justify_center().gap_3()
@@ -438,7 +499,7 @@ impl Render for SftpView {
                 .child(div().id("sftp-close").size(px(28.)).rounded_md().flex().items_center().justify_center().cursor_pointer()
                     .hover(|d| d.bg(c(cur().surface0))).on_click(cx.listener(|_, _, _, cx| cx.emit(SftpEvent::Close)))
                     .child(icon(IconName::X, 16., c(th.overlay1)))))
-            .child(toolbar).children(edit_bar).children(confirm)
+            .child(toolbar).children(edit_bar).children(confirm).children(sync)
             .child(body)
             .child(div().px_4().pt_3().child(self.queue_view(cx)))
             .child(status)

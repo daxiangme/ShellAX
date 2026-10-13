@@ -267,3 +267,55 @@ fn keyboard_interactive_auth() {
     let (p3, _) = prompts(vec![(kbd, "wrong".into(), false)]);
     assert!(rt.block_on(ssh::connect(&t, &p3)).is_err());
 }
+
+#[test]
+fn sftp_directory_sync() {
+    use ssh_term_proto::dirsync::{plan, scan_local, Mode, Op};
+    use ssh_term_proto::sftp::{self, Queue, Side};
+    let (Some(port), Some(key)) = (env("TEST_SSH_PORT"), env("TEST_SSH_KEY")) else { eprintln!("skip"); return };
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let t = SshTarget { auth: "key".into(), keys: vec![key.into()], ..base(&port) };
+    let (p, _) = prompts(vec![]);
+    rt.block_on(async {
+        let c = ssh::connect(&t, &p).await.unwrap();
+        let s = c.sftp().await.unwrap();
+        let home = s.canonicalize(".").await.unwrap();
+        let rd = sftp::join(&home, &format!("stp-sync-{}", std::process::id()));
+        let _ = sftp::remove(Some(&s), Side::Remote, &rd).await;
+        sftp::mkdir(Some(&s), Side::Remote, &rd).await.unwrap();
+        let ld = std::env::temp_dir().join(format!("stp-sync-l-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&ld);
+        std::fs::create_dir_all(ld.join("sub/deep")).unwrap();
+        std::fs::write(ld.join("a.txt"), "local a").unwrap();
+        std::fs::write(ld.join("sub/deep/b.txt"), "local b").unwrap();
+        sftp::write_text(&s, &sftp::join(&rd, "only-remote.txt"), "r", None).await.unwrap();
+        sftp::write_text(&s, &sftp::join(&rd, "a.txt"), "old remote a, longer", None).await.unwrap();
+        // one-way local→remote without delete: remote extra stays
+        let q = Queue::default();
+        let ops = plan(&scan_local(&ld).unwrap(), &sftp::scan_remote(&s, &rd).await.unwrap(), Mode::LocalToRemote, false);
+        assert!(ops.contains(&Op::Upload("a.txt".into())) && ops.contains(&Op::MkdirRemote("sub/deep".into())) && !ops.iter().any(|o| o.is_delete()));
+        sftp::execute_sync(&s, &q, &ld, &rd, &ops).await.unwrap();
+        q.drain(&s).await;
+        assert_eq!(s.read(sftp::join(&rd, "a.txt")).await.unwrap(), b"local a");
+        assert_eq!(s.read(sftp::join(&rd, "sub/deep/b.txt")).await.unwrap(), b"local b");
+        // in sync now (mtimes preserved) → only the remote-only file differs
+        let ops = plan(&scan_local(&ld).unwrap(), &sftp::scan_remote(&s, &rd).await.unwrap(), Mode::LocalToRemote, true);
+        assert_eq!(ops, vec![Op::DeleteRemote("only-remote.txt".into())]);
+        sftp::execute_sync(&s, &q, &ld, &rd, &ops).await.unwrap();
+        assert!(s.metadata(sftp::join(&rd, "only-remote.txt")).await.is_err());
+        // two-way: new remote file comes down, newer local edit goes up
+        sftp::write_text(&s, &sftp::join(&rd, "from-remote.txt"), "hello", None).await.unwrap();
+        std::fs::write(ld.join("a.txt"), "local a v2").unwrap();
+        let f = std::fs::File::options().write(true).open(ld.join("a.txt")).unwrap();
+        f.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60)).unwrap();
+        let ops = plan(&scan_local(&ld).unwrap(), &sftp::scan_remote(&s, &rd).await.unwrap(), Mode::TwoWay, false);
+        assert!(ops.contains(&Op::Download("from-remote.txt".into())) && ops.contains(&Op::Upload("a.txt".into())), "{ops:?}");
+        sftp::execute_sync(&s, &q, &ld, &rd, &ops).await.unwrap();
+        q.drain(&s).await;
+        assert_eq!(std::fs::read_to_string(ld.join("from-remote.txt")).unwrap(), "hello");
+        assert_eq!(s.read(sftp::join(&rd, "a.txt")).await.unwrap(), b"local a v2");
+        assert!(plan(&scan_local(&ld).unwrap(), &sftp::scan_remote(&s, &rd).await.unwrap(), Mode::TwoWay, true).is_empty(), "idempotent");
+        let _ = sftp::remove(Some(&s), Side::Remote, &rd).await;
+        let _ = std::fs::remove_dir_all(&ld);
+    });
+}

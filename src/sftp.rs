@@ -201,6 +201,11 @@ pub async fn run_job(s: &SftpSession, job: &Job) -> Result<()> {
                     job.done.fetch_add(n as u64, Ordering::Relaxed);
                 }
                 dst.shutdown().await?;
+                // keep the source mtime so later syncs see the pair as unchanged
+                if let Some(mt) = std::fs::metadata(&job.local).ok().and_then(|m| m.modified().ok()).and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()) {
+                    let t = mt.as_secs() as u32;
+                    let _ = s.set_metadata(job.remote.clone(), FileAttributes { size: None, uid: None, user: None, gid: None, group: None, permissions: None, atime: Some(t), mtime: Some(t) }).await;
+                }
             }
             Dir::Download => {
                 let mut src = s.open_with_flags(job.remote.clone(), OpenFlags::READ).await?;
@@ -221,6 +226,10 @@ pub async fn run_job(s: &SftpSession, job: &Job) -> Result<()> {
                     job.done.fetch_add(n as u64, Ordering::Relaxed);
                 }
                 dst.flush().await?;
+                drop(dst);
+                if let Some(mt) = s.metadata(job.remote.clone()).await.ok().and_then(|m| m.mtime) {
+                    if let Ok(f) = std::fs::File::options().write(true).open(&job.local) { let _ = f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(mt as u64)); }
+                }
             }
         }
         Ok::<bool, anyhow::Error>(true)
@@ -230,6 +239,43 @@ pub async fn run_job(s: &SftpSession, job: &Job) -> Result<()> {
         Ok(false) => { job.set(JobState::Paused); Ok(()) }
         Err(e) => { *job.error.lock().unwrap() = Some(format!("{e:#}")); job.set(JobState::Failed); Err(e) }
     }
+}
+
+/// Recursive remote listing for directory sync (relative paths; symlinks skipped).
+pub async fn scan_remote(s: &SftpSession, root: &str) -> Result<crate::dirsync::Tree> {
+    let mut t = crate::dirsync::Tree::new(); let mut stack = vec![(root.to_string(), String::new())];
+    while let Some((dir, rel)) = stack.pop() {
+        for e in s.read_dir(dir.clone()).await? {
+            let name = e.file_name();
+            if name == "." || name == ".." { continue; }
+            let m = e.metadata();
+            if m.file_type().is_symlink() { continue; }
+            let r = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
+            t.insert(r.clone(), crate::dirsync::FileInfo { size: if m.is_dir() { 0 } else { m.size.unwrap_or(0) }, mtime: m.mtime.unwrap_or(0) as u64, is_dir: m.is_dir() });
+            if m.is_dir() { stack.push((join(&dir, &name), r)); }
+        }
+    }
+    Ok(t)
+}
+/// Execute a sync plan: mkdirs and deletes run now; transfers go to `queue` (destination
+/// file removed first so the resumable queue never appends to stale content). Conflicts are skipped.
+/// Returns (queued transfers, deletes, skipped conflicts).
+pub async fn execute_sync(s: &SftpSession, queue: &Queue, local_root: &Path, remote_root: &str, ops: &[crate::dirsync::Op]) -> Result<(usize, usize, usize)> {
+    use crate::dirsync::Op;
+    let (mut q, mut d, mut c) = (0, 0, 0);
+    for op in ops {
+        let (lp, rp) = (local_root.join(op.path()), join(remote_root, op.path()));
+        match op {
+            Op::MkdirRemote(_) => { let _ = s.create_dir(rp).await; }
+            Op::MkdirLocal(_) => std::fs::create_dir_all(&lp)?,
+            Op::Upload(_) => { let _ = s.remove_file(rp.clone()).await; queue.push(Dir::Upload, lp, rp); q += 1; }
+            Op::Download(_) => { if let Some(p) = lp.parent() { std::fs::create_dir_all(p)?; } let _ = std::fs::remove_file(&lp); queue.push(Dir::Download, lp, rp); q += 1; }
+            Op::DeleteRemote(_) => { remove(Some(s), Side::Remote, &rp).await?; d += 1; }
+            Op::DeleteLocal(_) => { remove(None, Side::Local, &lp.to_string_lossy()).await?; d += 1; }
+            Op::Conflict(_) => c += 1,
+        }
+    }
+    Ok((q, d, c))
 }
 
 /// Sequential transfer queue on one SFTP session. Paused/failed jobs can be resumed.
