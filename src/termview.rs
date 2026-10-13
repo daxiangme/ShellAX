@@ -242,7 +242,7 @@ fn row_highlights(row: &alacritty_terminal::grid::Row<alacritty_terminal::term::
     let mut out: Vec<HlCell> = vec![None; ncols];
     for (a, b, ri) in ssh_term_proto::highlight::spans(&rules, &chars) {
         let (c0, c1) = (cols[a], if b < cols.len() { cols[b] } else { ncols });
-        for o in &mut out[c0..c1] { *o = Some((rules[ri].color.clone(), rules[ri].bold)); }
+        for o in &mut out[c0..c1] { *o = Some((rules[ri].color, rules[ri].bold)); }
     }
     out
 }

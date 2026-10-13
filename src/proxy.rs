@@ -181,7 +181,8 @@ mod tests {
         let oport = origin.local_addr().unwrap().port();
         std::thread::spawn(move || for c in origin.incoming().flatten() {
             let mut r = std::io::BufReader::new(c.try_clone().unwrap()); let mut line = String::new(); r.read_line(&mut line).unwrap();
-            let mut len = 0; loop { let mut h = String::new(); r.read_line(&mut h).unwrap(); if h.trim().is_empty() { break; } if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") { len = v.trim().parse().unwrap(); } }
+            let mut len = 0; loop { let mut h = String::new(); r.read_line(&mut h).unwrap(); if h.trim().is_empty() { break; }
+            if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") { len = v.trim().parse().unwrap(); } }
             let mut b = vec![0; len]; r.read_exact(&mut b).unwrap();
             let body = if line.contains("manifest") { r#"{"version":"99.0.0","url":"x","notes":""}"#.to_string() } else { r#"{"choices":[{"message":{"content":"ok"}}]}"#.to_string() };
             let mut c = c; let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());

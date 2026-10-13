@@ -6,6 +6,7 @@
 //!   = hosts marked production, or `names` globs),
 //! - `audit.retention_days` is a floor for the user's retention,
 //! - `pty_write` caps write_to_pty.
+//!
 //! A file that exists but cannot be parsed fails closed (Plan only, everything else asks).
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
