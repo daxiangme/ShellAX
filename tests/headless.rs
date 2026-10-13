@@ -75,7 +75,7 @@ fn ssh_localhost_ls_and_known_hosts_tofu() {
     let t0 = Instant::now();
     while s3.conn_error.lock().unwrap().is_none() && t0.elapsed() < Duration::from_secs(10) { std::thread::sleep(Duration::from_millis(100)); }
     let err = s3.conn_error.lock().unwrap().clone().expect("changed key must be refused");
-    assert!(err.contains("主机密钥已变更"), "{err}");
+    assert!(err.contains("主机密钥已变更") || err.contains("HOST KEY CHANGED"), "{err}");
     assert_eq!(prompts.load(std::sync::atomic::Ordering::SeqCst), 1);
     let _ = std::fs::remove_file(&kh);
 }

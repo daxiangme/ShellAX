@@ -243,3 +243,32 @@ SSH_PORT=2222 SSH_USER=sshtest SSH_KEY=$PWD/testenv/client_ed25519 \
 **测试**：`cargo test --release`：库 25 + 二进制 7 + 无界面 6（SSH 用例需 `TEST_SSH_PORT=2222 TEST_SSH_USER=sshtest TEST_SSH_KEY=testenv/client_ed25519`）全部通过；release 构建无警告。
 
 **已知问题**：设置写回会丢掉 config.toml 里手写的注释；多行粘贴确认在 bash/zsh 提示符下不会出现（readline 开了括号粘贴，属预期）；本机 X 环境没有 xclip，粘贴确认没截图验证；首次点击窗口有时只是获得焦点。
+
+## v6：界面多语言 + 内置 AI（2026-10-13）
+
+### 界面语言
+- 设置 → 通用 → 界面语言：跟随系统 / 简体中文 / English，切换后立即生效，写入 `general.language`。
+- 文本在 `locales/en.toml`、`locales/zh-CN.toml`（扁平 `"key" = "文本"`，`{name}` 占位符），编译时嵌入。缺键时先回退英文，再回退到 key 本身。
+- `cargo test --lib i18n` 会检查：两份文件键集合相同、占位符相同、代码里所有 `t("…")` 都有英文。
+- 不随语言变化的内容：已打开标签的标题（新开标签才会换）、用户数据（分组名、规则原因）、已经写进审计的文本。
+
+### 内置 AI（自带 Key）
+- 设置 → AI：可以添加多个服务商（类型为 OpenAI 兼容或 Anthropic；可填 Base URL、模型、超时、温度、最大 tokens），并设一个为默认。这些写入 `config.toml` 的 `[[ai.providers]]`。
+- API Key **不写入 config.toml、日志或审计**：
+  - 优先存系统钥匙串（keyring crate：Linux 用 Secret Service，macOS 用钥匙串，Windows 用凭据管理器）。服务名为 `agentshell`，账户为 `ai-provider:<id>`。
+  - 钥匙串不可用时，存到 `$XDG_DATA_HOME/agentshell/secrets.enc`（ChaCha20-Poly1305 加密，密钥文件 `secrets.key`，两者权限都是 0600）。这个加密只防误泄露，不防同一用户的其他进程。
+  - 界面只显示 Key 的后 4 位，并标出当前存储位置。
+  - 设环境变量 `AGENTSHELL_NO_KEYRING=1` 可强制使用文件存储。
+- “测试连接”会发一次真实的最小请求（max_tokens=1），并显示延迟或错误。
+- 脱敏和上下文范围设置会作用于实际请求：
+  - 上下文范围可选：不发送 / 最近命令 / 选中 / 当前屏幕。
+  - 关闭“允许发送输出”后只发送最近一条命令。
+  - 发送前脱敏会去掉密码、Token、私钥、URL 中的凭据等。
+- 自然语言生成命令：在终端输入 `# 想做的事` 回车，或按 Ctrl+Shift+G，会弹出命令卡片。
+  - **插入（→）**：只写入命令、不回车。
+  - **执行…**：交给权限引擎按当前模式和规则判定，允许则运行，询问则弹出确认，拒绝则显示原因。
+  - 请求、响应、插入、判定、执行都会写入审计（只记录脱敏后的请求文本和上下文字数）。
+- 本地 mock（开发用）：`python3 tools/mock_ai.py` 监听 127.0.0.1:18080，提供 OpenAI 兼容接口，按关键词返回固定命令。**本轮没有用任何真实模型测试过。**
+
+### 截图
+`screenshot-v6-english-ui.png`、`screenshot-v6-english-settings.png`、`screenshot-v6-chinese-settings.png`、`screenshot-v6-chinese-ui-confirm.png`、`screenshot-v6-ai-provider-en.png`、`screenshot-v6-ai-provider-zh.png`、`screenshot-v6-nl-card.png`、`screenshot-v6-nl-inserted.png`、`screenshot-v6-nl-redaction-zh.png`、`screenshot-v6-nl-plan-denied.png`

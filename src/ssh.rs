@@ -1,3 +1,4 @@
+use crate::i18n::{t, tf};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -64,13 +65,11 @@ impl client::Handler for Handler {
         match check_known_host(&self.host, self.port, &key, &self.known_hosts)? {
             KnownHost::Match => Ok(true),
             KnownHost::Changed { line } => {
-                *self.failure.lock().unwrap() = Some(format!(
-                    "主机密钥已变更！{}:{} 现在提供 {fp}，与 {} 第 {line} 行记录不符。可能存在中间人攻击，已拒绝连接。",
-                    self.host, self.port, self.known_hosts.display()));
+                *self.failure.lock().unwrap() = Some(tf("ssh.hostkey_changed", &[("host", &self.host), ("port", &self.port), ("fp", &fp), ("file", &self.known_hosts.display()), ("line", &line)]));
                 Ok(false)
             }
             KnownHost::Unknown if HOST_KEY_POLICY.load(std::sync::atomic::Ordering::Relaxed) == 1 => {
-                *self.failure.lock().unwrap() = Some(format!("严格模式：{}:{} 不在 known_hosts 中（{fp}），已拒绝连接。", self.host, self.port));
+                *self.failure.lock().unwrap() = Some(tf("ssh.strict_unknown", &[("host", &self.host), ("port", &self.port), ("fp", &fp)]));
                 Ok(false)
             }
             KnownHost::Unknown if HOST_KEY_POLICY.load(std::sync::atomic::Ordering::Relaxed) == 2 => {
@@ -88,7 +87,7 @@ impl client::Handler for Handler {
                         Ok(true)
                     }
                     HostKeyDecision::AcceptOnce => Ok(true),
-                    HostKeyDecision::Reject => { *self.failure.lock().unwrap() = Some("用户拒绝了未知主机密钥".into()); Ok(false) }
+                    HostKeyDecision::Reject => { *self.failure.lock().unwrap() = Some(t("ssh.user_rejected").into()); Ok(false) }
                 }
             }
         }
@@ -109,7 +108,7 @@ const HISTORY_CMD: &str = "for f in ~/.bash_history ~/.zsh_history; do [ -r \"$f
 pub fn spawn_ssh(rt: &tokio::runtime::Handle, target: SshTarget, size: Size, prompt: flume::Sender<HostKeyPrompt>) -> Arc<Session> {
     let (session, out_tx, from_ui) = Session::new(size);
     let s = session.clone();
-    let _ = out_tx.send(format!("正在连接 {} …\r\n", target.label()).into_bytes());
+    let _ = out_tx.send(format!("{}\r\n", tf("ssh.connecting", &[("target", &target.label())])).into_bytes());
     rt.spawn(async move {
         let failure = Arc::new(std::sync::Mutex::new(None));
         let res: Result<()> = async {
@@ -121,18 +120,18 @@ pub fn spawn_ssh(rt: &tokio::runtime::Handle, target: SshTarget, size: Size, pro
             // host-key prompt) gets a separate generous bound.
             let secs = CONNECT_TIMEOUT_SECS.load(Relaxed).max(1);
             let tcp = tokio::time::timeout(Duration::from_secs(secs), tokio::net::TcpStream::connect((target.host.as_str(), target.port))).await
-                .map_err(|_| anyhow!("连接超时（{secs} 秒）"))??;
+                .map_err(|_| anyhow!(tf("ssh.connect_timeout", &[("secs", &secs)])))??;
             let mut h = tokio::time::timeout(Duration::from_secs(300), client::connect_stream(cfg, tcp, handler)).await
-                .map_err(|_| anyhow!("握手超时"))??;
+                .map_err(|_| anyhow!(t("ssh.handshake_timeout")))??;
             let mut authed = false;
-            let mut last_err = String::from("没有可用的私钥");
+            let mut last_err = String::from(t("ssh.no_key"));
             for kp in &target.keys {
                 let key = match load_secret_key(kp, None) { Ok(k) => k, Err(e) => { last_err = format!("{}: {e}", kp.display()); continue } };
                 let hash = h.best_supported_rsa_hash().await?.flatten();
                 if h.authenticate_publickey(&target.user, PrivateKeyWithHashAlg::new(Arc::new(key), hash)).await?.success() { authed = true; break; }
-                last_err = format!("{} 被服务器拒绝", kp.display());
+                last_err = tf("ssh.key_rejected", &[("key", &kp.display())]);
             }
-            if !authed { bail!("公钥认证失败（{last_err}）"); }
+            if !authed { bail!(tf("ssh.pubkey_failed", &[("err", &last_err)])); }
             // remote history on a separate exec channel (read-only, best effort)
             if let Ok(mut hc) = h.channel_open_session().await {
                 if hc.exec(true, HISTORY_CMD).await.is_ok() {

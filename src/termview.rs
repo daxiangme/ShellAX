@@ -2,6 +2,7 @@
 //! autosuggestion and agent detection. Painting is split into two child entities so that
 //! a cursor blink repaints only the cursor layer while the grid is replayed from GPUI's
 //! view cache (`Entity::cached`).
+use ssh_term_proto::i18n::{t, tf};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,6 +21,7 @@ use gpui::{
 };
 use ssh_term_proto::agent::{self, AgentState, DetectionInput, Manifest};
 use ssh_term_proto::boxdraw;
+use ssh_term_proto::policy::{self, Effect, Risk};
 use ssh_term_proto::ssh::SshTarget;
 use ssh_term_proto::suggest::{History, InputTracker, Key};
 use ssh_term_proto::term::{Session, Size};
@@ -357,8 +359,20 @@ pub struct TermView {
     last_detect: Instant,
     detect_scheduled: bool,
     pub pending_paste: Option<String>,
+    pub ai: Option<AiCard>,
     bell_until: Option<Instant>,
     _subs: Vec<Subscription>,
+}
+
+/// Natural-language → command card (built-in AI). Accepting inserts text only; executing goes
+/// through the permission engine and is audited.
+#[derive(Clone)]
+pub enum AiCard {
+    Loading { request: String },
+    Ready { request: String, command: String, explanation: String, redactions: usize, provider: String },
+    Confirm { command: String, reason: String },
+    Denied { command: String, reason: String },
+    Error { request: String, message: String },
 }
 
 /// Snapshot of what the input line looks like right now.
@@ -396,17 +410,17 @@ impl TermView {
             selecting: false, scroll_drag: false, history, tracker: InputTracker::new(),
             last_activity: Instant::now(), blink_running: false, last_mouse_cell: None, mouse_down_btn: None,
             manifests, last_command: None, agent: None, agent_seen: Instant::now(), last_detect: Instant::now() - Duration::from_secs(5),
-            detect_scheduled: false, pending_paste: None, bell_until: None, _subs: subs,
+            detect_scheduled: false, pending_paste: None, ai: None, bell_until: None, _subs: subs,
         }
     }
 
-    pub fn status(&self, t: &Theme) -> (&'static str, Hsla) {
+    pub fn status(&self, th: &Theme) -> (&'static str, Hsla) {
         match &self.session {
-            Some(s) if s.conn_error.lock().unwrap().is_some() => ("连接失败", c(t.error)),
-            Some(s) if s.exited.load(Ordering::Acquire) => ("已断开", c(t.overlay0)),
-            Some(s) if s.connected.load(Ordering::Acquire) => ("已连接", c(t.success)),
-            Some(_) => ("连接中", c(t.warning)),
-            None => ("连接失败", c(t.error)),
+            Some(s) if s.conn_error.lock().unwrap().is_some() => (t("ui.connection_failed"), c(th.error)),
+            Some(s) if s.exited.load(Ordering::Acquire) => (t("ui.disconnected"), c(th.overlay0)),
+            Some(s) if s.connected.load(Ordering::Acquire) => (t("ui.connected"), c(th.success)),
+            Some(_) => (t("ui.connecting"), c(th.warning)),
+            None => (t("ui.connection_failed"), c(th.error)),
         }
     }
 
@@ -434,7 +448,7 @@ impl TermView {
         self.repaint_grid(cx);
         self.schedule_detect(cx);
         // connection state changes show in the header
-        if self.status(&cur()).0 != "已连接" { cx.notify(); }
+        if self.status(&cur()).0 != t("ui.connected") { cx.notify(); }
     }
 
     // ---------------- blink: only while focused, window active and recently used; repaints the cursor layer only
@@ -612,6 +626,13 @@ impl TermView {
         let k = &ev.keystroke;
         let m = &k.modifiers;
         self.kick_blink(window, cx);
+        if self.ai.is_some() && !m.control && !m.alt && !m.platform {
+            match k.key.as_str() {
+                "escape" => { self.ai_cancel(cx); cx.stop_propagation(); return; }
+                "tab" | "right" if matches!(self.ai, Some(AiCard::Ready { .. })) => { self.ai_insert(cx); cx.stop_propagation(); return; }
+                _ => {}
+            }
+        }
         // app shortcuts
         if m.control && m.shift && !m.alt {
             match k.key.to_ascii_lowercase().as_str() {
@@ -644,6 +665,15 @@ impl TermView {
         let app_cursor = self.mode().contains(TermMode::APP_CURSOR);
         let Some(bytes) = key_to_bytes(k, app_cursor) else { return };
         match k.key.as_str() {
+            "enter" if plain && self.nl_request().is_some() => {
+                let req = self.nl_request().unwrap_or_default();
+                // clear the typed "# ..." line instead of submitting it (it would be a shell comment anyway)
+                s.write(vec![0x15]);
+                self.tracker.key(Key::KillLine);
+                self.ai_request(req, cx);
+                cx.stop_propagation();
+                return;
+            }
             "enter" => {
                 if let Some(ls) = self.line_state() {
                     if !ls.alt_screen {
@@ -668,6 +698,186 @@ impl TermView {
         self.scroll_to_bottom(cx);
         s.write(bytes);
         cx.stop_propagation();
+    }
+
+    // ---------------- built-in AI: natural language -> command
+    /// "# list big files" typed at the prompt (prefix configurable), when AI is enabled.
+    fn nl_request(&self) -> Option<String> {
+        let cfg = config::get();
+        if !cfg.ai.enabled || cfg.ai.nl_prefix.is_empty() { return None; }
+        let ls = self.line_state()?;
+        if ls.alt_screen { return None; }
+        let (input, _) = self.tracker.current_input(&ls.before_cursor, ls.prompt_col)?;
+        let rest = input.trim_start().strip_prefix(cfg.ai.nl_prefix.as_str())?.trim();
+        (!rest.is_empty()).then(|| rest.to_string())
+    }
+    /// Shortcut entry: use the current input line (prefix optional) as the request.
+    pub fn ai_from_line(&mut self, cx: &mut Context<Self>) {
+        let Some(s) = self.session.clone() else { return };
+        let req = self.nl_request().or_else(|| {
+            let ls = self.line_state()?;
+            let (input, _) = self.tracker.current_input(&ls.before_cursor, ls.prompt_col)?;
+            let t = input.trim().to_string();
+            (!t.is_empty()).then_some(t)
+        });
+        match req {
+            Some(r) => { s.write(vec![0x15]); self.tracker.key(Key::KillLine); self.ai_request(r, cx); }
+            None => { self.ai = Some(AiCard::Error { request: String::new(), message: tf("ai.nl_hint", &[("prefix", &config::get().ai.nl_prefix)]) }); cx.notify(); }
+        }
+    }
+    /// Logical screen lines (soft-wrapped rows joined, so a wrapped secret is redacted as a whole).
+    fn screen_lines(&self) -> Vec<String> {
+        let Some(s) = &self.session else { return vec![] };
+        let t = s.term.lock().unwrap();
+        let g = t.grid();
+        let ncols = g.columns();
+        let mut out = vec![];
+        let mut cur = String::new();
+        for l in g.topmost_line().0..=g.bottommost_line().0 {
+            let row = &g[Line(l)];
+            for c in 0..ncols {
+                let cell = &row[Column(c)];
+                if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) { continue; }
+                cur.push(if cell.c == '\0' { ' ' } else { cell.c });
+            }
+            if !row[Column(ncols - 1)].flags.contains(Flags::WRAPLINE) { out.push(cur.trim_end().to_string()); cur.clear(); }
+        }
+        if !cur.is_empty() { out.push(cur.trim_end().to_string()); }
+        out
+    }
+    pub fn ai_request(&mut self, request: String, cx: &mut Context<Self>) {
+        let cfg = config::get();
+        if !cfg.ai.enabled { self.ai = Some(AiCard::Error { request, message: t("ai.disabled").into() }); cx.notify(); return; }
+        let Some(provider) = cfg.ai.default_provider().cloned() else {
+            self.ai = Some(AiCard::Error { request, message: t("ai.no_provider").into() }); cx.notify(); return;
+        };
+        let key = crate::secret_store().get(&provider.secret_name()).map(|x| x.0).unwrap_or_default();
+        // context, honouring scope / send_output / redaction settings
+        let screen = self.screen_lines();
+        let sel = self.selection_text();
+        let inp = ssh_term_proto::ai::ContextInput { selection: sel.as_deref(), last_command: self.last_command.as_deref(), screen: &screen };
+        let opts = ssh_term_proto::ai::ContextOpts {
+            scope: ssh_term_proto::ai::Scope::from_id(&cfg.ai.context), lines: cfg.ai.context_lines as usize,
+            send_output: cfg.ai.send_output, redact: cfg.ai.redact,
+        };
+        let (ctx_text, mut n_red) = ssh_term_proto::ai::build_context(&inp, &opts);
+        let (req_sent, n2) = if cfg.ai.redact { ssh_term_proto::ai::redact(&request) } else { (request.clone(), 0) };
+        n_red += n2;
+        let shell = match &self.spec { Spec::Local => std::env::var("SHELL").unwrap_or_else(|_| "sh".into()), Spec::Ssh(_) => "remote POSIX shell".into() };
+        let host = match &self.spec { Spec::Local => "local".to_string(), Spec::Ssh(t) => t.label() };
+        let user = ssh_term_proto::ai::build_user_prompt(&req_sent, &shell, &host, &ctx_text);
+        let _ = crate::audit_log().append("ai.request", "user", &format!(
+            "provider={} model={} request={:?} context_scope={} context_chars={} redactions={}",
+            provider.name, provider.model, req_sent, cfg.ai.context, ctx_text.chars().count(), n_red));
+        self.ai = Some(AiCard::Loading { request: request.clone() });
+        cx.notify();
+        let pname = provider.name.clone();
+        let task = cx.background_executor().spawn(async move {
+            ssh_term_proto::ai::chat(&provider, &key, ssh_term_proto::ai::SYSTEM_PROMPT, &user, None).map_err(|e| format!("{e:#}"))
+        });
+        cx.spawn(async move |this, cx| {
+            let r = task.await;
+            let _ = this.update(cx, |v, cx| {
+                if !matches!(v.ai, Some(AiCard::Loading { .. })) { return; } // cancelled
+                v.ai = Some(match r {
+                    Ok(reply) => {
+                        let (command, explanation) = ssh_term_proto::ai::extract_command(&reply.text);
+                        let _ = crate::audit_log().append("ai.response", "ai", &format!("command={command:?} latency_ms={}", reply.latency.as_millis()));
+                        if command.is_empty() { AiCard::Error { request, message: t("ai.empty_reply").into() } }
+                        else { AiCard::Ready { request, command, explanation, redactions: n_red, provider: pname } }
+                    }
+                    Err(e) => AiCard::Error { request, message: e },
+                });
+                cx.notify();
+            });
+        }).detach();
+    }
+    fn ai_cancel(&mut self, cx: &mut Context<Self>) { self.ai = None; cx.notify(); }
+    /// Insert the suggested command at the prompt. Never sends Enter.
+    pub fn ai_insert(&mut self, cx: &mut Context<Self>) {
+        let Some(AiCard::Ready { command, .. }) = self.ai.clone() else { return };
+        let Some(s) = self.session.clone() else { return };
+        let one_line = command.replace(['\r', '\n'], " ");
+        s.write(one_line.clone().into_bytes());
+        self.tracker.key(Key::Text(&one_line));
+        let _ = crate::audit_log().append("ai.insert", "user", &format!("command={one_line:?}"));
+        self.ai = None;
+        cx.notify();
+    }
+    /// Execute: the permission engine decides (mode + rules); every outcome is audited.
+    pub fn ai_execute(&mut self, cx: &mut Context<Self>) {
+        let Some(AiCard::Ready { command, .. }) = self.ai.clone() else { return };
+        let cfg = config::get();
+        let max = match cfg.permissions.max_auto_risk.as_str() { "R0" => Risk::R0, "R2" => Risk::R2, _ => Risk::R1 };
+        let (eff, reason) = policy::decide(cfg.permissions.mode, max, &cfg.permissions.rules, "ai", "exec", &command, cfg.permissions.dangerous_confirm);
+        let risk = policy::classify(&command);
+        let _ = crate::audit_log().append("ai.exec.decision", "policy", &format!("mode={} risk={} effect={:?} command={command:?} reason={reason}", cfg.permissions.mode.label(), risk.label(), eff));
+        match eff {
+            Effect::Allow => self.ai_run(command, "policy", cx),
+            Effect::Ask => { self.ai = Some(AiCard::Confirm { command, reason }); cx.notify(); }
+            Effect::Deny => { self.ai = Some(AiCard::Denied { command, reason }); cx.notify(); }
+        }
+    }
+    fn ai_confirm(&mut self, cx: &mut Context<Self>) {
+        let Some(AiCard::Confirm { command, .. }) = self.ai.clone() else { return };
+        self.ai_run(command, "user", cx);
+    }
+    fn ai_run(&mut self, command: String, approved_by: &str, cx: &mut Context<Self>) {
+        let Some(s) = self.session.clone() else { return };
+        let one_line = command.replace(['\r', '\n'], " ");
+        let _ = crate::audit_log().append("ai.exec", approved_by, &format!("command={one_line:?}"));
+        self.tracker.key(Key::Text(&one_line));
+        self.last_command = Some(one_line.clone());
+        s.write(format!("{one_line}\r").into_bytes());
+        self.tracker.key(Key::Enter);
+        self.ai = None;
+        self.scroll_to_bottom(cx);
+        cx.notify();
+    }
+
+    fn ai_card(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let card = self.ai.clone()?;
+        let th = cur();
+        let mono = SharedString::from(config::get().font.family.clone());
+        let btn = |id: &'static str, label: &'static str, kind: u8| div().id(id).px_3().py(px(4.)).rounded_md().cursor_pointer().text_size(px(12.))
+            .bg(match kind { 1 => c(th.accent), 2 => c(th.error), _ => c(th.surface0) })
+            .text_color(if kind == 0 { c(th.text) } else { c(th.base) }).child(label);
+        let (border, title, body, buttons): (Hsla, String, gpui::Div, gpui::Div) = match card {
+            AiCard::Loading { request } => (c(th.accent), tf("ai.card_loading", &[("req", &request)]), div(), div().flex().gap_2()
+                .child(btn("ai-cancel", t("ui.cancel"), 0).on_click(cx.listener(|v, _, _w, cx| v.ai_cancel(cx))))),
+            AiCard::Ready { request, command, explanation, redactions, provider } => (c(th.accent), tf("ai.card_ready", &[("req", &request), ("provider", &provider)]),
+                div().flex().flex_col().gap_1()
+                    .child(div().px_2().py_1().rounded_md().bg(c(th.bg)).font_family(mono).text_size(px(13.)).text_color(c(th.text)).child(command))
+                    .when(!explanation.is_empty(), |d| d.child(div().text_color(c(th.overlay1)).child(explanation)))
+                    .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(tf("ai.card_meta", &[("n", &redactions), ("mode", &config::get().permissions.mode.label())]))),
+                div().flex().gap_2()
+                    .child(btn("ai-cancel", t("ai.btn_cancel"), 0).on_click(cx.listener(|v, _, _w, cx| v.ai_cancel(cx))))
+                    .child(btn("ai-exec", t("ai.btn_exec"), 0).on_click(cx.listener(|v, _, _w, cx| v.ai_execute(cx))))
+                    .child(btn("ai-insert", t("ai.btn_insert"), 1).on_click(cx.listener(|v, _, _w, cx| v.ai_insert(cx))))),
+            AiCard::Confirm { command, reason, .. } => (c(th.warning), t("ai.card_confirm").to_string(),
+                div().flex().flex_col().gap_1()
+                    .child(div().px_2().py_1().rounded_md().bg(c(th.bg)).font_family(mono).text_size(px(13.)).text_color(c(th.text)).child(command))
+                    .child(div().text_color(c(th.warning)).child(reason)),
+                div().flex().gap_2()
+                    .child(btn("ai-cancel", t("ui.cancel"), 0).on_click(cx.listener(|v, _, _w, cx| { let _ = crate::audit_log().append("ai.exec.rejected", "user", ""); v.ai_cancel(cx) })))
+                    .child(btn("ai-confirm", t("ai.btn_confirm"), 2).on_click(cx.listener(|v, _, _w, cx| v.ai_confirm(cx))))),
+            AiCard::Denied { command, reason } => (c(th.error), t("ai.card_denied").to_string(),
+                div().flex().flex_col().gap_1()
+                    .child(div().px_2().py_1().rounded_md().bg(c(th.bg)).font_family(mono).text_size(px(13.)).text_color(c(th.text)).child(command))
+                    .child(div().text_color(c(th.error)).child(reason)),
+                div().flex().gap_2().child(btn("ai-cancel", t("ai.btn_close"), 0).on_click(cx.listener(|v, _, _w, cx| v.ai_cancel(cx))))),
+            AiCard::Error { request, message } => (c(th.error), if request.is_empty() { t("ai.card_hint").to_string() } else { tf("ai.card_error", &[("req", &request)]) },
+                div().text_color(c(th.error)).child(message),
+                div().flex().gap_2().child(btn("ai-cancel", t("ai.btn_close"), 0).on_click(cx.listener(|v, _, _w, cx| v.ai_cancel(cx))))),
+        };
+        Some(div().id("ai-card").occlude().absolute().bottom(px(12.)).left(px(12.)).right(px(12.)).p_3().rounded_lg().bg(c(th.mantle)).border_1().border_color(border)
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .flex().flex_col().gap_2().text_size(px(12.)).text_color(c(th.text))
+            .child(div().flex().items_center().gap_2().child(crate::ui::icon(crate::ui::IconName::Sparkles, 13., c(th.accent)))
+                .child(div().font_weight(FontWeight::SEMIBOLD).child(title)))
+            .child(body)
+            .child(div().flex().items_center().gap_3().child(div().flex_1().min_w_0().text_size(px(11.)).text_color(c(th.overlay0)).child(t("ai.card_keys"))).child(buttons.flex_shrink_0()))
+            .into_any_element())
     }
 
     // ---------------- mouse
@@ -902,7 +1112,7 @@ impl Render for TermView {
             .child(div().absolute().top_0().left_0().size_full().child(self.cursor.clone()));
         if let Some(e) = &self.error {
             body = body.child(div().absolute().top(px(16.)).left(px(16.)).right(px(16.)).p_3().rounded_md()
-                .bg(c(th.mantle)).border_1().border_color(c(th.error)).text_color(c(th.error)).text_sm().child(format!("连接失败：{e}")));
+                .bg(c(th.mantle)).border_1().border_color(c(th.error)).text_color(c(th.error)).text_sm().child(tf("term.connect_failed", &[("e", &e)])));
         }
         if let Some(text) = &self.pending_paste {
             let lines = text.trim_end().lines().count();
@@ -912,11 +1122,12 @@ impl Render for TermView {
             body = body.child(div().absolute().bottom(px(12.)).left(px(12.)).right(px(12.)).p_3().rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.warning))
                 .flex().items_center().gap_3().text_size(px(12.)).text_color(c(th.text))
                 .child(div().flex_1().flex().flex_col().gap_1()
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("粘贴 {lines} 行文本？每一行都可能被立即执行")))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(tf("term.paste_confirm", &[("lines", &lines)])))
                     .child(div().text_color(c(th.overlay1)).child(format!("{preview} …"))))
-                .child(btn("paste-cancel", "取消", false).on_click(cx.listener(|v, _, _w, cx| { v.pending_paste = None; cx.notify(); })))
-                .child(btn("paste-ok", "粘贴", true).on_click(cx.listener(|v, _, _w, cx| { if let Some(t) = v.pending_paste.take() { v.paste_text(t, cx); } cx.notify(); }))));
+                .child(btn("paste-cancel", t("ui.cancel"), false).on_click(cx.listener(|v, _, _w, cx| { v.pending_paste = None; cx.notify(); })))
+                .child(btn("paste-ok", t("ui.paste"), true).on_click(cx.listener(|v, _, _w, cx| { if let Some(t) = v.pending_paste.take() { v.paste_text(t, cx); } cx.notify(); }))));
         }
+        if let Some(card) = self.ai_card(cx) { body = body.child(card); }
         if self.bell_until.is_some_and(|t| t > Instant::now()) {
             body = body.child(div().absolute().top_0().left_0().size_full().border_2().border_color(c(th.warning)).bg(c(th.warning).opacity(0.06)));
         }
@@ -928,7 +1139,7 @@ impl Render for TermView {
             .child(div().text_color(c(th.overlay0)).child(status));
         if let Some((name, st)) = self.agent_label() {
             let col = match st { AgentState::Working => c(th.warning), AgentState::Blocked => c(th.error), AgentState::Idle => c(th.success), _ => c(th.overlay1) };
-            header = header.child(div().px_2().rounded_md().bg(col.opacity(0.18)).text_color(col).child(format!("{name} · {}", st.label_zh())));
+            header = header.child(div().px_2().rounded_md().bg(col.opacity(0.18)).text_color(col).child(format!("{name} · {}", st.label())));
         }
         div()
             .track_focus(&self.focus)

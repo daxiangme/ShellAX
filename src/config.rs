@@ -11,7 +11,6 @@ use ssh_term_proto::policy::{Effect, Mode, Rule};
 
 macro_rules! d { ($name:ident, $t:ty, $v:expr) => { fn $name() -> $t { $v } }; }
 d!(t, bool, true);
-d!(s_zh, String, "zh-CN".into());
 d!(s_restore, String, "local".into());
 d!(s_stable, String, "stable".into());
 d!(s_system, String, "system".into());
@@ -22,8 +21,6 @@ d!(s_both, String, "both".into());
 d!(s_ask, String, "ask".into());
 d!(s_kh, String, "~/.ssh/known_hosts".into());
 d!(s_sc, String, "~/.ssh/config".into());
-d!(s_openai, String, "openai".into());
-d!(s_model, String, "gpt-4.1".into());
 d!(s_screen, String, "screen".into());
 d!(s_deny, String, "deny".into());
 d!(s_r1, String, "R1".into());
@@ -39,13 +36,13 @@ d!(u_30, u64, 30);
 d!(u_15, u64, 15);
 d!(u_120, u64, 120);
 d!(u_90, u64, 90);
-d!(u_ctx, u64, 200);
+d!(u_40, u64, 40);
 d!(u_10, u64, 10);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct General { pub language: String, pub startup: String, pub check_updates: bool, pub update_channel: String }
-impl Default for General { fn default() -> Self { Self { language: s_zh(), startup: s_restore(), check_updates: t(), update_channel: s_stable() } } }
+impl Default for General { fn default() -> Self { Self { language: s_system(), startup: s_restore(), check_updates: t(), update_channel: s_stable() } } }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -106,8 +103,22 @@ impl Default for Credentials { fn default() -> Self { Self { use_keychain: t(), 
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
-pub struct Ai { pub enabled: bool, pub provider: String, pub model: String, pub base_url: String, pub redact: bool, pub context: String, pub context_lines: u64, pub send_output: bool }
-impl Default for Ai { fn default() -> Self { Self { enabled: false, provider: s_openai(), model: s_model(), base_url: String::new(), redact: t(), context: s_screen(), context_lines: u_ctx(), send_output: false } } }
+pub struct Ai {
+    pub enabled: bool,
+    /// id of the default provider in `providers`
+    pub default_provider: String,
+    /// API keys are NOT here: they live in the OS keychain (or the encrypted fallback file)
+    pub providers: Vec<ssh_term_proto::ai::Provider>,
+    pub redact: bool, pub context: String, pub context_lines: u64, pub send_output: bool,
+    /// natural-language prefix typed at the prompt, e.g. "# list big files"
+    pub nl_prefix: String,
+}
+impl Default for Ai { fn default() -> Self { Self { enabled: t(), default_provider: String::new(), providers: vec![], redact: t(), context: s_screen(), context_lines: u_40(), send_output: false, nl_prefix: "#".into() } } }
+impl Ai {
+    pub fn default_provider(&self) -> Option<&ssh_term_proto::ai::Provider> {
+        self.providers.iter().find(|p| p.id == self.default_provider).or(self.providers.first())
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -280,6 +291,7 @@ pub fn install(mut s: Settings) {
 
 /// Push settings into library-level knobs (new sessions / connections pick them up).
 fn apply_runtime(s: &Settings) {
+    ssh_term_proto::i18n::set_language(&s.general.language);
     use std::sync::atomic::Ordering::Relaxed;
     ssh_term_proto::term::SCROLLBACK.store(s.terminal.scrollback.clamp(100, 1_000_000), Relaxed);
     ssh_term_proto::ssh::KEEPALIVE_SECS.store(s.ssh.keepalive_secs, Relaxed);
@@ -326,5 +338,29 @@ mod tests {
         assert!(s.set("font.size", toml::Value::String("abc".into())).is_err());
         let back = Settings::parse(&toml::to_string_pretty(&s).unwrap()).unwrap();
         assert_eq!(back, s);
+    }
+
+    #[test]
+    fn api_key_never_written_to_config() {
+        let dir = std::env::temp_dir().join(format!("as-cfg-key-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut s = Settings::default();
+        let p = ssh_term_proto::ai::Provider { id: "p1".into(), name: "Mock".into(), base_url: "http://127.0.0.1:18080/v1".into(), ..Default::default() };
+        let store = ssh_term_proto::secrets::SecretStore::file_only(&dir);
+        store.set(&p.secret_name(), "sk-NEVER-IN-CONFIG-4242").unwrap();
+        s.ai.default_provider = "p1".into();
+        s.ai.providers.push(p);
+        let text = toml::to_string_pretty(&s).unwrap();
+        assert!(text.contains("[[ai.providers]]") && text.contains("127.0.0.1:18080"));
+        assert!(!text.contains("NEVER-IN-CONFIG") && !text.contains("4242"));
+        assert!(!text.to_lowercase().contains("api_key"));
+        // and the audit log written through the real writer contains no key either
+        let log = ssh_term_proto::audit::AuditLog::new(dir.join("audit.jsonl"));
+        log.append("ai.request", "user", "provider=Mock model=gpt request=\"list files\" redactions=0").unwrap();
+        let audit = std::fs::read_to_string(dir.join("audit.jsonl")).unwrap();
+        assert!(!audit.contains("NEVER-IN-CONFIG"));
+        let enc = std::fs::read_to_string(dir.join("secrets.enc")).unwrap();
+        assert!(!enc.contains("NEVER-IN-CONFIG"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

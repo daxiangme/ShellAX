@@ -11,6 +11,7 @@
 //!   - added `identify()` (process name / command word / title hint) and `AgentInfo`.
 //! Everything outside the functions marked "[herdr]" is original AgentShell code.
 
+use crate::i18n::t;
 use regex::Regex;
 use serde::Deserialize;
 
@@ -18,8 +19,8 @@ use serde::Deserialize;
 pub enum AgentState { Idle, Working, Blocked, Unknown }
 
 impl AgentState {
-    pub fn label_zh(self) -> &'static str {
-        match self { Self::Idle => "等待输入", Self::Working => "运行中", Self::Blocked => "需要确认", Self::Unknown => "未知" }
+    pub fn label(self) -> &'static str {
+        match self { Self::Idle => t("agent.idle"), Self::Working => t("agent.working"), Self::Blocked => t("agent.blocked"), Self::Unknown => t("agent.unknown") }
     }
 }
 

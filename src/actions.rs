@@ -1,11 +1,12 @@
 //! App-level actions: shown in the command palette, bindable in Settings → 快捷键.
+use ssh_term_proto::i18n::t;
 use crate::ui::IconName;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Action {
     CommandPalette, OpenSettings, NewLocalTab, NewHost, SplitAuto, SplitRight, SplitDown, ClosePane,
     NextTab, PrevTab, CycleTheme, ThemeSystem, CyclePermissionMode, ModeAsk, ModePlan, ModeAuto,
-    OpenSftp, OpenPortForward, OpenAi, OpenAudit, OpenAbout, ClearHistory, ToggleSidebar,
+    OpenSftp, OpenPortForward, OpenAi, AiCommand, OpenAudit, OpenAbout, ClearHistory, ToggleSidebar,
     SettingsPermissions, SettingsAppearance, SettingsTerminal, SettingsSsh, SettingsKeys,
 }
 
@@ -16,41 +17,42 @@ impl Action {
         Action::CommandPalette, Action::OpenSettings, Action::OpenAbout, Action::NewLocalTab, Action::SplitAuto, Action::SplitRight,
         Action::SplitDown, Action::ClosePane, Action::NextTab, Action::PrevTab, Action::NewHost, Action::CycleTheme, Action::ThemeSystem,
         Action::ToggleSidebar, Action::CyclePermissionMode, Action::ModeAsk, Action::ModePlan, Action::ModeAuto, Action::OpenSftp, Action::OpenPortForward,
-        Action::OpenAi, Action::OpenAudit, Action::ClearHistory,
+        Action::OpenAi, Action::AiCommand, Action::OpenAudit, Action::ClearHistory,
         Action::SettingsPermissions, Action::SettingsAppearance, Action::SettingsTerminal, Action::SettingsSsh, Action::SettingsKeys,
     ];
     pub fn info(self) -> Info {
         use IconName as I;
         let i = |id, label, group, key, icon| Info { id, label, group, key, icon };
         match self {
-            Action::CommandPalette => i("palette", "命令面板", "通用", "ctrl-shift-p", I::Command),
-            Action::OpenSettings => i("settings", "打开设置", "通用", "ctrl-,", I::Settings),
-            Action::NewLocalTab => i("new_tab", "新建本地终端标签", "终端", "ctrl-shift-n", I::SquareTerminal),
-            Action::NewHost => i("new_host", "新建主机…", "主机", "", I::Plus),
-            Action::SplitAuto => i("split", "自动分屏（按长边）", "终端", "ctrl-shift-d", I::LayoutGrid),
-            Action::SplitRight => i("split_right", "左右分屏", "终端", "", I::LayoutGrid),
-            Action::SplitDown => i("split_down", "上下分屏", "终端", "", I::LayoutGrid),
-            Action::ClosePane => i("close_pane", "关闭当前分屏", "终端", "ctrl-shift-w", I::X),
-            Action::NextTab => i("next_tab", "下一个标签", "终端", "ctrl-tab", I::ChevronRight),
-            Action::PrevTab => i("prev_tab", "上一个标签", "终端", "ctrl-shift-tab", I::ChevronRight),
-            Action::CycleTheme => i("cycle_theme", "切换主题", "外观", "ctrl-shift-t", I::Palette),
-            Action::ThemeSystem => i("theme_system", "主题跟随系统", "外观", "", I::Monitor),
-            Action::CyclePermissionMode => i("cycle_mode", "切换权限模式 Ask → Plan → Auto", "权限", "ctrl-shift-m", I::Shield),
-            Action::ModeAsk => i("mode_ask", "权限模式：Ask（逐项询问）", "权限", "", I::Shield),
-            Action::ModePlan => i("mode_plan", "权限模式：Plan（只读）", "权限", "", I::Shield),
-            Action::ModeAuto => i("mode_auto", "权限模式：Auto（低风险自动）", "权限", "", I::Shield),
-            Action::OpenSftp => i("sftp", "SFTP 文件", "工具", "", I::FolderSync),
-            Action::OpenPortForward => i("port_forward", "端口转发", "工具", "", I::ArrowLeftRight),
-            Action::OpenAi => i("ai_panel", "AI / Agent 面板", "工具", "ctrl-shift-a", I::Bot),
-            Action::OpenAudit => i("audit", "审计日志", "工具", "ctrl-shift-l", I::ScrollText),
-            Action::OpenAbout => i("about", "帮助与关于（第三方许可）", "通用", "f1", I::CircleQuestionMark),
-            Action::ClearHistory => i("clear_history", "清空命令建议历史", "命令建议", "", I::Trash),
-            Action::ToggleSidebar => i("toggle_sidebar", "显示/隐藏侧栏", "外观", "ctrl-b", I::Layers),
-            Action::SettingsPermissions => i("settings_permissions", "设置：权限与安全", "设置", "", I::ShieldCheck),
-            Action::SettingsAppearance => i("settings_appearance", "设置：外观与字体", "设置", "", I::Palette),
-            Action::SettingsTerminal => i("settings_terminal", "设置：终端", "设置", "", I::Terminal),
-            Action::SettingsSsh => i("settings_ssh", "设置：SSH", "设置", "", I::Server),
-            Action::SettingsKeys => i("settings_keys", "设置：快捷键", "设置", "", I::Keyboard),
+            Action::CommandPalette => i("palette", t("ui.command_palette"), t("ui.general"), "ctrl-shift-p", I::Command),
+            Action::OpenSettings => i("settings", t("ui.open_settings"), t("ui.general"), "ctrl-,", I::Settings),
+            Action::NewLocalTab => i("new_tab", t("ui.new_local_terminal_tab"), t("ui.terminal"), "ctrl-shift-n", I::SquareTerminal),
+            Action::NewHost => i("new_host", t("ui.new_host_2"), t("ui.host"), "", I::Plus),
+            Action::SplitAuto => i("split", t("ui.auto_split_longer_side"), t("ui.terminal"), "ctrl-shift-d", I::LayoutGrid),
+            Action::SplitRight => i("split_right", t("ui.split_left_right"), t("ui.terminal"), "", I::LayoutGrid),
+            Action::SplitDown => i("split_down", t("ui.split_top_bottom"), t("ui.terminal"), "", I::LayoutGrid),
+            Action::ClosePane => i("close_pane", t("ui.close_current_pane"), t("ui.terminal"), "ctrl-shift-w", I::X),
+            Action::NextTab => i("next_tab", t("ui.next_tab"), t("ui.terminal"), "ctrl-tab", I::ChevronRight),
+            Action::PrevTab => i("prev_tab", t("ui.previous_tab"), t("ui.terminal"), "ctrl-shift-tab", I::ChevronRight),
+            Action::CycleTheme => i("cycle_theme", t("ui.toggle_theme"), t("ui.appearance"), "ctrl-shift-t", I::Palette),
+            Action::ThemeSystem => i("theme_system", t("ui.theme_follows_system"), t("ui.appearance"), "", I::Monitor),
+            Action::CyclePermissionMode => i("cycle_mode", t("ui.cycle_permission_mode_ask_plan"), t("ui.permissions"), "ctrl-shift-m", I::Shield),
+            Action::ModeAsk => i("mode_ask", t("ui.permission_mode_ask_ask_each"), t("ui.permissions"), "", I::Shield),
+            Action::ModePlan => i("mode_plan", t("ui.permission_mode_plan_read_only"), t("ui.permissions"), "", I::Shield),
+            Action::ModeAuto => i("mode_auto", t("ui.permission_mode_auto_low_risk"), t("ui.permissions"), "", I::Shield),
+            Action::OpenSftp => i("sftp", t("ui.sftp_files"), t("ui.tools"), "", I::FolderSync),
+            Action::OpenPortForward => i("port_forward", t("ui.port_forwarding"), t("ui.tools"), "", I::ArrowLeftRight),
+            Action::OpenAi => i("ai_panel", t("ui.ai_agent_panel"), t("ui.tools"), "ctrl-shift-a", I::Bot),
+            Action::AiCommand => i("ai_command", t("ai.action_nl"), t("ui.tools"), "ctrl-shift-g", I::Sparkles),
+            Action::OpenAudit => i("audit", t("ui.audit_log"), t("ui.tools"), "ctrl-shift-l", I::ScrollText),
+            Action::OpenAbout => i("about", t("ui.help_about_third_party_licenses"), t("ui.general"), "f1", I::CircleQuestionMark),
+            Action::ClearHistory => i("clear_history", t("ui.clear_suggestion_history"), t("ui.suggestions"), "", I::Trash),
+            Action::ToggleSidebar => i("toggle_sidebar", t("ui.show_hide_sidebar"), t("ui.appearance"), "ctrl-b", I::Layers),
+            Action::SettingsPermissions => i("settings_permissions", t("ui.settings_permissions_security"), t("ui.settings"), "", I::ShieldCheck),
+            Action::SettingsAppearance => i("settings_appearance", t("ui.settings_appearance_fonts"), t("ui.settings"), "", I::Palette),
+            Action::SettingsTerminal => i("settings_terminal", t("ui.settings_terminal"), t("ui.settings"), "", I::Terminal),
+            Action::SettingsSsh => i("settings_ssh", t("ui.settings_ssh"), t("ui.settings"), "", I::Server),
+            Action::SettingsKeys => i("settings_keys", t("ui.settings_keyboard_shortcuts"), t("ui.settings"), "", I::Keyboard),
         }
     }
     /// Effective binding (user override from settings.keys, else default; "" = unbound).
@@ -123,10 +125,10 @@ mod tests {
     use super::*;
     #[test]
     fn fuzzy_and_bindings() {
-        assert!(fuzzy("spl", "自动分屏 split").is_some());
+        assert!(fuzzy("spl", t("ui.auto_split")).is_some());
         assert!(fuzzy("xyz", "split").is_none());
         assert!(fuzzy("set", "settings").unwrap() > fuzzy("set", "sftp external transfer").unwrap_or(-100));
-        assert!(fuzzy("权限", "设置：权限与安全").is_some());
+        assert!(fuzzy(t("ui.permissions"), t("ui.settings_permissions_security")).is_some());
         assert_eq!(normalize("Ctrl+Shift+P"), "ctrl-shift-p");
         assert_eq!(normalize("shift-ctrl-p"), "ctrl-shift-p");
         assert_eq!(normalize("ctrl-comma"), "ctrl-,");

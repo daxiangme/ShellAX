@@ -1,6 +1,7 @@
 //! Side tools opened from the sidebar function area: audit log viewer, SFTP, port forwarding,
 //! AI / Agent overview. Audit and the agent overview are real; SFTP remote side and port
 //! forwarding are UI frames only (marked 即将支持).
+use ssh_term_proto::i18n::{t, tf};
 use gpui::{div, prelude::*, px, AnyElement, Context, FontWeight, SharedString};
 use ssh_term_proto::agent::AgentState;
 use ssh_term_proto::audit;
@@ -31,9 +32,9 @@ impl Root {
         let mono = SharedString::from(config::get().font.family.clone());
         let mut list = div().id("audit-list").flex_1().min_h_0().overflow_y_scroll().flex().flex_col();
         list = list.child(div().flex().items_center().gap_3().px_4().py(px(6.)).bg(c(th.mantle)).text_size(px(11.)).text_color(c(th.overlay1))
-            .child(div().w(px(40.)).child("#")).child(div().w(px(150.)).child("时间 (UTC+8)")).child(div().w(px(130.)).child("类型"))
-            .child(div().w(px(70.)).child("主体")).child(div().flex_1().child("详情")).child(div().w(px(90.)).child("hash")));
-        if records.is_empty() { list = list.child(div().p_5().text_size(px(12.5)).text_color(c(th.overlay1)).child("暂无审计记录")); }
+            .child(div().w(px(40.)).child("#")).child(div().w(px(150.)).child(t("ui.time_utc_8"))).child(div().w(px(130.)).child(t("ui.kind")))
+            .child(div().w(px(70.)).child(t("ui.principal"))).child(div().flex_1().child(t("ui.detail"))).child(div().w(px(90.)).child("hash")));
+        if records.is_empty() { list = list.child(div().p_5().text_size(px(12.5)).text_color(c(th.overlay1)).child(t("ui.no_audit_records_yet"))); }
         for r in records.iter().rev().take(500) {
             let col = if r.kind.starts_with("permission") { c(th.warning) } else if r.kind.starts_with("hostkey") { c(th.error) } else if r.kind.starts_with("ssh") { c(th.info) } else { c(th.accent) };
             list = list.child(div().flex().items_center().gap_3().px_4().py(px(6.)).border_t_1().border_color(c(th.surface0)).text_size(px(12.)).text_color(c(th.text))
@@ -45,24 +46,24 @@ impl Root {
                 .child(div().w(px(90.)).font_family(mono.clone()).text_size(px(11.)).text_color(c(th.overlay0)).child(r.hash[..10].to_string())));
         }
         let verify_el = match &self.audit_verify {
-            Some(Ok(n)) => ui::tag(format!("✓ 哈希链完整，{n} 条"), c(th.success)).into_any_element(),
-            Some(Err((line, why))) => ui::tag(format!("✗ 第 {line} 行：{why}"), c(th.error)).into_any_element(),
+            Some(Ok(n)) => ui::tag(tf("panels.chain_ok", &[("n", &n)]), c(th.success)).into_any_element(),
+            Some(Err((line, why))) => ui::tag(tf("panels.chain_bad", &[("line", &line), ("why", &why)]), c(th.error)).into_any_element(),
             None => div().into_any_element(),
         };
         let toolbar = div().px_4().py_3().flex().items_center().gap_2().border_b_1().border_color(c(th.surface0))
-            .child(div().text_size(px(12.)).text_color(c(th.subtext)).child(format!("{}  ·  共 {} 条", path.display(), records.len())))
+            .child(div().text_size(px(12.)).text_color(c(th.subtext)).child(tf("panels.audit_total", &[("path", &path.display()), ("n", &records.len())])))
             .child(div().flex_1()).child(verify_el)
-            .child(ui::button("audit-verify", "校验哈希链", 0).on_click(cx.listener(|this, _, _w, cx| {
+            .child(ui::button("audit-verify", t("ui.verify_hash_chain"), 0).on_click(cx.listener(|this, _, _w, cx| {
                 this.audit_verify = Some(audit::verify(&config::get().audit_path()));
                 cx.notify();
             })))
-            .child(ui::button("audit-export", "导出", 0).on_click(cx.listener(|this, _, _w, cx| {
+            .child(ui::button("audit-export", t("ui.export"), 0).on_click(cx.listener(|this, _, _w, cx| {
                 let src = config::get().audit_path();
                 let dst = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
                     .join(format!("agentshell-audit-{}.jsonl", chrono::Local::now().format("%Y%m%d-%H%M%S")));
-                this.toast(match std::fs::copy(&src, &dst) { Ok(_) => format!("已导出到 {}", dst.display()), Err(e) => format!("导出失败：{e}") }, cx);
+                this.toast(match std::fs::copy(&src, &dst) { Ok(_) => tf("panels.exported", &[("path", &dst.display())]), Err(e) => tf("panels.export_failed", &[("e", &e)]) }, cx);
             })));
-        ui::modal(panel_shell("审计日志", IconName::ScrollText, "追加写入 · SHA-256 哈希链", cx).child(toolbar).child(list)).into_any_element()
+        ui::modal(panel_shell(t("ui.audit_log"), IconName::ScrollText, t("ui.append_only_sha_256_hash"), cx).child(toolbar).child(list)).into_any_element()
     }
 
     pub(crate) fn sftp_panel(&mut self, cx: &mut Context<Root>) -> AnyElement {
@@ -82,17 +83,17 @@ impl Root {
                 .child(div().flex_1().child(name.clone()))
                 .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(if *dir { "—".to_string() } else { human(*size) })));
         }
-        let target = self.focused_ssh_label(cx).unwrap_or_else(|| "（当前标签不是 SSH 会话）".into());
+        let target = self.focused_ssh_label(cx).unwrap_or_else(|| t("ui.current_tab_is_not_an").into());
         let remote = div().flex_1().flex().flex_col().items_center().justify_center().gap_2()
             .child(icon(IconName::FolderSync, 28., c(th.overlay0)))
-            .child(div().text_size(px(12.5)).text_color(c(th.subtext)).child("远端文件浏览（复用当前 SSH 连接的 SFTP 子系统）"))
+            .child(div().text_size(px(12.5)).text_color(c(th.subtext)).child(t("ui.remote_browsing_reuses_the_sftp")))
             .child(ui::soon());
         let body = div().flex_1().min_h_0().p_4().flex().gap_3()
-            .child(pane(format!("本机 · {}", home.display()), local.into_any_element()))
+            .child(pane(tf("panels.local_pane", &[("path", &home.display())]), local.into_any_element()))
             .child(div().w(px(36.)).flex().flex_col().items_center().justify_center().gap_2().opacity(0.4)
                 .child(icon(IconName::Upload, 16., c(th.overlay1))).child(icon(IconName::Download, 16., c(th.overlay1))))
-            .child(pane(format!("远端 · {target}"), remote.into_any_element()));
-        ui::modal(panel_shell("SFTP 文件", IconName::FolderSync, "本机列表为真实数据；远端浏览与传输即将支持", cx).child(body)).into_any_element()
+            .child(pane(tf("panels.remote_pane", &[("target", &target)]), remote.into_any_element()));
+        ui::modal(panel_shell(t("ui.sftp_files"), IconName::FolderSync, t("ui.local_listing_is_real_remote"), cx).child(body)).into_any_element()
     }
 
     pub(crate) fn port_panel(&mut self, cx: &mut Context<Root>) -> AnyElement {
@@ -101,17 +102,17 @@ impl Root {
             .child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(label.to_string()))
             .child(div().h(px(30.)).w(px(150.)).px_2().rounded_md().border_1().border_color(c(th.surface1)).bg(c(th.mantle)).flex().items_center()
                 .text_size(px(12.)).text_color(c(th.overlay0)).child(ph.to_string()));
-        let kinds = vec![("L".to_string(), "本地 -L".to_string()), ("R".to_string(), "远程 -R".to_string()), ("D".to_string(), "动态 SOCKS -D".to_string())];
+        let kinds = vec![("L".to_string(), t("ui.local_l").to_string()), ("R".to_string(), t("ui.remote_r").to_string()), ("D".to_string(), t("ui.dynamic_socks_d").to_string())];
         let form = div().p_4().m_4().rounded_lg().border_1().border_color(c(th.surface0)).flex().flex_col().gap_3().opacity(0.6)
-            .child(div().flex().items_center().gap_2().child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child("新建转发")).child(ui::soon()))
+            .child(div().flex().items_center().gap_2().child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("ui.new_forward"))).child(ui::soon()))
             .child(ui::segmented("pf-kind", &kinds, "L", |_, _, _| {}))
-            .child(div().flex().gap_3().child(field("本地地址", "127.0.0.1")).child(field("本地端口", "8080")).child(field("远端主机", "localhost")).child(field("远端端口", "80")))
-            .child(div().flex().gap_2().child(ui::button("pf-add", "添加并启动", 1)));
+            .child(div().flex().gap_3().child(field(t("ui.local_address"), "127.0.0.1")).child(field(t("ui.local_port"), "8080")).child(field(t("ui.remote_host"), "localhost")).child(field(t("ui.remote_port"), "80")))
+            .child(div().flex().gap_2().child(ui::button("pf-add", t("ui.add_and_start"), 1)));
         let empty = div().flex_1().flex().flex_col().items_center().justify_center().gap_2()
             .child(icon(IconName::ArrowLeftRight, 28., c(th.overlay0)))
-            .child(div().text_size(px(12.5)).text_color(c(th.subtext)).child("暂无端口转发"))
-            .child(div().text_size(px(11.5)).text_color(c(th.overlay1)).child("转发规则将按主机保存，并登记到端口注册表（PRD 5.8）避免冲突"));
-        ui::modal(panel_shell("端口转发", IconName::ArrowLeftRight, "界面框架 · 后端即将支持", cx).child(form).child(empty)).into_any_element()
+            .child(div().text_size(px(12.5)).text_color(c(th.subtext)).child(t("ui.no_port_forwards")))
+            .child(div().text_size(px(11.5)).text_color(c(th.overlay1)).child(t("ui.forwards_will_be_saved_per")));
+        ui::modal(panel_shell(t("ui.port_forwarding"), IconName::ArrowLeftRight, t("ui.ui_only_backend_coming_soon"), cx).child(form).child(empty)).into_any_element()
     }
 
     pub(crate) fn ai_panel(&mut self, cx: &mut Context<Root>) -> AnyElement {
@@ -127,27 +128,27 @@ impl Root {
                     agents = agents.child(div().flex().items_center().gap_3().px_3().py(px(8.)).when(n > 0, |d| d.border_t_1().border_color(c(th.surface0)))
                         .child(icon(IconName::Bot, 15., col))
                         .child(div().flex_1().flex().flex_col().child(div().text_size(px(12.5)).text_color(c(th.text)).child(name))
-                            .child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(format!("标签 {} · {}", ti + 1, v.title))))
-                        .child(ui::tag(st.label_zh(), col)));
+                            .child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(tf("panels.tab_n", &[("n", &(ti + 1)), ("title", &v.title)]))))
+                        .child(ui::tag(st.label(), col)));
                     n += 1;
                     let _ = AgentState::Idle;
                 }
             }
         }
-        if n == 0 { agents = agents.child(div().p_3().text_size(px(12.)).text_color(c(th.overlay1)).child("当前没有检测到运行中的 Claude Code / Codex / Grok")); }
+        if n == 0 { agents = agents.child(div().p_3().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ui.no_running_claude_code_codex"))); }
         let ai = div().p_3().rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.surface0)).flex().flex_col().gap_2()
             .child(div().flex().items_center().gap_2().child(icon(IconName::Sparkles, 15., c(th.accent)))
-                .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child("内置 AI 助手")).child(ui::soon()))
-            .child(div().text_size(px(12.)).text_color(c(th.subtext)).child(format!("服务商 {} · 模型 {} · 脱敏 {} · 权限模式 {}", s.ai.provider, s.ai.model, if s.ai.redact { "开" } else { "关" }, s.permissions.mode.label())))
+                .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("ui.built_in_ai_assistant"))).child(ui::soon()))
+            .child(div().text_size(px(12.)).text_color(c(th.subtext)).child(tf("panels.ai_summary", &[("provider", &s.ai.default_provider().map(|p| p.name.clone()).unwrap_or_else(|| t("ai.none").into())), ("model", &s.ai.default_provider().map(|p| p.model.clone()).unwrap_or_default()), ("redact", &if s.ai.redact { t("ui.on") } else { t("ui.off_2") }), ("mode", &s.permissions.mode.label())])))
             .child(div().h(px(64.)).px_3().rounded_md().border_1().border_color(c(th.surface1)).flex().items_center().text_size(px(12.)).text_color(c(th.overlay0))
-                .child("向 AI 提问，或让它解释选中的输出…（即将支持）"));
+                .child(t("ui.in_a_terminal_type_what")));
         let body = div().flex_1().min_h_0().p_4().flex().flex_col().gap_3()
             .child(ai)
-            .child(div().pt_2().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.subtext)).child("外部 Agent（实时检测）"))
+            .child(div().pt_2().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.subtext)).child(t("ui.external_agents_live_detection")))
             .child(agents)
-            .child(div().flex().gap_2().child(ui::button("ai-settings", "AI 设置", 0).on_click(cx.listener(|this, _, w, cx| this.open_settings(crate::settings_view::Cat::Ai, w, cx))))
-                .child(ui::button("perm-settings", "权限规则", 0).on_click(cx.listener(|this, _, w, cx| this.open_settings(crate::settings_view::Cat::Permissions, w, cx)))));
-        ui::modal(panel_shell("AI / Agent", IconName::Bot, "Agent 状态为真实检测；内置 AI 对话即将支持", cx).child(body)).into_any_element()
+            .child(div().flex().gap_2().child(ui::button("ai-settings", t("ui.ai_settings"), 0).on_click(cx.listener(|this, _, w, cx| this.open_settings(crate::settings_view::Cat::Ai, w, cx))))
+                .child(ui::button("perm-settings", t("ui.permission_rules"), 0).on_click(cx.listener(|this, _, w, cx| this.open_settings(crate::settings_view::Cat::Permissions, w, cx)))));
+        ui::modal(panel_shell("AI / Agent", IconName::Bot, t("ui.agent_state_is_detected_live"), cx).child(body)).into_any_element()
     }
 }
 

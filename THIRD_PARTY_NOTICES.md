@@ -48,8 +48,17 @@ Copyright 2025, Command Line Inc.
 | gpui-kit-assets 0.7.3 (embedded Lucide icon SVGs) | crate Apache-2.0; icons ISC — Copyright (c) Lucide Icons and Contributors (crate ships `LICENSE-LUCIDE`) |
 | sha2 0.10, chrono 0.4, serde_json 1 (audit log) | MIT OR Apache-2.0 |
 | regex 1.x, serde, toml, tokio, flume, anyhow, libc | MIT OR Apache-2.0 |
+| keyring 3.6.3 (OS keychain; features async-secret-service + crypto-rust on Linux, apple-native, windows-native) | MIT OR Apache-2.0 |
+| secret-service 4.0.0, zbus 4.4 (pure-Rust D-Bus, pulled in by keyring) | secret-service: MIT OR Apache-2.0; zbus: MIT |
+| chacha20poly1305 0.10.1 (encrypted fallback file for API keys), rand 0.8 | Apache-2.0 OR MIT |
+| ureq 2.12.1 (AI HTTP client) | MIT OR Apache-2.0 |
+| rustls 0.23 (via ureq "tls") | Apache-2.0 OR ISC OR MIT |
+| ring 0.17 (via rustls) | Apache-2.0 AND ISC (`ring` ships its LICENSE incl. the BoringSSL/OpenSSL-derived ISC parts; reproduce it in release notices) |
+| webpki-roots 0.26 / 1.0 (Mozilla CA bundle, via ureq) | CDLA-Permissive-2.0 (data license; permissive, attribution — include the license text in releases) |
 | Catppuccin Mocha / Latte palettes (`themes/catppuccin-*.toml`) | MIT, © Catppuccin |
 
 Transitive notes (pre-existing, unchanged in v5): `self_cell` and `r-efi` are dual/tri-licensed and used under Apache-2.0/MIT; `dwrote` (Windows only), `cbindgen` (build tool) and `option-ext` (build-time, via rust-embed's proc-macro) are MPL-2.0 — not modified, no source copied.
+
+v6 (i18n / built-in AI): the i18n module, redaction rules, OpenAI/Anthropic request code and the secrets fallback were written from scratch against the public API docs (OpenAI Chat Completions, Anthropic Messages, freedesktop Secret Service via the `keyring` crate docs); no code was copied from any project.
 
 Fonts are **not** bundled (see README "字体许可").

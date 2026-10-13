@@ -1,6 +1,7 @@
 //! Permission policy model (PRD 6.3–6.5): modes, risk levels, allow/ask/deny rules
 //! with last-match-wins evaluation. Original code. Enforcement for the built-in AI /
 //! agent bridge is not implemented yet; the settings UI edits and tests these rules.
+use crate::i18n::{t, tf};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -12,9 +13,9 @@ impl Mode {
     pub fn label(self) -> &'static str { match self { Mode::Ask => "Ask", Mode::Plan => "Plan", Mode::Auto => "Auto" } }
     pub fn desc(self) -> &'static str {
         match self {
-            Mode::Ask => "每个写操作/命令执行前询问（默认）",
-            Mode::Plan => "只读：只允许查看与规划，不执行任何写操作",
-            Mode::Auto => "自动放行不高于“最高自动风险”的操作，其余询问",
+            Mode::Ask => t("ui.ask_before_every_write_command"),
+            Mode::Plan => t("ui.read_only_view_and_plan"),
+            Mode::Auto => t("ui.allow_actions_up_to_max"),
         }
     }
     pub fn next(self) -> Mode { match self { Mode::Ask => Mode::Plan, Mode::Plan => Mode::Auto, Mode::Auto => Mode::Ask } }
@@ -25,7 +26,7 @@ impl Mode {
 pub enum Effect { Allow, #[default] Ask, Deny }
 
 impl Effect {
-    pub fn label(self) -> &'static str { match self { Effect::Allow => "允许", Effect::Ask => "询问", Effect::Deny => "拒绝" } }
+    pub fn label(self) -> &'static str { match self { Effect::Allow => t("ui.allow"), Effect::Ask => t("ui.ask"), Effect::Deny => t("ui.deny") } }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -71,12 +72,12 @@ impl Risk {
     pub fn label(self) -> &'static str { match self { Risk::R0 => "R0", Risk::R1 => "R1", Risk::R2 => "R2", Risk::R3 => "R3", Risk::R4 => "R4", Risk::Hard => "HARD" } }
     pub fn desc(self) -> &'static str {
         match self {
-            Risk::R0 => "纯读取、无副作用：ls、cat、git status、查看日志",
-            Risk::R1 => "本地可逆写：在工作目录内创建/修改文件、git commit",
-            Risk::R2 => "影响运行状态但可恢复：重启服务、安装依赖、git push 到分支",
-            Risk::R3 => "破坏性或影响他人：删除文件、改权限、改配置、生产环境写操作",
-            Risk::R4 => "高危不可逆：rm -rf、数据库 DROP、force push 主分支、关机",
-            Risk::Hard => "硬性禁止，任何模式与规则都不能放行：rm -rf /、mkfs、dd 写磁盘、fork 炸弹",
+            Risk::R0 => t("ui.read_only_no_side_effects"),
+            Risk::R1 => t("ui.local_reversible_writes_create_modify"),
+            Risk::R2 => t("ui.affects_running_state_but_recoverable"),
+            Risk::R3 => t("ui.destructive_or_affects_others_delete"),
+            Risk::R4 => t("ui.dangerous_irreversible_rm_rf_drop"),
+            Risk::Hard => t("ui.hard_blocked_no_mode_or"),
         }
     }
 }
@@ -103,18 +104,18 @@ pub fn classify(cmd: &str) -> Risk {
 /// bridge will call the same function once it exists).
 pub fn decide(mode: Mode, max_auto: Risk, rules: &[Rule], principal: &str, action: &str, command: &str, dangerous_confirm: bool) -> (Effect, String) {
     let risk = classify(command);
-    if risk == Risk::Hard { return (Effect::Deny, format!("{}：硬性禁止，规则无法放行", risk.label())); }
-    if mode == Mode::Plan && risk > Risk::R0 { return (Effect::Deny, format!("Plan 模式只读，{} 操作被拒绝", risk.label())); }
+    if risk == Risk::Hard { return (Effect::Deny, tf("policy.hard", &[("risk", &risk.label())])); }
+    if mode == Mode::Plan && risk > Risk::R0 { return (Effect::Deny, tf("policy.plan_deny", &[("risk", &risk.label())])); }
     if let Some((i, r)) = evaluate(rules, principal, action, command) {
         if r.effect == Effect::Allow && dangerous_confirm && risk >= Risk::R4 {
-            return (Effect::Ask, format!("规则 #{} {} 允许，但 {} 高危操作仍需确认", i + 1, r.id, risk.label()));
+            return (Effect::Ask, tf("policy.rule_but_dangerous", &[("n", &(i + 1)), ("id", &r.id), ("risk", &risk.label())]));
         }
-        return (r.effect, format!("命中规则 #{} {}（最后匹配生效）· 风险 {}", i + 1, r.id, risk.label()));
+        return (r.effect, tf("policy.rule_hit", &[("n", &(i + 1)), ("id", &r.id), ("risk", &risk.label())]));
     }
     match mode {
-        Mode::Auto if risk <= max_auto => (Effect::Allow, format!("Auto 模式：{} ≤ 最高自动风险 {}", risk.label(), max_auto.label())),
-        _ if risk == Risk::R0 => (Effect::Allow, "无匹配规则；R0 只读操作默认允许".into()),
-        _ => (Effect::Ask, format!("无匹配规则；{} 模式下 {} 需要询问", mode.label(), risk.label())),
+        Mode::Auto if risk <= max_auto => (Effect::Allow, tf("policy.auto_allow", &[("risk", &risk.label()), ("max", &max_auto.label())])),
+        _ if risk == Risk::R0 => (Effect::Allow, t("ui.no_matching_rule_r0_read").into()),
+        _ => (Effect::Ask, tf("policy.no_rule_ask", &[("mode", &mode.label()), ("risk", &risk.label())])),
     }
 }
 

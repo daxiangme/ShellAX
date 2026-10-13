@@ -1,4 +1,5 @@
 //! New / edit host dialog. Saves into config.toml [[hosts]].
+use ssh_term_proto::i18n::{t, tf};
 use gpui::{div, prelude::*, px, Context, Entity, EventEmitter, FontWeight, Window};
 use gpui_component::input::{Input, InputState};
 use gpui_component::switch::Switch;
@@ -25,13 +26,13 @@ impl HostDialog {
         let e = existing.clone().unwrap_or_default();
         let mk = |ph: &str, v: String, window: &mut Window, cx: &mut Context<Self>| { let ph = ph.to_string(); cx.new(|cx| InputState::new(window, cx).placeholder(ph).default_value(v)) };
         let fields = vec![
-            ("名称", "name", mk("如 prod-web-1", e.name.clone(), window, cx)),
-            ("地址", "host", mk("主机名或 IP", e.host.clone(), window, cx)),
-            ("端口", "port", mk("22", e.port.map(|p| p.to_string()).unwrap_or_default(), window, cx)),
-            ("用户", "user", mk("留空使用默认用户", e.user.clone().unwrap_or_default(), window, cx)),
-            ("私钥", "key", mk("~/.ssh/id_ed25519（留空自动尝试默认私钥）", e.identity_file.clone().unwrap_or_default(), window, cx)),
-            ("分组", "group", mk("如 生产 / 测试", e.group.clone().unwrap_or_default(), window, cx)),
-            ("跳板机", "jump", mk("user@bastion:22（即将支持）", e.jump.clone().unwrap_or_default(), window, cx)),
+            (t("ui.name"), "name", mk(t("ui.e_g_prod_web_1"), e.name.clone(), window, cx)),
+            (t("ui.address"), "host", mk(t("ui.hostname_or_ip"), e.host.clone(), window, cx)),
+            (t("ui.port"), "port", mk("22", e.port.map(|p| p.to_string()).unwrap_or_default(), window, cx)),
+            (t("ui.user"), "user", mk(t("ui.empty_uses_the_default_user"), e.user.clone().unwrap_or_default(), window, cx)),
+            (t("ui.private_key"), "key", mk(t("ui.ssh_id_ed25519_empty_tries"), e.identity_file.clone().unwrap_or_default(), window, cx)),
+            (t("ui.group"), "group", mk(t("ui.e_g_prod_test"), e.group.clone().unwrap_or_default(), window, cx)),
+            (t("ui.jump_host"), "jump", mk(t("ui.user_bastion_22_coming_soon"), e.jump.clone().unwrap_or_default(), window, cx)),
         ];
         fields[0].2.update(cx, |s, cx| s.focus(window, cx));
         Self { editing: existing.map(|h| h.name), fields, auth: e.auth.unwrap_or_else(|| "key".into()), production: e.production, error: None }
@@ -44,15 +45,15 @@ impl HostDialog {
     fn save(&mut self, cx: &mut Context<Self>) {
         let name = self.val("name", cx);
         let host = self.val("host", cx);
-        if name.is_empty() || host.is_empty() { self.error = Some("名称和地址必填".into()); cx.notify(); return; }
+        if name.is_empty() || host.is_empty() { self.error = Some(t("ui.name_and_address_are_required").into()); cx.notify(); return; }
         let port = self.val("port", cx);
-        let port = if port.is_empty() { None } else { match port.parse::<u16>() { Ok(p) if p > 0 => Some(p), _ => { self.error = Some("端口应为 1–65535".into()); cx.notify(); return; } } };
+        let port = if port.is_empty() { None } else { match port.parse::<u16>() { Ok(p) if p > 0 => Some(p), _ => { self.error = Some(t("ui.port_must_be_1_65535").into()); cx.notify(); return; } } };
         let opt = |s: String| (!s.is_empty()).then_some(s);
         let entry = HostEntry { name: name.clone(), host, port, user: opt(self.val("user", cx)), identity_file: opt(self.val("key", cx)),
             group: opt(self.val("group", cx)), auth: Some(self.auth.clone()), production: self.production, jump: opt(self.val("jump", cx)), source: "config" };
         let editing = self.editing.clone();
         let s = config::get();
-        if editing.as_deref() != Some(name.as_str()) && s.hosts.iter().any(|h| h.name == name) { self.error = Some(format!("已存在名为 {name} 的主机")); cx.notify(); return; }
+        if editing.as_deref() != Some(name.as_str()) && s.hosts.iter().any(|h| h.name == name) { self.error = Some(tf("host.exists", &[("name", &name)])); cx.notify(); return; }
         if let Some(e) = config::update(|s| {
             match editing.and_then(|old| s.hosts.iter().position(|h| h.name == old)) { Some(i) => s.hosts[i] = entry, None => s.hosts.push(entry) }
         }) { self.error = Some(e); cx.notify(); return; }
@@ -71,30 +72,30 @@ impl Render for HostDialog {
             form = form.child(row);
             if i == 4 {
                 let me = cx.entity().downgrade();
-                let opts = vec![("key".to_string(), "私钥".to_string()), ("agent".to_string(), "ssh-agent".to_string()), ("password".to_string(), "密码".to_string())];
-                form = form.child(div().flex().items_center().gap_3().child(label("认证方式"))
+                let opts = vec![("key".to_string(), t("ui.private_key").to_string()), ("agent".to_string(), "ssh-agent".to_string()), ("password".to_string(), t("ui.password").to_string())];
+                form = form.child(div().flex().items_center().gap_3().child(label(t("ui.authentication")))
                     .child(ui::segmented("auth", &opts, &self.auth, move |v, _w, cx| { let _ = me.update(cx, |this, cx| { this.auth = v; cx.notify(); }); }))
                     .when(self.auth != "key", |d| d.child(ui::soon())));
             }
         }
-        form = form.child(div().flex().items_center().gap_3().child(label("生产环境"))
+        form = form.child(div().flex().items_center().gap_3().child(label(t("ui.production")))
             .child(Switch::new("prod").checked(self.production).on_click(cx.listener(|this, v: &bool, _w, cx| { this.production = *v; cx.notify(); })))
-            .child(div().text_size(px(11.5)).text_color(c(th.overlay1)).child("侧栏显示红色“生产”标记，权限规则可据此加严")));
+            .child(div().text_size(px(11.5)).text_color(c(th.overlay1)).child(t("ui.shows_a_red_prod_tag"))));
         if let Some(e) = &self.error { form = form.child(div().text_size(px(12.)).text_color(c(th.error)).child(e.clone())); }
 
-        let title = if self.editing.is_some() { "编辑主机" } else { "新建主机" };
+        let title = if self.editing.is_some() { t("ui.edit_host") } else { t("ui.new_host") };
         let mut footer = div().px_5().py_3().flex().items_center().gap_2().border_t_1().border_color(c(th.surface0)).bg(c(th.mantle))
-            .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(format!("保存到 {}", config::config_path().display())))
+            .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(tf("host.save_to", &[("path", &config::config_path().display())])))
             .child(div().flex_1());
         if let Some(name) = self.editing.clone() {
-            footer = footer.child(ui::button("host-del", "删除", 2).on_click(cx.listener(move |_, _, _w, cx| {
+            footer = footer.child(ui::button("host-del", t("ui.delete"), 2).on_click(cx.listener(move |_, _, _w, cx| {
                 let n = name.clone();
                 let _ = config::update(|s| s.hosts.retain(|h| h.name != n));
                 cx.emit(HostEvent::Deleted(name.clone()));
             })));
         }
-        footer = footer.child(ui::button("host-cancel", "取消", 0).on_click(cx.listener(|_, _, _w, cx| cx.emit(HostEvent::Close))))
-            .child(ui::button("host-save", "保存", 1).on_click(cx.listener(|this, _, _w, cx| this.save(cx))));
+        footer = footer.child(ui::button("host-cancel", t("ui.cancel"), 0).on_click(cx.listener(|_, _, _w, cx| cx.emit(HostEvent::Close))))
+            .child(ui::button("host-save", t("ui.save"), 1).on_click(cx.listener(|this, _, _w, cx| this.save(cx))));
         ui::modal(ui::card(560.)
             .child(div().h(px(48.)).px_5().flex().items_center().gap_2().border_b_1().border_color(c(th.surface0))
                 .child(icon(IconName::Server, 16., c(th.accent)))

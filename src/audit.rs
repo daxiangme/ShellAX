@@ -1,6 +1,7 @@
 //! Audit log: append-only JSONL with a SHA-256 hash chain (PRD 6.x).
 //! Each record stores `prev` (hash of the previous record) and `hash` =
 //! sha256(prev || seq || ts || kind || actor || detail). `verify` recomputes the chain.
+use crate::i18n::{t, tf};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -69,9 +70,9 @@ pub fn verify(path: &Path) -> Result<usize, (usize, String)> {
     for (i, line) in std::io::BufReader::new(f).lines().enumerate() {
         let line = line.map_err(|e| (i + 1, e.to_string()))?;
         if line.trim().is_empty() { continue; }
-        let r: Record = serde_json::from_str(&line).map_err(|e| (i + 1, format!("无法解析: {e}")))?;
-        if r.prev != prev { return Err((i + 1, "prev 与上一条记录的 hash 不一致（记录被删除或重排）".into())); }
-        if digest(&r.prev, r.seq, &r.ts, &r.kind, &r.actor, &r.detail) != r.hash { return Err((i + 1, "hash 不匹配（记录被篡改）".into())); }
+        let r: Record = serde_json::from_str(&line).map_err(|e| (i + 1, tf("audit.unparsable", &[("e", &e)])))?;
+        if r.prev != prev { return Err((i + 1, t("audit.prev_mismatch").into())); }
+        if digest(&r.prev, r.seq, &r.ts, &r.kind, &r.actor, &r.detail) != r.hash { return Err((i + 1, t("audit.hash_mismatch").into())); }
         prev = r.hash;
         n += 1;
     }

@@ -1,4 +1,5 @@
 //! Command palette (Ctrl+Shift+P): fuzzy search over app actions and hosts.
+use ssh_term_proto::i18n::{t, tf};
 use gpui::{div, prelude::*, px, Context, Entity, EventEmitter, FontWeight, KeyDownEvent, Subscription, Window};
 use gpui_component::input::{Input, InputEvent, InputState};
 
@@ -22,7 +23,7 @@ impl EventEmitter<PaletteEvent> for Palette {}
 
 impl Palette {
     pub fn new(hosts: Vec<(String, String)>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let query = cx.new(|cx| InputState::new(window, cx).placeholder("输入命令或主机名…（↑↓ 选择，Enter 执行，Esc 关闭）"));
+        let query = cx.new(|cx| InputState::new(window, cx).placeholder(t("ui.type_a_command_or_host")));
         let subs = vec![cx.subscribe_in(&query, window, |this: &mut Self, _, ev: &InputEvent, _, cx| {
             match ev { InputEvent::Change => { this.selected = 0; cx.notify(); } InputEvent::PressEnter { .. } => this.run_selected(cx), _ => {} }
         })];
@@ -38,7 +39,7 @@ impl Palette {
             fuzzy(&q, &format!("{} {} {}", i.label, i.group, i.id)).map(|s| (s, Item::Act(*a)))
         }).collect();
         for (idx, (name, detail)) in self.hosts.iter().enumerate() {
-            if let Some(s) = fuzzy(&q, &format!("连接 {name} {detail} ssh")) { v.push((s - 2, Item::Host(idx, name.clone(), detail.clone()))); }
+            if let Some(s) = fuzzy(&q, &tf("palette.connect_search", &[("name", name), ("detail", detail)])) { v.push((s - 2, Item::Host(idx, name.clone(), detail.clone()))); }
         }
         if !q.trim().is_empty() { v.sort_by(|a, b| b.0.cmp(&a.0)); }
         v
@@ -60,7 +61,7 @@ impl Render for Palette {
         for (i, (_, it)) in items.iter().enumerate().take(60) {
             let (ic, label, group, binding) = match it {
                 Item::Act(a) => { let inf = a.info(); (inf.icon, inf.label.to_string(), inf.group, a.binding()) }
-                Item::Host(_, name, detail) => (IconName::Server, format!("连接：{name}  ·  {detail}"), "主机", String::new()),
+                Item::Host(_, name, detail) => (IconName::Server, tf("palette.connect", &[("name", name), ("detail", detail)]), t("ui.host"), String::new()),
             };
             if group != last_group && self.query.read(cx).value().is_empty() {
                 list = list.child(div().flex_shrink_0().px_2().pt_2().pb_1().text_size(px(10.5)).text_color(c(th.overlay0)).child(group));
@@ -76,7 +77,7 @@ impl Render for Palette {
                 .when(!self.query.read(cx).value().is_empty(), |d| d.child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(group)))
                 .when(!binding.is_empty(), |d| d.child(ui::kbd(&binding))));
         }
-        if n == 0 { list = list.child(div().p_4().text_size(px(12.5)).text_color(c(th.overlay1)).child("没有匹配的命令")); }
+        if n == 0 { list = list.child(div().p_4().text_size(px(12.5)).text_color(c(th.overlay1)).child(t("ui.no_matching_commands"))); }
         div().absolute().top_0().left_0().size_full().occlude().flex().flex_col().items_center().pt(px(90.)).bg(gpui::black().opacity(0.35))
             .on_mouse_down(gpui::MouseButton::Left, cx.listener(|_, _, _w, cx| cx.emit(PaletteEvent::Close)))
             .child(ui::card(640.)
@@ -95,7 +96,7 @@ impl Render for Palette {
                 .child(list)
                 .child(div().h(px(30.)).px_3().flex().items_center().gap_3().border_t_1().border_color(c(th.surface0)).bg(c(th.mantle))
                     .text_size(px(11.)).text_color(c(th.overlay0))
-                    .child(format!("{n} 项")).child(div().flex_1()).child("↑↓ 选择").child("Enter 执行").child("Esc 关闭")
+                    .child(tf("palette.count", &[("n", &n)])).child(div().flex_1()).child(t("ui.select")).child(t("ui.enter_run")).child(t("ui.esc_close"))
                     .font_weight(FontWeight::NORMAL)))
     }
 }
