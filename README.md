@@ -316,3 +316,10 @@ SSH_PORT=2222 SSH_USER=sshtest SSH_KEY=$PWD/testenv/client_ed25519 \
 - mock：`python3 tools/mock_ai.py` 新增 `/v1/models`、Anthropic 分页和 `/api/tags`。设置 `MOCK_MODELS_DELAY` 可以模拟慢响应。
 - 真实接口验证：`cargo run --example models_probe` 请求 OpenRouter 公开接口，不需要 Key。
 - 截图：`screenshot-v7-*.png`。
+
+## 第 10 轮新增（进行中，详见 PROGRESS.md 第 10 节）
+- 审计面板：按决策（允许/询问/拒绝）、主机、会话筛选（`audit::Filter`）。
+- `agentshell hosts | exec <host> -- <cmd> | upload <host> <local> <remote> | download <host> <remote> <local>`：经运行中的 App 执行，复用连接池，凭据不出 App；每次经权限引擎与审批卡，退出码透传，被拒绝时退出码 126；远端（反向转发）调用者不能 upload/download。
+- 内置 AI 对话“逐条执行”：回复中所有代码块命令逐条经权限引擎判定，询问的步骤在对话中逐条批准/跳过/停止。
+- AI 首次发送提示（`ai.first_send_ack`）、按主机禁止发送终端输出（`ai.no_output_hosts`，通配）。
+- SSH 出站代理：`ssh.proxy = "socks5://[u:p@]host:port"` 或 `"http://…"`，`ssh.no_proxy` 例外；测试代理 `tools/mock_proxy.py [port]`。

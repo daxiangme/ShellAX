@@ -125,7 +125,8 @@ mod tests {
         tokio::spawn(async move { loop { let (c, _) = hp.accept().await.unwrap(); tokio::spawn(async move {
             let mut br = BufReader::new(c); let mut l = String::new(); br.read_line(&mut l).await.unwrap();
             let mut auth = false;
-            loop { let mut h = String::new(); br.read_line(&mut h).await.unwrap(); if h.starts_with("Proxy-Authorization: Basic dTpw") { auth = true; } if h == "\r\n" { break; } }
+            loop { let mut h = String::new(); br.read_line(&mut h).await.unwrap(); if h.starts_with("Proxy-Authorization: Basic dTpw") { auth = true; }
+            if h == "\r\n" { break; } }
             let mut c = br.into_inner();
             if !auth { c.write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n").await.unwrap(); return; }
             let t = l.split_whitespace().nth(1).unwrap().to_string();
