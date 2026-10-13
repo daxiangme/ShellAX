@@ -71,10 +71,10 @@ pub fn render<V: 'static>(st: &MenuState, cx: &mut Context<V>, pick: fn(&mut V, 
     let mut list = div().id("ctxmenu-list").max_h(px(560.)).overflow_y_scroll().flex().flex_col().py_1();
     let mut last_group = None;
     for (i, it) in st.menu.items.iter().enumerate() {
-        if last_group.is_some_and(|g| g != it.group) { list = list.child(div().my_1().h(px(1.)).bg(c(th.surface0))); }
+        if last_group.is_some_and(|g| g != it.group) { list = list.child(div().mx(px(10.)).my(px(4.)).h(px(1.)).bg(c(th.surface1).opacity(0.6))); }
         last_group = Some(it.group);
         let enabled = it.enabled();
-        let mut row = div().id(("ctxmenu-item", i)).px_3().py(px(4.)).flex().flex_col().gap(px(1.)).rounded_md().mx_1()
+        let mut row = div().id(("ctxmenu-item", i)).px(px(10.)).py(px(4.)).flex().flex_col().gap(px(1.)).rounded(px(6.)).mx(px(5.))
             .child(div().flex().items_center().gap_2().text_size(px(12.5)).text_color(if enabled { c(th.text) } else { c(th.overlay0) })
                 .child(div().flex_1().child(it.label.clone()))
                 .children(it.custom.then(|| div().px_1().rounded_sm().text_size(px(10.)).text_color(c(th.accent)).border_1().border_color(c(th.accent).opacity(0.5)).child("custom")))
@@ -90,13 +90,13 @@ pub fn render<V: 'static>(st: &MenuState, cx: &mut Context<V>, pick: fn(&mut V, 
         }
         list = list.child(row);
     }
-    let menu = div().id("ctxmenu").occlude().w(px(520.)).rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.surface1)).shadow_lg().flex().flex_col()
+    let menu = crate::ui::popover().id("ctxmenu").occlude().w(px(520.)).flex().flex_col().overflow_hidden()
         .on_mouse_down_out(cx.listener(move |v, _, _, cx| close(v, cx)))
         .child(div().px_3().pt_2().pb_1().flex().flex_col().gap(px(2.)).border_b_1().border_color(c(th.surface0))
             .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(st.menu.header.clone()))
             .children(st.note.clone().map(|n| div().text_size(px(11.)).text_color(c(th.warning)).child(n)))
             .children((st.errors > 0).then(|| div().text_size(px(11.)).text_color(c(th.error)).child(tf("cm.custom_errors", &[("n", &st.errors)])))))
         .child(list)
-        .child(div().px_3().py_1().border_t_1().border_color(c(th.surface0)).text_size(px(10.5)).text_color(c(th.overlay1)).child(t("cm.insert_hint")));
-    deferred(anchored().position(st.pos).snap_to_window_with_margin(px(8.)).child(menu)).with_priority(10).into_any_element()
+        .child(div().px_3().py_1().border_t_1().border_color(c(th.surface1).opacity(0.5)).text_size(px(10.5)).text_color(c(th.overlay1)).child(t("cm.insert_hint")));
+    deferred(anchored().position(st.pos).snap_to_window_with_margin(px(8.)).child(crate::chrome::pop_in("ctxmenu-pop", menu))).with_priority(10).into_any_element()
 }

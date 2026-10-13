@@ -17,7 +17,7 @@ pub fn button(id: impl Into<ElementId>, label: impl Into<SharedString>, kind: u8
         3 => (gpui::transparent_black(), c(th.subtext), gpui::transparent_black()),
         _ => (c(th.surface0), c(th.text), c(th.surface1)),
     };
-    div().id(id).h(px(28.)).px_3().rounded_md().flex().items_center().justify_center().gap_1().cursor_pointer()
+    div().id(id).h(px(28.)).px_3().rounded(px(6.)).flex().items_center().justify_center().gap_1().cursor_pointer()
         .bg(bg).text_color(fg).border_1().border_color(border).text_size(px(12.)).font_weight(FontWeight::MEDIUM)
         .hover(move |s| s.opacity(0.85))
         .child(label.into())
@@ -64,12 +64,18 @@ pub fn kbd(binding: &str) -> AnyElement {
 }
 
 /// Modal backdrop + centered card.
-pub fn modal(card: impl IntoElement) -> Div {
+pub fn modal(card: impl IntoElement + 'static) -> Div {
     // occlude: the backdrop swallows mouse/scroll events so the terminal below stays inert
-    div().absolute().top_0().left_0().size_full().occlude().flex().items_center().justify_center().bg(gpui::black().opacity(0.5)).child(card)
+    div().absolute().top_0().left_0().size_full().occlude().flex().items_center().justify_center().bg(gpui::black().opacity(0.28)).child(crate::chrome::pop_in("modal-pop", card))
+}
+
+/// Translucent popover surface (menus, palette): radius 10, hairline border, soft layered shadow.
+pub fn popover() -> Div {
+    let th = cur();
+    div().rounded(px(10.)).bg(c(th.base).opacity(0.94)).border_1().border_color(c(th.surface2).opacity(0.45)).shadow(crate::chrome::soft_shadow(true))
 }
 
 pub fn card(w: f32) -> Div {
     let th = cur();
-    div().w(px(w)).occlude().on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()).rounded_xl().bg(c(th.base)).border_1().border_color(c(th.surface1)).shadow_lg().flex().flex_col().overflow_hidden()
+    div().w(px(w)).occlude().on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()).rounded(px(10.)).bg(c(th.base).opacity(0.97)).border_1().border_color(c(th.surface2).opacity(0.45)).shadow(crate::chrome::soft_shadow(true)).flex().flex_col().overflow_hidden()
 }

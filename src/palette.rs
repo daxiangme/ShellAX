@@ -64,23 +64,25 @@ impl Render for Palette {
                 Item::Host(_, name, detail) => (IconName::Server, tf("palette.connect", &[("name", name), ("detail", detail)]), t("ui.host"), String::new()),
             };
             if group != last_group && self.query.read(cx).value().is_empty() {
-                list = list.child(div().flex_shrink_0().px_2().pt_2().pb_1().text_size(px(10.5)).text_color(c(th.overlay0)).child(group));
+                list = list.child(div().flex_shrink_0().px(px(10.)).pt_2().pb_1().text_size(px(10.5)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.overlay1)).child(group.to_uppercase()));
                 last_group = group;
             }
             let sel = i == self.selected;
-            list = list.child(div().id(("pal", i)).flex_shrink_0().h(px(34.)).px_2().rounded_md().flex().items_center().gap_3().cursor_pointer()
-                .bg(if sel { c(th.surface0) } else { gpui::transparent_black() })
-                .hover(|d| d.bg(c(cur().surface0)))
+            // Spotlight-like: selected row is an accent pill with white text
+            list = list.child(div().id(("pal", i)).flex_shrink_0().h(px(32.)).px(px(10.)).rounded(px(6.)).flex().items_center().gap_3().cursor_pointer()
+                .bg(if sel { c(th.accent) } else { gpui::transparent_black() })
+                .when(!sel, |d| d.hover(|d| d.bg(c(cur().surface0).opacity(0.7))))
                 .on_click(cx.listener(move |this, _, _w, cx| { this.selected = i; this.run_selected(cx); }))
-                .child(icon(ic, 15., if sel { c(th.accent) } else { c(th.overlay1) }))
-                .child(div().flex_1().text_size(px(13.)).text_color(c(th.text)).child(label))
-                .when(!self.query.read(cx).value().is_empty(), |d| d.child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(group)))
+                .child(icon(ic, 15., if sel { gpui::white() } else { c(th.overlay1) }))
+                .child(div().flex_1().text_size(px(13.)).text_color(if sel { gpui::white() } else { c(th.text) }).child(label))
+                .when(!self.query.read(cx).value().is_empty(), |d| d.child(div().text_size(px(11.)).text_color(if sel { gpui::white().opacity(0.8) } else { c(th.overlay0) }).child(group)))
                 .when(!binding.is_empty(), |d| d.child(ui::kbd(&binding))));
         }
         if n == 0 { list = list.child(div().p_4().text_size(px(12.5)).text_color(c(th.overlay1)).child(t("ui.no_matching_commands"))); }
-        div().absolute().top_0().left_0().size_full().occlude().flex().flex_col().items_center().pt(px(90.)).bg(gpui::black().opacity(0.35))
+        div().absolute().top_0().left_0().size_full().occlude().flex().flex_col().items_center().pt(px(96.)).bg(gpui::black().opacity(0.12))
             .on_mouse_down(gpui::MouseButton::Left, cx.listener(|_, _, _w, cx| cx.emit(PaletteEvent::Close)))
-            .child(ui::card(640.)
+            .child(crate::chrome::pop_in("palette-pop", ui::popover().w(px(640.)).occlude().flex().flex_col().overflow_hidden()
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, _w, cx| {
                     let n = this.items(cx).len();
                     match ev.keystroke.key.as_str() {
@@ -92,11 +94,11 @@ impl Render for Palette {
                     cx.stop_propagation();
                     cx.notify();
                 }))
-                .child(div().p_3().border_b_1().border_color(c(th.surface0)).child(Input::new(&self.query).prefix(icon(IconName::Command, 15., c(th.overlay1)))))
+                .child(div().p_3().border_b_1().border_color(c(th.surface1).opacity(0.5)).child(Input::new(&self.query).appearance(false).prefix(icon(IconName::Search, 16., c(th.overlay1)))))
                 .child(list)
-                .child(div().h(px(30.)).px_3().flex().items_center().gap_3().border_t_1().border_color(c(th.surface0)).bg(c(th.mantle))
+                .child(div().h(px(30.)).px_3().flex().items_center().gap_3().border_t_1().border_color(c(th.surface1).opacity(0.5))
                     .text_size(px(11.)).text_color(c(th.overlay0))
                     .child(tf("palette.count", &[("n", &n)])).child(div().flex_1()).child(t("ui.select")).child(t("ui.enter_run")).child(t("ui.esc_close"))
-                    .font_weight(FontWeight::NORMAL)))
+                    .font_weight(FontWeight::NORMAL))))
     }
 }

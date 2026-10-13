@@ -577,9 +577,9 @@ impl Root {
     fn host_menu_el(&self, spec: Spec, pos: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
         let ssh = match &spec { Spec::Ssh(t) => Some(t.clone()), Spec::Local => None };
-        let mut list = div().id("host-menu").occlude().min_w(px(230.)).py_1().rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.surface1)).shadow_lg().flex().flex_col()
+        let mut list = ui::popover().id("host-menu").occlude().min_w(px(230.)).p(px(5.)).flex().flex_col()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| { this.host_menu = None; cx.notify(); }));
-        let item = |id: usize, ic: IconName, label: &str, enabled: bool| div().id(("host-menu-item", id)).h(px(28.)).px_3().flex().items_center().gap_2().text_size(px(12.))
+        let item = |id: usize, ic: IconName, label: &str, enabled: bool| div().id(("host-menu-item", id)).h(px(26.)).px(px(10.)).rounded(px(6.)).flex().items_center().gap_2().text_size(px(12.))
             .text_color(if enabled { c(th.text) } else { c(th.overlay0) }).when(enabled, |d| d.cursor_pointer().hover(|d| d.bg(c(cur().surface0))))
             .child(icon(ic, 13., c(th.overlay1))).child(label.to_string());
         let sp = spec.clone();
@@ -597,7 +597,7 @@ impl Root {
             }
             list = list.child(el);
         }
-        gpui::deferred(gpui::anchored().position(pos).snap_to_window_with_margin(px(8.)).child(list)).with_priority(3).into_any_element()
+        gpui::deferred(gpui::anchored().position(pos).snap_to_window_with_margin(px(8.)).child(chrome::pop_in("host-menu-pop", list))).with_priority(3).into_any_element()
     }
     #[allow(dead_code)]
     fn open_sftp(&mut self, window: &mut Window, cx: &mut Context<Self>) {
