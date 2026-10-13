@@ -375,3 +375,31 @@ mod tests {
         assert_eq!(classify("rm -rf /tmp/x"), Risk::R4);
     }
 }
+
+/// PRD 6.x `write_to_pty`: built-in AI (or another agent) typing into a pane where an external
+/// agent is running. Modes: `ask` (always ask), `ask_first` (ask once per pane, then allow),
+/// `allow`, `deny`. Panes without an agent are ordinary shells and are not gated here.
+pub fn write_to_pty(mode: &str, agent_running: bool, approved_before: bool) -> Effect {
+    if !agent_running { return Effect::Allow; }
+    match mode {
+        "allow" | "always_allow" => Effect::Allow,
+        "deny" => Effect::Deny,
+        "ask_first" | "ask_on_first_write" => if approved_before { Effect::Allow } else { Effect::Ask },
+        _ => Effect::Ask,
+    }
+}
+
+#[cfg(test)]
+mod pty_tests {
+    use super::*;
+    #[test]
+    fn write_to_pty_modes() {
+        assert_eq!(write_to_pty("ask", false, false), Effect::Allow);
+        assert_eq!(write_to_pty("ask", true, true), Effect::Ask);
+        assert_eq!(write_to_pty("ask_first", true, false), Effect::Ask);
+        assert_eq!(write_to_pty("ask_first", true, true), Effect::Allow);
+        assert_eq!(write_to_pty("allow", true, false), Effect::Allow);
+        assert_eq!(write_to_pty("deny", true, true), Effect::Deny);
+        assert_eq!(write_to_pty("bogus", true, false), Effect::Ask);
+    }
+}

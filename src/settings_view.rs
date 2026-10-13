@@ -206,6 +206,7 @@ impl SettingsView {
             r(Agents, t("ui.notify_on_state_change"), t("ui.desktop_notification_when_an_agent"), Ctl::Toggle("agents.notify_state")),
             r(Agents, t("ui.approval_timeout_s"), t("ui.how_long_to_wait_after"), Ctl::Text("agents.approval_timeout_secs", "120")),
             r(Agents, t("ui.on_timeout"), "", Ctl::Choice("agents.on_timeout", opts(&[("deny", t("ui.deny")), ("ask", t("ui.keep_waiting"))]))),
+            r(Agents, t("ui.write_to_pty"), t("ui.write_to_pty_desc"), Ctl::Choice("agents.write_to_pty", opts(&[("ask", "ask"), ("ask_first", "ask_first"), ("allow", "allow"), ("deny", "deny")]))),
 
             r(Permissions, t("ui.default_mode"), t("ui.also_switchable_from_the_status"), Ctl::Choice("permissions.mode", opts(&[("ask", t("ui.ask_2")), ("plan", t("ui.plan_read_only")), ("auto", t("ui.auto"))]))),
             r(Permissions, t("ui.max_auto_risk_in_auto"), t("ui.actions_at_or_below_this"), Ctl::Choice("permissions.max_auto_risk", opts(&[("R0", "R0"), ("R1", "R1"), ("R2", "R2")]))),

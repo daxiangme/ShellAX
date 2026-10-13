@@ -671,3 +671,7 @@
 "ui.ai_feed_back_desc" = "After a step-by-step run, exit codes and redacted output (never for no-output hosts) go back to the chat"
 "ui.keyword_highlight" = "Keyword highlighting"
 "ui.keyword_highlight_desc" = "Colour ERROR / WARN / OK etc. in output; rules in [[terminal.highlights]] (pattern, color = error|warning|success|info|accent|#rrggbb, bold)"
+"term.pty_ask_run" = "AI wants to type into {agent} and press Enter: “{preview}”"
+"term.pty_ask_insert" = "AI wants to type into {agent}: “{preview}”"
+"ui.write_to_pty" = "AI input into agent panes"
+"ui.write_to_pty_desc" = "write_to_pty: ask = every time, ask_first = once per pane, allow, deny"

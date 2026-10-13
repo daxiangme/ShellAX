@@ -263,7 +263,7 @@ impl Root {
                     chat_view::ChatEvent::Close => this.close_overlay(w, cx),
                     chat_view::ChatEvent::Insert(cmd) => {
                         // AI output is only inserted, never executed (the user presses Enter)
-                        if let Some(p) = this.tabs.get(this.active).map(|t| t.focused.clone()) { if let Some(s) = &p.read(cx).session { s.write(cmd.clone().into_bytes()); } }
+                        if let Some(p) = this.tabs.get(this.active).map(|t| t.focused.clone()) { let cmd = cmd.clone(); p.update(cx, |t, cx| t.ai_insert_text(cmd, cx)); }
                         this.log("ai.chat.insert", cmd);
                         this.close_overlay(w, cx);
                     }

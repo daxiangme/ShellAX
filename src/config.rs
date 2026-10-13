@@ -166,8 +166,10 @@ impl Ai {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
-pub struct Agents { pub detect_claude: bool, pub detect_codex: bool, pub detect_grok: bool, pub notify_state: bool, pub approval_timeout_secs: u64, pub on_timeout: String, pub policy_port: u16 }
-impl Default for Agents { fn default() -> Self { Self { detect_claude: t(), detect_codex: t(), detect_grok: t(), notify_state: t(), approval_timeout_secs: u_120(), on_timeout: s_deny(), policy_port: 0 } } }
+pub struct Agents { pub detect_claude: bool, pub detect_codex: bool, pub detect_grok: bool, pub notify_state: bool, pub approval_timeout_secs: u64, pub on_timeout: String, pub policy_port: u16,
+    /// AI typing into a pane running an external agent: ask | ask_first | allow | deny
+    pub write_to_pty: String }
+impl Default for Agents { fn default() -> Self { Self { detect_claude: t(), detect_codex: t(), detect_grok: t(), notify_state: t(), approval_timeout_secs: u_120(), on_timeout: s_deny(), policy_port: 0, write_to_pty: "ask".into() } } }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]

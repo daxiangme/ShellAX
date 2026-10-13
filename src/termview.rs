@@ -431,6 +431,10 @@ pub struct TermView {
     pub resume_offer: Option<String>,
     /// OSC 52 write waiting for the user (terminal.osc52_write = ask)
     pub clip_ask: Option<String>,
+    /// AI input held back for a pane running an external agent (write_to_pty = ask):
+    /// (text, press Enter, approved_by, capture channel).
+    pty_ask: Option<(String, bool, String, Option<flume::Sender<StepOutput>>)>,
+    pty_write_ok: bool,
     /// terminal search (Ctrl+Shift+F): query, current match, last result
     pub search: Option<SearchBar>,
     /// Last command failed (OSC 133;D non-zero): (command, exit code) → "Explain" button.
@@ -548,7 +552,7 @@ impl TermView {
             selecting: false, scroll_drag: false, history, tracker: InputTracker::new(),
             last_activity: Instant::now(), blink_running: false, software_gpu: std::env::var("AGENTSHELL_FORCE_BLINK").ok().map(|_| false), last_mouse_cell: None, mouse_down_btn: None,
             manifests, last_command: None, agent: None, agent_seen: Instant::now(), last_detect: Instant::now() - Duration::from_secs(5),
-            detect_scheduled: false, pending_paste: None, ai: None, daemon_id: None, resume_offer: None, clip_ask: None, search: None, last_agent: None, failed: None, exit_seen: 0, ai_inline_seq: 0, ai_inline: None, bell_until: None, cmd_started: None, ai_capture: None, _subs: subs,
+            detect_scheduled: false, pending_paste: None, ai: None, daemon_id: None, resume_offer: None, clip_ask: None, pty_ask: None, pty_write_ok: false, search: None, last_agent: None, failed: None, exit_seen: 0, ai_inline_seq: 0, ai_inline: None, bell_until: None, cmd_started: None, ai_capture: None, _subs: subs,
         }
     }
 
@@ -1073,9 +1077,15 @@ impl TermView {
     /// completion (OSC 133;D).
     pub(crate) fn ai_run_capture(&mut self, command: String, approved_by: &str, tx: flume::Sender<StepOutput>, cx: &mut Context<Self>) {
         if self.session.is_none() { let _ = tx.send(StepOutput { cmd: command, exit: None, output: String::new(), withheld: true }); return; }
+        let tx = match self.pty_gate(&command, true, approved_by, Some(tx), cx) {
+            Ok(Some(tx)) => tx,
+            Ok(None) => return,
+            Err(None) => return, // held for the write_to_pty card
+            Err(Some(tx)) => { let _ = tx.send(StepOutput { cmd: command, exit: None, output: "[not typed: write_to_pty = deny]".into(), withheld: true }); return; }
+        };
         let start = self.abs_cursor_line();
         self.ai_capture = Some((start, command.clone(), tx));
-        self.ai_run(command, approved_by, cx);
+        self.ai_run_now(command, approved_by, cx);
     }
     pub fn ai_context(&self) -> (String, usize, String) {
         let cfg = config::get();
@@ -1149,6 +1159,15 @@ impl TermView {
     /// Insert the suggested command at the prompt. Never sends Enter.
     pub fn ai_insert(&mut self, cx: &mut Context<Self>) {
         let Some(AiCard::Ready { command, .. }) = self.ai.clone() else { return };
+        if self.pty_gate(&command, false, "user", None, cx).is_err() { return; }
+        self.insert_now(command, cx);
+    }
+    /// Insert text from the chat panel (never presses Enter), through the write_to_pty gate.
+    pub(crate) fn ai_insert_text(&mut self, text: String, cx: &mut Context<Self>) {
+        if self.pty_gate(&text, false, "user", None, cx).is_err() { return; }
+        self.insert_now(text, cx);
+    }
+    fn insert_now(&mut self, command: String, cx: &mut Context<Self>) {
         let Some(s) = self.session.clone() else { return };
         let one_line = command.replace(['\r', '\n'], " ");
         s.write(one_line.clone().into_bytes());
@@ -1186,7 +1205,38 @@ impl TermView {
         let Some(AiCard::Confirm { command, .. }) = self.ai.clone() else { return };
         self.ai_run(command, "user", cx);
     }
+    /// write_to_pty gate for AI input into this pane. Returns true when the write may proceed now;
+    /// otherwise the input is held for the card (ask) or dropped (deny), audited either way.
+    fn pty_gate(&mut self, text: &str, enter: bool, by: &str, tx: Option<flume::Sender<StepOutput>>, cx: &mut Context<Self>) -> Result<Option<flume::Sender<StepOutput>>, Option<flume::Sender<StepOutput>>> {
+        let agent = self.agent.map(|(i, _)| agent::display_name(&self.manifests[i].id).to_string());
+        let mode = config::get().agents.write_to_pty.clone();
+        match policy::write_to_pty(&mode, agent.is_some(), self.pty_write_ok) {
+            Effect::Allow => { if let Some(a) = &agent { let _ = crate::audit_log().append("write_to_pty", by, &format!("allow mode={mode} agent={a} host={} chars={}", self.audit_host(), text.chars().count())); } Ok(tx) }
+            Effect::Ask => {
+                let _ = crate::audit_log().append("write_to_pty", "policy", &format!("ask mode={mode} agent={} host={} chars={}", agent.unwrap_or_default(), self.audit_host(), text.chars().count()));
+                self.pty_ask = Some((text.to_string(), enter, by.to_string(), tx)); self.ai = None; cx.notify(); Err(None)
+            }
+            Effect::Deny => {
+                let _ = crate::audit_log().append("write_to_pty", "policy", &format!("deny mode={mode} agent={} host={}", agent.unwrap_or_default(), self.audit_host()));
+                self.ai = None; cx.notify(); Err(tx)
+            }
+        }
+    }
+    fn pty_answer(&mut self, allow: bool, cx: &mut Context<Self>) {
+        let Some((text, enter, by, tx)) = self.pty_ask.take() else { return };
+        let _ = crate::audit_log().append("write_to_pty", "user", &format!("{} host={} chars={}", if allow { "approved" } else { "rejected" }, self.audit_host(), text.chars().count()));
+        if !allow { if let Some(tx) = tx { let _ = tx.send(StepOutput { cmd: text, exit: None, output: "[not typed: user rejected writing into the agent pane]".into(), withheld: true }); } cx.notify(); return; }
+        self.pty_write_ok = true;
+        if enter {
+            if let Some(tx) = tx { let start = self.abs_cursor_line(); self.ai_capture = Some((start, text.clone(), tx)); }
+            self.ai_run_now(text, &by, cx);
+        } else { self.insert_now(text, cx); }
+    }
     pub(crate) fn ai_run(&mut self, command: String, approved_by: &str, cx: &mut Context<Self>) {
+        if self.pty_gate(&command, true, approved_by, None, cx).is_err() { return; }
+        self.ai_run_now(command, approved_by, cx);
+    }
+    fn ai_run_now(&mut self, command: String, approved_by: &str, cx: &mut Context<Self>) {
         let Some(s) = self.session.clone() else { return };
         let one_line = command.replace(['\r', '\n'], " ");
         let _ = crate::audit_log().append("ai.exec", approved_by, &format!("host={} command={one_line:?}", self.audit_host()));
@@ -1536,6 +1586,17 @@ impl Render for TermView {
                     .on_click(cx.listener(|v, _, _w, cx| { if let Some(t) = v.clip_ask.take() { cx.emit(TermEvent::Audit("osc52.write", format!("approved {} bytes", t.len()))); cx.write_to_clipboard(ClipboardItem::new_string(t)); } cx.notify(); })))
                 .child(div().id("osc52-deny").px_2().py(px(3.)).rounded_md().cursor_pointer().bg(c(th.surface0)).child(t("ui.deny"))
                     .on_click(cx.listener(|v, _, _w, cx| { if let Some(t) = v.clip_ask.take() { cx.emit(TermEvent::Audit("osc52.write", format!("rejected {} bytes", t.len()))); } cx.notify(); }))));
+        }
+        if let Some((text, enter, _, _)) = self.pty_ask.clone() {
+            let preview: String = text.chars().take(120).collect::<String>().replace(['\n', '\r'], " ");
+            let agent = self.agent.map(|(i, _)| agent::display_name(&self.manifests[i].id).to_string()).unwrap_or_default();
+            body = body.child(div().absolute().bottom(px(12.)).left(px(12.)).right(px(12.)).p_2().rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.warning))
+                .flex().flex_wrap().items_center().gap_2().text_size(px(12.)).text_color(c(th.text))
+                .child(tf(if enter { "term.pty_ask_run" } else { "term.pty_ask_insert" }, &[("agent", &agent), ("preview", &preview)]))
+                .child(div().id("pty-allow").px_3().py(px(3.)).rounded_md().cursor_pointer().bg(c(th.accent)).text_color(c(th.base)).child(t("ui.allow"))
+                    .on_click(cx.listener(|v, _, _w, cx| v.pty_answer(true, cx))))
+                .child(div().id("pty-deny").px_2().py(px(3.)).rounded_md().cursor_pointer().bg(c(th.surface0)).child(t("ui.deny"))
+                    .on_click(cx.listener(|v, _, _w, cx| v.pty_answer(false, cx)))));
         }
         if self.bell_until.is_some_and(|t| t > Instant::now()) {
             body = body.child(div().absolute().top_0().left_0().size_full().border_2().border_color(c(th.warning)).bg(c(th.warning).opacity(0.06)));
