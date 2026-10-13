@@ -1,5 +1,4 @@
 //! Small shared widgets drawn with plain GPUI divs + Lucide icons (gpui-kit-assets, ISC).
-use ssh_term_proto::i18n::t;
 use gpui::{div, prelude::*, px, svg, AnyElement, Div, ElementId, FontWeight, Hsla, SharedString, Stateful};
 pub use gpui_kit_assets::IconName;
 
@@ -50,7 +49,6 @@ pub fn tag(label: impl Into<SharedString>, color: Hsla) -> impl IntoElement {
     div().px(px(6.)).py(px(1.)).rounded(px(4.)).bg(color.opacity(0.16)).text_color(color).text_size(px(10.5)).font_weight(FontWeight::MEDIUM).child(label.into())
 }
 
-pub fn soon() -> impl IntoElement { tag(t("ui.soon"), c(cur().overlay1)) }
 
 /// Keyboard shortcut chip, e.g. "ctrl-shift-p" -> Ctrl Shift P.
 pub fn kbd(binding: &str) -> AnyElement {

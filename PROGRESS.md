@@ -45,8 +45,8 @@
 - ☑ 7.6 更新检查：src/update.rs 拉取通道清单 JSON（stable/beta，general.update_url 或 AGENTSHELL_UPDATE_URL 覆盖）、版本比较；启动时后台检查并提示，设置-通用“立即检查”。只提示不自动安装（下载+minisign 校验留给发布流水线）；默认清单域名无真实服务器
 - ☑ 7.7 审计保留期：AuditLog::prune 按 retention_days 删除旧记录，首条保留记录的 prev 写入 audit.jsonl.anchor，verify 从锚点校验，剪除本身记一条 audit.prune；audit.log_commands 打开后记录提交的命令（脱敏）
 - ☑ 7.8 配置写回保留注释：Settings::save 用 toml_edit 合并到已有文件（保留注释、空行、键顺序、行尾注释），解析失败回退整写；测试 config::tests::save_preserves_comments
-- ☐ 7.9 光标闪烁 CPU
-- ☐ 7.10 "即将支持"占位清零（当前 32 处）
+- ☑ 7.9 光标闪烁 CPU：实测本机 llvmpipe 每次闪烁是整窗软件重绘（约 110ms/帧，闪烁期间约 23% CPU）；检测 window.gpu_specs().is_software_emulated，软件渲染时光标常亮（AGENTSHELL_FORCE_BLINK 可强制闪烁），实测输入后 8 秒 CPU 0.4%；硬件 GPU 保持原逻辑（聚焦+10 秒内活动才闪，只重绘光标层）
+- ☑ 7.10 "即将支持"占位清零：透明度（窗口透明背景 + 终端区域 alpha）、界面字号（gpui-component 主题字号 + 根元素默认字号）实现；删除 Row.soon/ui::soon 与 5 个废弃键，修正 settings.agent_sock 文案；`rg "即将支持|coming soon|Soon" src locales` 为 0
 
 ## 8 整体测试
 - ☐ release 无警告、clippy、全部测试；TEST_REPORT.md；screenshot-final-*.png；PRD v1.0、README

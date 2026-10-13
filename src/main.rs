@@ -91,6 +91,8 @@ pub(crate) struct Root {
     overlay: Overlay,
     host_search: Entity<InputState>,
     lang_seen: u8,
+    bg_seen: Option<gpui::WindowBackgroundAppearance>,
+    ui_size_seen: f32,
     collapsed: HashSet<String>,
     sidebar_visible: bool,
     audit: Arc<AuditLog>,
@@ -712,7 +714,7 @@ pub(crate) fn sync_component_theme(th: &Theme, cx: &mut App) {
         t.colors.switch_thumb = gpui::white();
         t.colors.popover = c(th.base);
         t.colors.popover_foreground = c(th.text);
-        t.font_size = px(13.);
+        t.font_size = px(config::get().appearance.ui_font_size.clamp(10., 20.));
         t.font_family = SharedString::from("Inter");
         t.radius = px(6.);
         t.focus_ring = false;
@@ -766,6 +768,12 @@ impl Render for Root {
         }
         let th = cur();
         let s = config::get();
+        // appearance.opacity: transparent window background, terminal area drawn with alpha
+        let op = s.appearance.opacity.clamp(0.5, 1.0);
+        let want = if op < 0.999 { gpui::WindowBackgroundAppearance::Transparent } else { gpui::WindowBackgroundAppearance::Opaque };
+        if self.bg_seen != Some(want) { self.bg_seen = Some(want); window.set_background_appearance(want); }
+        let ui = s.appearance.ui_font_size.clamp(10., 20.);
+        if self.ui_size_seen != ui { self.ui_size_seen = ui; gpui_component::Theme::global_mut(cx).font_size = px(ui); }
 
         let mut tabbar = div().h(px(40.)).px_2().flex().items_center().gap_1().bg(c(th.crust)).border_b_1().border_color(c(th.surface0));
         if !self.sidebar_visible {
@@ -853,7 +861,7 @@ impl Render for Root {
                 .on_click(cx.listener(|this, _, w, cx| this.run(Action::CyclePermissionMode, w, cx)))
                 .child(icon(IconName::Shield, 12., mode_col)).child(tf("main.perm_status", &[("mode", &mode.label())])));
 
-        let mut root = div().size_full().relative().flex().flex_row().bg(c(th.crust)).font_family(SharedString::from("Inter")).text_color(c(th.text))
+        let mut root = div().size_full().relative().flex().flex_row().bg(c(th.crust).opacity(op)).font_family(SharedString::from("Inter")).text_size(px(s.appearance.ui_font_size.clamp(10., 20.))).text_color(c(th.text))
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, w, cx| {
                 if ev.keystroke.key == "escape" && !matches!(this.overlay, Overlay::None | Overlay::Palette(_)) {
                     this.close_overlay(w, cx);
@@ -993,7 +1001,7 @@ fn main() {
                     let mut root = Root {
                         rt, default_target, tabs: vec![], active: 0, themes, histories: HashMap::new(),
                         manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], policy_port: None, overlay: Overlay::None, sftp_views: HashMap::new(), sftp_current: None, port_view: None, quit_confirm: false, quit_ok: false, chat_view: None,
-                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, collapsed: HashSet::new(), sidebar_visible: true, audit, audit_verify: None,
+                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., collapsed: HashSet::new(), sidebar_visible: true, audit, audit_verify: None,
                         settings_dirty: vec![], toast: None, toast_seq: 0, _subs: vec![],
                     };
                     root.apply_theme(window, cx);

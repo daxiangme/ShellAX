@@ -61,7 +61,7 @@ impl Cat {
 
 enum Ctl { Toggle(&'static str), Choice(&'static str, Vec<(String, String)>), Text(&'static str, &'static str), Info(String) }
 
-struct Row { cat: Cat, label: &'static str, desc: &'static str, ctl: Ctl, soon: bool }
+struct Row { cat: Cat, label: &'static str, desc: &'static str, ctl: Ctl }
 
 fn opts(v: &[(&str, &str)]) -> Vec<(String, String)> { v.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect() }
 
@@ -130,93 +130,93 @@ impl SettingsView {
             .chain(self.theme_names.iter().map(|n| (n.0.clone(), n.0.clone()))).collect();
         let light: Vec<(String, String)> = self.theme_names.iter().filter(|n| !n.1).map(|n| (n.0.clone(), n.0.clone())).collect();
         let dark: Vec<(String, String)> = self.theme_names.iter().filter(|n| n.1).map(|n| (n.0.clone(), n.0.clone())).collect();
-        let r = |cat, label, desc, ctl, soon| Row { cat, label, desc, ctl, soon };
+        let r = |cat, label, desc, ctl| Row { cat, label, desc, ctl };
         use Cat::*;
         vec![
-            r(General, t("ui.interface_language"), t("ui.applies_immediately_follow_system_reads"), Ctl::Choice("general.language", opts(&[("system", t("ui.follow_system")), ("zh-CN", "简体中文"), ("en", "English")])), false),
-            r(General, t("ui.on_startup"), t("ui.what_to_open_when_the"), Ctl::Choice("general.startup", opts(&[("local", t("ui.local_terminal")), ("restore", t("ui.restore_layout")), ("blank", t("ui.blank"))])), false),
-            r(General, t("ui.check_for_updates_automatically"), "", Ctl::Toggle("general.check_updates"), false),
-            r(General, t("ui.update_channel"), "", Ctl::Choice("general.update_channel", opts(&[("stable", t("ui.stable")), ("beta", t("ui.beta"))])), false),
-            r(General, t("ui.config_file"), t("ui.all_settings_are_stored_here"), Ctl::Info(config::config_path().display().to_string()), false),
+            r(General, t("ui.interface_language"), t("ui.applies_immediately_follow_system_reads"), Ctl::Choice("general.language", opts(&[("system", t("ui.follow_system")), ("zh-CN", "简体中文"), ("en", "English")]))),
+            r(General, t("ui.on_startup"), t("ui.what_to_open_when_the"), Ctl::Choice("general.startup", opts(&[("local", t("ui.local_terminal")), ("restore", t("ui.restore_layout")), ("blank", t("ui.blank"))]))),
+            r(General, t("ui.check_for_updates_automatically"), "", Ctl::Toggle("general.check_updates")),
+            r(General, t("ui.update_channel"), "", Ctl::Choice("general.update_channel", opts(&[("stable", t("ui.stable")), ("beta", t("ui.beta"))]))),
+            r(General, t("ui.config_file"), t("ui.all_settings_are_stored_here"), Ctl::Info(config::config_path().display().to_string())),
 
-            r(Appearance, t("ui.theme"), t("ui.follow_system_switches_with_the"), Ctl::Choice("appearance.theme", themes), false),
-            r(Appearance, t("ui.light_theme"), t("ui.used_in_light_mode_when"), Ctl::Choice("appearance.light_theme", light), false),
-            r(Appearance, t("ui.dark_theme"), t("ui.used_in_dark_mode_when"), Ctl::Choice("appearance.dark_theme", dark), false),
-            r(Appearance, t("ui.terminal_font"), t("ui.primary_font_monospace"), Ctl::Text("font.family", "JetBrains Mono"), false),
-            r(Appearance, t("ui.fallback_fonts"), t("ui.comma_separated_used_in_order"), Ctl::Text("font.fallbacks", "Noto Sans Mono CJK SC, …"), false),
-            r(Appearance, t("ui.font_size"), t("ui.in_pt_8_32"), Ctl::Text("font.size", "13.5"), false),
-            r(Appearance, t("ui.line_height"), t("ui.multiple_of_the_font_size"), Ctl::Text("font.line_height", "1.4"), false),
-            r(Appearance, t("ui.ligatures"), t("ui.show_etc_as_ligatures"), Ctl::Toggle("font.ligatures"), false),
-            r(Appearance, t("ui.window_opacity"), "0.5–1.0", Ctl::Text("appearance.opacity", "1.0"), true),
-            r(Appearance, t("ui.ui_font_size"), t("ui.sidebar_tabs_and_other_ui"), Ctl::Text("appearance.ui_font_size", "13"), true),
+            r(Appearance, t("ui.theme"), t("ui.follow_system_switches_with_the"), Ctl::Choice("appearance.theme", themes)),
+            r(Appearance, t("ui.light_theme"), t("ui.used_in_light_mode_when"), Ctl::Choice("appearance.light_theme", light)),
+            r(Appearance, t("ui.dark_theme"), t("ui.used_in_dark_mode_when"), Ctl::Choice("appearance.dark_theme", dark)),
+            r(Appearance, t("ui.terminal_font"), t("ui.primary_font_monospace"), Ctl::Text("font.family", "JetBrains Mono")),
+            r(Appearance, t("ui.fallback_fonts"), t("ui.comma_separated_used_in_order"), Ctl::Text("font.fallbacks", "Noto Sans Mono CJK SC, …")),
+            r(Appearance, t("ui.font_size"), t("ui.in_pt_8_32"), Ctl::Text("font.size", "13.5")),
+            r(Appearance, t("ui.line_height"), t("ui.multiple_of_the_font_size"), Ctl::Text("font.line_height", "1.4")),
+            r(Appearance, t("ui.ligatures"), t("ui.show_etc_as_ligatures"), Ctl::Toggle("font.ligatures")),
+            r(Appearance, t("ui.window_opacity"), "0.5–1.0", Ctl::Text("appearance.opacity", "1.0")),
+            r(Appearance, t("ui.ui_font_size"), t("ui.sidebar_tabs_and_other_ui"), Ctl::Text("appearance.ui_font_size", "13")),
 
-            r(Terminal, t("ui.default_shell"), t("ui.empty_uses_shell_applies_to"), Ctl::Text("terminal.shell", "/bin/zsh"), false),
-            r(Terminal, t("ui.scrollback_lines"), t("ui.applies_to_new_sessions"), Ctl::Text("terminal.scrollback", "10000"), false),
-            r(Terminal, t("ui.cursor_style"), "", Ctl::Choice("terminal.cursor_style", opts(&[("block", t("ui.block")), ("bar", t("ui.bar")), ("underline", t("ui.underline"))])), false),
-            r(Terminal, t("ui.cursor_blink"), t("ui.stops_blinking_after_10_s"), Ctl::Toggle("terminal.cursor_blink"), false),
-            r(Terminal, t("ui.bell"), t("ui.on_bel"), Ctl::Choice("terminal.bell", opts(&[("none", t("ui.off")), ("visual", t("ui.flash_border")), ("sound", t("ui.sound"))])), false),
-            r(Terminal, t("ui.copy_on_select"), t("ui.copy_to_the_clipboard_on"), Ctl::Toggle("terminal.copy_on_select"), false),
-            r(Terminal, t("ui.confirm_multi_line_paste"), t("ui.confirm_before_pasting_multiple_lines"), Ctl::Toggle("terminal.paste_confirm"), false),
-            r(Terminal, t("ui.mouse_reporting"), t("ui.let_vim_htop_etc_receive"), Ctl::Toggle("terminal.mouse_reporting"), false),
-            r(Terminal, t("ui.shell_integration_osc_133"), t("ui.inject_prompt_marks_into_bash"), Ctl::Choice("terminal.shell_integration", opts(&[("auto", t("ui.auto_inject")), ("off", t("ui.off"))])), false),
+            r(Terminal, t("ui.default_shell"), t("ui.empty_uses_shell_applies_to"), Ctl::Text("terminal.shell", "/bin/zsh")),
+            r(Terminal, t("ui.scrollback_lines"), t("ui.applies_to_new_sessions"), Ctl::Text("terminal.scrollback", "10000")),
+            r(Terminal, t("ui.cursor_style"), "", Ctl::Choice("terminal.cursor_style", opts(&[("block", t("ui.block")), ("bar", t("ui.bar")), ("underline", t("ui.underline"))]))),
+            r(Terminal, t("ui.cursor_blink"), t("ui.stops_blinking_after_10_s"), Ctl::Toggle("terminal.cursor_blink")),
+            r(Terminal, t("ui.bell"), t("ui.on_bel"), Ctl::Choice("terminal.bell", opts(&[("none", t("ui.off")), ("visual", t("ui.flash_border")), ("sound", t("ui.sound"))]))),
+            r(Terminal, t("ui.copy_on_select"), t("ui.copy_to_the_clipboard_on"), Ctl::Toggle("terminal.copy_on_select")),
+            r(Terminal, t("ui.confirm_multi_line_paste"), t("ui.confirm_before_pasting_multiple_lines"), Ctl::Toggle("terminal.paste_confirm")),
+            r(Terminal, t("ui.mouse_reporting"), t("ui.let_vim_htop_etc_receive"), Ctl::Toggle("terminal.mouse_reporting")),
+            r(Terminal, t("ui.shell_integration_osc_133"), t("ui.inject_prompt_marks_into_bash"), Ctl::Choice("terminal.shell_integration", opts(&[("auto", t("ui.auto_inject")), ("off", t("ui.off"))]))),
 
-            r(Suggest, t("ui.enable_suggestions"), "", Ctl::Toggle("suggest.enabled"), false),
-            r(Suggest, t("ui.accept_key"), "", Ctl::Choice("suggest.accept", opts(&[("both", t("ui.or_tab")), ("right", t("ui.only")), ("tab", t("ui.tab_only"))])), false),
-            r(Suggest, t("ui.local_history"), t("ui.record_commands_typed_in_this"), Ctl::Toggle("suggest.local_history"), false),
-            r(Suggest, t("ui.remote_history"), t("ui.read_remote_bash_history_and"), Ctl::Toggle("suggest.remote_history"), false),
-            r(Suggest, t("ui.ai_suggest"), t("ui.ai_suggest.d"), Ctl::Toggle("suggest.ai"), false),
-            r(Suggest, t("ui.sensitive_command_filters"), t("ui.regexes_comma_separated_combined_with"), Ctl::Text("suggest.filter_patterns", "(?i)vault +login"), false),
+            r(Suggest, t("ui.enable_suggestions"), "", Ctl::Toggle("suggest.enabled")),
+            r(Suggest, t("ui.accept_key"), "", Ctl::Choice("suggest.accept", opts(&[("both", t("ui.or_tab")), ("right", t("ui.only")), ("tab", t("ui.tab_only"))]))),
+            r(Suggest, t("ui.local_history"), t("ui.record_commands_typed_in_this"), Ctl::Toggle("suggest.local_history")),
+            r(Suggest, t("ui.remote_history"), t("ui.read_remote_bash_history_and"), Ctl::Toggle("suggest.remote_history")),
+            r(Suggest, t("ui.ai_suggest"), t("ui.ai_suggest.d"), Ctl::Toggle("suggest.ai")),
+            r(Suggest, t("ui.sensitive_command_filters"), t("ui.regexes_comma_separated_combined_with"), Ctl::Text("suggest.filter_patterns", "(?i)vault +login")),
 
-            r(Ssh, t("ui.default_user"), t("ui.used_when_a_host_has"), Ctl::Text("ssh.default_user", "$USER"), false),
-            r(Ssh, t("ui.default_port"), "", Ctl::Text("ssh.default_port", "22"), false),
-            r(Ssh, t("ui.keepalive_interval_s"), t("ui.0_disables"), Ctl::Text("ssh.keepalive_secs", "30"), false),
-            r(Ssh, t("ui.connect_timeout_s"), t("ui.tcp_connect_phase"), Ctl::Text("ssh.connect_timeout_secs", "15"), false),
-            r(Ssh, t("ui.known_hosts_file"), "", Ctl::Text("ssh.known_hosts", "~/.ssh/known_hosts"), false),
-            r(Ssh, t("ui.unknown_host_keys"), t("ui.what_to_do_on_first"), Ctl::Choice("ssh.host_key_policy", opts(&[("ask", t("ui.ask")), ("strict", t("ui.strict_reject")), ("accept-new", t("ui.accept_new_hosts"))])), false),
-            r(Ssh, t("ui.read_ssh_config"), t("ui.list_its_host_entries_in"), Ctl::Toggle("ssh.read_ssh_config"), false),
-            r(Ssh, t("ui.ssh_config_path"), "", Ctl::Text("ssh.ssh_config", "~/.ssh/config"), false),
-            r(Ssh, t("ui.default_jump_host"), t("ui.proxyjump_e_g_bastion"), Ctl::Text("ssh.jump_host", "user@bastion:22"), false),
-            r(Ssh, t("ui.cipher_preference"), t("ui.comma_separated_by_priority"), Ctl::Text("ssh.ciphers", ""), false),
-            r(Ssh, t("ui.kex_preference"), t("ui.comma_separated_by_priority"), Ctl::Text("ssh.kex", "curve25519-sha256"), false),
-            r(Ssh, t("ui.agent_forwarding"), "", Ctl::Toggle("ssh.agent_forwarding"), false),
+            r(Ssh, t("ui.default_user"), t("ui.used_when_a_host_has"), Ctl::Text("ssh.default_user", "$USER")),
+            r(Ssh, t("ui.default_port"), "", Ctl::Text("ssh.default_port", "22")),
+            r(Ssh, t("ui.keepalive_interval_s"), t("ui.0_disables"), Ctl::Text("ssh.keepalive_secs", "30")),
+            r(Ssh, t("ui.connect_timeout_s"), t("ui.tcp_connect_phase"), Ctl::Text("ssh.connect_timeout_secs", "15")),
+            r(Ssh, t("ui.known_hosts_file"), "", Ctl::Text("ssh.known_hosts", "~/.ssh/known_hosts")),
+            r(Ssh, t("ui.unknown_host_keys"), t("ui.what_to_do_on_first"), Ctl::Choice("ssh.host_key_policy", opts(&[("ask", t("ui.ask")), ("strict", t("ui.strict_reject")), ("accept-new", t("ui.accept_new_hosts"))]))),
+            r(Ssh, t("ui.read_ssh_config"), t("ui.list_its_host_entries_in"), Ctl::Toggle("ssh.read_ssh_config")),
+            r(Ssh, t("ui.ssh_config_path"), "", Ctl::Text("ssh.ssh_config", "~/.ssh/config")),
+            r(Ssh, t("ui.default_jump_host"), t("ui.proxyjump_e_g_bastion"), Ctl::Text("ssh.jump_host", "user@bastion:22")),
+            r(Ssh, t("ui.cipher_preference"), t("ui.comma_separated_by_priority"), Ctl::Text("ssh.ciphers", "")),
+            r(Ssh, t("ui.kex_preference"), t("ui.comma_separated_by_priority"), Ctl::Text("ssh.kex", "curve25519-sha256")),
+            r(Ssh, t("ui.agent_forwarding"), "", Ctl::Toggle("ssh.agent_forwarding")),
 
-            r(Credentials, t("ui.use_system_keychain"), t("ui.store_key_passphrases_and_api"), Ctl::Toggle("credentials.use_keychain"), false),
-            r(Credentials, t("ui.use_ssh_agent"), "", Ctl::Toggle("credentials.use_ssh_agent"), false),
-            r(Credentials, t("ui.extra_private_keys"), t("ui.comma_separated_paths_tried_after"), Ctl::Text("credentials.extra_keys", "~/.ssh/work_ed25519"), false),
+            r(Credentials, t("ui.use_system_keychain"), t("ui.store_key_passphrases_and_api"), Ctl::Toggle("credentials.use_keychain")),
+            r(Credentials, t("ui.use_ssh_agent"), "", Ctl::Toggle("credentials.use_ssh_agent")),
+            r(Credentials, t("ui.extra_private_keys"), t("ui.comma_separated_paths_tried_after"), Ctl::Text("credentials.extra_keys", "~/.ssh/work_ed25519")),
 
-            r(Ai, t("ui.enable_built_in_ai"), t("ai.enable.d"), Ctl::Toggle("ai.enabled"), false),
-            r(Ai, t("ui.redact_before_sending"), t("ui.strip_passwords_tokens_private_keys"), Ctl::Toggle("ai.redact"), false),
-            r(Ai, t("ui.context_scope"), t("ai.context.d"), Ctl::Choice("ai.context", opts(&[("none", t("ai.ctx_none")), ("command", t("ui.last_command")), ("selection", t("ui.selection_only")), ("screen", t("ui.current_screen"))])), false),
-            r(Ai, t("ai.context_lines"), t("ai.context_lines.d"), Ctl::Text("ai.context_lines", "40"), false),
-            r(Ai, t("ui.allow_sending_command_output"), t("ui.when_off_only_the_command"), Ctl::Toggle("ai.send_output"), false),
-            r(Ai, t("ai.nl_prefix"), t("ai.nl_prefix.d"), Ctl::Text("ai.nl_prefix", "#"), false),
+            r(Ai, t("ui.enable_built_in_ai"), t("ai.enable.d"), Ctl::Toggle("ai.enabled")),
+            r(Ai, t("ui.redact_before_sending"), t("ui.strip_passwords_tokens_private_keys"), Ctl::Toggle("ai.redact")),
+            r(Ai, t("ui.context_scope"), t("ai.context.d"), Ctl::Choice("ai.context", opts(&[("none", t("ai.ctx_none")), ("command", t("ui.last_command")), ("selection", t("ui.selection_only")), ("screen", t("ui.current_screen"))]))),
+            r(Ai, t("ai.context_lines"), t("ai.context_lines.d"), Ctl::Text("ai.context_lines", "40")),
+            r(Ai, t("ui.allow_sending_command_output"), t("ui.when_off_only_the_command"), Ctl::Toggle("ai.send_output")),
+            r(Ai, t("ai.nl_prefix"), t("ai.nl_prefix.d"), Ctl::Text("ai.nl_prefix", "#")),
 
-            r(Agents, t("ui.detect_claude_code"), "", Ctl::Toggle("agents.detect_claude"), false),
-            r(Agents, t("ui.detect_codex"), "", Ctl::Toggle("agents.detect_codex"), false),
-            r(Agents, t("ui.detect_grok"), "", Ctl::Toggle("agents.detect_grok"), false),
-            r(Agents, t("ui.notify_on_state_change"), t("ui.desktop_notification_when_an_agent"), Ctl::Toggle("agents.notify_state"), false),
-            r(Agents, t("ui.approval_timeout_s"), t("ui.how_long_to_wait_after"), Ctl::Text("agents.approval_timeout_secs", "120"), false),
-            r(Agents, t("ui.on_timeout"), "", Ctl::Choice("agents.on_timeout", opts(&[("deny", t("ui.deny")), ("ask", t("ui.keep_waiting"))])), false),
+            r(Agents, t("ui.detect_claude_code"), "", Ctl::Toggle("agents.detect_claude")),
+            r(Agents, t("ui.detect_codex"), "", Ctl::Toggle("agents.detect_codex")),
+            r(Agents, t("ui.detect_grok"), "", Ctl::Toggle("agents.detect_grok")),
+            r(Agents, t("ui.notify_on_state_change"), t("ui.desktop_notification_when_an_agent"), Ctl::Toggle("agents.notify_state")),
+            r(Agents, t("ui.approval_timeout_s"), t("ui.how_long_to_wait_after"), Ctl::Text("agents.approval_timeout_secs", "120")),
+            r(Agents, t("ui.on_timeout"), "", Ctl::Choice("agents.on_timeout", opts(&[("deny", t("ui.deny")), ("ask", t("ui.keep_waiting"))]))),
 
-            r(Permissions, t("ui.default_mode"), t("ui.also_switchable_from_the_status"), Ctl::Choice("permissions.mode", opts(&[("ask", t("ui.ask_2")), ("plan", t("ui.plan_read_only")), ("auto", t("ui.auto"))])), false),
-            r(Permissions, t("ui.max_auto_risk_in_auto"), t("ui.actions_at_or_below_this"), Ctl::Choice("permissions.max_auto_risk", opts(&[("R0", "R0"), ("R1", "R1"), ("R2", "R2")])), false),
-            r(Permissions, t("ui.confirm_writes_on_production_hosts"), t("ui.always_ask_for_r1_actions"), Ctl::Toggle("permissions.prod_confirm"), false),
-            r(Permissions, t("ui.double_confirm_dangerous_commands"), t("ui.r4_actions_need_confirmation_even"), Ctl::Toggle("permissions.dangerous_confirm"), false),
+            r(Permissions, t("ui.default_mode"), t("ui.also_switchable_from_the_status"), Ctl::Choice("permissions.mode", opts(&[("ask", t("ui.ask_2")), ("plan", t("ui.plan_read_only")), ("auto", t("ui.auto"))]))),
+            r(Permissions, t("ui.max_auto_risk_in_auto"), t("ui.actions_at_or_below_this"), Ctl::Choice("permissions.max_auto_risk", opts(&[("R0", "R0"), ("R1", "R1"), ("R2", "R2")]))),
+            r(Permissions, t("ui.confirm_writes_on_production_hosts"), t("ui.always_ask_for_r1_actions"), Ctl::Toggle("permissions.prod_confirm")),
+            r(Permissions, t("ui.double_confirm_dangerous_commands"), t("ui.r4_actions_need_confirmation_even"), Ctl::Toggle("permissions.dangerous_confirm")),
 
-            r(Audit, t("ui.log_directory"), "", Ctl::Text("audit.dir", "~/.local/share/agentshell/audit"), false),
-            r(Audit, t("ui.retention_days"), "", Ctl::Text("audit.retention_days", "90"), false),
-            r(Audit, t("ui.log_manually_typed_commands"), t("ui.by_default_only_connections_permissions"), Ctl::Toggle("audit.log_commands"), false),
+            r(Audit, t("ui.log_directory"), "", Ctl::Text("audit.dir", "~/.local/share/agentshell/audit")),
+            r(Audit, t("ui.retention_days"), "", Ctl::Text("audit.retention_days", "90")),
+            r(Audit, t("ui.log_manually_typed_commands"), t("ui.by_default_only_connections_permissions"), Ctl::Toggle("audit.log_commands")),
 
-            r(Session, t("ui.persistent_sessions"), t("ui.resume_via_remote_tmux_after"), Ctl::Choice("session.persistent", opts(&[("off", t("ui.off")), ("tmux", "tmux")])), false),
-            r(Session, t("ui.local_daemon"), t("ui.local_daemon.d"), Ctl::Toggle("session.local_daemon"), false),
-            r(Session, t("ui.restore_layout_on_startup"), "", Ctl::Toggle("session.restore_layout"), false),
-            r(Session, t("ui.confirm_before_closing"), t("ui.confirm_closing_a_tab_while"), Ctl::Toggle("session.confirm_close"), false),
-            r(Session, t("ui.auto_reconnect"), "", Ctl::Toggle("session.auto_reconnect"), false),
+            r(Session, t("ui.persistent_sessions"), t("ui.resume_via_remote_tmux_after"), Ctl::Choice("session.persistent", opts(&[("off", t("ui.off")), ("tmux", "tmux")]))),
+            r(Session, t("ui.local_daemon"), t("ui.local_daemon.d"), Ctl::Toggle("session.local_daemon")),
+            r(Session, t("ui.restore_layout_on_startup"), "", Ctl::Toggle("session.restore_layout")),
+            r(Session, t("ui.confirm_before_closing"), t("ui.confirm_closing_a_tab_while"), Ctl::Toggle("session.confirm_close")),
+            r(Session, t("ui.auto_reconnect"), "", Ctl::Toggle("session.auto_reconnect")),
 
-            r(Notify, t("ui.desktop_notifications"), "", Ctl::Toggle("notify.desktop"), false),
-            r(Notify, t("ui.notify_when_an_agent_waits"), "", Ctl::Toggle("notify.agent_blocked"), false),
-            r(Notify, t("ui.long_command_notification_s"), t("ui.when_a_command_runs_longer"), Ctl::Text("notify.long_command_secs", "10"), false),
-            r(Notify, t("ui.sound"), "", Ctl::Toggle("notify.sound"), false),
+            r(Notify, t("ui.desktop_notifications"), "", Ctl::Toggle("notify.desktop")),
+            r(Notify, t("ui.notify_when_an_agent_waits"), "", Ctl::Toggle("notify.agent_blocked")),
+            r(Notify, t("ui.long_command_notification_s"), t("ui.when_a_command_runs_longer"), Ctl::Text("notify.long_command_secs", "10")),
+            r(Notify, t("ui.sound"), "", Ctl::Toggle("notify.sound")),
         ]
     }
 
@@ -290,7 +290,7 @@ impl SettingsView {
         let path = match &row.ctl { Ctl::Toggle(p) | Ctl::Choice(p, _) | Ctl::Text(p, _) => Some(*p), _ => None };
         let err = path.and_then(|p| self.errors.get(p).cloned());
         let mut left = div().flex_1().flex().flex_col().gap(px(2.)).min_w_0()
-            .child(div().flex().items_center().gap_2().text_size(px(13.)).text_color(c(th.text)).child(row.label).when(row.soon, |d| d.child(ui::soon())));
+            .child(div().flex().items_center().gap_2().text_size(px(13.)).text_color(c(th.text)).child(row.label));
         if !row.desc.is_empty() { left = left.child(div().text_size(px(11.5)).text_color(c(th.overlay1)).child(row.desc)); }
         if let Some(e) = err { left = left.child(div().text_size(px(11.5)).text_color(c(th.error)).child(e)); }
         div().id(("row", idx)).py(px(10.)).flex().items_center().gap_4().border_b_1().border_color(c(th.surface0))
@@ -676,8 +676,6 @@ impl Render for SettingsView {
             .child(div().pb_2().child(Input::new(&self.search).prefix(icon(IconName::Search, 14., c(th.overlay1))).cleanable(true)));
         for (i, cat) in Cat::ALL.iter().copied().enumerate() {
             let active = query.is_empty() && cat == self.cat;
-            let n_soon = rows.iter().filter(|r| r.cat == cat).count();
-            let _ = n_soon;
             nav = nav.child(div().id(("cat", i)).h(px(30.)).px_2().rounded_md().flex().items_center().gap_2().cursor_pointer()
                 .bg(if active { c(th.surface0) } else { gpui::transparent_black() })
                 .hover(|d| d.bg(c(cur().surface0)))

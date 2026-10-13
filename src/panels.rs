@@ -1,6 +1,5 @@
 //! Side tools opened from the sidebar function area: audit log viewer, SFTP, port forwarding,
-//! AI / Agent overview. Audit and the agent overview are real; SFTP remote side and port
-//! forwarding are UI frames only (marked 即将支持).
+//! AI / Agent overview. SFTP and port forwarding live in sftp_view.rs / port_view.rs.
 use ssh_term_proto::i18n::{t, tf};
 use gpui::{div, prelude::*, px, AnyElement, Context, FontWeight, SharedString};
 use ssh_term_proto::agent::AgentState;

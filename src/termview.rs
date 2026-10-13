@@ -362,6 +362,7 @@ pub struct TermView {
     tracker: InputTracker,
     last_activity: Instant,
     blink_running: bool,
+    software_gpu: Option<bool>,
     last_mouse_cell: Option<(usize, usize)>,
     mouse_down_btn: Option<u8>,
     // agent detection
@@ -479,7 +480,7 @@ impl TermView {
         Self {
             title: title.to_string().into(), spec, session, error, focus, st, grid, cursor,
             selecting: false, scroll_drag: false, history, tracker: InputTracker::new(),
-            last_activity: Instant::now(), blink_running: false, last_mouse_cell: None, mouse_down_btn: None,
+            last_activity: Instant::now(), blink_running: false, software_gpu: std::env::var("AGENTSHELL_FORCE_BLINK").ok().map(|_| false), last_mouse_cell: None, mouse_down_btn: None,
             manifests, last_command: None, agent: None, agent_seen: Instant::now(), last_detect: Instant::now() - Duration::from_secs(5),
             detect_scheduled: false, pending_paste: None, ai: None, daemon_id: None, resume_offer: None, last_agent: None, failed: None, exit_seen: 0, ai_inline_seq: 0, ai_inline: None, bell_until: None, cmd_started: None, _subs: subs,
         }
@@ -546,6 +547,9 @@ impl TermView {
         self.last_activity = Instant::now();
         self.st.borrow_mut().blink_on = true;
         if self.blink_running || !config::get().terminal.cursor_blink { return; }
+        // On a software rasterizer (llvmpipe/lavapipe) every blink is a full-window CPU redraw
+        // (~110 ms per frame at 1920x1200, ~23% CPU while blinking): keep the cursor steady there.
+        if *self.software_gpu.get_or_insert_with(|| window.gpu_specs().is_some_and(|g| g.is_software_emulated)) { return; }
         self.blink_running = true;
         cx.spawn_in(window, async move |this, cx| {
             loop {
@@ -1331,7 +1335,7 @@ impl Render for TermView {
             .on_mouse_up(MouseButton::Right, cx.listener(|v, ev, w, cx| v.on_mouse_up(MouseButton::Right, ev, w, cx)))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
-            .flex_1().size_full().flex().flex_col().bg(c(th.bg)).overflow_hidden()
+            .flex_1().size_full().flex().flex_col().bg(c(th.bg).opacity(crate::config::get().appearance.opacity.clamp(0.5, 1.0))).overflow_hidden()
             .border_t_2().border_color(if focused { c(th.accent) } else { c(th.bg) })
             .child(header)
             .child(body)
