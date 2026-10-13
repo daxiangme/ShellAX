@@ -771,7 +771,11 @@ impl Root {
     fn answer_approval(&mut self, ans: ssh_term_proto::policy_server::Answer, cx: &mut Context<Self>) {
         if !self.approvals.is_empty() {
             let a = self.approvals.remove(0);
-            let _ = a.reply.send(ans);
+            if a.reply.send(ans).is_err() {
+                // the caller is gone and the request was already denied: a late answer executes nothing
+                self.log("hook.approval", format!("id={} late-answer-ignored (approval withdrawn)", a.id));
+                self.toast(t("main.approval_late").into(), cx);
+            }
         }
         self.deny_reason = None;
         cx.notify();
@@ -1504,7 +1508,9 @@ fn main() {
                         cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
                         if this.update(cx, |r, cx| if !r.approvals.is_empty() {
                             let now = std::time::Instant::now();
-                            r.approvals.retain(|a| a.deadline > now && !a.reply.is_disconnected());
+                            // AGENTSHELL_TEST_SLOW_WITHDRAW: test hook that keeps a withdrawn card on screen so a late "allow" can be clicked
+                            let slow = std::env::var_os("AGENTSHELL_TEST_SLOW_WITHDRAW").is_some();
+                            r.approvals.retain(|a| a.deadline > now && (slow || !a.reply.is_disconnected()));
                             cx.notify();
                         }).is_err() { break; }
                     }).detach();

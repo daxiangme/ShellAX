@@ -773,3 +773,4 @@
 "sync.in_sync" = "Both sides are in sync"
 "sync.previewed" = "Diff preview: {n} items"
 "sync.done" = "Sync: {q} transfers queued, {d} deleted, {c} conflicts skipped"
+"main.approval_late" = "This approval was withdrawn (caller disconnected); the late answer was not executed"
