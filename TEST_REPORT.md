@@ -1,20 +1,20 @@
-# TEST_REPORT — AgentShell 原型对照 PRD v1.0（第 11 轮收尾，2026-10-13）
+# TEST_REPORT — AgentShell 原型对照 PRD v1.0（第 12 轮收尾，2026-10-13）
 
 标记：**通过** / **失败**（PRD 要求未实现或不达标）/ **未验证**（只因硬件或平台限制无法在本机验证，写明原因）。
 证据：`T:` 自动化测试；`G:` 本轮在 DISPLAY=:2 实测（截图本轮逐张看过）；`P:` 前几轮 GUI 实测（PROGRESS.md 有记录，截图在仓库）；`M:` 手工测量。
-代码基线：90a5588 起（本报告提交前的最后一个代码 commit）。
+代码基线：第 12 轮（2a7fbe7 之后，本报告提交前的最后一个代码 commit）。G: 截图都在 DISPLAY=:2（1920×1200）全屏截取，本轮逐张看过。
 
 ## 0. 构建与自动化测试
 
 | 项 | 命令 | 结果 |
 |---|---|---|
 | release 构建 | `cargo build --release`（`~/.cargo/bin` 工具链） | **通过**，0 警告 |
-| dist 构建 | `cargo build --profile dist`（fat LTO、cgu=1、panic=abort、strip） | **通过**，0 警告；二进制 45.2MB，gzip 17.8MB |
+| dist 构建 | `cargo build --profile dist`（fat LTO、cgu=1、panic=abort、strip） | **通过**，0 警告；二进制 46.0MB，gzip 18.2MB |
 | clippy | `cargo clippy --release --all-targets` | **通过**，0 警告 0 错误 |
-| 全量测试 ×3 | `source testenv/test.env; eval $(ssh-agent -s); ssh-add testenv/client_ed25519; cargo test --release -- --nocapture` | **通过**：3 轮均 123/123（lib 85、agentshell 7、GUI bin 15、daemon 1、headless 6、managed_policy 1、ssh_features 8），0 失败 0 忽略 |
+| 全量测试 ×3 | `source testenv/test.env; eval $(ssh-agent -s); ssh-add testenv/client_ed25519; cargo test --release -- --nocapture` | **通过**：3 轮均 135/135（lib 92、agentshell 8、GUI bin 16、daemon 1、headless 8、managed_policy 1、ssh_features 9），0 失败 0 忽略 |
 | 跳过检查 | 在 --nocapture 输出里 grep skip | 0 个跳过（sshd 2222 公钥 / 2223 密码+转发 / 2224 keyboard-interactive 都在运行，SSH_AUTH_SOCK 已设） |
 | 外部 Agent hook 端到端 | `tools/e2e_hooks.sh`（真实 Claude Code / Codex / Grok CLI + mock LLM） | **通过** 7/7 |
-| 许可证 | 新增代码全部自写；本轮无新依赖；ksni（Unlicense）、socks（MIT/Apache）、serde_yaml（MIT/Apache）已在 THIRD_PARTY_NOTICES.md 登记 | 通过 |
+| 许可证 | 新增代码全部自写（Sixel/Kitty 解码、asciicast、目录同步、广播、快照均按公开规范自写）；本轮新增直接依赖 image 0.25（MIT OR Apache-2.0，原本已是 gpui 的传递依赖）已登记 THIRD_PARTY_NOTICES.md；未打开 research/ 下 shell-rs、oxideterm、warp，未读 Zed terminal/terminal_view/editor | 通过 |
 
 ## 1. 用户故事（PRD 2.2）
 
@@ -52,9 +52,9 @@
 | 连接复用、keepalive、重连 | 通过 | T: connection_reuse；P: 2.5 |
 | SFTP 基础 | 通过 | 同 US-12 |
 | SFTP 内置编辑 | 通过 | T: sftp_ops_and_resumable_transfers（往返、冲突、二进制/大小限制）；P: screenshot-final-sftp-editor.png、screenshot-final-sftp-editor-conflict.png |
-| SFTP 目录同步（P1） | **失败** | 未实现 |
+| SFTP 目录同步（P1） | 通过 | T: dirsync::tests::plans、tests/ssh_features.rs::sftp_directory_sync（单向不删/带删除、双向较新者胜、mtime 保留后幂等）；G: SFTP「同步…」→ 差异预览（↑/+/✕ 着色）→ 有删除时按钮变为“确认删除 3 项并同步”需再点一次 → 传输完成、远端只剩本地文件（screenshot-final-sftp-sync-preview.png / -delete-confirm.png / -done.png，ssh 核对远端文件列表与内容） |
 | 端口转发 | 通过 | 同 US-13 |
-| 端口转发规则图示（P1） | **失败** | 只有列表，无图示 |
+| 端口转发规则图示（P1） | 通过 | T: forward::tests::diagram_nodes；G: 每条规则显示「本机/远端监听 ══SSH 隧道══▶ SSH 服务器 ──转发──▶ 目标」，运行中连线变绿、出错灰色并显示错误（screenshot-final-port-forward-diagram.png：-D 运行中、-L 端口被占用） |
 | 钥匙串凭据 | 通过 / 未验证 | T: secrets::tests::*（本机走 0600 加密文件回退）；macOS Keychain / Windows Credential Manager 无对应平台，未验证 |
 | Agent 转发（默认关、按主机开） | 通过 | P: 2.4 |
 | 凭据页 / 生成导入密钥 | 通过 | T: keygen::tests::generate_import_and_load |
@@ -75,12 +75,12 @@
 | 主题 + Alacritty/iTerm2 导入 | 通过 | T: theme::tests::*、theme::iterm_tests::imports_itermcolors |
 | 历史建议 + AI 灰字 | 通过 | T: suggest::tests::*；P: screenshot-final-ai-inline-suggest.png |
 | 关键字高亮（着色） | 通过 | T: highlight::tests::rules_and_spans；G: screenshot-final-keyword-highlight.png（OK/PASS 绿、ERROR/failed 红、warn/deprecated 黄） |
-| 关键字触发通知（P1，PRD 写“着色/通知”） | **失败** | 只着色，不发通知 |
+| 关键字触发通知（P1，PRD 写“着色/通知”） | 通过 | T: notify_rules::tests::fires_and_rate_limits、headless::local_pty_graphics_record_notify；G: `[[notify.keywords]]`（默认 build/deploy failed/succeeded/finished、OOM/段错误/kernel panic），命中输出行弹出提示并发桌面通知（本机无通知守护，日志显示 D-Bus 不可用，界面提示可见），审计 notify.keyword 已脱敏，刚输入的命令回显行不触发，每规则 10 秒限流（screenshot-final-keyword-notify-recording.png 右下角） |
 | IME 预编辑 | 未验证 | 代码已实现 EntityInputHandler；本机没有 fcitx/ibus 输入法程序 |
 | 光标闪烁 CPU | 通过 / 未验证 | M: 软件渲染下光标常亮，空闲 0.4% CPU；硬件 GPU 下的闪烁路径没有真 GPU 可测 |
-| 图形协议 Sixel/Kitty（P2） | **失败** | 未实现 |
-| 录制回放 asciicast（P2） | **失败** | 未实现 |
-| 广播输入（P2） | **失败** | 未实现 |
+| 图形协议 Sixel/Kitty（P2） | 通过 | T: graphics::tests::sixel_and_kitty、headless::local_pty_graphics_record_notify、headless::graphics_in_single_chunk_keep_order；G: Sixel（RGB/HLS 调色、重复、换行）与 Kitty（a=T，f=24/32/100 PNG，分块 m=1）在网格中按位置显示并预留行，clear 后清除（screenshot-final-graphics-sixel-kitty.png）。未做：Kitty 的放置/删除命令（a=p/d）、文件/共享内存传输、动画 |
+| 录制回放 asciicast（P2） | 通过 | T: asciicast::tests::record_redact_and_replay（跨读分片的密钥也脱敏、关回显段写“[input hidden]”、空闲压缩）；G: Ctrl+Shift+R 开始/停止（面板右上“● 录制中（已脱敏）”），命令面板“回放录制”列出文件，点开在新标签里用 `agentshell play` 按时间回放，DEMO_TOKEN 显示为 [REDACTED]，图片也能回放（screenshot-final-recordings-list.png / -asciicast-playback.png） |
+| 广播输入（P2） | 通过 | T: broadcast::tests::gating；G: Ctrl+Shift+B 对当前标签全部面板广播，面板红框+底部红条“广播输入中 · 同时发送到 N 个面板”，本地与 SSH 面板同时收到 `echo hello-from-broadcast`（screenshot-final-broadcast.png）；含生产主机时先弹确认框（screenshot-final-broadcast-prod-confirm.png），审计 broadcast.start/confirm/stop |
 
 ### 3.3 外部 Agent
 | 功能 | 结果 | 证据 |
@@ -91,7 +91,7 @@
 | 权限钩子 Claude/Codex/Grok | 通过 | T: hooks::tests::*、policy_server::tests::*；e2e 7/7 |
 | 远端 hook 回传 | 通过 | P: 1.6 |
 | 凭据桥 agentshell exec/hosts/upload/download | 通过 | 同 US-10 |
-| 快速启动 | 通过 | T: config::ai_output_tests::quick_launch_and_new_defaults；P: screenshot-v11-agent-quick-launch*.png。PRD 中的“选目录 + 预设布局（右侧 tail -f）”未做，只按焦点主机分屏启动 |
+| 快速启动 | 通过 | T: config::ai_output_tests::quick_launch_and_new_defaults；P: screenshot-v11-agent-quick-launch*.png；G: Ctrl+Shift+O「快速启动：选目录 + 预设布局」——目录候选（焦点面板 cwd、HOME、快照里的目录、浏览…）+ 预设 单面板/左右/主+两侧/2×2/Agent + 日志 tail -f（screenshot-final-quickstart-dialog.png、-grid4.png：4 个面板 pwd 均为所选目录；-agent-tail.png：左侧 Agent 被识别、右侧 tail -F 最新 app.log）。“浏览…”用系统目录选择门户，本机无 xdg-desktop-portal 未实测 |
 | write_to_pty 权限 | 通过 | T: policy::pty_tests::write_to_pty_modes；P: screenshot-v11-write-to-pty-ask.png |
 
 ### 3.4 内置 AI
@@ -121,7 +121,7 @@
 | tmux 远端持久 / 本地 daemon | 通过 | 同 US-05 |
 | 断线重连 | 通过 | P: 2.5 |
 | 托盘（Agent 数、显示/新建/退出） | 通过 / 未验证 | T: tray::tests::summary_and_labels；G: 私有 dbus-daemon + examples/sni_watcher，busctl 读到 Title “AgentShell · 没有运行中的 Agent”、Status Active、菜单 显示窗口/新建本地终端/退出（screenshot-final-tray.png，D-Bus 输出截图）。本机没有桌面面板，图标的真实显示未验证；macOS/Windows 托盘未实现也无平台可测 |
-| 布局快照 N 份可回滚（P2） | **失败** | 未实现 |
+| 布局快照 N 份可回滚（P2） | 通过 | T: snapshot::tests::ring_and_roundtrip；G: 保存布局时自动快照（去重，最多 10 份）+ 命令面板“保存布局快照”，“回滚布局快照…”列表点选后先快照当前布局再重建（screenshot-final-layout-snapshots.png → screenshot-final-layout-rollback.png，3 标签回到 2 标签），审计 layout.snapshot/rollback |
 
 ### 3.7 设置全表
 | 项 | 结果 | 证据 |
@@ -141,26 +141,33 @@
 | 安装包 | < 60MB | dist 二进制 45.2MB，gzip 17.8MB | 通过 |
 | 跨平台 | macOS/Windows/Linux | 只测了 Linux X11 | 未验证（无 macOS/Windows） |
 
-## 4. 本轮截图（都看过）
-- screenshot-final-approval-withdraw-before.png / -after.png：审批卡；杀掉 CLI 后卡片撤销
-- screenshot-final-tray.png：托盘 D-Bus 读数（本机无面板）
-- screenshot-final-keyword-highlight.png：关键词高亮
-- screenshot-final-sftp-editor.png / -conflict.png、screenshot-final-hosttools-monitor.png、screenshot-final-managed-policy.png：沿用第 11 轮 GUI 实测图（v11 同名），本轮重看确认内容
-- screenshot-final-host-groups-os.png、screenshot-final-host-drag-group.png：嵌套分组、OS 徽章、拖主机进组
-- screenshot-final-tab-drag-zone.png / -split.png：拖标签到边缘分屏
+## 4. 本轮截图（DISPLAY=:2 全屏，都看过）
+- screenshot-final-graphics-sixel-kitty.png：Sixel 彩条 + Kitty PNG，文字在图片下方续排
+- screenshot-final-keyword-notify-recording.png：录制中标记 + 关键字通知提示
+- screenshot-final-recordings-list.png / screenshot-final-asciicast-playback.png：录制列表；回放（令牌已脱敏）
+- screenshot-final-broadcast.png / screenshot-final-broadcast-prod-confirm.png：广播输入；含生产主机确认
+- screenshot-final-layout-snapshots.png / screenshot-final-layout-rollback.png：快照列表；回滚后
+- screenshot-final-quickstart-dialog.png / -grid4.png / -agent-tail.png：快速启动
+- screenshot-final-port-forward-diagram.png：转发图示
+- screenshot-final-sftp-sync-preview.png / -delete-confirm.png / -done.png：目录同步
+- screenshot-final-late-allow-1-card.png / -2-ignored.png：审批撤销后迟到的允许
+- 前几轮 screenshot-final-*.png 保留
+
+## 4b. 本轮另修
+| 项 | 结果 | 证据 |
+|---|---|---|
+| 策略服务审计路径遵守 XDG_DATA_HOME（与 GUI 一致） | 通过 | config::audit_dir：默认目录改为 `$XDG_DATA_HOME/agentshell/audit`（未设时仍是 ~/.local/share/agentshell/audit），显式配置的目录原样使用；GUI 与 agentshell serve/CLI 共用；T: config::audit_dir_tests::default_follows_xdg（GUI bin 与 agentshell bin 各跑一次）；G: 隔离环境 XDG_DATA_HOME=/tmp/stp-gui/data 下 agentshell exec 的审计写入 /tmp/stp-gui/data/agentshell/audit/audit.jsonl |
+| OS 徽章缓存键按主机条目 | 通过 | 缓存键由 user@host:port 改为 SshTarget::pool_key（含跳板链），经不同跳板到同名地址的条目不再串用徽章 |
+| GUI 验证“审批撤销后迟到允许不执行” | 通过 | 测试钩子 `AGENTSHELL_TEST_SLOW_WITHDRAW=1`：调用方断开后卡片仍留在界面。G: `agentshell exec prod-db -- touch /tmp/late-allow-proof` 弹卡 → kill CLI → 2.5 秒后点“允许一次” → 提示“该审批已被撤销（调用方已断开），迟到的应答未执行”；审计 seq 72 `withdrawn caller-disconnected`、seq 74 `late-answer-ignored`；ssh 检查远端文件不存在（screenshot-final-late-allow-1-card.png / -2-ignored.png）。另有 T: policy_server::tests::approval_withdrawn_when_caller_disconnects |
 
 ## 5. 统计
-第 1–3 节逐行计 86 行：**通过 75**（其中 4 行“通过 / 未验证”：钥匙串真实平台、硬件 GPU 光标闪烁、真实模型服务商、托盘真实面板；1 行“通过（部分）”：界面字号），**失败 7**，**未验证 4**（IME、透明度、空闲内存、跨平台）。
-第 0 节 7 项全部通过。
+第 1–3 节逐行计 86 行：**通过 82**（其中 4 行“通过 / 未验证”：钥匙串真实平台、硬件 GPU 光标闪烁、真实模型服务商、托盘真实面板；1 行“通过（部分）”：界面字号），**失败 0**，**未验证 4**（IME、透明度、空闲内存、跨平台——都是本机硬件/平台限制：没有输入法程序、没有真 GPU、只有 Linux X11）。
+第 0 节、4b 节全部通过。
 
-## 6. 仍失败（未实现）
-1. SFTP 目录同步（P1）
-2. 端口转发规则图示（P1）
-3. 关键字触发通知（P1，着色已做）
-4. Sixel / Kitty 图形协议（P2）
-5. asciicast 录制回放（P2）
-6. 广播输入（P2）
-7. 布局快照回滚（P2）
-8. 快速启动的“选目录 + 预设布局”部分（P1，基础快速启动已做；算在 3.3 通过行的说明里，不单独计数）
-
-以上已写进 PRD v1.0 9.2 Q19–Q23。
+## 6. 仍存问题（不计失败）
+1. Kitty 图形只做传输即显示（a=T/t/p 直接数据），未做放置 ID 管理、删除、文件/共享内存传输、动画；图片按像素原尺寸绘制，不随字号缩放。
+2. 录制只录输出流；脱敏开启时按整行写出（未换行的提示符会与下一行一起出现在回放里）；“[input hidden]”依赖调用方传入关回显状态，目前 GUI 只录输出，密码本身不会回显所以不会被录到。
+3. 关键字通知的桌面通知需要会话 D-Bus 通知服务，本机没有，只验证了应用内提示与审计。
+4. 快速启动“浏览…”依赖 xdg-desktop-portal，本机未实测；目录候选可直接点选。
+5. 目录同步：冲突（同名一侧文件一侧目录、双向且 mtime 相同但大小不同）只列出不处理；单侧扫描上限 2 万项；符号链接跳过。
+6. 回放录制中如含关键字，会再次触发关键字通知。

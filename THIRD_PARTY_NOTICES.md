@@ -82,3 +82,7 @@ Fonts are **not** bundled (see README "字体许可").
 ## russh-sftp 3.0.1 — Apache-2.0 (dependency, unmodified)
 ## getrandom 0.4 — MIT OR Apache-2.0 (dependency, unmodified)
 ## toml_edit 0.22 — MIT OR Apache-2.0 (dependency, unmodified; comment-preserving config writes, PROGRESS 7.8)
+
+## image 0.25 — MIT OR Apache-2.0 (dependency, unmodified; decodes Kitty PNG payloads and builds gpui image frames; already a transitive dependency of gpui)
+
+Sixel and Kitty graphics decoding, asciicast v2 recording/playback, directory sync planning, broadcast input and layout snapshots (round 12) are original code written from the public specifications (DEC Sixel, Kitty graphics protocol, asciicast v2 format); no third-party source was copied.

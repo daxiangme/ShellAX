@@ -12,7 +12,7 @@ cargo clippy --release --all-targets       # 0 警告
 sudo /usr/sbin/sshd -f $PWD/testenv/sshd3_config -E $PWD/testenv/sshd3.log   # 若 2224 未运行
 source testenv/test.env                    # TEST_SSH_PORT/PORT2/PORT3/USER/KEY/PASSWORD/PP_KEY/PP（仅本机回环测试账号）
 eval $(ssh-agent -s) && ssh-add testenv/client_ed25519   # agent_auth 需要 SSH_AUTH_SOCK
-cargo test --release                       # 123 个，全部通过，无跳过（变量缺失时用例会打印 skip 并直接返回）
+cargo test --release                       # 135 个，全部通过，无跳过（变量缺失时用例会打印 skip 并直接返回）
 tools/e2e_hooks.sh                         # 外部 Agent hook 端到端 7/7
 tools/gui_final.sh                         # 在 DISPLAY=:2 启动 release GUI（隔离配置 /tmp/stp-gui）
 tools/tray_check.sh                        # 私有 dbus-daemon + SNI watcher，用 busctl 检查托盘
@@ -28,10 +28,20 @@ tools/tray_check.sh                        # 私有 dbus-daemon + SNI watcher，
 - 主机：分组写成 `a/b/c` 即嵌套；拖主机到分组标题即改组；连接后侧栏显示 OS 徽章（只读 uname 探测，记审计）；ssh:// sftp:// 链接（兼容 Xshell `-url`）；主机工具（监控/进程/服务/Docker，写操作过策略）。
 - 其它：SFTP 内置编辑（冲突检测）、Agent 快速启动（Ctrl+Alt+1/2/3）、托盘（Linux StatusNotifierItem）。
 
-## 已知问题（第 11 轮）
-- 未实现：SFTP 目录同步、端口转发图示、关键字触发通知、快速启动的目录/预设布局、Sixel/Kitty 图形、asciicast 录制、广播输入、布局快照回滚（TEST_REPORT.md 第 6 节，PRD 9.2 Q23）。
-- 本机无法验证：IME 预编辑（无输入法程序）、透明度与空闲内存（无真 GPU）、macOS/Windows、托盘在真实桌面面板上的显示、真实模型服务商。
+## 第 12 轮新增
+- SFTP 目录同步：SFTP 面板「同步…」，单向（本地→远端 / 远端→本地）或双向（较新者胜），先预览差异；删除目标端多余文件要打开开关并二次确认。
+- 端口转发图示：每条规则显示 监听 → SSH 服务器 → 目标。
+- 关键字触发通知：`[[notify.keywords]] pattern = "…" title = "…"`（默认构建/部署结果、OOM/段错误）。
+- Sixel / Kitty 图形：程序输出的图片直接显示在终端里。
+- 录制回放：Ctrl+Shift+R 录制当前面板为 asciicast v2（默认脱敏，`[recording] redact / dir`），命令面板「回放录制」或 `agentshell play file.cast [--speed N] [--idle S]`。
+- 广播输入：Ctrl+Shift+B 把键入同时发到当前标签所有面板；面板红框提示；含生产主机先确认。
+- 布局快照：自动保留最近 10 份，命令面板「保存布局快照」「回滚布局快照…」。
+- 快速启动：Ctrl+Shift+O 选目录 + 预设布局（单/左右/主+两侧/2×2/Agent + tail -F 日志）。
+- 审计默认目录遵守 `XDG_DATA_HOME`；测试钩子 `AGENTSHELL_TEST_SLOW_WITHDRAW=1`（撤销的审批卡仍显示，用于验证迟到的允许不执行）。
 
+## 已知问题（第 12 轮）
+- 见 TEST_REPORT.md 第 6 节：Kitty 只支持直接传输显示；录制脱敏按整行写出；本机无桌面通知服务 / xdg-desktop-portal。
+- 本机无法验证：IME 预编辑（无输入法程序）、透明度与空闲内存（无真 GPU）、macOS/Windows、托盘在真实桌面面板上的显示、真实模型服务商。
 
 ## v8 新增 / 变化
 - 配置写回保留注释、空行和键顺序（toml_edit 合并；解析失败才整文件重写）。

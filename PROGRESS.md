@@ -79,4 +79,18 @@
 - ☑ 11.D2 PRD 3.1 主机管理补齐：src/outline.rs（嵌套分组 a/b/c、折叠、计数、OS 探测解析与徽章）；侧栏树形分组、拖主机到分组标题改组并写回（审计 hosts.move）、连接后只读探测 OS（审计 hosts.os_probe）；测试 outline::tests::*；截图 screenshot-final-host-groups-os.png / host-drag-group.png
 - ☑ 11.D3 US-03 拖标签到面板边缘分屏：Node::insert_at，拖动时面板显示左/右/上/下放置区；测试 layout::tests::insert_subtree_at_edges；截图 screenshot-final-tab-drag-zone.png / -split.png
 - ☑ 11.D4 收尾：release / dist 0 警告（dist 45MB）、clippy --all-targets 0 警告；cargo test --release 3 轮 123/123 无跳过；e2e_hooks 7/7；GUI 复验审批撤销（kill CLI 后卡片消失、远端文件未创建、审计 seq 272）；截图 screenshot-final-{approval-withdraw-before,approval-withdraw-after,tray,keyword-highlight,sftp-editor,sftp-editor-conflict,hosttools-monitor,managed-policy}.png；TEST_REPORT 重写（通过 75 / 失败 7 / 未验证 4）；PRD v1.0 同步（3.7 新行、5.18、Q19–Q23）；README
-- ☐ 11.E 剩余未实现（见 TEST_REPORT 第 6 节）：SFTP 同步、转发图示、关键字通知、快速启动目录/布局、Sixel/Kitty、asciicast、广播输入、布局快照
+- ☑ 11.E 剩余未实现项已在第 12 轮完成（见 12.*）
+
+# 第 12 轮（剩余 PRD 项 + 修复）
+- ☑ 12.1 审计路径遵守 XDG_DATA_HOME：config::audit_dir（默认目录 → $XDG_DATA_HOME/agentshell/audit；显式目录不变），GUI 与 agentshell 共用；测试 config::audit_dir_tests
+- ☑ 12.2 OS 徽章缓存键改为 SshTarget::pool_key（按主机条目含跳板链）
+- ☑ 12.3 src/dirsync.rs（差异计划：单向/双向、删除仅在开启时且排最后、深者先删、2 万项上限）+ sftp::scan_remote / execute_sync（覆盖前删目标避免续传追加）+ 传输后保留 mtime；SFTP「同步…」面板：模式、删除开关、预览、有删除需二次确认，审计 sftp.sync；测试 dirsync::tests::plans、ssh_features::sftp_directory_sync；截图 screenshot-final-sftp-sync-*.png
+- ☑ 12.4 端口转发图示：forward::Spec::diagram + port_view 每条规则画 监听 → SSH 服务器 → 目标（运行中绿色）；测试 forward::tests::diagram_nodes；截图 screenshot-final-port-forward-diagram.png
+- ☑ 12.5 关键字触发通知：src/notify_rules.rs（正则、10 秒限流、跳过刚输入命令的回显行），[[notify.keywords]]；应用内提示 + 桌面通知 + 审计 notify.keyword（脱敏）
+- ☑ 12.6 Sixel/Kitty：src/graphics.rs（自写解码器与流提取器，按流偏移放置，ED2/ED3/RIS 清除），term::Session::images，termview 用 gpui paint_image 绘制；依赖 image 0.25（MIT/Apache，已登记）；测试 graphics::tests、headless 两项；截图 screenshot-final-graphics-sixel-kitty.png
+- ☑ 12.7 asciicast v2：src/asciicast.rs（默认脱敏、按行缓冲防分片泄露、关回显写 [input hidden]、空闲压缩）；Ctrl+Shift+R 录制、“回放录制”经 `agentshell play` 在新标签回放；[recording] redact/dir；截图 screenshot-final-recordings-list.png / -asciicast-playback.png
+- ☑ 12.8 广播输入：src/broadcast.rs + termview 全局广播组（键入/IME/粘贴都扇出），红框+红条提示，生产主机先确认；Ctrl+Shift+B；审计 broadcast.*；截图 screenshot-final-broadcast*.png
+- ☑ 12.9 布局快照：src/snapshot.rs（最近 10 份，去重）；保存布局时自动快照 + 手动保存；回滚列表（回滚前先快照当前）；截图 screenshot-final-layout-*.png
+- ☑ 12.10 快速启动“选目录 + 预设布局”：Ctrl+Shift+O，目录候选/浏览，预设 单/左右/主+两侧/2×2/Agent+tail -F 最新日志；截图 screenshot-final-quickstart-*.png
+- ☑ 12.11 审批撤销后迟到允许：测试钩子 AGENTSHELL_TEST_SLOW_WITHDRAW 保留卡片，迟到应答发送失败 → 审计 late-answer-ignored + 提示；GUI 实测远端文件未创建；截图 screenshot-final-late-allow-*.png
+- ☑ 12.12 收尾：release / dist（46.0MB）0 警告、clippy --all-targets 0 警告；cargo test --release 3 轮 135/135 无跳过；e2e_hooks 7/7；TEST_REPORT 重写（通过 82 / 失败 0 / 未验证 4）；PRD v1.0、README 同步
