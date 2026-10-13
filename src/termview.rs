@@ -994,7 +994,7 @@ impl TermView {
                 cx.stop_propagation();
                 return;
             }
-            "enter" if self.ctx_pending.is_some() && !self.mode().contains(TermMode::ALT_SCREEN) => {
+            "enter" if self.ctx_pending.is_some() => {
                 // a command inserted from the context menu: the permission engine decides on Enter
                 let cmd = self.line_state().and_then(|ls| self.tracker.submitted_input(&ls.before_cursor, ls.prompt_col)).or_else(|| self.ctx_pending.clone()).unwrap_or_default();
                 if self.ctx_gate(cmd, cx) { self.ctx_submit(cx); }
