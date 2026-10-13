@@ -421,7 +421,8 @@ impl Root {
             match &v.spec { Spec::Ssh(t) if v.session.as_ref().is_some_and(|s| s.connected.load(Ordering::Acquire)) => Some(t.clone()), _ => None }
         }).collect();
         for tg in todo {
-            let label = tg.label();
+            // Cache per host entry (user@host:port plus its jump chain), not per bare address.
+            let label = tg.pool_key();
             if !self.os_probing.insert(label.clone()) { continue; }
             self.log("hosts.os_probe", format!("host={label} command={:?}", ssh_term_proto::outline::PROBE));
             let (map, p) = (self.host_os.clone(), self.prompts.clone());
@@ -815,7 +816,8 @@ impl Root {
                 let dot = if online(&e.label) { c(th.success) } else { c(th.surface2) };
                 let spec = e.spec.clone();
                 let gid = SharedString::from(format!("host-row-{idx}"));
-                let os = host_os.get(&e.label).map(|s| s.as_str());
+                let os_key = match &e.spec { Spec::Ssh(t) => t.pool_key(), _ => e.label.clone() };
+                let os = host_os.get(&os_key).map(|s| s.as_str());
                 let mut row = div().id(("host", idx)).group(gid.clone()).mx_2().px_2().pl(px(8. + 12. * sec.depth as f32)).py(px(5.)).rounded_lg().flex().items_center().gap_3().cursor_pointer()
                     .hover(|s| s.bg(c(cur().surface0)))
                     .on_click(cx.listener(move |this, _, w, cx| this.new_tab(spec.clone(), w, cx)))

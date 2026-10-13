@@ -330,7 +330,9 @@ impl Settings {
             no_agent: !self.credentials.use_ssh_agent, extra_keys: self.credentials.extra_keys.clone(),
         }
     }
-    pub fn audit_path(&self) -> PathBuf { ssh_term_proto::hosts::expand_tilde(&self.audit.dir).join("audit.jsonl") }
+    /// Audit log path. The default directory follows `$XDG_DATA_HOME/agentshell/audit`
+    /// (same base as the GUI's data dir); an explicitly configured dir is used as is.
+    pub fn audit_path(&self) -> PathBuf { audit_dir(&self.audit.dir).join("audit.jsonl") }
 }
 
 impl Settings {
@@ -559,5 +561,22 @@ mod tests {
         assert!(out.contains("language = \"zh-CN\""));
         // round-trips to the same settings
         assert_eq!(Settings::parse(&out).unwrap(), s);
+    }
+}
+
+/// Resolve the audit dir: the built-in default honours XDG_DATA_HOME.
+pub fn audit_dir(dir: &str) -> PathBuf {
+    if dir.is_empty() || dir == s_auditdir() {
+        if let Some(x) = std::env::var_os("XDG_DATA_HOME").filter(|x| !x.is_empty()) { return PathBuf::from(x).join("agentshell/audit"); }
+    }
+    ssh_term_proto::hosts::expand_tilde(dir)
+}
+#[cfg(test)]
+mod audit_dir_tests {
+    #[test]
+    fn default_follows_xdg() {
+        std::env::set_var("XDG_DATA_HOME", "/tmp/xdgx");
+        assert_eq!(super::audit_dir(&super::s_auditdir()), std::path::PathBuf::from("/tmp/xdgx/agentshell/audit"));
+        assert_eq!(super::audit_dir("/var/aud"), std::path::PathBuf::from("/var/aud"));
     }
 }
