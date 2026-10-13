@@ -79,6 +79,7 @@ pub fn parse_ssh_config(body: &str) -> Vec<HostEntry> {
                         "user" if !us => { e.user = Some(v.clone()); us = true; }
                         "port" if !po => { e.port = v.parse().ok(); po = true; }
                         "identityfile" if !id => { e.identity_file = Some(v.clone()); id = true; }
+                        "proxyjump" if e.jump.is_none() && v != "none" => { e.jump = Some(v.clone()); }
                         _ => {}
                     }
                 }
@@ -107,6 +108,56 @@ pub fn load_ssh_config(path: &Path) -> Vec<HostEntry> {
     std::fs::read_to_string(path).map(|b| parse_ssh_config(&b)).unwrap_or_default()
 }
 
+/// Connection options that come from settings rather than the host entry.
+#[derive(Debug, Clone, Default)]
+pub struct SshOpts {
+    pub default_user: String,
+    pub default_port: u16,
+    pub agent_forward: bool,
+    pub kex: Vec<String>,
+    pub ciphers: Vec<String>,
+    /// Global ProxyJump used when a host has none.
+    pub jump: String,
+    pub remote_hooks: bool,
+}
+
+/// Resolve an entry (including its ProxyJump chain `a,b,…`, each a host name from `all` or
+/// `[user@]host[:port]`) into a connect target.
+pub fn resolve(e: &HostEntry, known_hosts: &Path, all: &[HostEntry], o: &SshOpts) -> SshTarget {
+    resolve_depth(e, known_hosts, all, o, 0)
+}
+
+fn resolve_depth(e: &HostEntry, known_hosts: &Path, all: &[HostEntry], o: &SshOpts, depth: u8) -> SshTarget {
+    let mut t = to_target(e, known_hosts);
+    if e.port.is_none() && o.default_port != 0 { t.port = o.default_port; }
+    if e.user.is_none() && !o.default_user.is_empty() { t.user = o.default_user.clone(); }
+    t.agent_forward = o.agent_forward;
+    t.kex = o.kex.clone();
+    t.ciphers = o.ciphers.clone();
+    t.remote_hooks = o.remote_hooks;
+    let spec = e.jump.clone().filter(|j| !j.is_empty()).or_else(|| (depth == 0 && !o.jump.is_empty() && o.jump != e.name && o.jump != e.host).then(|| o.jump.clone()));
+    if let (Some(spec), true) = (spec, depth < 4) {
+        // OpenSSH semantics: "a,b" means connect to a, then through a to b, then to the target
+        let mut prev: Option<Box<SshTarget>> = None;
+        for hop in spec.split(',').map(str::trim).filter(|h| !h.is_empty()) {
+            let he = all.iter().find(|h| h.name == hop).cloned().unwrap_or_else(|| parse_hop(hop));
+            let mut ht = resolve_depth(&HostEntry { jump: None, ..he }, known_hosts, all, &SshOpts { jump: String::new(), remote_hooks: false, ..o.clone() }, depth + 1);
+            ht.agent_forward = false;
+            ht.jump = prev.take();
+            prev = Some(Box::new(ht));
+        }
+        t.jump = prev;
+    }
+    t
+}
+
+/// `[user@]host[:port]` → entry.
+pub fn parse_hop(s: &str) -> HostEntry {
+    let (user, rest) = match s.split_once('@') { Some((u, r)) => (Some(u.to_string()), r), None => (None, s) };
+    let (host, port) = match rest.rsplit_once(':') { Some((h, p)) if p.parse::<u16>().is_ok() => (h.to_string(), p.parse().ok()), _ => (rest.to_string(), None) };
+    HostEntry { name: s.to_string(), host, user, port, source: "jump", ..Default::default() }
+}
+
 /// Turn an entry into a connect target. Defaults: $USER, port 22, ~/.ssh/id_ed25519 + id_rsa.
 pub fn to_target(e: &HostEntry, known_hosts: &Path) -> SshTarget {
     let mut keys = Vec::new();
@@ -119,6 +170,8 @@ pub fn to_target(e: &HostEntry, known_hosts: &Path) -> SshTarget {
         keys,
         known_hosts: known_hosts.to_path_buf(),
         production: e.production,
+        auth: e.auth.clone().unwrap_or_else(|| "auto".into()),
+        ..Default::default()
     }
 }
 
@@ -147,6 +200,21 @@ Match host foo
         assert_eq!((h[0].name.as_str(), h[0].host.as_str(), h[0].user.as_deref(), h[0].port), ("web", "10.0.0.5", Some("deploy"), Some(22)));
         assert_eq!((h[1].host.as_str(), h[1].user.as_deref(), h[1].port), ("db.internal", Some("fallback"), Some(2200)));
         assert_eq!(h[1].identity_file.as_deref(), Some("~/.ssh/db_key"));
+    }
+    #[test]
+    fn jump_chain_resolution() {
+        let all = parse_ssh_config("Host bastion\n  HostName 10.0.0.1\n  User jump\nHost inner\n  HostName 10.0.0.2\n  ProxyJump bastion,ops@10.0.0.3:2222\n");
+        let inner = all.iter().find(|h| h.name == "inner").unwrap();
+        assert_eq!(inner.jump.as_deref(), Some("bastion,ops@10.0.0.3:2222"));
+        let t = resolve(inner, Path::new("/kh"), &all, &SshOpts::default());
+        let j1 = t.jump.as_ref().unwrap();
+        assert_eq!((j1.user.as_str(), j1.host.as_str(), j1.port), ("ops", "10.0.0.3", 2222));
+        let j0 = j1.jump.as_ref().unwrap();
+        assert_eq!((j0.user.as_str(), j0.host.as_str()), ("jump", "10.0.0.1"));
+        assert!(j0.jump.is_none());
+        assert_eq!(t.pool_key(), "jump@10.0.0.1:22>ops@10.0.0.3:2222>".to_string() + &t.label());
+        let g = resolve(all.iter().find(|h| h.name == "bastion").unwrap(), Path::new("/kh"), &all, &SshOpts { jump: "bastion".into(), ..Default::default() });
+        assert!(g.jump.is_none(), "global jump is not applied to the jump host itself");
     }
     #[test]
     fn glob_works() { assert!(glob("prod-*", "prod-1")); assert!(glob("h?st", "host")); assert!(!glob("a*", "b")); }

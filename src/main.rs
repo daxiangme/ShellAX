@@ -68,7 +68,10 @@ pub(crate) struct Root {
     themes: Vec<Arc<Theme>>,
     histories: HashMap<String, Arc<Mutex<History>>>,
     manifests: Arc<Vec<Manifest>>,
-    hk_tx: flume::Sender<HostKeyPrompt>,
+    prompts: ssh::Prompts,
+    auth_pending: Vec<ssh::AuthPrompt>,
+    auth_input: Option<Entity<InputState>>,
+    auth_save: bool,
     hk_pending: Vec<HostKeyPrompt>,
     approvals: Vec<ssh_term_proto::policy_server::Approval>,
     pub(crate) policy_port: Option<u16>,
@@ -96,7 +99,8 @@ fn env_target(known_hosts: &std::path::Path) -> Option<SshTarget> {
         source: "env",
         ..Default::default()
     };
-    Some(hosts::to_target(&e, known_hosts))
+    let s = config::get();
+    Some(hosts::resolve(&e, known_hosts, &s.all_hosts(), &s.ssh_opts()))
 }
 
 impl Root {
@@ -135,7 +139,7 @@ impl Root {
             Spec::Ssh(t) => {
                 let title = t.label();
                 self.log("ssh.connect", format!("{} (known_hosts: {})", t.label(), t.known_hosts.display()));
-                let s = ssh::spawn_ssh(self.rt.handle(), t.clone(), init, self.hk_tx.clone());
+                let s = ssh::spawn_ssh(self.rt.handle(), t.clone(), init, self.prompts.clone());
                 cx.new(|cx| TermView::new(&title, Spec::Ssh(t), Ok(s), h, m, window, cx))
             }
         }
@@ -238,6 +242,18 @@ impl Root {
             let a = self.approvals.remove(0);
             let _ = a.reply.send(allow);
         }
+        cx.notify();
+    }
+
+    fn answer_auth(&mut self, submit: bool, cx: &mut Context<Self>) {
+        if self.auth_pending.is_empty() { return; }
+        let p = self.auth_pending.remove(0);
+        let val = self.auth_input.as_ref().map(|i| i.read(cx).value().to_string()).unwrap_or_default();
+        let what = match &p.kind { ssh::AuthKind::Password => "ssh.auth.password", ssh::AuthKind::Passphrase(_) => "ssh.auth.passphrase" };
+        // the secret itself is never logged
+        self.log(what, format!("{} {} save={}", p.label, if submit { "submitted" } else { "cancelled" }, self.auth_save && submit));
+        let _ = p.reply.send(if submit && !val.is_empty() { Some((val, self.auth_save)) } else { None });
+        self.auth_input = None;
         cx.notify();
     }
 
@@ -358,7 +374,9 @@ impl Root {
     fn host_targets(&self) -> Vec<(HostEntry, SshTarget)> {
         let s = config::get();
         let kh = s.known_hosts_path();
-        s.all_hosts().into_iter().map(|h| { let t = hosts::to_target(&h, &kh); (h, t) }).collect()
+        let all = s.all_hosts();
+        let o = s.ssh_opts();
+        all.iter().map(|h| { let t = hosts::resolve(h, &kh, &all, &o); (h.clone(), t) }).collect()
     }
 
     // ---------------------------------------------------------------- sidebar
@@ -654,6 +672,32 @@ impl Render for Root {
                     .child(ui::button("hk-once", t("ui.this_time_only"), 0).on_click(cx.listener(|this, _, _w, cx| this.answer_hostkey(HostKeyDecision::AcceptOnce, cx))))
                     .child(ui::button("hk-save", t("ui.accept_and_save"), 1).on_click(cx.listener(|this, _, _w, cx| this.answer_hostkey(HostKeyDecision::AcceptAndSave, cx)))))));
         }
+        // password / passphrase prompt
+        if self.hk_pending.is_empty() && !self.auth_pending.is_empty() {
+            if self.auth_input.is_none() {
+                let inp = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder(t("ui.auth_placeholder")));
+                inp.update(cx, |i, cx| i.focus(window, cx));
+                self.auth_input = Some(inp);
+            }
+            let p = &self.auth_pending[0];
+            let (title, detail) = match &p.kind {
+                ssh::AuthKind::Password => (t("ui.auth_password_title"), tf("main.auth_password_for", &[("target", &p.label)])),
+                ssh::AuthKind::Passphrase(path) => (t("ui.auth_passphrase_title"), tf("main.auth_passphrase_for", &[("key", &path.display())])),
+            };
+            let inp = self.auth_input.clone().unwrap();
+            root = root.child(ui::modal(ui::card(480.).p_5().gap_3()
+                .child(div().flex().items_center().gap_2().child(icon(IconName::KeyRound, 16., c(th.accent)))
+                    .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(title)))
+                .child(div().text_size(px(12.5)).text_color(c(th.subtext)).child(detail))
+                .child(gpui_component::input::Input::new(&inp))
+                .child(div().flex().items_center().gap_2()
+                    .child(gpui_component::switch::Switch::new("auth-save").checked(self.auth_save).on_click(cx.listener(|this, v: &bool, _w, cx| { this.auth_save = *v; cx.notify(); })))
+                    .child(div().text_size(px(12.)).text_color(c(th.subtext)).child(t("ui.auth_save"))))
+                .child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(t("ui.auth_note")))
+                .child(div().flex().gap_2().justify_end()
+                    .child(ui::button("au-cancel", t("ui.cancel"), 0).on_click(cx.listener(|this, _, _w, cx| this.answer_auth(false, cx))))
+                    .child(ui::button("au-ok", t("ui.connect"), 1).on_click(cx.listener(|this, _, _w, cx| this.answer_auth(true, cx)))))));
+        }
         // approval card for agent hook requests
         if self.hk_pending.is_empty() { if let Some(a) = self.approvals.first() {
             let left = a.deadline.saturating_duration_since(std::time::Instant::now()).as_secs();
@@ -703,17 +747,24 @@ fn main() {
             move |window, cx| {
                 let view = cx.new(|cx| {
                     let (hk_tx, hk_rx) = flume::unbounded::<HostKeyPrompt>();
+                    let (au_tx, au_rx) = flume::unbounded::<ssh::AuthPrompt>();
+                    let _ = ssh::SECRETS.set(secret_store());
                     let host_search = cx.new(|cx| InputState::new(window, cx).placeholder(t("ui.search_hosts")));
                     let audit = audit_log();
                     let mut root = Root {
                         rt, default_target, tabs: vec![], active: 0, themes, histories: HashMap::new(),
-                        manifests: Arc::new(agent::bundled()), hk_tx, hk_pending: vec![], approvals: vec![], policy_port: None, overlay: Overlay::None,
+                        manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], policy_port: None, overlay: Overlay::None,
                         host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, collapsed: HashSet::new(), sidebar_visible: true, audit, audit_verify: None,
                         settings_dirty: vec![], toast: None, toast_seq: 0, _subs: vec![],
                     };
                     root.apply_theme(window, cx);
                     root._subs.push(cx.observe_window_appearance(window, |this: &mut Root, w, cx| { this.apply_theme(w, cx); this.refresh_all(cx); }));
                     root._subs.push(cx.subscribe_in(&host_search, window, |_, _, ev: &InputEvent, _, cx| if matches!(ev, InputEvent::Change) { cx.notify() }));
+                    cx.spawn(async move |this, cx| {
+                        while let Ok(p) = au_rx.recv_async().await {
+                            if this.update(cx, |r, cx| { r.auth_pending.push(p); cx.notify(); }).is_err() { break; }
+                        }
+                    }).detach();
                     cx.spawn(async move |this, cx| {
                         while let Ok(p) = hk_rx.recv_async().await {
                             if this.update(cx, |r, cx| { r.hk_pending.push(p); cx.notify(); }).is_err() { break; }
@@ -724,7 +775,7 @@ fn main() {
                     let ctx: ssh_term_proto::policy_server::CtxFn = Arc::new(|| config::get().policy_ctx());
                     let bind = format!("127.0.0.1:{}", config::get().agents.policy_port);
                     match ssh_term_proto::policy_server::start(&bind, None, ctx, Some(ap_tx), root.audit.clone(), Some(ssh_term_proto::policy_server::endpoint_path(&data_dir()))) {
-                        Ok(srv) => { root.policy_port = Some(srv.port); root.log("policy.server", format!("listening on 127.0.0.1:{}", srv.port)); }
+                        Ok(srv) => { root.policy_port = Some(srv.port); *ssh::POLICY_ENDPOINT.lock().unwrap() = Some((srv.port, srv.token.clone())); root.log("policy.server", format!("listening on 127.0.0.1:{}", srv.port)); }
                         Err(e) => root.toast(tf("main.policy_server_failed", &[("e", &e)]), cx),
                     }
                     cx.spawn(async move |this, cx| {

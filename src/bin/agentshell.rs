@@ -72,7 +72,8 @@ fn status(s: &config::Settings) {
 }
 
 fn check(mut args: Vec<String>, s: &config::Settings) {
-    let host = opt(&mut args, "--host").or_else(|| std::env::var("AGENTSHELL_HOST").ok());
+    let host = opt(&mut args, "--host").or_else(|| std::env::var("AGENTSHELL_HOST").ok())
+        .or_else(|| ps::read_endpoint(&data_dir()).map(|e| e.host).filter(|h| !h.is_empty()));
     let principal = opt(&mut args, "--principal").unwrap_or_else(|| "cli".into());
     if args.first().is_some_and(|a| a == "--") { args.remove(0); }
     let command = args.join(" ");
@@ -106,9 +107,12 @@ fn hook(mut args: Vec<String>, _s: &config::Settings) {
     if agent == Agent::Claude && std::env::var_os("GROK_HOOK_EVENT").is_some() && hooks::installed(Agent::Grok, &home()) { std::process::exit(0); }
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
-    let host = std::env::var("AGENTSHELL_HOST").ok();
     let res = ps::read_endpoint(&data_dir()).ok_or_else(|| anyhow::anyhow!("AgentShell policy service is not running"))
-        .and_then(|ep| ps::post(&ep.url, &format!("/v1/hook/{}/{event}", agent.id()), &ep.token, host.as_deref(), &input, Duration::from_secs(3600)));
+        .and_then(|ep| {
+            // on a remote host the endpoint file (written by AgentShell over SSH) names the host
+            let host = std::env::var("AGENTSHELL_HOST").ok().filter(|h| !h.is_empty()).or_else(|| (!ep.host.is_empty()).then(|| ep.host.clone()));
+            ps::post(&ep.url, &format!("/v1/hook/{}/{event}", agent.id()), &ep.token, host.as_deref(), &input, Duration::from_secs(3600))
+        });
     match res {
         Ok((200, body, exit)) => { print!("{body}"); std::process::exit(exit.unwrap_or(0)); }
         other => {

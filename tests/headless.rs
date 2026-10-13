@@ -44,15 +44,17 @@ fn ssh_localhost_ls_and_known_hosts_tofu() {
     let Some(target) = test_target(kh.clone()) else { eprintln!("TEST_SSH_PORT unset, skipping"); return };
     let rt = tokio::runtime::Runtime::new().unwrap();
     let (tx, rx) = flume::unbounded::<ssh::HostKeyPrompt>();
-    let prompts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let p2 = prompts.clone();
+    let (atx, _arx) = flume::unbounded::<ssh::AuthPrompt>();
+    let prompts = ssh::Prompts { hostkey: tx.clone(), auth: atx };
+    let nprompt = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let p2 = nprompt.clone();
     std::thread::spawn(move || while let Ok(p) = rx.recv() {
         assert!(p.fingerprint.starts_with("SHA256:"));
         p2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let _ = p.reply.send(ssh::HostKeyDecision::AcceptAndSave);
     });
     // 1st connection: unknown host -> prompt -> saved
-    let s = ssh::spawn_ssh(rt.handle(), target.clone(), Size { cols: 100, rows: 30 }, tx.clone());
+    let s = ssh::spawn_ssh(rt.handle(), target.clone(), Size { cols: 100, rows: 30 }, prompts.clone());
     let txt = wait_for(&s, "$", 10);
     s.resize(Size { cols: 90, rows: 25 });
     s.write("stty size; ls\r");
@@ -60,24 +62,25 @@ fn ssh_localhost_ls_and_known_hosts_tofu() {
     println!("{txt}\n{txt2}");
     assert!(txt2.contains("hello_from_sshd.txt"), "remote ls output not in grid");
     assert!(txt2.contains("25 90"), "window_change not applied on remote pty");
-    assert_eq!(prompts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(nprompt.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert!(std::fs::read_to_string(&kh).unwrap().contains("ssh-ed25519"));
     // 2nd connection: known -> no prompt
-    let s2 = ssh::spawn_ssh(rt.handle(), target.clone(), Size { cols: 80, rows: 24 }, tx.clone());
+    let s2 = ssh::spawn_ssh(rt.handle(), target.clone(), Size { cols: 80, rows: 24 }, prompts.clone());
     s2.write("echo second_ok\r");
     assert!(wait_for(&s2, "second_ok", 10).contains("second_ok"));
-    assert_eq!(prompts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(nprompt.load(std::sync::atomic::Ordering::SeqCst), 1);
     // changed key: record a different ed25519 key for this host -> refused, no prompt
     let other = std::fs::read_to_string(std::env::var("TEST_SSH_KEY").unwrap() + ".pub").unwrap();
     let mut parts = other.split_whitespace();
     let line = format!("[127.0.0.1]:{} {} {}\n", target.port, parts.next().unwrap(), parts.next().unwrap());
     std::fs::write(&kh, line).unwrap();
-    let s3 = ssh::spawn_ssh(rt.handle(), target, Size { cols: 80, rows: 24 }, tx);
+    ssh::REUSE.store(false, std::sync::atomic::Ordering::Relaxed); // force a fresh handshake
+    let s3 = ssh::spawn_ssh(rt.handle(), target, Size { cols: 80, rows: 24 }, prompts);
     let t0 = Instant::now();
     while s3.conn_error.lock().unwrap().is_none() && t0.elapsed() < Duration::from_secs(10) { std::thread::sleep(Duration::from_millis(100)); }
     let err = s3.conn_error.lock().unwrap().clone().expect("changed key must be refused");
     assert!(err.contains("主机密钥已变更") || err.contains("HOST KEY CHANGED"), "{err}");
-    assert_eq!(prompts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(nprompt.load(std::sync::atomic::Ordering::SeqCst), 1);
     let _ = std::fs::remove_file(&kh);
 }
 

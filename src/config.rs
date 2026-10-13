@@ -87,12 +87,14 @@ pub struct Ssh {
     pub default_user: String, pub default_port: u16, pub keepalive_secs: u64, pub connect_timeout_secs: u64,
     pub known_hosts: String, pub host_key_policy: String, pub jump_host: String, pub ciphers: Vec<String>,
     pub read_ssh_config: bool, pub ssh_config: String, pub agent_forwarding: bool,
+    pub kex: Vec<String>, pub reconnect: bool, pub reuse_connections: bool, pub remote_agent_hooks: bool,
 }
 impl Default for Ssh {
     fn default() -> Self {
         Self { default_user: String::new(), default_port: u_22(), keepalive_secs: u_30(), connect_timeout_secs: u_15(), known_hosts: s_kh(),
             host_key_policy: s_ask(), jump_host: String::new(), ciphers: vec!["chacha20-poly1305@openssh.com".into(), "aes256-gcm@openssh.com".into(), "aes128-ctr".into()],
-            read_ssh_config: t(), ssh_config: s_sc(), agent_forwarding: false }
+            read_ssh_config: t(), ssh_config: s_sc(), agent_forwarding: false,
+            kex: vec![], reconnect: t(), reuse_connections: t(), remote_agent_hooks: t() }
     }
 }
 
@@ -268,6 +270,12 @@ impl Settings {
     pub fn known_hosts_path(&self) -> PathBuf {
         ssh_term_proto::hosts::expand_tilde(&std::env::var("AGENTSHELL_KNOWN_HOSTS").unwrap_or_else(|_| self.ssh.known_hosts.clone()))
     }
+    pub fn ssh_opts(&self) -> ssh_term_proto::hosts::SshOpts {
+        ssh_term_proto::hosts::SshOpts {
+            default_user: self.ssh.default_user.clone(), default_port: self.ssh.default_port, agent_forward: self.ssh.agent_forwarding,
+            kex: self.ssh.kex.clone(), ciphers: self.ssh.ciphers.clone(), jump: self.ssh.jump_host.clone(), remote_hooks: self.ssh.remote_agent_hooks,
+        }
+    }
     pub fn audit_path(&self) -> PathBuf { ssh_term_proto::hosts::expand_tilde(&self.audit.dir).join("audit.jsonl") }
 }
 
@@ -322,6 +330,8 @@ fn apply_runtime(s: &Settings) {
     ssh_term_proto::term::SCROLLBACK.store(s.terminal.scrollback.clamp(100, 1_000_000), Relaxed);
     ssh_term_proto::ssh::KEEPALIVE_SECS.store(s.ssh.keepalive_secs, Relaxed);
     ssh_term_proto::ssh::CONNECT_TIMEOUT_SECS.store(s.ssh.connect_timeout_secs, Relaxed);
+    ssh_term_proto::ssh::RECONNECT.store(s.ssh.reconnect, Relaxed);
+    ssh_term_proto::ssh::REUSE.store(s.ssh.reuse_connections, Relaxed);
     ssh_term_proto::ssh::HOST_KEY_POLICY.store(match s.ssh.host_key_policy.as_str() { "strict" => 1, "accept-new" => 2, _ => 0 }, Relaxed);
     ssh_term_proto::local::INTEGRATE.store(if s.terminal.shell_integration == "off" { 0 } else if s.terminal.shell.is_empty() { 1 } else { 2 }, Relaxed);
     let _ = ssh_term_proto::suggest::set_extra_filters(&s.suggest.filter_patterns);

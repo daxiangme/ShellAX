@@ -51,12 +51,12 @@ pub struct Approval {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Endpoint { pub url: String, pub token: String, pub pid: u32 }
+pub struct Endpoint { pub url: String, pub token: String, pub pid: u32, #[serde(default, skip_serializing_if = "String::is_empty")] pub host: String }
 
 pub fn endpoint_path(data_dir: &Path) -> PathBuf { data_dir.join("policy-endpoint.json") }
 
 pub fn read_endpoint(data_dir: &Path) -> Option<Endpoint> {
-    if let (Ok(url), Ok(token)) = (std::env::var("AGENTSHELL_URL"), std::env::var("AGENTSHELL_TOKEN")) { return Some(Endpoint { url, token, pid: 0 }); }
+    if let (Ok(url), Ok(token)) = (std::env::var("AGENTSHELL_URL"), std::env::var("AGENTSHELL_TOKEN")) { return Some(Endpoint { url, token, pid: 0, host: std::env::var("AGENTSHELL_HOST").unwrap_or_default() }); }
     serde_json::from_str(&std::fs::read_to_string(endpoint_path(data_dir)).ok()?).ok()
 }
 
@@ -73,7 +73,7 @@ pub fn start(bind: &str, token: Option<String>, ctx: CtxFn, approvals: Option<fl
     let token = token.unwrap_or_else(new_token);
     if let Some(p) = &endpoint_file {
         if let Some(d) = p.parent() { std::fs::create_dir_all(d)?; }
-        let ep = Endpoint { url: format!("http://127.0.0.1:{port}"), token: token.clone(), pid: std::process::id() };
+        let ep = Endpoint { url: format!("http://127.0.0.1:{port}"), token: token.clone(), pid: std::process::id(), host: String::new() };
         write_private(p, &serde_json::to_string_pretty(&ep)?)?;
     }
     let shared = Arc::new(Shared { token: token.clone(), ctx, approvals, audit, next: AtomicU64::new(1) });

@@ -1,2 +1,4 @@
 target/
 testenv/sshd.log
+testenv/*.log
+testenv/*.pid
