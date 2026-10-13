@@ -8,6 +8,7 @@ mod panels;
 mod settings_view;
 mod sftp_view;
 mod port_view;
+mod host_tools_view;
 mod chat_view;
 mod termview;
 mod theme;
@@ -71,7 +72,7 @@ impl Render for DividerDrag { fn render(&mut self, _w: &mut Window, _cx: &mut Co
 
 struct Tab { layout: Node<Entity<TermView>>, focused: Entity<TermView> }
 
-pub(crate) enum Overlay { None, Settings(Entity<SettingsView>), Palette(Entity<Palette>), Host(Entity<HostDialog>), Audit, Sftp, Port, Ai, Chat }
+pub(crate) enum Overlay { None, Settings(Entity<SettingsView>), Palette(Entity<Palette>), Host(Entity<HostDialog>), Audit, Sftp, Port, Ai, Chat, HostTools(Entity<host_tools_view::HostToolsView>) }
 
 pub(crate) struct Root {
     rt: Arc<tokio::runtime::Runtime>,
@@ -612,6 +613,13 @@ impl Root {
             Action::ModePlan => self.set_mode(Mode::Plan, cx),
             Action::ModeAuto => self.set_mode(Mode::Auto, cx),
             Action::OpenSftp => self.open_sftp(window, cx),
+            Action::OpenHostTools => {
+                let tg = self.focused_pane(window, cx).and_then(|p| match &p.read(cx).spec { Spec::Ssh(t) => Some(t.clone()), _ => None });
+                let (rt, pr) = (self.rt.handle().clone(), self.prompts.clone());
+                let v = cx.new(|cx| host_tools_view::HostToolsView::new(tg, rt, pr, cx));
+                self._subs.push(cx.subscribe_in(&v, window, |this, _, _ev: &host_tools_view::HostToolsEvent, w, cx| this.close_overlay(w, cx)));
+                self.overlay = Overlay::HostTools(v);
+            }
             Action::OpenPortForward => { let tg = self.ssh_target_for_tools(cx); let pv = self.port_view(window, cx); pv.update(cx, |v, _| if v.target.is_none() || tg.is_some() { v.target = tg }); self.overlay = Overlay::Port; }
             Action::OpenAi => self.overlay = Overlay::Ai,
             Action::LaunchAgent1 => self.launch_agent(0, window, cx),
@@ -728,9 +736,10 @@ impl Root {
         if idx == 0 { list = list.child(div().px_4().py_3().text_size(px(11.5)).text_color(c(th.overlay0)).child(t("ui.no_matching_hosts"))); }
 
         // ---- function area (bottom-left)
-        let items: [(Action, &str, IconName); 7] = [
+        let items: [(Action, &str, IconName); 8] = [
             (Action::OpenSftp, t("ui.sftp_files"), IconName::FolderSync),
             (Action::OpenPortForward, t("ui.port_forwarding"), IconName::ArrowLeftRight),
+            (Action::OpenHostTools, t("hosttools.title"), IconName::ChartPie),
             (Action::OpenAi, "AI / Agent", IconName::Bot),
             (Action::OpenAudit, t("ui.audit_log"), IconName::ScrollText),
             (Action::CommandPalette, t("ui.command_palette"), IconName::Command),
@@ -946,6 +955,7 @@ impl Render for Root {
             Overlay::Audit => Some(self.audit_panel(cx)),
             Overlay::Sftp => Some(self.sftp_panel(cx)),
             Overlay::Port => Some(self.port_panel(cx)),
+            Overlay::HostTools(v) => Some(ui::modal(v.clone()).into_any_element()),
             Overlay::Ai => Some(self.ai_panel(cx)),
             Overlay::Chat => self.chat_view.clone().map(|v| ui::modal(v).into_any_element()),
         };

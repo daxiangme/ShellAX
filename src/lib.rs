@@ -29,3 +29,4 @@ pub mod highlight;
 pub mod tray;
 pub mod managed;
 pub mod link;
+pub mod hosttools;
