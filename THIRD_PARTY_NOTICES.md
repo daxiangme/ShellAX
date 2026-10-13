@@ -62,3 +62,8 @@ Transitive notes (pre-existing, unchanged in v5): `self_cell` and `r-efi` are du
 v6 (i18n / built-in AI): the i18n module, redaction rules, OpenAI/Anthropic request code and the secrets fallback were written from scratch against the public API docs (OpenAI Chat Completions, Anthropic Messages, freedesktop Secret Service via the `keyring` crate docs); no code was copied from any project.
 
 Fonts are **not** bundled (see README "字体许可").
+
+## models.dev（运行时数据，v7）
+
+- 来源：https://github.com/sst/models.dev ，许可证 MIT（Copyright (c) sst）。
+- 用法：程序运行时从 https://models.dev/api.json 拉取模型元数据（上下文长度、价格），缓存在本地数据目录 24 小时。没有复制代码，也没有把数据打包进程序。如果以后改为打包快照，需要随附 MIT 许可文本。

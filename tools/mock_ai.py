@@ -12,7 +12,37 @@ def pick(text):
     ]:
         if any(k in t for k in keys): return cmd, ex
     return 'ls -la', 'List files'
+OPENAI_MODELS = ['mock-gpt', 'mock-gpt-mini', 'mock-reasoner', 'deepseek-chat', 'gpt-4.1', 'gpt-4.1-mini',
+                 'text-embedding-3-small', 'whisper-1', 'tts-1', 'dall-e-3', 'omni-moderation-latest']
+ANTHROPIC_MODELS = [('claude-sonnet-4-5', 'Claude Sonnet 4.5'), ('claude-haiku-4-5', 'Claude Haiku 4.5'),
+                    ('claude-opus-4-1', 'Claude Opus 4.1'), ('claude-3-5-haiku-latest', 'Claude Haiku 3.5'), ('claude-x-mock', 'Claude X (mock)')]
 class H(BaseHTTPRequestHandler):
+    def _json(self, code, obj):
+        b = json.dumps(obj).encode()
+        self.send_response(code); self.send_header('content-type', 'application/json'); self.send_header('content-length', str(len(b))); self.end_headers(); self.wfile.write(b)
+    def do_GET(self):
+        from urllib.parse import urlparse, parse_qs
+        u = urlparse(self.path); q = parse_qs(u.query)
+        LOG.write(json.dumps({'ts': time.strftime('%H:%M:%S'), 'GET': self.path, 'bearer': self.headers.get('authorization', '').startswith('Bearer '),
+                              'x_api_key': bool(self.headers.get('x-api-key')), 'anthropic_version': self.headers.get('anthropic-version')}) + '\n'); LOG.flush()
+        time.sleep(float(__import__('os').environ.get('MOCK_MODELS_DELAY', '0.3')))
+        if u.path.startswith('/nomodels/'):
+            return self._json(404, {'error': {'message': 'Not Found'}})
+        if u.path == '/api/tags':  # Ollama native
+            return self._json(200, {'models': [{'name': 'llama3.2:latest'}, {'name': 'qwen2.5-coder:7b'}, {'name': 'nomic-embed-text:latest'}]})
+        if u.path.endswith('/v1/models'):
+            if self.headers.get('x-api-key'):  # Anthropic style, 2 per page to exercise pagination
+                if self.headers.get('anthropic-version') is None: return self._json(400, {'error': 'missing anthropic-version'})
+                ids = [m[0] for m in ANTHROPIC_MODELS]
+                start = ids.index(q['after_id'][0]) + 1 if 'after_id' in q else 0
+                page = ANTHROPIC_MODELS[start:start + 2]
+                return self._json(200, {'data': [{'type': 'model', 'id': i, 'display_name': n} for i, n in page],
+                                        'has_more': start + 2 < len(ids), 'first_id': page[0][0] if page else None, 'last_id': page[-1][0] if page else None})
+            if not self.headers.get('authorization', '').startswith('Bearer sk-'):
+                return self._json(401, {'error': {'message': 'missing or invalid API key'}})
+            return self._json(200, {'object': 'list', 'data': [{'id': i, 'object': 'model', 'owned_by': 'mock'} for i in OPENAI_MODELS]})
+        self._json(404, {'error': 'not found'})
+
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get('content-length', 0))).decode()
         auth = self.headers.get('authorization', '')

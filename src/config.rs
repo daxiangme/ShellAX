@@ -112,8 +112,12 @@ pub struct Ai {
     pub redact: bool, pub context: String, pub context_lines: u64, pub send_output: bool,
     /// natural-language prefix typed at the prompt, e.g. "# list big files"
     pub nl_prefix: String,
+    /// hide embedding / audio / image models in the model picker
+    pub chat_models_only: bool,
+    /// model list cache lifetime
+    pub models_cache_hours: u64,
 }
-impl Default for Ai { fn default() -> Self { Self { enabled: t(), default_provider: String::new(), providers: vec![], redact: t(), context: s_screen(), context_lines: u_40(), send_output: false, nl_prefix: "#".into() } } }
+impl Default for Ai { fn default() -> Self { Self { enabled: t(), default_provider: String::new(), providers: vec![], redact: t(), context: s_screen(), context_lines: u_40(), send_output: false, nl_prefix: "#".into(), chat_models_only: t(), models_cache_hours: 24 } } }
 impl Ai {
     pub fn default_provider(&self) -> Option<&ssh_term_proto::ai::Provider> {
         self.providers.iter().find(|p| p.id == self.default_provider).or(self.providers.first())

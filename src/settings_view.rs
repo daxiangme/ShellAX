@@ -10,6 +10,7 @@ use gpui_component::switch::Switch;
 use gpui_component::Sizable;
 use ssh_term_proto::policy::{self, Effect, Mode, Risk, Rule};
 use ssh_term_proto::ai::{Kind, Provider};
+use ssh_term_proto::models::{self, ModelInfo};
 use ssh_term_proto::secrets::{self, Location};
 
 use crate::actions::{self, Action};
@@ -86,6 +87,10 @@ pub struct SettingsView {
     ai_test: HashMap<String, (bool, String)>,
     ai_testing: Option<String>,
     lang_seen: u8,
+    ai_models: HashMap<String, ModelState>,
+    ai_dropdown: Option<&'static str>,
+    ai_model_search: Entity<InputState>,
+    ai_url_gen: u64,
     _subs: Vec<Subscription>,
 }
 
@@ -100,8 +105,12 @@ impl SettingsView {
         let mut subs = vec![cx.subscribe_in(&search, window, |_, _, ev: &InputEvent, _, cx| if matches!(ev, InputEvent::Change) { cx.notify() })];
         subs.push(cx.subscribe_in(&tester, window, |_, _, ev: &InputEvent, _, cx| if matches!(ev, InputEvent::Change) { cx.notify() }));
         let ai_key = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder(t("ai.key_placeholder")));
+        let ai_model_search = cx.new(|cx| InputState::new(window, cx).placeholder(t("models.search")));
+        subs.push(cx.subscribe_in(&ai_model_search, window, |_, _, ev: &InputEvent, _, cx| if matches!(ev, InputEvent::Change) { cx.notify() }));
         let mut me = Self { cat, search, inputs: HashMap::new(), errors: HashMap::new(), theme_names, new_rule, new_effect: Effect::Allow, tester, notice: None,
-            ai_sel: config::get().ai.default_provider().map(|p| p.id.clone()), ai_key, ai_keys: HashMap::new(), ai_note: None, ai_test: HashMap::new(), ai_testing: None, lang_seen: ssh_term_proto::i18n::current() as u8, _subs: subs };
+            ai_sel: config::get().ai.default_provider().map(|p| p.id.clone()), ai_key, ai_keys: HashMap::new(), ai_note: None, ai_test: HashMap::new(), ai_testing: None, lang_seen: ssh_term_proto::i18n::current() as u8,
+            ai_models: HashMap::new(), ai_dropdown: None, ai_model_search, ai_url_gen: 0, _subs: subs };
+        if let Some(id) = me.ai_sel.clone() { me.load_models(&id, false, cx); }
         me.refresh_keys();
         me
     }
@@ -628,6 +637,9 @@ impl Render for SettingsView {
     }
 }
 
+#[derive(Default, Clone)]
+pub struct ModelState { pub loading: bool, pub list: Vec<ModelInfo>, pub fetched_at: Option<i64>, pub error: Option<String>, pub from_cache: bool }
+
 pub fn location_label(l: &Location) -> String {
     match l {
         Location::Keychain => t("ai.loc_keychain").to_string(),
@@ -670,6 +682,7 @@ impl SettingsView {
                 _ => {}
             }, cx);
             if bad { this.errors.insert(k2.clone(), t("ai.bad_number").into()); } else { this.errors.remove(&k2); }
+            if field == "base_url" { this.schedule_models(&pid, cx); }
         }));
         self.inputs.insert(key, e.clone());
         e
@@ -704,7 +717,7 @@ impl SettingsView {
             list = list.child(div().id(("aip", i)).flex().items_center().gap_3().px_3().py(px(8.)).cursor_pointer()
                 .when(i > 0, |d| d.border_t_1().border_color(c(th.surface0)))
                 .when(sel, |d| d.bg(c(th.accent).opacity(0.08)))
-                .on_click(cx.listener(move |this, _, _w, cx| { this.ai_sel = Some(pid.clone()); this.ai_key_reset(cx); cx.notify(); }))
+                .on_click(cx.listener(move |this, _, _w, cx| { this.ai_sel = Some(pid.clone()); this.ai_key_reset(cx); this.ai_dropdown = None; this.load_models(&pid, false, cx); cx.notify(); }))
                 .child(icon(IconName::Sparkles, 14., if sel { c(th.accent) } else { c(th.overlay1) }))
                 .child(div().flex_1().min_w_0().flex().flex_col()
                     .child(div().flex().items_center().gap_2().text_size(px(13.)).text_color(c(th.text)).child(if p.name.is_empty() { p.id.clone() } else { p.name.clone() })
@@ -723,6 +736,7 @@ impl SettingsView {
                     .on_click(cx.listener(move |this, _, _w, cx| {
                         let name = config::get().ai.providers.iter().find(|p| p.id == pid3).map(|p| p.secret_name());
                         if let Some(n) = name { crate::secret_store().delete(&n); }
+                        models::ModelCache::new(&crate::data_dir()).remove(&pid3);
                         this.notice = config::update(|s| { s.ai.providers.retain(|p| p.id != pid3); if s.ai.default_provider == pid3 { s.ai.default_provider = s.ai.providers.first().map(|p| p.id.clone()).unwrap_or_default(); } });
                         if this.ai_sel.as_deref() == Some(pid3.as_str()) { this.ai_sel = config::get().ai.providers.first().map(|p| p.id.clone()); }
                         this.refresh_keys();
@@ -731,14 +745,8 @@ impl SettingsView {
                     .child(icon(IconName::Trash, 13., c(th.error)))));
         }
         out = out.child(list).child(div().pt_2().flex().gap_2()
-            .child(ui::button("aip-add", t("ai.add_provider"), 1).on_click(cx.listener(|this, _, _w, cx| {
-                let id = format!("p{}", chrono::Local::now().format("%m%d%H%M%S"));
-                let p = Provider { id: id.clone(), name: format!("Provider {}", config::get().ai.providers.len() + 1), ..Default::default() };
-                this.notice = config::update(|s| { if s.ai.default_provider.is_empty() { s.ai.default_provider = id.clone(); } s.ai.providers.push(p); });
-                this.ai_sel = Some(id);
-                this.refresh_keys(); this.ai_key_reset(cx);
-                cx.emit(SettingsEvent::Changed("ai.providers".into())); cx.notify();
-            }))));
+            .child(div().text_size(px(12.)).text_color(c(th.subtext)).child(t("ai.add_provider")))
+            .child(self.preset_chips("add", cx)));
 
         // editor for the selected provider
         let Some(p) = self.ai_sel.as_ref().and_then(|id| s.ai.providers.iter().find(|p| &p.id == id)).cloned() else { return out.into_any_element() };
@@ -755,6 +763,10 @@ impl SettingsView {
         let me = cx.entity().downgrade();
         let kind_opts = opts(&[("openai", t("ai.kind_openai")), ("anthropic", "Anthropic")]);
         out = out
+            .child(div().py(px(8.)).flex().items_center().gap_4().border_b_1().border_color(c(th.surface0))
+                .child(div().w(px(140.)).flex_shrink_0().flex().flex_col().text_size(px(13.)).text_color(c(th.text)).child(t("models.template"))
+                    .child(div().text_size(px(11.5)).text_color(c(th.overlay1)).child(t("models.template.d"))))
+                .child(div().flex_1().child(self.preset_chips("apply", cx))))
             .child(field(self, t("ui.name"), "name", "OpenAI", p.name.clone(), window, cx))
             .child(div().py(px(8.)).flex().items_center().gap_4().border_b_1().border_color(c(th.surface0))
                 .child(div().flex_1().flex().flex_col().text_size(px(13.)).text_color(c(th.text)).child(t("ai.kind"))
@@ -768,7 +780,8 @@ impl SettingsView {
                     }, cx));
                 })))
             .child(field(self, t("ui.base_url"), "base_url", "https://api.openai.com/v1", p.base_url.clone(), window, cx))
-            .child(field(self, t("ui.model"), "model", "gpt-4.1-mini", p.model.clone(), window, cx))
+            .child(self.model_picker(&p, "model", window, cx))
+            .child(self.model_picker(&p, "fast_model", window, cx))
             .child(field(self, t("ai.timeout"), "timeout_secs", "30", p.timeout_secs.to_string(), window, cx))
             .child(field(self, t("ai.temperature"), "temperature", "0.2", p.temperature.to_string(), window, cx))
             .child(field(self, t("ai.max_tokens"), "max_tokens", "512", p.max_tokens.to_string(), window, cx));
@@ -798,6 +811,7 @@ impl SettingsView {
                 }
                 this.ai_key.update(cx, |s, cx| s.set_value("", window, cx));
                 this.refresh_keys();
+                this.load_models(&sid, true, cx);
                 cx.notify();
             })))
             .when(key.is_some(), |d| d.child(ui::button("aip-key-del", t("ui.delete"), 2).on_click(cx.listener(move |this, _, _w, cx| {
@@ -836,4 +850,168 @@ impl SettingsView {
         out.into_any_element()
     }
     fn ai_key_reset(&mut self, _cx: &mut Context<Self>) { self.ai_note = None; }
+
+    fn preset_chips(&mut self, mode: &'static str, cx: &mut Context<Self>) -> gpui::Div {
+        let th = cur();
+        let cur_preset = self.ai_sel.as_ref().and_then(|id| config::get().ai.providers.iter().find(|p| &p.id == id).map(|p| p.preset.clone()));
+        let mut row = div().flex().flex_wrap().gap_1();
+        for (i, pr) in models::PRESETS.iter().enumerate() {
+            let active = mode == "apply" && cur_preset.as_deref() == Some(pr.id);
+            let label = if pr.id == "custom" { t("models.preset_custom") } else { pr.name };
+            row = row.child(div().id(SharedString::from(format!("preset-{mode}-{i}"))).px_2().py(px(3.)).rounded_md().cursor_pointer().text_size(px(11.5))
+                .border_1().border_color(if active { c(th.accent) } else { c(th.surface1) })
+                .bg(if active { c(th.accent).opacity(0.12) } else { c(th.surface0) }).text_color(c(th.text))
+                .hover(|d| d.border_color(c(cur().accent)))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    let pr = &models::PRESETS[i];
+                    if mode == "add" {
+                        let id = format!("p{}", chrono::Local::now().format("%m%d%H%M%S%3f"));
+                        let p = Provider { id: id.clone(), name: if pr.id == "custom" { t("models.preset_custom").to_string() } else { pr.name.to_string() }, kind: pr.kind,
+                            base_url: pr.base_url.into(), model: pr.model.into(), fast_model: pr.fast_model.into(), preset: pr.id.into(), ..Default::default() };
+                        this.notice = config::update(|s| { if s.ai.default_provider.is_empty() { s.ai.default_provider = id.clone(); } s.ai.providers.push(p); });
+                        this.ai_sel = Some(id.clone());
+                        this.refresh_keys(); this.ai_key_reset(cx);
+                        if !pr.needs_key { this.load_models(&id, true, cx); }
+                    } else if let Some(id) = this.ai_sel.clone() {
+                        this.update_provider(&id, |p| {
+                            p.preset = pr.id.into(); p.kind = pr.kind;
+                            if !pr.base_url.is_empty() { p.base_url = pr.base_url.into(); }
+                            if !pr.model.is_empty() { p.model = pr.model.into(); }
+                            p.fast_model = pr.fast_model.into();
+                        }, cx);
+                        // re-create the bound inputs so they show the new values
+                        this.inputs.retain(|k, _| !k.starts_with(&format!("aip.{id}.")));
+                        let _ = window;
+                        this.load_models(&id, true, cx);
+                    }
+                    cx.emit(SettingsEvent::Changed("ai.providers".into())); cx.notify();
+                }))
+                .child(label));
+        }
+        row
+    }
+
+    /// Show cached models at once; fetch when forced, missing or stale.
+    fn load_models(&mut self, id: &str, force: bool, cx: &mut Context<Self>) {
+        let cfg = config::get();
+        let Some(p) = cfg.ai.providers.iter().find(|p| p.id == id).cloned() else { return };
+        let base = models::api_base(p.kind, &p.base_url);
+        let now = chrono::Utc::now().timestamp();
+        let ttl = (cfg.ai.models_cache_hours.max(1) * 3600) as i64;
+        let cache = models::ModelCache::new(&crate::data_dir());
+        let cached = cache.get(id, &base);
+        let st = self.ai_models.entry(id.to_string()).or_default();
+        if let Some(e) = &cached { st.list = e.models.clone(); st.fetched_at = Some(e.fetched_at); st.from_cache = true; st.error = None; }
+        else if force { st.list.clear(); st.fetched_at = None; }
+        let stale = cached.as_ref().map(|e| !models::is_fresh(e, now, ttl)).unwrap_or(true);
+        let key = crate::secret_store().get(&p.secret_name()).map(|x| x.0).unwrap_or_default();
+        let can = !key.is_empty() || !models::preset(&p.preset).map(|x| x.needs_key).unwrap_or(true) || p.base_url.contains("127.0.0.1") || p.base_url.contains("localhost");
+        if !(force || (stale && can)) || p.base_url.trim().is_empty() { cx.notify(); return; }
+        st.loading = true; st.error = None;
+        cx.notify();
+        let dir = crate::data_dir();
+        let task = cx.background_executor().spawn(async move {
+            let mut list = models::list_models(&p, &key).map_err(|e| format!("{e:#}"))?;
+            if let Some(meta) = models::models_dev(&dir, now, 86400) { models::enrich(&mut list, &p.preset, &meta); }
+            Ok::<_, String>(list)
+        });
+        let id = id.to_string();
+        cx.spawn(async move |this, cx| {
+            let r = task.await;
+            let _ = this.update(cx, |this, cx| {
+                let st = this.ai_models.entry(id.clone()).or_default();
+                st.loading = false;
+                match r {
+                    Ok(list) => {
+                        let _ = models::ModelCache::new(&crate::data_dir()).put(&id, &base, list.clone(), now);
+                        st.list = list; st.fetched_at = Some(now); st.from_cache = false; st.error = None;
+                    }
+                    Err(e) => st.error = Some(e),
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+    /// Debounced refetch after the base URL was edited.
+    fn schedule_models(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.ai_url_gen += 1;
+        let gen = self.ai_url_gen;
+        let id = id.to_string();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(900)).await;
+            let _ = this.update(cx, |this, cx| if this.ai_url_gen == gen { this.load_models(&id, true, cx) });
+        }).detach();
+    }
+
+    fn model_picker(&mut self, p: &Provider, field: &'static str, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
+        let th = cur();
+        let val = if field == "model" { p.model.clone() } else { p.fast_model.clone() };
+        let e = self.provider_input(&p.id, field, if field == "model" { "gpt-4.1" } else { t("models.fast_ph") }, val.clone(), window, cx);
+        let st = self.ai_models.get(&p.id).cloned().unwrap_or_default();
+        let chat_only = config::get().ai.chat_models_only;
+        let shown = models::filter_chat(&st.list, chat_only);
+        let open = self.ai_dropdown == Some(field);
+        let pid = p.id.clone();
+        let status: (gpui::Hsla, String) = if st.loading { (c(th.accent), t("models.loading").into()) }
+            else if let Some(err) = &st.error { (c(th.error), tf("models.error", &[("e", err)])) }
+            else if let Some(ts) = st.fetched_at {
+                let when = chrono::DateTime::from_timestamp(ts, 0).map(|d| d.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string()).unwrap_or_default();
+                (c(th.overlay1), tf(if st.from_cache { "models.count_cached" } else { "models.count" }, &[("n", &shown.len()), ("total", &st.list.len()), ("when", &when)]))
+            } else { (c(th.overlay1), t("models.none_yet").into()) };
+        let label = if field == "model" { t("ui.model") } else { t("models.fast") };
+        let desc = if field == "model" { t("models.model.d") } else { t("models.fast.d") };
+        let mut col = div().py(px(8.)).flex().flex_col().gap_1().border_b_1().border_color(c(th.surface0))
+            .child(div().flex().items_center().gap_3()
+                .child(div().flex_1().flex().flex_col().text_size(px(13.)).text_color(c(th.text)).child(label)
+                    .child(div().text_size(px(11.5)).text_color(c(th.overlay1)).child(desc)))
+                .child(div().w(px(240.)).child(Input::new(&e)))
+                .child(ui::button(SharedString::from(format!("mdl-open-{field}")), if open { t("models.close_list") } else { t("models.pick") }, 0)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.ai_dropdown = if this.ai_dropdown == Some(field) { None } else { Some(field) };
+                        this.ai_model_search.update(cx, |s, cx| { s.set_value("", window, cx); s.focus(window, cx); });
+                        cx.notify();
+                    })))
+                .when(field == "model", |d| d.child(ui::button("mdl-refresh", if st.loading { t("models.loading_short") } else { t("models.refresh") }, 1)
+                    .on_click(cx.listener(move |this, _, _w, cx| this.load_models(&pid, true, cx))))))
+            .when(field == "model", |d| d.child(div().flex().items_center().gap_2().text_size(px(11.5))
+                .child(div().flex_1().min_w_0().text_color(status.0).child(status.1))
+                .child(div().text_color(c(th.overlay1)).child(t("models.chat_only")))
+                .child(Switch::new("mdl-chat-only").small().checked(chat_only).on_click(cx.listener(|this, v: &bool, _w, cx| this.set("ai.chat_models_only", toml::Value::Boolean(*v), cx))))));
+        if open {
+            let q = self.ai_model_search.read(cx).value().to_string();
+            let hits = models::search(&shown, &q);
+            let mut list = div().id(SharedString::from(format!("mdl-list-{field}"))).max_h(px(260.)).overflow_y_scroll().flex().flex_col();
+            if hits.is_empty() {
+                list = list.child(div().p_2().text_size(px(12.)).text_color(c(th.overlay1)).child(if st.list.is_empty() { t("models.empty_manual") } else { t("models.no_match") }));
+            }
+            for (i, m) in hits.iter().take(300).enumerate() {
+                let id = m.id.clone();
+                let pid = p.id.clone();
+                let sel = m.id == val;
+                let mut meta = vec![];
+                if let Some(c) = m.context { meta.push(if c >= 1000 { format!("{}K ctx", c / 1000) } else { format!("{c} ctx") }); }
+                if let (Some(a), Some(b)) = (m.price_in, m.price_out) { meta.push(format!("${a:.2} / ${b:.2} per 1M")); }
+                if m.usage != models::Use::Chat { meta.push(format!("{:?}", m.usage).to_lowercase()); }
+                list = list.child(div().id(("mdl", i)).flex_shrink_0().px_2().py(px(5.)).flex().items_center().gap_2().cursor_pointer().rounded_md()
+                    .when(sel, |d| d.bg(c(th.accent).opacity(0.12)))
+                    .hover(|d| d.bg(c(cur().surface0)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let v = id.clone();
+                        this.update_provider(&pid, |p| if field == "model" { p.model = v.clone() } else { p.fast_model = v.clone() }, cx);
+                        if let Some(inp) = this.inputs.get(&format!("aip.{pid}.{field}")).cloned() { inp.update(cx, |s, cx| s.set_value(id.clone(), window, cx)); }
+                        this.ai_dropdown = None;
+                        cx.notify();
+                    }))
+                    .child(div().flex_1().min_w_0().flex().flex_col()
+                        .child(div().text_size(px(12.5)).text_color(c(th.text)).child(m.id.clone()))
+                        .when(!m.name.is_empty(), |d| d.child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(m.name.clone()))))
+                    .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(meta.join(" · "))));
+            }
+            col = col.child(div().mt_1().p_2().rounded_lg().border_1().border_color(c(th.surface1)).bg(c(th.mantle)).flex().flex_col().gap_1()
+                .child(Input::new(&self.ai_model_search).small().prefix(icon(IconName::Search, 13., c(th.overlay1))))
+                .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(tf("models.list_hint", &[("n", &hits.len())])))
+                .child(list));
+        }
+        col
+    }
 }

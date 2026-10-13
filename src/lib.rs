@@ -2,6 +2,7 @@
 //! fed by either a local PTY (portable-pty) or an SSH channel (russh).
 pub mod agent;
 pub mod ai;
+pub mod models;
 pub mod i18n;
 pub mod secrets;
 pub mod audit;

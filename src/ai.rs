@@ -28,16 +28,22 @@ pub struct Provider {
     pub timeout_secs: u64,
     pub temperature: f32,
     pub max_tokens: u32,
+    /// optional faster/cheaper model for command generation; empty = use `model`
+    pub fast_model: String,
+    /// preset template id this provider was created from ("openai", "ollama", "custom", …)
+    pub preset: String,
 }
 impl Default for Provider {
     fn default() -> Self {
         Self { id: String::new(), name: String::new(), kind: Kind::OpenAi, base_url: "https://api.openai.com/v1".into(),
-               model: "gpt-4.1-mini".into(), timeout_secs: 30, temperature: 0.2, max_tokens: 512 }
+               model: "gpt-4.1-mini".into(), timeout_secs: 30, temperature: 0.2, max_tokens: 512, fast_model: String::new(), preset: "custom".into() }
     }
 }
 impl Provider {
     /// Keychain account name for this provider's API key.
     pub fn secret_name(&self) -> String { format!("ai-provider:{}", self.id) }
+    /// Model used for natural-language → command.
+    pub fn command_model(&self) -> &str { if self.fast_model.trim().is_empty() { &self.model } else { self.fast_model.trim() } }
 }
 
 // ---------- redaction ----------
@@ -139,7 +145,8 @@ fn scrub(s: &str, key: &str) -> String {
 /// One chat round-trip. `max_tokens` overrides the provider default (used by "test connection").
 pub fn chat(p: &Provider, key: &str, system: &str, user: &str, max_tokens: Option<u32>) -> Result<Reply> {
     let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(p.timeout_secs.max(1))).build();
-    let base = p.base_url.trim_end_matches('/');
+    let base = crate::models::api_base(p.kind, &p.base_url);
+    let base = base.as_str();
     let mt = max_tokens.unwrap_or(p.max_tokens);
     let t0 = Instant::now();
     let res = match p.kind {
@@ -152,7 +159,7 @@ pub fn chat(p: &Provider, key: &str, system: &str, user: &str, max_tokens: Optio
             }))
         }
         Kind::Anthropic => {
-            let url = if base.ends_with("/v1") { format!("{base}/messages") } else { format!("{base}/v1/messages") };
+            let url = format!("{base}/messages");
             agent.post(&url).set("x-api-key", key).set("anthropic-version", "2023-06-01").set("content-type", "application/json")
                 .send_json(serde_json::json!({
                     "model": p.model, "max_tokens": mt, "temperature": p.temperature, "system": system,

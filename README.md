@@ -272,3 +272,14 @@ SSH_PORT=2222 SSH_USER=sshtest SSH_KEY=$PWD/testenv/client_ed25519 \
 
 ### 截图
 `screenshot-v6-english-ui.png`、`screenshot-v6-english-settings.png`、`screenshot-v6-chinese-settings.png`、`screenshot-v6-chinese-ui-confirm.png`、`screenshot-v6-ai-provider-en.png`、`screenshot-v6-ai-provider-zh.png`、`screenshot-v6-nl-card.png`、`screenshot-v6-nl-inserted.png`、`screenshot-v6-nl-redaction-zh.png`、`screenshot-v6-nl-plan-denied.png`
+
+## v7：AI 模型列表（2026-10-13）
+
+- 服务商模板：OpenAI、Anthropic、OpenRouter、DeepSeek、通义 DashScope、Kimi、智谱、Ollama、LM Studio、自定义。选中后自动填类型和 Base URL。
+- 模型列表：OpenAI 兼容服务商请求 `GET {base}/models`（Base URL 有没有 `/v1` 都可以），Ollama 在 404 时退回 `/api/tags`，Anthropic 请求 `/v1/models` 并翻页。OpenRouter 会显示上下文长度和价格。
+- 设置 → AI：模型下拉框可搜索，有“刷新模型”按钮，显示加载中、数量或错误。保存 Key 或修改 URL 后会自动拉取。可以手填模型名，可以只显示聊天模型（`ai.chat_models_only`）。列表缓存在 `models-cache.json`，缓存时长由 `ai.models_cache_hours` 设置。
+- 命令模型 `fast_model`：“# …”生成命令时用这个模型，留空则用主模型。
+- 可选元数据来源 models.dev（MIT），运行时拉取。
+- mock：`python3 tools/mock_ai.py` 新增 `/v1/models`、Anthropic 分页和 `/api/tags`。设置 `MOCK_MODELS_DELAY` 可以模拟慢响应。
+- 真实接口验证：`cargo run --example models_probe` 请求 OpenRouter 公开接口，不需要 Key。
+- 截图：`screenshot-v7-*.png`。

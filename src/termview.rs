@@ -748,10 +748,11 @@ impl TermView {
     pub fn ai_request(&mut self, request: String, cx: &mut Context<Self>) {
         let cfg = config::get();
         if !cfg.ai.enabled { self.ai = Some(AiCard::Error { request, message: t("ai.disabled").into() }); cx.notify(); return; }
-        let Some(provider) = cfg.ai.default_provider().cloned() else {
+        let Some(mut provider) = cfg.ai.default_provider().cloned() else {
             self.ai = Some(AiCard::Error { request, message: t("ai.no_provider").into() }); cx.notify(); return;
         };
         let key = crate::secret_store().get(&provider.secret_name()).map(|x| x.0).unwrap_or_default();
+        provider.model = provider.command_model().to_string(); // fast model for command generation if set
         // context, honouring scope / send_output / redaction settings
         let screen = self.screen_lines();
         let sel = self.selection_text();
