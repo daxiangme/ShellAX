@@ -471,3 +471,5 @@
 "ui.when_a_command_runs_longer" = "When a command runs longer than this and the window is in the background"
 "ui.when_off_only_the_command" = "When off, only the command itself is sent"
 "ui.window_opacity" = "Window opacity"
+"policy.prod_rule_ask" = "Rule #{n} ({id}) allows it, but this is a production host and the risk is {risk}: confirm"
+"policy.prod_ask" = "Production host: Auto mode only auto-allows R0; risk {risk} needs confirmation"

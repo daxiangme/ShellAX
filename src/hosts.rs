@@ -118,6 +118,7 @@ pub fn to_target(e: &HostEntry, known_hosts: &Path) -> SshTarget {
         user: e.user.clone().unwrap_or_else(|| std::env::var("USER").unwrap_or_default()),
         keys,
         known_hosts: known_hosts.to_path_buf(),
+        production: e.production,
     }
 }
 

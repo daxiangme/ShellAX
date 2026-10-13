@@ -33,6 +33,7 @@ fn test_target(known_hosts: std::path::PathBuf) -> Option<ssh::SshTarget> {
         user: std::env::var("TEST_SSH_USER").unwrap(),
         keys: vec![std::env::var("TEST_SSH_KEY").unwrap().into()],
         known_hosts,
+        ..Default::default()
     })
 }
 

@@ -10,7 +10,7 @@ use russh::{client, ChannelMsg};
 
 use crate::term::{BackendMsg, Session, Size};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct SshTarget {
     pub host: String,
     pub port: u16,
@@ -19,6 +19,8 @@ pub struct SshTarget {
     pub keys: Vec<PathBuf>,
     /// known_hosts file used for verification and for learning new keys.
     pub known_hosts: PathBuf,
+    /// Host is marked production (stricter permission policy, red tag).
+    pub production: bool,
 }
 impl SshTarget {
     pub fn label(&self) -> String { format!("{}@{}:{}", self.user, self.host, self.port) }

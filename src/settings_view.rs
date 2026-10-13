@@ -192,7 +192,7 @@ impl SettingsView {
 
             r(Permissions, t("ui.default_mode"), t("ui.also_switchable_from_the_status"), Ctl::Choice("permissions.mode", opts(&[("ask", t("ui.ask_2")), ("plan", t("ui.plan_read_only")), ("auto", t("ui.auto"))])), false),
             r(Permissions, t("ui.max_auto_risk_in_auto"), t("ui.actions_at_or_below_this"), Ctl::Choice("permissions.max_auto_risk", opts(&[("R0", "R0"), ("R1", "R1"), ("R2", "R2")])), false),
-            r(Permissions, t("ui.confirm_writes_on_production_hosts"), t("ui.always_ask_for_r1_actions"), Ctl::Toggle("permissions.prod_confirm"), true),
+            r(Permissions, t("ui.confirm_writes_on_production_hosts"), t("ui.always_ask_for_r1_actions"), Ctl::Toggle("permissions.prod_confirm"), false),
             r(Permissions, t("ui.double_confirm_dangerous_commands"), t("ui.r4_actions_need_confirmation_even"), Ctl::Toggle("permissions.dangerous_confirm"), false),
 
             r(Audit, t("ui.log_directory"), "", Ctl::Text("audit.dir", "~/.local/share/agentshell/audit"), false),

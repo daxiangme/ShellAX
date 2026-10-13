@@ -810,7 +810,8 @@ impl TermView {
         let Some(AiCard::Ready { command, .. }) = self.ai.clone() else { return };
         let cfg = config::get();
         let max = match cfg.permissions.max_auto_risk.as_str() { "R0" => Risk::R0, "R2" => Risk::R2, _ => Risk::R1 };
-        let (eff, reason) = policy::decide(cfg.permissions.mode, max, &cfg.permissions.rules, "ai", "exec", &command, cfg.permissions.dangerous_confirm);
+        let prod = cfg.permissions.prod_confirm && matches!(&self.spec, Spec::Ssh(t) if t.production);
+        let (eff, reason) = policy::decide_ctx(cfg.permissions.mode, max, &cfg.permissions.rules, "ai", "exec", &command, cfg.permissions.dangerous_confirm, prod);
         let risk = policy::classify(&command);
         let _ = crate::audit_log().append("ai.exec.decision", "policy", &format!("mode={} risk={} effect={:?} command={command:?} reason={reason}", cfg.permissions.mode.label(), risk.label(), eff));
         match eff {

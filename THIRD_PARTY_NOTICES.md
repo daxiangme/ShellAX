@@ -67,3 +67,7 @@ Fonts are **not** bundled (see README "字体许可").
 
 - 来源：https://github.com/sst/models.dev ，许可证 MIT（Copyright (c) sst）。
 - 用法：程序运行时从 https://models.dev/api.json 拉取模型元数据（上下文长度、价格），缓存在本地数据目录 24 小时。没有复制代码，也没有把数据打包进程序。如果以后改为打包快照，需要随附 MIT 许可文本。
+
+## tree-sitter / tree-sitter-bash（依赖，PROGRESS 1.1）
+
+- tree-sitter 0.25（MIT，Copyright (c) 2018 Max Brunsfeld）、tree-sitter-bash 0.25.1（MIT，Copyright (c) 2017 Max Brunsfeld）、tree-sitter-language（MIT）。作为 crate 依赖链接（含 C 解析器源码，编译进二进制），没有复制代码。用于给命令分段，再做风险分级。

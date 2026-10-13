@@ -471,3 +471,5 @@
 "ui.when_a_command_runs_longer" = "命令运行超过该时长且窗口不在前台时"
 "ui.when_off_only_the_command" = "关闭时只发送命令本身"
 "ui.window_opacity" = "窗口透明度"
+"policy.prod_rule_ask" = "规则 #{n}（{id}）允许，但这是生产主机且风险为 {risk}：需确认"
+"policy.prod_ask" = "生产主机：自动模式只自动放行 R0，风险 {risk} 需确认"

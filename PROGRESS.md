@@ -4,8 +4,8 @@
 规则：每完成一项更新本文件并 git commit；中断后从第一个 ☐/◐ 继续。
 
 ## 1 权限引擎真拦截（PRD 第 6 章，P0）
-- ☐ 1.1 风险分级改为 tree-sitter-bash 分段：管道、&&/||/;、子 shell、$( )、find -exec、xargs、重定向、sudo/env/nohup 前缀，取最高风险
-- ☐ 1.2 生产主机加严（hosts 标 prod → 提升一级 / 强制确认，`permissions.prod_confirm`）
+- ☑ 1.1 风险分级改为 tree-sitter-bash 分段：管道、&&/||/;、子 shell、$( )、find -exec、xargs、重定向、sudo/env/nohup 前缀，取最高风险
+- ☑ 1.2 生产主机加严：`policy::decide_ctx(.., prod)`；Auto 只放行 R0，R2+ 的允许规则改为询问；AI 执行已接入
 - ☐ 1.3 本地策略服务（localhost HTTP + 令牌）+ `agentshell` CLI（`agentshell check -- <cmd>`、hook 子命令）
 - ☐ 1.4 Hook 一键安装：Claude Code PreToolUse、Codex hooks/PermissionRequest、Grok Build；写前备份
 - ☐ 1.5 界面审批卡（来自 hook 的请求）、超时与失败策略（fail-closed 默认）、全部进审计
