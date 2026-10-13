@@ -126,8 +126,8 @@ impl Ai {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
-pub struct Agents { pub detect_claude: bool, pub detect_codex: bool, pub detect_grok: bool, pub notify_state: bool, pub approval_timeout_secs: u64, pub on_timeout: String }
-impl Default for Agents { fn default() -> Self { Self { detect_claude: t(), detect_codex: t(), detect_grok: t(), notify_state: t(), approval_timeout_secs: u_120(), on_timeout: s_deny() } } }
+pub struct Agents { pub detect_claude: bool, pub detect_codex: bool, pub detect_grok: bool, pub notify_state: bool, pub approval_timeout_secs: u64, pub on_timeout: String, pub policy_port: u16 }
+impl Default for Agents { fn default() -> Self { Self { detect_claude: t(), detect_codex: t(), detect_grok: t(), notify_state: t(), approval_timeout_secs: u_120(), on_timeout: s_deny(), policy_port: 0 } } }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -269,6 +269,28 @@ impl Settings {
         ssh_term_proto::hosts::expand_tilde(&std::env::var("AGENTSHELL_KNOWN_HOSTS").unwrap_or_else(|_| self.ssh.known_hosts.clone()))
     }
     pub fn audit_path(&self) -> PathBuf { ssh_term_proto::hosts::expand_tilde(&self.audit.dir).join("audit.jsonl") }
+}
+
+impl Settings {
+    /// Inputs for the local policy service.
+    pub fn policy_ctx(&self) -> ssh_term_proto::policy_server::PolicyCtx {
+        use ssh_term_proto::policy::Risk;
+        let mut prod_hosts = Vec::new();
+        for h in self.hosts.iter().filter(|h| h.production) {
+            prod_hosts.push(h.name.clone());
+            if !h.host.is_empty() { prod_hosts.push(h.host.clone()); }
+        }
+        ssh_term_proto::policy_server::PolicyCtx {
+            mode: self.permissions.mode,
+            max_auto: self.permissions.max_auto_risk.parse().unwrap_or(Risk::R1),
+            rules: self.permissions.rules.clone(),
+            dangerous_confirm: self.permissions.dangerous_confirm,
+            prod_confirm: self.permissions.prod_confirm,
+            prod_hosts,
+            approval_timeout: std::time::Duration::from_secs(self.agents.approval_timeout_secs.clamp(5, 3600)),
+            timeout_deny: self.agents.on_timeout != "ask",
+        }
+    }
 }
 
 // ---- process-wide current settings (read from paint code, written by the settings page)

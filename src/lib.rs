@@ -7,6 +7,8 @@ pub mod i18n;
 pub mod secrets;
 pub mod audit;
 pub mod policy;
+pub mod hooks;
+pub mod policy_server;
 pub mod boxdraw;
 pub mod hosts;
 pub mod layout;

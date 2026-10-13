@@ -1,0 +1,278 @@
+//! Local policy service (PRD 6.9): a tiny HTTP server on 127.0.0.1 that answers permission
+//! questions from external agents' hooks (via the `agentshell` CLI or Claude Code `http` hooks)
+//! and from remote hosts through an SSH reverse port forward. Every request needs the bearer
+//! token from the endpoint file (0600). "Ask" decisions are forwarded to the UI as an
+//! [`Approval`] and resolved by the user, by timeout (`agents.on_timeout`), or passed back as
+//! "ask" when no UI is attached. Every request and outcome is written to the audit log.
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use anyhow::{anyhow, Result};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+
+use crate::audit::AuditLog;
+use crate::hooks::{self, Agent, HookReq};
+use crate::policy::{self, Effect, Mode, Risk, Rule};
+
+/// Policy inputs, read fresh for every request.
+#[derive(Clone, Debug)]
+pub struct PolicyCtx {
+    pub mode: Mode,
+    pub max_auto: Risk,
+    pub rules: Vec<Rule>,
+    pub dangerous_confirm: bool,
+    pub prod_confirm: bool,
+    /// Host names / addresses marked production.
+    pub prod_hosts: Vec<String>,
+    pub approval_timeout: Duration,
+    /// On approval timeout: true = deny, false = keep waiting (until the hook itself times out).
+    pub timeout_deny: bool,
+}
+impl Default for PolicyCtx {
+    fn default() -> Self { Self { mode: Mode::Ask, max_auto: Risk::R1, rules: vec![], dangerous_confirm: true, prod_confirm: true, prod_hosts: vec![], approval_timeout: Duration::from_secs(120), timeout_deny: true } }
+}
+
+/// A pending "ask" for the UI.
+#[derive(Debug)]
+pub struct Approval {
+    pub id: u64,
+    pub principal: String,
+    pub req: HookReq,
+    pub host: String,
+    pub risk: Risk,
+    pub reason: String,
+    pub deadline: Instant,
+    pub reply: flume::Sender<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Endpoint { pub url: String, pub token: String, pub pid: u32 }
+
+pub fn endpoint_path(data_dir: &Path) -> PathBuf { data_dir.join("policy-endpoint.json") }
+
+pub fn read_endpoint(data_dir: &Path) -> Option<Endpoint> {
+    if let (Ok(url), Ok(token)) = (std::env::var("AGENTSHELL_URL"), std::env::var("AGENTSHELL_TOKEN")) { return Some(Endpoint { url, token, pid: 0 }); }
+    serde_json::from_str(&std::fs::read_to_string(endpoint_path(data_dir)).ok()?).ok()
+}
+
+pub type CtxFn = Arc<dyn Fn() -> PolicyCtx + Send + Sync>;
+
+pub struct Server { pub port: u16, pub token: String }
+
+pub fn new_token() -> String { use rand::RngCore; let mut b = [0u8; 24]; rand::thread_rng().fill_bytes(&mut b); b.iter().map(|x| format!("{x:02x}")).collect() }
+
+/// Start the server on `bind` (e.g. "127.0.0.1:0"). Writes the endpoint file when given.
+pub fn start(bind: &str, token: Option<String>, ctx: CtxFn, approvals: Option<flume::Sender<Approval>>, audit: Arc<AuditLog>, endpoint_file: Option<PathBuf>) -> Result<Server> {
+    let listener = TcpListener::bind(bind)?;
+    let port = listener.local_addr()?.port();
+    let token = token.unwrap_or_else(new_token);
+    if let Some(p) = &endpoint_file {
+        if let Some(d) = p.parent() { std::fs::create_dir_all(d)?; }
+        let ep = Endpoint { url: format!("http://127.0.0.1:{port}"), token: token.clone(), pid: std::process::id() };
+        write_private(p, &serde_json::to_string_pretty(&ep)?)?;
+    }
+    let shared = Arc::new(Shared { token: token.clone(), ctx, approvals, audit, next: AtomicU64::new(1) });
+    std::thread::Builder::new().name("policy-server".into()).spawn(move || {
+        for s in listener.incoming().flatten() {
+            let sh = shared.clone();
+            std::thread::spawn(move || { let _ = handle(s, &sh); });
+        }
+    })?;
+    Ok(Server { port, token })
+}
+
+fn write_private(p: &Path, text: &str) -> Result<()> {
+    let tmp = p.with_extension("tmp");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+        f.write_all(text.as_bytes())?;
+    }
+    #[cfg(not(unix))]
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(tmp, p)?;
+    Ok(())
+}
+
+struct Shared { token: String, ctx: CtxFn, approvals: Option<flume::Sender<Approval>>, audit: Arc<AuditLog>, next: AtomicU64 }
+
+fn ct_eq(a: &str, b: &str) -> bool { a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0 }
+
+fn respond(mut s: TcpStream, status: &str, body: &str, extra: &[(&str, String)]) -> std::io::Result<()> {
+    let mut h = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
+    for (k, v) in extra { h.push_str(&format!("{k}: {v}\r\n")); }
+    h.push_str("\r\n");
+    s.write_all(h.as_bytes())?;
+    s.write_all(body.as_bytes())?;
+    s.flush()
+}
+
+fn handle(stream: TcpStream, sh: &Shared) -> Result<()> {
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    let mut r = BufReader::new(stream.try_clone()?);
+    let mut line = String::new();
+    r.read_line(&mut line)?;
+    let mut parts = line.split_whitespace();
+    let (method, path) = (parts.next().unwrap_or("").to_string(), parts.next().unwrap_or("").to_string());
+    let (mut len, mut auth, mut host_hdr) = (0usize, String::new(), String::new());
+    loop {
+        let mut h = String::new();
+        if r.read_line(&mut h)? == 0 || h == "\r\n" || h == "\n" { break; }
+        if let Some((k, v)) = h.split_once(':') {
+            let v = v.trim().to_string();
+            match k.trim().to_ascii_lowercase().as_str() {
+                "content-length" => len = v.parse().unwrap_or(0),
+                "authorization" => auth = v.strip_prefix("Bearer ").unwrap_or(&v).to_string(),
+                "x-agentshell-token" => auth = v,
+                "x-agentshell-host" => host_hdr = v,
+                _ => {}
+            }
+        }
+    }
+    if len > 1 << 20 { return Ok(respond(stream, "413 Payload Too Large", "{}", &[])?); }
+    let mut body = vec![0u8; len];
+    r.read_exact(&mut body)?;
+    let body = String::from_utf8_lossy(&body).to_string();
+    if method == "GET" && path == "/v1/health" { return Ok(respond(stream, "200 OK", r#"{"ok":true,"service":"agentshell-policy"}"#, &[])?); }
+    if !ct_eq(&auth, &sh.token) {
+        let _ = sh.audit.append("policy.auth_fail", "policy", &format!("path={path}"));
+        return Ok(respond(stream, "401 Unauthorized", r#"{"error":"bad token"}"#, &[])?);
+    }
+    if method != "POST" { return Ok(respond(stream, "405 Method Not Allowed", "{}", &[])?); }
+    if path == "/v1/check" {
+        #[derive(Deserialize, Default)]
+        #[serde(default)]
+        struct Check { principal: String, action: String, command: String, host: String, cwd: String, interactive: Option<bool> }
+        let c: Check = match serde_json::from_str(&body) { Ok(c) => c, Err(e) => return Ok(respond(stream, "400 Bad Request", &json!({"error": e.to_string()}).to_string(), &[])?) };
+        let principal = if c.principal.is_empty() { "cli".to_string() } else { c.principal };
+        let req = HookReq { event: "Check".into(), tool: "Bash".into(), command: c.command, action: if c.action.is_empty() { "exec".into() } else { c.action }, cwd: c.cwd, session: String::new() };
+        let host = if c.host.is_empty() { host_hdr } else { c.host };
+        let (eff, risk, reason) = sh.decide(&principal, &req, &host, c.interactive.unwrap_or(true));
+        let d = match eff { Effect::Allow => "allow", Effect::Ask => "ask", Effect::Deny => "deny" };
+        return Ok(respond(stream, "200 OK", &json!({"decision": d, "risk": risk.label(), "reason": reason}).to_string(), &[])?);
+    }
+    if let Some(rest) = path.strip_prefix("/v1/hook/") {
+        let mut it = rest.split('/');
+        let Some(agent) = it.next().and_then(Agent::parse) else { return Ok(respond(stream, "404 Not Found", r#"{"error":"unknown agent"}"#, &[])?) };
+        let mut req = match hooks::parse_request(&body) { Ok(r) => r, Err(e) => return Ok(respond(stream, "400 Bad Request", &json!({"error": e.to_string()}).to_string(), &[])?) };
+        if let Some(ev) = it.next().filter(|e| !e.is_empty()) { req.event = ev.to_string(); }
+        let (eff, _risk, reason) = sh.decide(agent.id(), &req, &host_hdr, true);
+        let (out, code) = hooks::render(agent, &req.event, eff, &reason);
+        return Ok(respond(stream, "200 OK", &out, &[("X-AgentShell-Exit", code.to_string())])?);
+    }
+    Ok(respond(stream, "404 Not Found", "{}", &[])?)
+}
+
+impl Shared {
+    fn decide(&self, principal: &str, req: &HookReq, host: &str, interactive: bool) -> (Effect, Risk, String) {
+        let ctx = (self.ctx)();
+        let prod = ctx.prod_confirm && !host.is_empty() && ctx.prod_hosts.iter().any(|h| h == host || policy::glob(h, host));
+        let risk = if req.action == "exec" { policy::classify(&req.command) } else { Risk::R1 };
+        let where_ = if host.is_empty() { "local".to_string() } else { host.to_string() };
+        let _ = self.audit.append("hook.request", principal, &format!("event={} tool={} action={} host={where_} cwd={:?} command={:?}", req.event, req.tool, req.action, req.cwd, req.command));
+        let (mut eff, mut reason) = if req.action == "tool" {
+            // non-shell, non-write tools: only explicit rules decide; otherwise no opinion (allow)
+            match policy::evaluate(&ctx.rules, principal, "tool", &req.command) { Some((_, r)) => (r.effect, format!("rule {}", r.id)), None => (Effect::Allow, "not a shell/write tool".into()) }
+        } else {
+            policy::decide_ctx(ctx.mode, ctx.max_auto, &ctx.rules, principal, &req.action, &req.command, ctx.dangerous_confirm, prod)
+        };
+        if eff == Effect::Ask && interactive {
+            if let Some(tx) = &self.approvals {
+                let (rtx, rrx) = flume::bounded(1);
+                let id = self.next.fetch_add(1, Ordering::Relaxed);
+                let deadline = Instant::now() + ctx.approval_timeout;
+                let a = Approval { id, principal: principal.into(), req: req.clone(), host: where_.clone(), risk, reason: reason.clone(), deadline, reply: rtx };
+                if tx.send(a).is_ok() {
+                    let got = if ctx.timeout_deny { rrx.recv_timeout(ctx.approval_timeout).ok() } else { rrx.recv().ok() };
+                    match got {
+                        Some(true) => { eff = Effect::Allow; reason = format!("{reason} → approved by user"); let _ = self.audit.append("hook.approval", "user", &format!("id={id} allow command={:?}", req.command)); }
+                        Some(false) => { eff = Effect::Deny; reason = format!("{reason} → denied by user"); let _ = self.audit.append("hook.approval", "user", &format!("id={id} deny command={:?}", req.command)); }
+                        None => { eff = Effect::Deny; reason = format!("{reason} → no answer within {}s, denied", ctx.approval_timeout.as_secs()); let _ = self.audit.append("hook.approval", "policy", &format!("id={id} timeout deny")); }
+                    }
+                }
+            }
+        }
+        let _ = self.audit.append("hook.decision", "policy", &format!("principal={principal} risk={} effect={eff:?} reason={reason} command={:?}", risk.label(), req.command));
+        (eff, risk, reason)
+    }
+}
+
+/// Minimal blocking HTTP client used by the CLI (no TLS; localhost or a forwarded port).
+pub fn post(url: &str, path: &str, token: &str, host_hdr: Option<&str>, body: &str, timeout: Duration) -> Result<(u16, String, Option<i32>)> {
+    let rest = url.strip_prefix("http://").ok_or_else(|| anyhow!("only http:// endpoints are supported"))?;
+    let addr = rest.trim_end_matches('/');
+    let mut s = TcpStream::connect(addr)?;
+    s.set_read_timeout(Some(timeout))?;
+    let mut req = format!("POST {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
+    if let Some(h) = host_hdr { req.push_str(&format!("X-AgentShell-Host: {h}\r\n")); }
+    req.push_str("\r\n");
+    s.write_all(req.as_bytes())?;
+    s.write_all(body.as_bytes())?;
+    let mut resp = String::new();
+    s.read_to_string(&mut resp)?;
+    let (head, body) = resp.split_once("\r\n\r\n").ok_or_else(|| anyhow!("bad HTTP response"))?;
+    let status = head.split_whitespace().nth(1).and_then(|x| x.parse().ok()).unwrap_or(0);
+    let exit = head.lines().find_map(|l| l.strip_prefix("X-AgentShell-Exit: ")).and_then(|x| x.trim().parse().ok());
+    Ok((status, body.to_string(), exit))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn srv(ctx: PolicyCtx, approvals: Option<flume::Sender<Approval>>) -> (Server, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("as-ps-{}-{}", std::process::id(), new_token()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let audit = Arc::new(AuditLog::new(dir.join("audit.jsonl")));
+        let s = start("127.0.0.1:0", None, Arc::new(move || ctx.clone()), approvals, audit, Some(endpoint_path(&dir))).unwrap();
+        (s, dir)
+    }
+    #[test]
+    fn check_auth_hooks_and_audit() {
+        let (s, dir) = srv(PolicyCtx { prod_hosts: vec!["prod-*".into()], ..Default::default() }, None);
+        let ep = read_endpoint(&dir).unwrap();
+        assert_eq!(ep.token, s.token);
+        #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; assert_eq!(std::fs::metadata(endpoint_path(&dir)).unwrap().permissions().mode() & 0o777, 0o600); }
+        let t = Duration::from_secs(5);
+        assert_eq!(post(&ep.url, "/v1/check", "wrong", None, "{}", t).unwrap().0, 401);
+        let (_, b, _) = post(&ep.url, "/v1/check", &ep.token, None, r#"{"command":"ls -la"}"#, t).unwrap();
+        assert!(b.contains("\"allow\""), "{b}");
+        let (_, b, _) = post(&ep.url, "/v1/check", &ep.token, None, r#"{"command":"rm -rf /"}"#, t).unwrap();
+        assert!(b.contains("\"deny\""));
+        let (_, b, _) = post(&ep.url, "/v1/hook/claude/PreToolUse", &ep.token, None, r#"{"tool_name":"Bash","tool_input":{"command":"rm -rf build"}}"#, t).unwrap();
+        assert!(b.contains("\"ask\""), "{b}");
+        let (_, b, code) = post(&ep.url, "/v1/hook/grok", &ep.token, None, r#"{"toolName":"bash","toolInput":{"command":"mkfs.ext4 /dev/sda1"}}"#, t).unwrap();
+        assert!(b.contains("deny") && code == Some(2));
+        let log = std::fs::read_to_string(dir.join("audit.jsonl")).unwrap();
+        assert!(log.contains("hook.request") && log.contains("hook.decision") && log.contains("policy.auth_fail"));
+        assert!(crate::audit::verify(&dir.join("audit.jsonl")).is_ok());
+    }
+    #[test]
+    fn approvals_and_timeout() {
+        let (tx, rx) = flume::unbounded::<Approval>();
+        let (s, dir) = srv(PolicyCtx { approval_timeout: Duration::from_millis(600), ..Default::default() }, Some(tx));
+        let url = format!("http://127.0.0.1:{}", s.port);
+        let tok = s.token.clone();
+        std::thread::spawn(move || { let a = rx.recv().unwrap(); assert_eq!(a.req.command, "rm a"); a.reply.send(true).unwrap(); let _b = rx.recv().unwrap(); /* never answer */ std::thread::sleep(Duration::from_secs(2)); });
+        let (_, b, _) = post(&url, "/v1/hook/claude", &tok, None, r#"{"tool_name":"Bash","tool_input":{"command":"rm a"}}"#, Duration::from_secs(5)).unwrap();
+        assert!(b.contains("\"allow\"") && b.contains("approved"), "{b}");
+        let (_, b, _) = post(&url, "/v1/hook/claude", &tok, None, r#"{"tool_name":"Bash","tool_input":{"command":"rm b"}}"#, Duration::from_secs(5)).unwrap();
+        assert!(b.contains("\"deny\"") && b.contains("no answer"), "{b}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    #[test]
+    fn production_host_header() {
+        let (s, _dir) = srv(PolicyCtx { mode: Mode::Auto, max_auto: Risk::R2, prod_hosts: vec!["prod-*".into()], ..Default::default() }, None);
+        let url = format!("http://127.0.0.1:{}", s.port);
+        let t = Duration::from_secs(5);
+        let (_, b, _) = post(&url, "/v1/check", &s.token, None, r#"{"command":"touch x"}"#, t).unwrap();
+        assert!(b.contains("\"allow\""));
+        let (_, b, _) = post(&url, "/v1/check", &s.token, Some("prod-web"), r#"{"command":"touch x"}"#, t).unwrap();
+        assert!(b.contains("\"ask\""), "{b}");
+    }
+}

@@ -7215,6 +7215,7 @@ dependencies = [
  "gpui-pre-platform",
  "keyring",
  "libc",
+ "notify-rust",
  "portable-pty",
  "rand 0.8.8",
  "regex",

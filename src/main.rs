@@ -70,6 +70,8 @@ pub(crate) struct Root {
     manifests: Arc<Vec<Manifest>>,
     hk_tx: flume::Sender<HostKeyPrompt>,
     hk_pending: Vec<HostKeyPrompt>,
+    approvals: Vec<ssh_term_proto::policy_server::Approval>,
+    pub(crate) policy_port: Option<u16>,
     overlay: Overlay,
     host_search: Entity<InputState>,
     lang_seen: u8,
@@ -218,6 +220,25 @@ impl Root {
         self.log("permission.mode", format!("{} → {}", old.label(), m.label()));
         self.report(err, cx);
         self.toast(tf("main.mode_toast", &[("mode", &m.label()), ("desc", &m.desc())]), cx);
+    }
+
+    /// Desktop notification (notify.desktop + notify.agent_blocked). Best effort: without a
+    /// notification daemon the call fails silently (logged to stderr).
+    pub(crate) fn notify_desktop(&self, body: &str, _cx: &mut Context<Self>) {
+        let n = &config::get().notify;
+        if !(n.desktop && n.agent_blocked) { return; }
+        let body = body.to_string();
+        std::thread::spawn(move || {
+            if let Err(e) = notify_rust::Notification::new().appname("AgentShell").summary("AgentShell").body(&body).show() { eprintln!("notification: {e}"); }
+        });
+    }
+
+    fn answer_approval(&mut self, allow: bool, cx: &mut Context<Self>) {
+        if !self.approvals.is_empty() {
+            let a = self.approvals.remove(0);
+            let _ = a.reply.send(allow);
+        }
+        cx.notify();
     }
 
     fn answer_hostkey(&mut self, d: HostKeyDecision, cx: &mut Context<Self>) {
@@ -633,6 +654,22 @@ impl Render for Root {
                     .child(ui::button("hk-once", t("ui.this_time_only"), 0).on_click(cx.listener(|this, _, _w, cx| this.answer_hostkey(HostKeyDecision::AcceptOnce, cx))))
                     .child(ui::button("hk-save", t("ui.accept_and_save"), 1).on_click(cx.listener(|this, _, _w, cx| this.answer_hostkey(HostKeyDecision::AcceptAndSave, cx)))))));
         }
+        // approval card for agent hook requests
+        if self.hk_pending.is_empty() { if let Some(a) = self.approvals.first() {
+            let left = a.deadline.saturating_duration_since(std::time::Instant::now()).as_secs();
+            let risk_col = if a.risk >= ssh_term_proto::policy::Risk::R3 { th.error } else { th.warning };
+            root = root.child(ui::modal(ui::card(600.).p_5().gap_3()
+                .child(div().flex().items_center().gap_2().child(icon(IconName::TriangleAlert, 16., c(risk_col)))
+                    .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("ui.approval_title")))
+                    .child(div().flex_1())
+                    .child(div().text_size(px(11.5)).text_color(c(th.overlay1)).child(tf("main.approval_left", &[("n", &left), ("q", &self.approvals.len())]))))
+                .child(div().text_size(px(12.5)).text_color(c(th.subtext)).child(tf("main.approval_who", &[("agent", &a.principal), ("host", &a.host), ("tool", &a.req.tool), ("risk", &a.risk.label())])))
+                .child(div().p_3().rounded_md().bg(c(th.mantle)).text_size(px(12.5)).text_color(c(th.text)).font_family(SharedString::from(s.font.family.clone())).child(a.req.command.clone()))
+                .child(div().text_size(px(11.5)).text_color(c(th.overlay1)).child(tf("main.approval_why", &[("why", &a.reason), ("cwd", &a.req.cwd)])))
+                .child(div().flex().gap_2().justify_end()
+                    .child(ui::button("ap-deny", t("ui.deny"), 0).on_click(cx.listener(|this, _, _w, cx| this.answer_approval(false, cx))))
+                    .child(ui::button("ap-allow", t("ui.allow_once"), 1).on_click(cx.listener(|this, _, _w, cx| this.answer_approval(true, cx)))))));
+        } }
         if let Some((msg, _)) = &self.toast {
             root = root.child(div().absolute().bottom(px(40.)).right(px(16.)).max_w(px(460.)).px_4().py_2().rounded_lg().bg(c(th.base)).border_1().border_color(c(th.surface1)).shadow_lg()
                 .flex().items_center().gap_2().text_size(px(12.)).text_color(c(th.text)).child(icon(IconName::Info, 14., c(th.accent))).child(msg.clone()));
@@ -670,7 +707,7 @@ fn main() {
                     let audit = audit_log();
                     let mut root = Root {
                         rt, default_target, tabs: vec![], active: 0, themes, histories: HashMap::new(),
-                        manifests: Arc::new(agent::bundled()), hk_tx, hk_pending: vec![], overlay: Overlay::None,
+                        manifests: Arc::new(agent::bundled()), hk_tx, hk_pending: vec![], approvals: vec![], policy_port: None, overlay: Overlay::None,
                         host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, collapsed: HashSet::new(), sidebar_visible: true, audit, audit_verify: None,
                         settings_dirty: vec![], toast: None, toast_seq: 0, _subs: vec![],
                     };
@@ -681,6 +718,27 @@ fn main() {
                         while let Ok(p) = hk_rx.recv_async().await {
                             if this.update(cx, |r, cx| { r.hk_pending.push(p); cx.notify(); }).is_err() { break; }
                         }
+                    }).detach();
+                    // local policy service for external agents' hooks
+                    let (ap_tx, ap_rx) = flume::unbounded::<ssh_term_proto::policy_server::Approval>();
+                    let ctx: ssh_term_proto::policy_server::CtxFn = Arc::new(|| config::get().policy_ctx());
+                    let bind = format!("127.0.0.1:{}", config::get().agents.policy_port);
+                    match ssh_term_proto::policy_server::start(&bind, None, ctx, Some(ap_tx), root.audit.clone(), Some(ssh_term_proto::policy_server::endpoint_path(&data_dir()))) {
+                        Ok(srv) => { root.policy_port = Some(srv.port); root.log("policy.server", format!("listening on 127.0.0.1:{}", srv.port)); }
+                        Err(e) => root.toast(tf("main.policy_server_failed", &[("e", &e)]), cx),
+                    }
+                    cx.spawn(async move |this, cx| {
+                        while let Ok(a) = ap_rx.recv_async().await {
+                            if this.update(cx, |r, cx| { r.approvals.push(a); r.notify_desktop(&t("ui.approval_title"), cx); cx.notify(); }).is_err() { break; }
+                        }
+                    }).detach();
+                    cx.spawn(async move |this, cx| loop {
+                        cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                        if this.update(cx, |r, cx| if !r.approvals.is_empty() {
+                            let now = std::time::Instant::now();
+                            r.approvals.retain(|a| a.deadline > now && !a.reply.is_disconnected());
+                            cx.notify();
+                        }).is_err() { break; }
                     }).detach();
                     if let Some(e) = load_err.clone() { root.toast(e, cx); }
                     if config::get().general.startup != "blank" {
