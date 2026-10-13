@@ -23,7 +23,7 @@
 - ☑ 3.2 上传下载、队列与进度、暂停/继续、断点续传（按目标已有大小续传）、两栏拖放 + 系统文件拖入远端栏；tests/ssh_features.rs::sftp_ops_and_resumable_transfers；GUI 拖拽上传 40MB sha256 一致
 
 ## 4 端口转发（P1）
-- ☐ 4.1 本地 / 远程 / 动态 SOCKS；列表启停、状态、自动启动
+- ☑ 4.1 本地 / 远程 / 动态 SOCKS5；列表启停、状态与计数、按主机保存 forwards.toml、主机连接时自动启动（src/forward.rs + src/port_view.rs；测试 port_forwards_local_remote_socks；GUI 实测 L 走 ssh、D 走 curl --socks5、R 远端 curl、重启后自动启动、停止后端口关闭）
 
 ## 5 会话持久化（P1）
 - ☐ 5.1 布局保存与启动恢复，恢复时不自动重跑，退出确认

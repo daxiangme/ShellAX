@@ -75,23 +75,8 @@ impl Root {
         ui::modal(panel_shell(t("ui.sftp_files"), IconName::FolderSync, t("ui.remote_browsing_reuses_the_sftp"), cx).child(body)).into_any_element()
     }
 
-    pub(crate) fn port_panel(&mut self, cx: &mut Context<Root>) -> AnyElement {
-        let th = cur();
-        let field = |label: &str, ph: &str| div().flex().flex_col().gap_1()
-            .child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(label.to_string()))
-            .child(div().h(px(30.)).w(px(150.)).px_2().rounded_md().border_1().border_color(c(th.surface1)).bg(c(th.mantle)).flex().items_center()
-                .text_size(px(12.)).text_color(c(th.overlay0)).child(ph.to_string()));
-        let kinds = vec![("L".to_string(), t("ui.local_l").to_string()), ("R".to_string(), t("ui.remote_r").to_string()), ("D".to_string(), t("ui.dynamic_socks_d").to_string())];
-        let form = div().p_4().m_4().rounded_lg().border_1().border_color(c(th.surface0)).flex().flex_col().gap_3().opacity(0.6)
-            .child(div().flex().items_center().gap_2().child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("ui.new_forward"))).child(ui::soon()))
-            .child(ui::segmented("pf-kind", &kinds, "L", |_, _, _| {}))
-            .child(div().flex().gap_3().child(field(t("ui.local_address"), "127.0.0.1")).child(field(t("ui.local_port"), "8080")).child(field(t("ui.remote_host"), "localhost")).child(field(t("ui.remote_port"), "80")))
-            .child(div().flex().gap_2().child(ui::button("pf-add", t("ui.add_and_start"), 1)));
-        let empty = div().flex_1().flex().flex_col().items_center().justify_center().gap_2()
-            .child(icon(IconName::ArrowLeftRight, 28., c(th.overlay0)))
-            .child(div().text_size(px(12.5)).text_color(c(th.subtext)).child(t("ui.no_port_forwards")))
-            .child(div().text_size(px(11.5)).text_color(c(th.overlay1)).child(t("ui.forwards_will_be_saved_per")));
-        ui::modal(panel_shell(t("ui.port_forwarding"), IconName::ArrowLeftRight, t("ui.ui_only_backend_coming_soon"), cx).child(form).child(empty)).into_any_element()
+    pub(crate) fn port_panel(&mut self, _cx: &mut Context<Root>) -> AnyElement {
+        match self.port_view.clone() { Some(v) => ui::modal(v).into_any_element(), None => div().into_any_element() }
     }
 
     pub(crate) fn ai_panel(&mut self, cx: &mut Context<Root>) -> AnyElement {
