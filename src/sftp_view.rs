@@ -27,7 +27,13 @@ impl Render for DragPreview {
 #[derive(Clone, Copy, PartialEq)]
 enum Edit { Mkdir, Rename, Chmod }
 
-pub enum SftpEvent { Close }
+pub enum SftpEvent {
+    Close,
+    /// Insert a command (no Enter) into the session for this host (remote) or a local pane.
+    Insert { remote: bool, command: String },
+    /// Open a new tab on this host / locally and insert `cd -- dir`.
+    CdTab { remote: bool, dir: String },
+}
 impl gpui::EventEmitter<SftpEvent> for SftpView {}
 
 pub struct SftpView {
@@ -57,6 +63,12 @@ pub struct SftpView {
     _subs: Vec<gpui::Subscription>,
     /// Directory sync panel: Some when open.
     sync: Option<SyncUi>,
+    /// Multi-selection (indices on the `sel` side; Ctrl toggles, Shift extends).
+    multi: Vec<usize>,
+    /// Right-click menu (PRD 5.20) and the side it was opened on.
+    ctx_menu: Option<(Side, crate::ctxmenu_view::MenuState)>,
+    /// Remote file to open in the editor once connected (terminal "open in built-in editor").
+    pending_edit: Option<String>,
 }
 /// Sync panel state: mode, delete flag, computed plan, delete confirmation pending.
 struct SyncUi { mode: ssh_term_proto::dirsync::Mode, delete: bool, plan: Option<Vec<ssh_term_proto::dirsync::Op>>, busy: bool, confirm_delete: bool }
@@ -66,7 +78,7 @@ impl SftpView {
     pub fn new_deferred(target: SshTarget, rt: tokio::runtime::Handle, prompts: ssh::Prompts, _w: &mut Window, _cx: &mut Context<Self>) -> Self {
         let local_dir = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into()));
         let mut me = Self { target, rt, prompts, sess: None, conn: None, connecting: false, status: String::new(), error: false, local_dir, remote_dir: String::new(),
-            local: vec![], remote: vec![], sel: None, hidden: false, queue: Queue::default(), edit: None, confirm_delete: None, editor: None, ticking: false, initial_dir: None, _subs: vec![], sync: None };
+            local: vec![], remote: vec![], sel: None, hidden: false, queue: Queue::default(), edit: None, confirm_delete: None, editor: None, ticking: false, initial_dir: None, _subs: vec![], sync: None, multi: vec![], ctx_menu: None, pending_edit: None };
         me.refresh_local();
         me
     }
@@ -74,7 +86,7 @@ impl SftpView {
     pub fn new(target: SshTarget, rt: tokio::runtime::Handle, prompts: ssh::Prompts, _w: &mut Window, cx: &mut Context<Self>) -> Self {
         let local_dir = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into()));
         let mut me = Self { target, rt, prompts, sess: None, conn: None, connecting: false, status: String::new(), error: false, local_dir, remote_dir: String::new(),
-            local: vec![], remote: vec![], sel: None, hidden: false, queue: Queue::default(), edit: None, confirm_delete: None, editor: None, ticking: false, initial_dir: None, _subs: vec![], sync: None };
+            local: vec![], remote: vec![], sel: None, hidden: false, queue: Queue::default(), edit: None, confirm_delete: None, editor: None, ticking: false, initial_dir: None, _subs: vec![], sync: None, multi: vec![], ctx_menu: None, pending_edit: None };
         me.refresh_local();
         me.connect(cx);
         me
@@ -213,6 +225,63 @@ impl SftpView {
         }
         cx.notify();
     }
+    fn select(&mut self, side: Side, i: usize, m: gpui::Modifiers) {
+        let same = self.sel.is_some_and(|(s, _)| s == side);
+        if (m.control || m.platform) && same {
+            if let Some(p) = self.multi.iter().position(|&x| x == i) { self.multi.remove(p); } else { self.multi.push(i); }
+            self.sel = Some((side, i));
+        } else if m.shift && same {
+            let a = self.sel.map(|s| s.1).unwrap_or(i);
+            self.multi = (a.min(i)..=a.max(i)).collect();
+        } else { self.sel = Some((side, i)); self.multi = vec![i]; }
+    }
+    /// Selected entries on `side` (multi-selection, else the single selection).
+    fn selection_on(&self, side: Side) -> Vec<Entry> {
+        let list = match side { Side::Local => &self.local, Side::Remote => &self.remote };
+        if self.sel.map(|s| s.0) != Some(side) { return vec![]; }
+        let mut idx = self.multi.clone();
+        if idx.is_empty() { if let Some((_, i)) = self.sel { idx.push(i); } }
+        idx.sort(); idx.dedup();
+        idx.into_iter().filter_map(|i| list.get(i).cloned()).collect()
+    }
+    fn open_ctx_menu(&mut self, side: Side, i: usize, pos: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+        use ssh_term_proto::ctxmenu::{FileObj, Place, Target};
+        // right-click outside the current selection selects just that entry
+        let in_sel = self.sel.is_some_and(|(s, _)| s == side) && (self.multi.contains(&i) || self.sel == Some((side, i)));
+        if !in_sel { self.sel = Some((side, i)); self.multi = vec![i]; }
+        let files: Vec<FileObj> = self.selection_on(side).into_iter().map(|e| FileObj { path: self.path_of(side, &e.name), is_dir: e.is_dir, mode: e.mode }).collect();
+        if files.is_empty() { return; }
+        let remote = side == Side::Remote;
+        let (place, host, tgt) = if remote { (Place::RemotePanel, self.target.host.clone(), Some(self.target.clone())) } else { (Place::LocalPanel, "local".to_string(), None) };
+        let key = crate::ctxmenu_view::host_key(tgt.as_ref());
+        self.ctx_menu = Some((side, crate::ctxmenu_view::build(Target::Files(files), place, &host, key, pos, None)));
+        if let Some(rx) = crate::ctxmenu_view::ensure_probe(tgt) {
+            cx.spawn(async move |this, cx| {
+                let _ = rx.recv_async().await;
+                let _ = this.update(cx, |v, cx| { if let Some((sd, m)) = &v.ctx_menu { let r = *sd == Side::Remote; let host = if r { v.target.host.clone() } else { "local".into() }; let nm = m.rebuilt(if r { Place::RemotePanel } else { Place::LocalPanel }, &host); v.ctx_menu = Some((*sd, nm)); cx.notify(); } });
+            }).detach();
+        }
+        cx.notify();
+    }
+    fn ctx_pick(&mut self, i: usize, _w: &mut Window, cx: &mut Context<Self>) {
+        use ssh_term_proto::ctxmenu::Act;
+        let Some((side, m)) = self.ctx_menu.take() else { return };
+        let Some(item) = m.menu.items.get(i).cloned() else { return };
+        let remote = side == Side::Remote;
+        let _ = crate::audit_log().append("ctxmenu.pick", "user", &format!("host={} panel={} item={} custom={}", if remote { self.target.host.as_str() } else { "local" }, if remote { "remote" } else { "local" }, item.id, item.custom));
+        match item.act {
+            Act::Insert(command) => cx.emit(SftpEvent::Insert { remote, command }),
+            Act::CdNewTab(dir) => cx.emit(SftpEvent::CdTab { remote, dir }),
+            Act::Copy(text) => cx.write_to_clipboard(gpui::ClipboardItem::new_string(text)),
+            Act::OpenEditor(p) => self.edit_path(p, cx),
+            Act::Download(paths) => for p in paths { self.download(p, cx) },
+            Act::Upload(paths) => for p in paths { self.upload(PathBuf::from(p), cx) },
+            Act::OpenUrl(u) => cx.open_url(&u),
+            Act::Search(_) | Act::AiExplain(_) | Act::PasteInput(_) => {}
+        }
+        cx.notify();
+    }
+    fn ctx_close(&mut self, cx: &mut Context<Self>) { if self.ctx_menu.take().is_some() { cx.notify(); } }
     fn selected(&self) -> Option<(Side, Entry)> {
         let (side, i) = self.sel?;
         let e = match side { Side::Local => self.local.get(i), Side::Remote => self.remote.get(i) }?;
@@ -293,16 +362,21 @@ impl SftpView {
         cx.notify();
     }
     /// Open the selected remote file in the built-in editor (UTF-8 text up to 2 MB).
-    fn edit_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn edit_selected(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let Some((Side::Remote, e)) = self.selected().filter(|(_, e)| !e.is_dir) else { self.set_status(t("sftp.edit_select").into(), true); cx.notify(); return };
-        let Some(s) = self.sess.clone() else { return };
         let path = self.path_of(Side::Remote, &e.name);
+        self.edit_path(path, cx);
+    }
+    /// Open a remote text file in the built-in editor (waits for the connection if needed).
+    pub fn edit_path(&mut self, path: String, cx: &mut Context<Self>) {
+        let Some(s) = self.sess.clone() else { self.pending_edit = Some(path); cx.notify(); return };
         let p2 = path.clone();
         let (tx, rx) = flume::bounded(1);
         self.rt.spawn(async move { let _ = tx.send(sftp::read_text(&s, &p2).await); });
-        cx.spawn_in(window, async move |this, cx| {
+        cx.spawn(async move |this, cx| {
             let Ok(r) = rx.recv_async().await else { return };
-            let _ = this.update_in(cx, |v, window, cx| {
+            let Some(window) = cx.update(|cx| cx.active_window()) else { return };
+            let _ = window.update(cx, |_, window, cx| this.update(cx, |v, cx| {
                 match r {
                     Ok((text, ver)) => {
                         let st = cx.new(|cx| EditorState::new(window, cx).line_number(true).default_value(text));
@@ -313,7 +387,7 @@ impl SftpView {
                     Err(e) => v.set_status(format!("{e:#}"), true),
                 }
                 cx.notify();
-            });
+            }));
         }).detach();
     }
     fn save_editor(&mut self, cx: &mut Context<Self>) {
@@ -373,12 +447,13 @@ impl SftpView {
                 .child(div().px_4().child(ui::button("sftp-reconnect", t("sftp.reconnect"), 0).on_click(cx.listener(|v, _, _, cx| v.connect(cx)))));
         }
         for (i, e) in entries.iter().enumerate().take(1000) {
-            let selected = self.sel == Some((side, i));
+            let selected = self.sel.is_some_and(|(s, _)| s == side) && (self.multi.contains(&i) || self.sel == Some((side, i)));
             let path = self.path_of(side, &e.name);
             let drag = DragFile { side, path, name: e.name.clone() };
             list = list.child(div().id((sid, i)).h(px(26.)).px_3().flex().items_center().gap_2().text_size(px(12.)).text_color(c(th.text)).cursor_pointer()
                 .when(selected, |d| d.bg(c(th.accent).opacity(0.2))).when(!selected, |d| d.hover(|d| d.bg(c(cur().surface0))))
-                .on_click(cx.listener(move |v, ev: &gpui::ClickEvent, _, cx| { if ev.click_count() >= 2 { v.open(side, i, cx) } else { v.sel = Some((side, i)); cx.notify() } }))
+                .on_click(cx.listener(move |v, ev: &gpui::ClickEvent, _, cx| { if ev.click_count() >= 2 { v.open(side, i, cx) } else { v.select(side, i, ev.modifiers()); cx.notify() } }))
+                .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |v, ev: &gpui::MouseDownEvent, _, cx| { v.open_ctx_menu(side, i, ev.position, cx); cx.stop_propagation(); }))
                 .on_drag(drag, |d: &DragFile, _, _, cx| cx.new(|_| DragPreview(d.name.clone())))
                 .child(icon(if e.is_dir { IconName::Folder } else { IconName::FileText }, 14., if e.is_dir { c(th.warning) } else { c(th.overlay1) }))
                 .child(div().flex_1().min_w_0().overflow_hidden().child(e.name.clone()))
@@ -438,6 +513,7 @@ impl SftpView {
 impl Render for SftpView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _ = window;
+        if self.sess.is_some() { if let Some(p) = self.pending_edit.take() { self.edit_path(p, cx); } }
         let th = cur();
         let act = |id: &'static str, ic: IconName, label: &str| ui::button(id, label.to_string(), 0).child(icon(ic, 13., c(cur().subtext)));
         let toolbar = div().px_4().pt_3().flex().items_center().gap_2()
@@ -502,6 +578,7 @@ impl Render for SftpView {
                 .child(div().id("sftp-close").size(px(28.)).rounded_md().flex().items_center().justify_center().cursor_pointer()
                     .hover(|d| d.bg(c(cur().surface0))).on_click(cx.listener(|_, _, _, cx| cx.emit(SftpEvent::Close)))
                     .child(icon(IconName::X, 16., c(th.overlay1)))))
+            .children(self.ctx_menu.as_ref().map(|(_, m)| crate::ctxmenu_view::render(m, cx, Self::ctx_pick, Self::ctx_close)))
             .child(toolbar).children(edit_bar).children(confirm).children(sync)
             .child(body)
             .child(div().px_4().pt_3().child(self.queue_view(cx)))

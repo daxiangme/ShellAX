@@ -479,6 +479,14 @@ pub struct TermView {
     cmd_started: Option<(Instant, String)>,
     /// AI plan step being captured: (absolute start line, command, where to send the result).
     ai_capture: Option<(usize, String, flume::Sender<StepOutput>)>,
+    /// Right-click context menu (PRD 5.20).
+    pub ctx_menu: Option<crate::ctxmenu_view::MenuState>,
+    /// Command inserted from the context menu and not yet submitted / cleared.
+    pub ctx_pending: Option<String>,
+    /// Context-menu command waiting for confirmation on Enter: (command, risk · reason).
+    pub ctx_confirm: Option<(String, String)>,
+    /// Context-menu command refused by the permission engine (shown until dismissed).
+    pub ctx_denied: Option<String>,
     _subs: Vec<Subscription>,
 }
 
@@ -505,7 +513,7 @@ pub struct SearchBar { pub query: String, pub cur: Option<(BPoint, BPoint)>, pub
 #[derive(Clone, Debug, PartialEq)]
 pub struct StepOutput { pub cmd: String, pub exit: Option<i32>, pub output: String, pub withheld: bool }
 
-pub enum TermEvent { Keyword(String, String), Explain, Agent(String, AgentState), LongDone(String, u64, i32), Audit(&'static str, String) }
+pub enum TermEvent { Keyword(String, String), Explain, Agent(String, AgentState), LongDone(String, u64, i32), Audit(&'static str, String), CtxEditor(String), CtxCdTab(String), CtxAiExplain(String) }
 
 /// IME support (PRD 3.3: IME must work for agents too). Committed text goes to the PTY like typing;
 /// composition text is only drawn (never sent) until the IME commits it.
@@ -585,7 +593,7 @@ impl TermView {
             selecting: false, scroll_drag: false, history, tracker: InputTracker::new(),
             last_activity: Instant::now(), blink_running: false, software_gpu: std::env::var("AGENTSHELL_FORCE_BLINK").ok().map(|_| false), last_mouse_cell: None, mouse_down_btn: None,
             manifests, last_command: None, agent: None, agent_seen: Instant::now(), last_detect: Instant::now() - Duration::from_secs(5),
-            detect_scheduled: false, pending_paste: None, ai: None, daemon_id: None, resume_offer: None, clip_ask: None, pty_ask: None, pty_write_ok: false, search: None, last_agent: None, failed: None, exit_seen: 0, ai_inline_seq: 0, ai_inline: None, bell_until: None, cmd_started: None, ai_capture: None, _subs: subs,
+            detect_scheduled: false, pending_paste: None, ai: None, daemon_id: None, resume_offer: None, clip_ask: None, pty_ask: None, pty_write_ok: false, search: None, last_agent: None, failed: None, exit_seen: 0, ai_inline_seq: 0, ai_inline: None, bell_until: None, cmd_started: None, ai_capture: None, ctx_menu: None, ctx_pending: None, ctx_confirm: None, ctx_denied: None, _subs: subs,
         }
     }
 
@@ -940,6 +948,8 @@ impl TermView {
                 _ => {}
             }
         }
+        if self.ctx_menu.is_some() && k.key == "escape" { self.ctx_menu = None; cx.notify(); cx.stop_propagation(); return; }
+        if self.ctx_confirm.is_some() && k.key == "escape" { self.ctx_confirm = None; cx.notify(); cx.stop_propagation(); return; }
         if self.search.is_some() { self.search_key(k, cx); cx.stop_propagation(); return; }
         // app shortcuts
         if m.control && m.shift && !m.alt {
@@ -984,6 +994,13 @@ impl TermView {
                 cx.stop_propagation();
                 return;
             }
+            "enter" if self.ctx_pending.is_some() && !self.mode().contains(TermMode::ALT_SCREEN) => {
+                // a command inserted from the context menu: the permission engine decides on Enter
+                let cmd = self.line_state().and_then(|ls| self.tracker.submitted_input(&ls.before_cursor, ls.prompt_col)).or_else(|| self.ctx_pending.clone()).unwrap_or_default();
+                if self.ctx_gate(cmd, cx) { self.ctx_submit(cx); }
+                cx.stop_propagation();
+                return;
+            }
             "enter" => {
                 if let Some(ls) = self.line_state() {
                     if !ls.alt_screen {
@@ -998,8 +1015,8 @@ impl TermView {
                 self.tracker.key(Key::Enter);
             }
             "backspace" => { self.tracker.key(Key::Backspace); }
-            _ if m.control && k.key == "c" => { self.tracker.key(Key::Interrupt); }
-            _ if m.control && k.key == "u" => { self.tracker.key(Key::KillLine); }
+            _ if m.control && k.key == "c" => { self.tracker.key(Key::Interrupt); self.ctx_pending = None; self.ctx_confirm = None; }
+            _ if m.control && k.key == "u" => { self.tracker.key(Key::KillLine); self.ctx_pending = None; }
             _ => {
                 let printable = !m.control && !m.alt && !m.platform && bytes.first().is_some_and(|b| *b >= 0x20 && *b != 0x7f);
                 if printable { self.tracker.key(Key::Text(std::str::from_utf8(&bytes).unwrap_or(""))); } else { self.tracker.key(Key::Other); }
@@ -1409,8 +1426,139 @@ impl TermView {
                 self.grid.update(cx, |_, cx| cx.notify());
             }
             MouseButton::Middle => self.paste(cx),
+            MouseButton::Right => self.open_ctx_menu(ev.position, cell, cx),
             _ => {}
         }
+    }
+
+    // ---------------- right-click context menu (PRD 5.20)
+    fn ssh_target(&self) -> Option<SshTarget> { match &self.spec { Spec::Ssh(t) => Some(t.clone()), Spec::Local => None } }
+    fn ctx_place(&self) -> ssh_term_proto::ctxmenu::Place { ssh_term_proto::ctxmenu::Place::Terminal { remote: matches!(self.spec, Spec::Ssh(_)) } }
+    /// Shell cwd: OSC 7 → local /proc probe → `user@host:dir$` prompt on the cursor line.
+    pub fn shell_cwd(&self) -> Option<String> {
+        let s = self.session.as_ref()?;
+        if let Some(c) = s.osc7_cwd.lock().unwrap().clone() { return Some(c); }
+        if let Some(c) = s.cwd_probe.lock().unwrap().as_ref().and_then(|f| f()) { return Some(c); }
+        let t = s.term.lock().unwrap();
+        let g = t.grid();
+        ssh_term_proto::ctxmenu::prompt_cwd(&row_chars(g, g.cursor.point.line.0))
+    }
+    /// Text of a screen row with wide-char spacers removed, and the char index of `col`.
+    fn line_at(&self, (row, col): (usize, usize)) -> Option<(String, usize)> {
+        let s = self.session.as_ref()?;
+        let t = s.term.lock().unwrap();
+        let g = t.grid();
+        let line = row as i32 - g.display_offset() as i32;
+        let r = &g[Line(line)];
+        let (mut text, mut idx) = (String::new(), 0);
+        let mut n = 0;
+        for c in 0..g.columns() {
+            let cell = &r[Column(c)];
+            if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) { if c == col { idx = n.max(1) - 1; } continue; }
+            if c == col { idx = n; }
+            text.push(if cell.c == '\0' { ' ' } else { cell.c });
+            n += 1;
+        }
+        Some((text, idx))
+    }
+    pub fn open_ctx_menu(&mut self, pos: gpui::Point<Pixels>, cell: (usize, usize), cx: &mut Context<Self>) {
+        use ssh_term_proto::ctxmenu::{detect_at, resolve, FileObj, Found, Target};
+        let sel = self.selection_text().filter(|s| !s.trim().is_empty());
+        let mut note = None;
+        let target = if let Some(sel) = sel { Target::Selection(sel) } else {
+            let Some((line, ci)) = self.line_at(cell) else { return };
+            match detect_at(&line, ci).map(|d| d.found) {
+                Some(Found::Url(u)) => Target::Url(u),
+                Some(Found::HostPort { host, port }) => Target::HostPort { host, port },
+                Some(Found::Path { path, .. }) => {
+                    let cwd = self.shell_cwd();
+                    let home = matches!(self.spec, Spec::Local).then(|| std::env::var("HOME").ok()).flatten();
+                    let (p, ok) = resolve(&path, cwd.as_deref(), home.as_deref());
+                    if !ok { note = Some(t("cm.cwd_unknown").to_string()); }
+                    let is_dir = path.ends_with('/');
+                    let p = if p.len() > 1 { p.trim_end_matches('/').to_string() } else { p };
+                    Target::Files(vec![FileObj { path: p, is_dir, mode: 0 }])
+                }
+                None => {
+                    // nothing recognised: offer paste of the clipboard (no newline)
+                    let Some(clip) = cx.read_from_clipboard().and_then(|i| i.text()).filter(|t| !t.is_empty()) else { return };
+                    Target::Selection(clip)
+                }
+            }
+        };
+        let key = crate::ctxmenu_view::host_key(self.ssh_target().as_ref());
+        self.ctx_menu = Some(crate::ctxmenu_view::build(target, self.ctx_place(), &self.audit_host(), key, pos, note));
+        if let Some(rx) = crate::ctxmenu_view::ensure_probe(self.ssh_target()) {
+            cx.spawn(async move |this, cx| {
+                let _ = rx.recv_async().await;
+                let _ = this.update(cx, |v, cx| { if let Some(m) = &v.ctx_menu { let (pl, h) = (v.ctx_place(), v.audit_host()); v.ctx_menu = Some(m.rebuilt(pl, &h)); cx.notify(); } });
+            }).detach();
+        }
+        cx.notify();
+    }
+    fn ctx_pick(&mut self, i: usize, _w: &mut Window, cx: &mut Context<Self>) {
+        use ssh_term_proto::ctxmenu::Act;
+        let Some(m) = self.ctx_menu.take() else { return };
+        let Some(item) = m.menu.items.get(i).cloned() else { return };
+        cx.emit(TermEvent::Audit("ctxmenu.pick", format!("host={} item={} custom={}", self.audit_host(), item.id, item.custom)));
+        match item.act {
+            Act::Insert(cmd) => self.insert_command(&cmd, cx),
+            Act::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            Act::OpenEditor(p) => cx.emit(TermEvent::CtxEditor(p)),
+            Act::CdNewTab(d) => cx.emit(TermEvent::CtxCdTab(d)),
+            Act::OpenUrl(u) => cx.open_url(&u),
+            Act::Search(q) => { self.search = Some(SearchBar { query: q.replace('\n', " "), cur: None, found: None }); self.search_step(false, cx); }
+            Act::AiExplain(text) => cx.emit(TermEvent::CtxAiExplain(text)),
+            Act::PasteInput(text) => {
+                if let Some(s) = self.session.clone() { let one = text.replace(['\r', '\n'], " "); s.write(one.clone().into_bytes()); self.tracker.key(Key::Text(&one)); }
+            }
+            Act::Download(_) | Act::Upload(_) => {}
+        }
+        cx.notify();
+    }
+    fn ctx_close(&mut self, cx: &mut Context<Self>) { if self.ctx_menu.take().is_some() { cx.notify(); } }
+    /// Put a command on the input line without running it (Ctrl+U clears what was typed first).
+    pub fn insert_command(&mut self, cmd: &str, cx: &mut Context<Self>) {
+        let Some(s) = self.session.clone() else { return };
+        let one = cmd.replace(['\r', '\n'], " ");
+        s.write(ssh_term_proto::ctxmenu::insert_bytes(&one));
+        self.tracker.key(Key::KillLine);
+        self.tracker.key(Key::Text(&one));
+        self.ctx_pending = Some(one.clone());
+        self.ctx_denied = None;
+        cx.emit(TermEvent::Audit("ctxmenu.insert", format!("host={} command={:?}", self.audit_host(), ssh_term_proto::ai::redact(&one).0)));
+        self.scroll_to_bottom(cx);
+        cx.notify();
+    }
+    /// Permission engine for a context-menu command on Enter. true = submit now.
+    fn ctx_gate(&mut self, cmd: String, cx: &mut Context<Self>) -> bool {
+        let cfg = config::get();
+        let max = match cfg.permissions.max_auto_risk.as_str() { "R0" => Risk::R0, "R2" => Risk::R2, _ => Risk::R1 };
+        let prod = cfg.permissions.prod_confirm && matches!(&self.spec, Spec::Ssh(t) if t.production);
+        let (eff, why) = policy::decide_host(cfg.permissions.mode, max, &cfg.permissions.rules, "user:ctxmenu", "exec", &cmd, cfg.permissions.dangerous_confirm, prod, &self.audit_host());
+        let risk = policy::classify(&cmd);
+        cx.emit(TermEvent::Audit("ctxmenu.decision", format!("host={} risk={} effect={eff:?} command={:?} reason={why:?}", self.audit_host(), risk.label(), ssh_term_proto::ai::redact(&cmd).0)));
+        match eff {
+            Effect::Allow => true,
+            Effect::Ask => { self.ctx_confirm = Some((cmd, format!("{} · {why}", risk.label()))); cx.notify(); false }
+            Effect::Deny => { self.ctx_denied = Some(tf("cm.denied", &[("cmd", &cmd), ("why", &why)])); cx.notify(); false }
+        }
+    }
+    /// Press Enter for the pending context-menu command (normal history / audit bookkeeping).
+    fn ctx_submit(&mut self, cx: &mut Context<Self>) {
+        let Some(s) = self.session.clone() else { return };
+        let cmd = self.line_state().and_then(|ls| self.tracker.submitted_input(&ls.before_cursor, ls.prompt_col)).or_else(|| self.ctx_pending.clone()).unwrap_or_default();
+        if !cmd.is_empty() {
+            self.history.lock().unwrap().add(&cmd);
+            if config::get().audit.log_commands { let _ = crate::audit_log().append("command", "user", &ssh_term_proto::ai::redact(&cmd).0); }
+            if self.agent.is_none() { self.cmd_started = Some((Instant::now(), cmd.clone())); self.last_command = Some(cmd.clone()); }
+        }
+        cx.emit(TermEvent::Audit("ctxmenu.exec", format!("host={} command={:?}", self.audit_host(), ssh_term_proto::ai::redact(&cmd).0)));
+        self.tracker.key(Key::Enter);
+        self.ctx_pending = None; self.ctx_confirm = None;
+        self.scroll_to_bottom(cx);
+        fanout(&s, b"\r".to_vec());
+        cx.notify();
     }
 
     fn link_at(&self, (row, col): (usize, usize)) -> Option<String> {
@@ -1659,6 +1807,22 @@ impl Render for TermView {
                     .on_click(cx.listener(|v, _, _w, cx| v.pty_answer(true, cx))))
                 .child(div().id("pty-deny").px_2().py(px(3.)).rounded_md().cursor_pointer().bg(c(th.surface0)).child(t("ui.deny"))
                     .on_click(cx.listener(|v, _, _w, cx| v.pty_answer(false, cx)))));
+        }
+        if let Some((cmd, why)) = self.ctx_confirm.clone() {
+            body = body.child(div().absolute().bottom(px(12.)).left(px(12.)).right(px(12.)).p_2().rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.warning))
+                .flex().flex_wrap().items_center().gap_2().text_size(px(12.)).text_color(c(th.text))
+                .child(tf("cm.confirm", &[("cmd", &cmd), ("why", &why)]))
+                .child(div().id("cm-run").px_3().py(px(3.)).rounded_md().cursor_pointer().bg(c(th.accent)).text_color(c(th.base)).child(t("cm.run_now"))
+                    .on_click(cx.listener(|v, _, _w, cx| { if let Some((cmd, _)) = v.ctx_confirm.clone() { cx.emit(TermEvent::Audit("ctxmenu.approval", format!("approved command={:?}", ssh_term_proto::ai::redact(&cmd).0))); } v.ctx_submit(cx); })))
+                .child(div().id("cm-cancel").px_2().py(px(3.)).rounded_md().cursor_pointer().bg(c(th.surface0)).child(t("ui.cancel"))
+                    .on_click(cx.listener(|v, _, _w, cx| { cx.emit(TermEvent::Audit("ctxmenu.approval", "rejected".into())); v.ctx_confirm = None; cx.notify(); }))));
+        }
+        if let Some(msg) = self.ctx_denied.clone() {
+            body = body.child(div().id("cm-denied").absolute().bottom(px(12.)).left(px(12.)).right(px(12.)).p_2().rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.error))
+                .text_size(px(12.)).text_color(c(th.error)).cursor_pointer().child(msg).on_click(cx.listener(|v, _, _w, cx| { v.ctx_denied = None; cx.notify(); })));
+        }
+        if let Some(m) = &self.ctx_menu {
+            body = body.child(crate::ctxmenu_view::render(m, cx, Self::ctx_pick, Self::ctx_close));
         }
         if self.bell_until.is_some_and(|t| t > Instant::now()) {
             body = body.child(div().absolute().top_0().left_0().size_full().border_2().border_color(c(th.warning)).bg(c(th.warning).opacity(0.06)));

@@ -100,6 +100,8 @@ pub struct Session {
     pub fg_probe: Mutex<Option<FgProbe>>,
     /// Current working directory of the shell (local panes), for layout snapshots.
     pub cwd_probe: Mutex<Option<FgProbe>>,
+    /// Shell cwd reported via OSC 7 (`file://host/path`), local or remote.
+    pub osc7_cwd: Arc<Mutex<Option<String>>>,
     /// OSC 133;D exit status of the last command and a counter bumped on each report.
     pub last_exit: Mutex<Option<i32>>,
     pub exit_seq: AtomicU64,
@@ -127,7 +129,7 @@ fn find_osc(b: &[u8]) -> Option<(usize, usize, u8, &[u8])> {
     while i + 4 < b.len() {
         let p = b[i..].windows(2).position(|w| w == b"\x1b]")? + i;
         let rest = &b[p + 2..];
-        let (kind, skip) = if rest.starts_with(b"133;") { (b'1', 4) } else if rest.starts_with(b"9;4") { (b'9', 2) } else { i = p + 2; continue };
+        let (kind, skip) = if rest.starts_with(b"133;") { (b'1', 4) } else if rest.starts_with(b"9;4") { (b'9', 2) } else if rest.starts_with(b"7;") { (b'7', 2) } else { i = p + 2; continue };
         let body = &rest[skip..];
         let end = body.iter().enumerate().find_map(|(j, &c)| {
             if c == 0x07 { Some((j, j + 1)) } else if c == 0x1b && body.get(j + 1) == Some(&b'\\') { Some((j, j + 2)) } else { None }
@@ -162,6 +164,7 @@ impl Session {
             history_seed: Mutex::new(None),
             fg_probe: Mutex::new(None),
             cwd_probe: Mutex::new(None),
+            osc7_cwd: Arc::new(Mutex::new(None)),
             last_exit: Mutex::new(None),
             exit_seq: AtomicU64::new(0),
             connected: AtomicBool::new(false),
@@ -197,6 +200,8 @@ impl Session {
                                     *s2.last_exit.lock().unwrap() = code;
                                     s2.exit_seq.fetch_add(1, Ordering::Relaxed);
                                 }
+                            } else if kind == b'7' {
+                                if let Some(p) = crate::ctxmenu::parse_osc7(&String::from_utf8_lossy(payload)) { *s2.osc7_cwd.lock().unwrap() = Some(p); }
                             } else {
                                 *s2.shared.progress.lock().unwrap() = String::from_utf8_lossy(payload).into_owned();
                             }
@@ -365,6 +370,8 @@ mod tests {
         let (s, e, k, p) = find_osc(b).unwrap();
         assert_eq!((k, p), (b'1', &b"B"[..]));
         assert_eq!(&b[s..e], b"\x1b]133;B\x07");
+        let (_, _, k7, p7) = find_osc(b"x\x1b]7;file://h/tmp/a b\x07y").unwrap();
+        assert_eq!((k7, p7), (b'7', &b"file://h/tmp/a b"[..]));
         let b = b"\x1b]9;4;1;-1\x1b\\";
         let (_, _, k, p) = find_osc(b).unwrap();
         assert_eq!((k, p), (b'9', &b"4;1;-1"[..]));

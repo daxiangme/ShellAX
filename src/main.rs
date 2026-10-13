@@ -13,6 +13,7 @@ mod chat_view;
 mod termview;
 mod theme;
 mod ui;
+mod ctxmenu_view;
 
 use ssh_term_proto::i18n::{t, tf};
 use std::collections::{HashMap, HashSet};
@@ -226,6 +227,28 @@ impl Root {
                     this.toast(format!("🔔 {title}: {line}"), cx);
                     return;
                 }
+                termview::TermEvent::CtxEditor(path) => {
+                    let target = match &pane.read(cx).spec { Spec::Ssh(t) => t.clone(), Spec::Local => return };
+                    let v = this.sftp_for(target, w, cx);
+                    v.update(cx, |v, cx| v.edit_path(path.clone(), cx));
+                    this.sftp_current = Some(v);
+                    this.overlay = Overlay::Sftp;
+                    cx.notify();
+                    return;
+                }
+                termview::TermEvent::CtxCdTab(dir) => {
+                    let spec = pane.read(cx).spec.clone();
+                    this.new_tab(spec, w, cx);
+                    if let Some(p) = this.tabs.get(this.active).map(|t| t.focused.clone()) { Self::insert_when_ready(p, format!("cd -- {}", ssh_term_proto::ctxmenu::quote_path(dir)), cx); }
+                    return;
+                }
+                termview::TermEvent::CtxAiExplain(text) => {
+                    this.log("ai.explain_selection", format!("chars={}", text.chars().count()));
+                    let chat = this.open_chat(w, cx);
+                    let text = text.clone();
+                    chat.update(cx, |c, cx| c.explain_text(text, cx));
+                    return;
+                }
                 termview::TermEvent::Explain => {}
             }
             let fc = pane.update(cx, |p, cx| { let f = p.failure_context(); p.failed = None; cx.notify(); f });
@@ -348,7 +371,7 @@ impl Root {
                 let dir = l.path.clone();
                 let v = match self.sftp_views.get(&key) { Some(v) => v.clone(), None => {
                     let v = cx.new(|cx| { let mut v = sftp_view::SftpView::new_deferred(target, rt, pr, window, cx); v.initial_dir = dir; v.start(cx); v });
-                    self._subs.push(cx.subscribe_in(&v, window, |this, _, _ev: &sftp_view::SftpEvent, w, cx| this.close_overlay(w, cx)));
+                    self._subs.push(cx.subscribe_in(&v, window, Self::on_sftp_event));
                     self.sftp_views.insert(key, v.clone()); v
                 } };
                 self.sftp_current = Some(v);
@@ -357,13 +380,70 @@ impl Root {
         }
         cx.notify();
     }
+    /// SFTP view for a host (cached per pool key), subscribed to its events.
+    fn sftp_for(&mut self, t: SshTarget, window: &mut Window, cx: &mut Context<Self>) -> Entity<sftp_view::SftpView> {
+        let key = t.pool_key();
+        if let Some(v) = self.sftp_views.get(&key) { return v.clone(); }
+        let (rt, pr) = (self.rt.handle().clone(), self.prompts.clone());
+        let v = cx.new(|cx| sftp_view::SftpView::new(t, rt, pr, window, cx));
+        self._subs.push(cx.subscribe_in(&v, window, Self::on_sftp_event));
+        self.sftp_views.insert(key, v.clone());
+        v
+    }
+    fn on_sftp_event(&mut self, v: &Entity<sftp_view::SftpView>, ev: &sftp_view::SftpEvent, w: &mut Window, cx: &mut Context<Self>) {
+        match ev {
+            sftp_view::SftpEvent::Close => self.close_overlay(w, cx),
+            sftp_view::SftpEvent::Insert { remote, command } => {
+                let target = remote.then(|| v.read(cx).target.clone());
+                self.close_overlay(w, cx);
+                let pane = self.pane_for(target, w, cx);
+                Self::insert_when_ready(pane, command.clone(), cx);
+            }
+            sftp_view::SftpEvent::CdTab { remote, dir } => {
+                let spec = if *remote { Spec::Ssh(v.read(cx).target.clone()) } else { Spec::Local };
+                self.close_overlay(w, cx);
+                self.new_tab(spec, w, cx);
+                if let Some(p) = self.tabs.get(self.active).map(|t| t.focused.clone()) { Self::insert_when_ready(p, format!("cd -- {}", ssh_term_proto::ctxmenu::quote_path(dir)), cx); }
+            }
+        }
+    }
+    /// The session for a host (PRD 5.20): focused pane if it matches, else any pane on that host
+    /// (its tab is activated), else a new tab.
+    fn pane_for(&mut self, target: Option<SshTarget>, window: &mut Window, cx: &mut Context<Self>) -> Entity<TermView> {
+        let want = |v: &TermView| match (&v.spec, &target) { (Spec::Local, None) => true, (Spec::Ssh(t), Some(r)) => t.pool_key() == r.pool_key(), _ => false };
+        if let Some(tab) = self.tabs.get(self.active) { if want(tab.focused.read(cx)) { let p = tab.focused.clone(); let fh = p.read(cx).focus.clone(); window.focus(&fh, cx); return p; } }
+        let found = self.tabs.iter().enumerate().find_map(|(ti, tab)| tab.layout.leaves().into_iter().find(|p| want(p.read(cx))).map(|p| (ti, p)));
+        if let Some((ti, p)) = found {
+            self.active = ti; self.tabs[ti].focused = p.clone();
+            let fh = p.read(cx).focus.clone(); window.focus(&fh, cx); cx.notify();
+            return p;
+        }
+        self.new_tab(match target { Some(t) => Spec::Ssh(t), None => Spec::Local }, window, cx);
+        self.tabs[self.active].focused.clone()
+    }
+    /// Insert a command (no Enter) once the pane's shell is up.
+    fn insert_when_ready(pane: Entity<TermView>, cmd: String, cx: &mut Context<Self>) {
+        cx.spawn(async move |_, cx| {
+            let mut waited = false;
+            for _ in 0..150 {
+                let ready = pane.update(cx, |v, _| v.session.as_ref().is_some_and(|s| s.connected.load(std::sync::atomic::Ordering::Relaxed)));
+                if ready {
+                    if waited { cx.background_executor().timer(std::time::Duration::from_millis(600)).await; }
+                    let _ = pane.update(cx, |v, cx| v.insert_command(&cmd, cx));
+                    return;
+                }
+                waited = true;
+                cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
+            }
+        }).detach();
+    }
     fn open_sftp(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sftp_current = self.ssh_target_for_tools(cx).map(|t| {
             let key = t.pool_key();
             if let Some(v) = self.sftp_views.get(&key) { return v.clone(); }
             let (rt, pr) = (self.rt.handle().clone(), self.prompts.clone());
             let v = cx.new(|cx| sftp_view::SftpView::new(t, rt, pr, window, cx));
-            self._subs.push(cx.subscribe_in(&v, window, |this, _, _ev: &sftp_view::SftpEvent, w, cx| this.close_overlay(w, cx)));
+            self._subs.push(cx.subscribe_in(&v, window, Self::on_sftp_event));
             self.sftp_views.insert(key, v.clone());
             v
         });
@@ -1470,6 +1550,7 @@ fn main() {
                         host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., collapsed: HashSet::new(), host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: true, audit, audit_verify: None, audit_filter: Default::default(),
                         settings_dirty: vec![], toast: None, toast_seq: 0, _subs: vec![],
                     };
+                    crate::ctxmenu_view::init(root.rt.handle().clone(), root.prompts.clone());
                     root.apply_theme(window, cx);
                     root._subs.push(cx.observe_window_appearance(window, |this: &mut Root, w, cx| { this.apply_theme(w, cx); this.refresh_all(cx); }));
                     root._subs.push(cx.subscribe_in(&host_search, window, |_, _, ev: &InputEvent, _, cx| if matches!(ev, InputEvent::Change) { cx.notify() }));

@@ -91,6 +91,10 @@ fn resolve_relative_with_cwd() {
     assert_eq!(resolve("/etc/../etc/hosts", None, None), ("/etc/hosts".into(), true));
     assert_eq!(resolve("rel/a.txt", None, None), ("rel/a.txt".into(), false));
     assert_eq!(normalize("/../.."), "/");
+    assert_eq!(prompt_cwd("sshtest@box:~/work dir$ "), Some("~/work dir".into()));
+    assert_eq!(prompt_cwd("root@srv:/var/log# ls"), Some("/var/log".into()));
+    assert_eq!(prompt_cwd("plain text"), None);
+    assert_eq!(resolve("a.zip", Some("~/w"), None), ("~/w/a.zip".into(), true));
     assert_eq!(parse_osc7("file://host/home/u/my%20dir"), Some("/home/u/my dir".into()));
     assert_eq!(parse_osc7("file://h/tmp/%E4%B8%AD"), Some("/tmp/中".into()));
     assert_eq!(parse_osc7("http://x"), None);

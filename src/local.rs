@@ -12,7 +12,7 @@ pub const BASH_INTEGRATION: &str = r#"
 [ -f ~/.bashrc ] && . ~/.bashrc
 __as_ps1_done=${__as_ps1_done:-0}
 if [ "$__as_ps1_done" = 0 ]; then
-  PS1='\[\e]133;D;$?\a\e]133;A\a\]'"$PS1"'\[\e]133;B\a\]'
+  PS1='\[\e]133;D;$?\a\e]7;file://${HOSTNAME}${PWD}\a\e]133;A\a\]'"$PS1"'\[\e]133;B\a\]'
   PS0='\e]133;C\a'"$PS0"
   __as_ps1_done=1
 fi
@@ -31,6 +31,7 @@ ZDOTDIR="$__as_orig"
 : ${HISTFILE:=$__as_orig/.zsh_history}
 __as_precmd() {
   print -n "\e]133;D;$?\a"
+  print -n "\e]7;file://${HOST}${PWD}\a"
   print -n '\e]133;A\a'
   [[ "$PS1" == *'133;B'* ]] || PS1="$PS1"$'%{\e]133;B\a%}'
 }

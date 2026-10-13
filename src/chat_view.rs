@@ -140,6 +140,11 @@ impl ChatView {
         self.msgs.push(Msg { role: "user", text: q, note, plan: None });
         self.run(ssh_term_proto::ai::CHAT_SYSTEM_PROMPT, content, cx);
     }
+    /// Explain selected terminal text (context menu "Explain with AI"); redaction / first-send notice apply.
+    pub fn explain_text(&mut self, text: String, cx: &mut Context<Self>) {
+        if self.busy { return; }
+        self.send_text(tf("chat.explain_selection", &[("text", &text)]), cx);
+    }
     /// Explain a failed command (from the terminal's "Explain failure" button).
     pub fn explain(&mut self, cmd: String, code: i32, out: String, host: String, cx: &mut Context<Self>) {
         if self.busy { return; }

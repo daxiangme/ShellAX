@@ -848,3 +848,7 @@
 "cm.settings_clear_tools" = "Clear tool cache"
 "cm.settings_tools_cleared" = "Tool cache cleared"
 "cm.settings_help" = "Placeholders: {path} {name} {dir} {stem} {ext} {host}. Match: extensions / glob / types / hosts; tools = required commands."
+"cm.denied" = "Context-menu command refused: {cmd} — {why} (click to dismiss)"
+"cm.confirm" = "Run this command? {cmd} ({why})"
+"cm.run_now" = "Run"
+"chat.explain_selection" = "Explain this terminal output / command:\n```\n{text}\n```"

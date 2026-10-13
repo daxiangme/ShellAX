@@ -58,7 +58,14 @@ pub fn resolve(path: &str, cwd: Option<&str>, home: Option<&str>) -> (String, bo
     if path == "~" || path.starts_with("~/") {
         return match home { Some(h) => (normalize(&format!("{h}{}", &path[1..])), true), None => (path.to_string(), true) };
     }
-    match cwd.filter(|c| c.starts_with('/')) { Some(c) => (normalize(&join(c, path)), true), None => (path.to_string(), false) }
+    match cwd.filter(|c| c.starts_with('/') || c == &"~" || c.starts_with("~/")) { Some(c) => (normalize(&join(c, path)), true), None => (path.to_string(), false) }
+}
+
+/// Fallback cwd from a classic `user@host:dir$ ` prompt on the cursor line (`~` kept as is).
+pub fn prompt_cwd(line: &str) -> Option<String> {
+    static R: OnceLock<regex::Regex> = OnceLock::new();
+    let re = R.get_or_init(|| regex::Regex::new(r"[\w.-]+@[\w.-]+:\s*([~/][^$#]*?)\s*[$#]").unwrap());
+    re.captures_iter(line).last().map(|c| c[1].to_string())
 }
 
 /// Parse an OSC 7 payload (`file://host/path`, percent-encoded) into the path.
