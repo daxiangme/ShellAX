@@ -1571,6 +1571,7 @@ pub fn broadcast_count() -> usize { BROADCAST.lock().unwrap().iter().filter(|w| 
 pub fn in_broadcast(s: &Arc<Session>) -> bool { BROADCAST.lock().unwrap().iter().any(|w| std::ptr::eq(w.as_ptr(), Arc::as_ptr(s))) }
 /// Write user input: to every live member when `s` is broadcasting, else to `s` only.
 fn fanout(s: &Arc<Session>, bytes: Vec<u8>) {
+    if bytes.contains(&b'\r') { if let Some(n) = s.notifier.lock().unwrap().as_mut() { n.skip = 1; } }
     let members: Vec<Arc<Session>> = { let g = BROADCAST.lock().unwrap(); if !g.iter().any(|w| std::ptr::eq(w.as_ptr(), Arc::as_ptr(s))) { drop(g); return s.write(bytes); } g.iter().filter_map(|w| w.upgrade()).collect() };
     for m in members { if !m.exited.load(Ordering::Acquire) { m.write(bytes.clone()); } }
 }
