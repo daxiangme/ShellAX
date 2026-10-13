@@ -253,6 +253,7 @@ pub async fn scan_remote(s: &SftpSession, root: &str) -> Result<crate::dirsync::
             let r = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
             t.insert(r.clone(), crate::dirsync::FileInfo { size: if m.is_dir() { 0 } else { m.size.unwrap_or(0) }, mtime: m.mtime.unwrap_or(0) as u64, is_dir: m.is_dir() });
             if m.is_dir() { stack.push((join(&dir, &name), r)); }
+            if t.len() > crate::dirsync::MAX_ENTRIES { return Err(anyhow!("more than {} entries under {root}; pick a smaller directory", crate::dirsync::MAX_ENTRIES)); }
         }
     }
     Ok(t)

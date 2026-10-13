@@ -7,6 +7,8 @@ use std::collections::BTreeMap;
 pub struct FileInfo { pub size: u64, pub mtime: u64, pub is_dir: bool }
 /// Relative path ("a/b.txt") → info.
 pub type Tree = BTreeMap<String, FileInfo>;
+/// Safety cap for one sync scan (each side).
+pub const MAX_ENTRIES: usize = 20_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode { LocalToRemote, RemoteToLocal, TwoWay }
@@ -62,6 +64,7 @@ pub fn scan_local(root: &std::path::Path) -> std::io::Result<Tree> {
             let r = if rel.is_empty() { name } else { format!("{rel}/{name}") };
             let mtime = md.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
             t.insert(r.clone(), FileInfo { size: if md.is_dir() { 0 } else { md.len() }, mtime, is_dir: md.is_dir() });
+            if t.len() > MAX_ENTRIES { return Err(std::io::Error::other(format!("more than {MAX_ENTRIES} entries under {}; pick a smaller directory", root.display()))); }
             if md.is_dir() { stack.push((e.path(), r)); }
         }
     }
