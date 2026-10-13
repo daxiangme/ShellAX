@@ -12,7 +12,8 @@ use russh::{client, ChannelMsg};
 
 use crate::term::{BackendMsg, Session, Size};
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct SshTarget {
     pub host: String,
     pub port: u16,
@@ -34,6 +35,8 @@ pub struct SshTarget {
     pub ciphers: Vec<String>,
     /// Reverse-forward the local policy service so agent hooks on the remote host can reach it.
     pub remote_hooks: bool,
+    /// Persistent session: run the shell inside `tmux new -A -s <name>` on the remote.
+    pub tmux: Option<String>,
 }
 impl SshTarget {
     pub fn label(&self) -> String { format!("{}@{}:{}", self.user, self.host, self.port) }
@@ -232,6 +235,12 @@ impl Conn {
     }
 }
 
+/// Remote command for a persistent tmux pane (status bar hidden so it looks like a plain shell).
+pub fn tmux_command(name: &str) -> String {
+    let n = sh_quote(name);
+    format!("if command -v tmux >/dev/null 2>&1; then exec tmux new-session -A -s {n} \\; set-option status off; else echo '[agentshell] tmux not found, plain shell'; exec \"$SHELL\" -l; fi")
+}
+
 pub fn sh_quote(s: &str) -> String {
     if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+=:@,".contains(c)) { s.into() } else { format!("'{}'", s.replace('\'', "'\\''")) }
 }
@@ -408,7 +417,7 @@ pub fn spawn_ssh(rt: &tokio::runtime::Handle, target: SshTarget, size: Size, pro
                 let sleep = tokio::time::sleep(Duration::from_secs(wait));
                 tokio::pin!(sleep);
                 let mut gone = false;
-                loop { tokio::select! { _ = &mut sleep => break, m = from_ui.recv_async() => if m.is_err() { gone = true; break } } }
+                loop { tokio::select! { _ = &mut sleep => break, m = from_ui.recv_async() => if m.is_err() || matches!(m, Ok(BackendMsg::Close)) { gone = true; break } } }
                 if gone { break; }
                 continue;
             }
@@ -462,7 +471,11 @@ async fn run_shell(target: &SshTarget, prompts: &Prompts, s: &Arc<Session>, out_
     if target.remote_hooks { let _ = ch.set_env(false, "AGENTSHELL_HOST", target.host.clone()).await; }
     let sz = s.size();
     ch.request_pty(false, "xterm-256color", sz.cols as u32, sz.rows as u32, 0, 0, &[]).await?;
-    ch.request_shell(false).await?;
+    match &target.tmux {
+        // reattach (or create) the persistent session; fall back to a login shell without tmux
+        Some(name) => ch.exec(false, tmux_command(name)).await?,
+        None => ch.request_shell(false).await?,
+    }
     let (mut rd, wr) = ch.split();
     s.connected.store(true, Ordering::Release);
     *s.conn_error.lock().unwrap() = None;
@@ -473,7 +486,7 @@ async fn run_shell(target: &SshTarget, prompts: &Prompts, s: &Arc<Session>, out_
             m = from_ui.recv_async() => match m {
                 Ok(BackendMsg::Input(b)) => { if wr.data_bytes(b).await.is_err() { return Ok(ShellEnd::Lost) } }
                 Ok(BackendMsg::Resize { cols, rows }) => { let _ = wr.window_change(cols as u32, rows as u32, 0, 0).await; }
-                Err(_) => return Ok(ShellEnd::UiGone),
+                Ok(BackendMsg::Close) | Err(_) => return Ok(ShellEnd::UiGone),
             },
             m = rd.wait() => match m {
                 Some(ChannelMsg::Data { data }) => { let _ = out_tx.send(data.to_vec()); }

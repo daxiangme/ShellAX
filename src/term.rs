@@ -14,6 +14,8 @@ use alacritty_terminal::vte::ansi::Processor;
 pub enum BackendMsg {
     Input(Vec<u8>),
     Resize { cols: u16, rows: u16 },
+    /// Pane closed: end the backend (local: kill shell; ssh: close channel; daemon: detach only).
+    Close,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +80,8 @@ pub struct Session {
     pub history_seed: Mutex<Option<String>>,
     /// Local PTYs: returns the foreground process name (for agent identification).
     pub fg_probe: Mutex<Option<FgProbe>>,
+    /// Current working directory of the shell (local panes), for layout snapshots.
+    pub cwd_probe: Mutex<Option<FgProbe>>,
     /// Backend connection state (SSH connects asynchronously; local is connected immediately).
     pub connected: AtomicBool,
     pub conn_error: Mutex<Option<String>>,
@@ -122,6 +126,7 @@ impl Session {
             prompt_mark: Arc::new(Mutex::new(None)),
             history_seed: Mutex::new(None),
             fg_probe: Mutex::new(None),
+            cwd_probe: Mutex::new(None),
             connected: AtomicBool::new(false),
             conn_error: Mutex::new(None),
         });
@@ -169,6 +174,7 @@ impl Session {
     }
 
     /// Wake the UI (e.g. after a backend state change that produced no output).
+    pub fn close(&self) { let _ = self.tx.send(BackendMsg::Close); }
     pub fn poke(&self) { let _ = self.wake_tx.try_send(()); }
 
     pub fn write(&self, bytes: impl Into<Vec<u8>>) {

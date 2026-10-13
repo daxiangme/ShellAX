@@ -30,7 +30,8 @@ pub fn auto_direction(rows: usize, cols: usize) -> Option<Dir> {
 #[derive(Clone, Debug)]
 pub enum Node<T> {
     Leaf(T),
-    Split { dir: Dir, a: Box<Node<T>>, b: Box<Node<T>> },
+    /// `ratio` = share of the first child (0.1–0.9), changed by dragging the divider.
+    Split { dir: Dir, ratio: f32, a: Box<Node<T>>, b: Box<Node<T>> },
 }
 
 impl<T: Clone + PartialEq> Node<T> {
@@ -42,11 +43,19 @@ impl<T: Clone + PartialEq> Node<T> {
         match self {
             Node::Leaf(t) if t == target => {
                 let old = Node::Leaf(t.clone());
-                *self = Node::Split { dir, a: Box::new(old), b: Box::new(Node::Leaf(new)) };
+                *self = Node::Split { dir, ratio: 0.5, a: Box::new(old), b: Box::new(Node::Leaf(new)) };
                 true
             }
             Node::Leaf(_) => false,
             Node::Split { a, b, .. } => a.split(target, new.clone(), dir) || b.split(target, new, dir),
+        }
+    }
+    /// Set the ratio of the split at `path` (false = first child, true = second). Clamped.
+    pub fn set_ratio(&mut self, path: &[bool], r: f32) -> bool {
+        match (self, path.split_first()) {
+            (Node::Split { ratio, .. }, None) => { *ratio = r.clamp(0.1, 0.9); true }
+            (Node::Split { a, b, .. }, Some((second, rest))) => if *second { b.set_ratio(rest, r) } else { a.set_ratio(rest, r) },
+            _ => false,
         }
     }
     /// Remove leaf `target`; its sibling takes the parent's place. The last leaf can't be removed.
@@ -82,5 +91,11 @@ mod tests {
         assert!(n.remove(&1));
         assert_eq!(n.leaves(), vec![3]);
         assert!(!n.remove(&3));
+        let mut m = Node::Leaf(1);
+        m.split(&1, 2, Dir::Vertical);
+        m.split(&2, 3, Dir::Horizontal);
+        assert!(m.set_ratio(&[true], 0.95));
+        assert!(matches!(&m, Node::Split { b, .. } if matches!(**b, Node::Split { ratio, .. } if ratio == 0.9)));
+        assert!(!m.set_ratio(&[false], 0.3));
     }
 }

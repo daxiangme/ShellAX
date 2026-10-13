@@ -50,6 +50,8 @@ fn main() {
         "check" => check(args, &settings),
         "hook" => hook(args, &settings),
         "install" => install(args, &settings),
+        #[cfg(unix)]
+        "daemon" => { let sock = args.first().map(PathBuf::from).unwrap_or_else(|| ssh_term_proto::daemon::socket_path(&data_dir())); if let Err(e) = ssh_term_proto::daemon::serve(&sock) { eprintln!("agentshell daemon: {e:#}"); std::process::exit(1) } }
         "serve" => serve(args, settings),
         "-h" | "--help" | "help" => usage(),
         _ => usage(),

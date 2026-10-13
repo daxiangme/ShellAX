@@ -16,6 +16,9 @@ pub mod layout;
 pub mod local;
 pub mod ssh;
 pub mod sftp;
+#[cfg(unix)]
+pub mod daemon;
+pub mod session_store;
 pub mod forward;
 pub mod suggest;
 pub mod term;

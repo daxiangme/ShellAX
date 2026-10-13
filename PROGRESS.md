@@ -26,10 +26,10 @@
 - ☑ 4.1 本地 / 远程 / 动态 SOCKS5；列表启停、状态与计数、按主机保存 forwards.toml、主机连接时自动启动（src/forward.rs + src/port_view.rs；测试 port_forwards_local_remote_socks；GUI 实测 L 走 ssh、D 走 curl --socks5、R 远端 curl、重启后自动启动、停止后端口关闭）
 
 ## 5 会话持久化（P1）
-- ☐ 5.1 布局保存与启动恢复，恢复时不自动重跑，退出确认
-- ☐ 5.2 远端 tmux 持久会话适配
-- ☐ 5.3 本地后台保活（server/client）
-- ☐ 5.4 Agent resume
+- ☑ 5.1 布局保存与启动恢复（src/session_store.rs，layout.json 每 5 秒与关闭时写入；含分屏比例、cwd、主机、tmux 名、daemon id、resume）；恢复时 Shell 在原 cwd 重新启动、不重跑命令；退出确认对话框（screenshot-final-restore-*.png、退出确认实测）
+- ☑ 5.2 远端 tmux 持久会话：session.persistent=tmux 时 SSH 面板执行 `tmux new-session -A -s agentshell-xxxx`，退出后远端继续运行，重启 App 自动 reattach（实测 export 的变量仍在）；无 tmux 时回退普通 shell
+- ☑ 5.3 本地后台保活：`agentshell daemon`（src/daemon.rs，Unix socket 0600，512KB 输出回放，同机 /proc 探测前台进程与 cwd）；session.local_daemon 开启后本地面板由 daemon 持有，关窗口后 Agent 继续运行，重开自动接回（tests/daemon.rs + GUI 实测）；关闭面板会结束 daemon 中对应 shell
+- ☑ 5.4 Agent resume：快照记录面板最近识别到的 Agent → `claude --continue` / `codex resume --last` / `grok --resume`（grok 参数未在本机核实）；进程丢失后恢复布局时显示“恢复 Agent”按钮，点击才运行；daemon 仍持有时不提示
 
 ## 6 内置 AI（P1）
 - ☐ 6.1 对话面板（流式，带脱敏后的终端上下文）
@@ -39,7 +39,7 @@
 ## 7 其余（P2 / 3.7 设置全表）
 - ☐ 7.1 桌面通知（Agent 等待输入 / 需确认）
 - ☐ 7.2 IME 预编辑
-- ☐ 7.3 分屏拖拽比例
+- ☑ 7.3 分屏拖拽比例（分隔条拖动，Node::Split.ratio 0.1–0.9，随布局保存）
 - ☐ 7.4 标签标题随语言
 - ☐ 7.5 iTerm2 主题导入
 - ☐ 7.6 更新检查

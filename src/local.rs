@@ -46,7 +46,10 @@ fn home() -> Option<std::path::PathBuf> { std::env::var_os("HOME").map(Into::int
 pub static INTEGRATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
 
 /// `shell`: explicit shell path; None = $SHELL (bash/zsh get OSC 133 integration).
-pub fn spawn_local(size: Size, shell: Option<&str>) -> Result<Arc<Session>> {
+pub fn spawn_local(size: Size, shell: Option<&str>) -> Result<Arc<Session>> { spawn_local_in(size, shell, None) }
+
+/// Like `spawn_local`, starting in `cwd` (layout restore) when it exists.
+pub fn spawn_local_in(size: Size, shell: Option<&str>, cwd: Option<&std::path::Path>) -> Result<Arc<Session>> {
     let (session, out_tx, from_ui) = Session::new(size);
     let pty = native_pty_system();
     let pair = pty.openpty(PtySize { rows: size.rows as u16, cols: size.cols as u16, pixel_width: 0, pixel_height: 0 })?;
@@ -74,8 +77,11 @@ pub fn spawn_local(size: Size, shell: Option<&str>) -> Result<Arc<Session>> {
     if sh.ends_with("zsh") { hist_file = ".zsh_history"; }
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
-    if let Some(h) = home() { cmd.cwd(h); }
+    match cwd.filter(|c| c.is_dir()) { Some(c) => cmd.cwd(c), None => if let Some(h) = home() { cmd.cwd(h); } }
     let mut child = pair.slave.spawn_command(cmd)?;
+    if let Some(pid) = child.process_id() {
+        *session.cwd_probe.lock().unwrap() = Some(Box::new(move || std::fs::read_link(format!("/proc/{pid}/cwd")).ok().map(|p| p.display().to_string())));
+    }
     if let Some(h) = home() {
         if let Ok(body) = std::fs::read(h.join(hist_file)) {
             *session.history_seed.lock().unwrap() = Some(String::from_utf8_lossy(&body).into_owned());
@@ -115,6 +121,7 @@ pub fn spawn_local(size: Size, shell: Option<&str>) -> Result<Arc<Session>> {
     std::thread::Builder::new().name("pty-writer".into()).spawn(move || {
         while let Ok(msg) = from_ui.recv() {
             match msg {
+                BackendMsg::Close => break,
                 BackendMsg::Input(b) => { let _ = writer.write_all(&b); let _ = writer.flush(); }
                 BackendMsg::Resize { cols, rows } => {
                     let _ = master.lock().unwrap().resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });

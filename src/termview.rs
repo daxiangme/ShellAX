@@ -360,6 +360,12 @@ pub struct TermView {
     detect_scheduled: bool,
     pub pending_paste: Option<String>,
     pub ai: Option<AiCard>,
+    /// Local pane held by the keep-alive daemon (id there).
+    pub daemon_id: Option<String>,
+    /// After a layout restore: agent resume command offered as a button (never auto-run).
+    pub resume_offer: Option<String>,
+    /// Last agent seen in this pane (kept for the layout snapshot after it exits).
+    pub last_agent: Option<String>,
     bell_until: Option<Instant>,
     _subs: Vec<Subscription>,
 }
@@ -410,7 +416,7 @@ impl TermView {
             selecting: false, scroll_drag: false, history, tracker: InputTracker::new(),
             last_activity: Instant::now(), blink_running: false, last_mouse_cell: None, mouse_down_btn: None,
             manifests, last_command: None, agent: None, agent_seen: Instant::now(), last_detect: Instant::now() - Duration::from_secs(5),
-            detect_scheduled: false, pending_paste: None, ai: None, bell_until: None, _subs: subs,
+            detect_scheduled: false, pending_paste: None, ai: None, daemon_id: None, resume_offer: None, last_agent: None, bell_until: None, _subs: subs,
         }
     }
 
@@ -518,7 +524,7 @@ impl TermView {
             Some((i, st)) => if self.agent_seen.elapsed() < Duration::from_secs(10) { Some((i, st)) } else { None },
             None => None,
         };
-        if new != self.agent { self.agent = new; cx.notify(); }
+        if new != self.agent { self.agent = new; if let Some((i, _)) = new { self.last_agent = Some(agent::display_name(&self.manifests[i].id).to_string()); } cx.notify(); }
     }
 
     pub fn agent_label(&self) -> Option<(String, AgentState)> {
@@ -1130,6 +1136,15 @@ impl Render for TermView {
                 .child(btn("paste-ok", t("ui.paste"), true).on_click(cx.listener(|v, _, _w, cx| { if let Some(t) = v.pending_paste.take() { v.paste_text(t, cx); } cx.notify(); }))));
         }
         if let Some(card) = self.ai_card(cx) { body = body.child(card); }
+        if let Some(cmd) = self.resume_offer.clone() {
+            body = body.child(div().absolute().bottom(px(12.)).left(px(12.)).right(px(12.)).p_2().rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.accent))
+                .flex().flex_wrap().items_center().gap_2().text_size(px(12.)).text_color(c(th.text))
+                .child(tf("term.restored_resume", &[("cmd", &cmd)]))
+                .child(div().id("resume-run").px_3().py(px(3.)).rounded_md().cursor_pointer().bg(c(th.accent)).text_color(c(th.base)).child(t("term.resume_agent"))
+                    .on_click(cx.listener(|v, _, _w, cx| { if let (Some(cmd), Some(s)) = (v.resume_offer.take(), v.session.clone()) { s.write(format!("{cmd}\r").into_bytes()); } cx.notify(); })))
+                .child(div().id("resume-dismiss").px_2().py(px(3.)).rounded_md().cursor_pointer().bg(c(th.surface0)).child(t("term.dismiss"))
+                    .on_click(cx.listener(|v, _, _w, cx| { v.resume_offer = None; cx.notify(); }))));
+        }
         if self.bell_until.is_some_and(|t| t > Instant::now()) {
             body = body.child(div().absolute().top_0().left_0().size_full().border_2().border_color(c(th.warning)).bg(c(th.warning).opacity(0.06)));
         }

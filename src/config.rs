@@ -153,8 +153,8 @@ impl Default for Audit { fn default() -> Self { Self { dir: s_auditdir(), retent
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
-pub struct SessionCfg { pub persistent: String, pub restore_layout: bool, pub confirm_close: bool, pub auto_reconnect: bool }
-impl Default for SessionCfg { fn default() -> Self { Self { persistent: s_off(), restore_layout: t(), confirm_close: t(), auto_reconnect: t() } } }
+pub struct SessionCfg { pub persistent: String, pub restore_layout: bool, pub confirm_close: bool, pub auto_reconnect: bool, pub local_daemon: bool }
+impl Default for SessionCfg { fn default() -> Self { Self { persistent: s_off(), restore_layout: t(), confirm_close: t(), auto_reconnect: t(), local_daemon: false } } }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]

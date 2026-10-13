@@ -61,6 +61,13 @@ pub(crate) fn data_dir() -> std::path::PathBuf {
 }
 
 // ---------------------------------------------------------------- app shell
+#[derive(Default)]
+struct PaneInit { cwd: Option<String>, daemon_id: Option<String>, resume: Option<String> }
+
+#[derive(Clone)]
+struct DividerDrag { tab: usize, path: Vec<bool> }
+impl Render for DividerDrag { fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement { div() } }
+
 struct Tab { layout: Node<Entity<TermView>>, focused: Entity<TermView> }
 
 pub(crate) enum Overlay { None, Settings(Entity<SettingsView>), Palette(Entity<Palette>), Host(Entity<HostDialog>), Audit, Sftp, Port, Ai }
@@ -92,6 +99,8 @@ pub(crate) struct Root {
     toast_seq: u64,
     pub(crate) sftp_views: HashMap<String, Entity<sftp_view::SftpView>>,
     pub(crate) port_view: Option<Entity<port_view::PortView>>,
+    quit_confirm: bool,
+    quit_ok: bool,
     pub(crate) sftp_current: Option<Entity<sftp_view::SftpView>>,
     _subs: Vec<gpui::Subscription>,
 }
@@ -133,6 +142,20 @@ impl Root {
         }).clone()
     }
     fn open_pane(&mut self, spec: Spec, window: &mut Window, cx: &mut Context<Self>) -> Entity<TermView> {
+        self.open_pane_with(spec, PaneInit::default(), window, cx)
+    }
+    fn open_pane_with(&mut self, spec: Spec, pi: PaneInit, window: &mut Window, cx: &mut Context<Self>) -> Entity<TermView> {
+        let mut pi = pi;
+        // reattaching to a still-running daemon shell: the agent is alive, nothing to resume
+        #[cfg(unix)]
+        if let Some(id) = &pi.daemon_id {
+            if ssh_term_proto::daemon::list(&ssh_term_proto::daemon::socket_path(&data_dir())).is_ok_and(|l| l.iter().any(|i| &i.id == id && i.alive)) { pi.resume = None; }
+        }
+        let v = self.open_pane_inner(spec, &pi, window, cx);
+        v.update(cx, |v, _| { v.resume_offer = pi.resume.clone(); if v.daemon_id.is_none() { v.daemon_id = pi.daemon_id.clone(); } });
+        v
+    }
+    fn open_pane_inner(&mut self, spec: Spec, pi: &PaneInit, window: &mut Window, cx: &mut Context<Self>) -> Entity<TermView> {
         let init = Size { cols: 80, rows: 24 };
         let h = self.history_for(&spec.history_key());
         let m = self.manifests.clone();
@@ -141,11 +164,28 @@ impl Root {
                 let shell = config::get().terminal.shell.clone();
                 let sh = if shell.is_empty() { std::env::var("SHELL").unwrap_or_else(|_| "bash".into()) } else { shell.clone() };
                 let title = tf("main.local_title", &[("shell", &sh.rsplit('/').next().unwrap_or("sh"))]);
-                let sess = local::spawn_local(init, (!shell.is_empty()).then_some(shell.as_str()));
+                let cwd = pi.cwd.as_deref().map(std::path::Path::new);
+                #[cfg(unix)]
+                if config::get().session.local_daemon {
+                    let id = pi.daemon_id.clone().unwrap_or_else(ssh_term_proto::session_store::uuid_like);
+                    let sock = ssh_term_proto::daemon::socket_path(&data_dir());
+                    let exe = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("agentshell"))).unwrap_or_else(|| "agentshell".into());
+                    match ssh_term_proto::daemon::ensure(&sock, &exe).and_then(|_| ssh_term_proto::daemon::attach(&sock, &id, init, &shell, pi.cwd.as_deref().unwrap_or(""))) {
+                        Ok(sess) => {
+                            let title = format!("{title} · {}", t("main.daemon_tag"));
+                            let v = cx.new(|cx| TermView::new(&title, Spec::Local, Ok(sess), h, m, window, cx));
+                            v.update(cx, |v, _| v.daemon_id = Some(id));
+                            return v;
+                        }
+                        Err(e) => self.toast(tf("main.daemon_failed", &[("e", &format!("{e:#}"))]), cx),
+                    }
+                }
+                let sess = local::spawn_local_in(init, (!shell.is_empty()).then_some(shell.as_str()), cwd);
                 cx.new(|cx| TermView::new(&title, Spec::Local, sess, h, m, window, cx))
             }
-            Spec::Ssh(t) => {
-                let title = t.label();
+            Spec::Ssh(mut t) => {
+                if config::get().session.persistent == "tmux" && t.tmux.is_none() { t.tmux = Some(ssh_term_proto::session_store::new_session_name()); }
+                let title = match &t.tmux { Some(n) => format!("{} · tmux:{n}", t.label()), None => t.label() };
                 self.log("ssh.connect", format!("{} (known_hosts: {})", t.label(), t.known_hosts.display()));
                 let s = ssh::spawn_ssh(self.rt.handle(), t.clone(), init, self.prompts.clone());
                 let pv = self.port_view(window, cx);
@@ -209,6 +249,7 @@ impl Root {
     }
     fn close_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(target) = self.focused_pane(window, cx) else { return };
+        self.end_pane(&target, cx);
         let Some(tab) = self.tabs.get_mut(self.active) else { return };
         if !tab.layout.remove(&target) {
             self.tabs.remove(self.active);
@@ -219,6 +260,74 @@ impl Root {
         self.focus_active(window, cx);
         cx.notify();
     }
+    /// A pane is closed by the user: stop its backend (a daemon pane is killed in the daemon too).
+    fn end_pane(&self, v: &Entity<TermView>, cx: &App) {
+        let v = v.read(cx);
+        #[cfg(unix)]
+        if let Some(id) = &v.daemon_id { let _ = ssh_term_proto::daemon::kill(&ssh_term_proto::daemon::socket_path(&data_dir()), id); }
+        if let Some(s) = &v.session { s.close(); }
+    }
+
+    // ---- layout persistence (PRD 3.6)
+    fn snapshot(&self, cx: &App) -> ssh_term_proto::session_store::LayoutSave {
+        use ssh_term_proto::session_store::{resume_command, NodeSave, PaneSave};
+        fn walk(n: &Node<Entity<TermView>>, cx: &App) -> NodeSave {
+            match n {
+                Node::Leaf(v) => {
+                    let v = v.read(cx);
+                    let resume = v.agent_label().map(|a| a.0).or(v.last_agent.clone()).and_then(|a| resume_command(&a)).map(str::to_string).or(v.resume_offer.clone());
+                    let pane = match &v.spec {
+                        Spec::Local => PaneSave::Local { cwd: v.session.as_ref().and_then(|s| s.cwd_probe.lock().unwrap().as_ref().and_then(|f| f())).unwrap_or_default(), daemon_id: v.daemon_id.clone(), resume },
+                        Spec::Ssh(t) => PaneSave::Ssh { target: t.clone(), resume },
+                    };
+                    NodeSave::Leaf { pane }
+                }
+                Node::Split { dir, ratio, a, b } => NodeSave::Split { vertical: *dir == Dir::Vertical, ratio: *ratio, a: Box::new(walk(a, cx)), b: Box::new(walk(b, cx)) },
+            }
+        }
+        ssh_term_proto::session_store::LayoutSave { version: 1, saved_at: chrono::Local::now().to_rfc3339(), active: self.active, tabs: self.tabs.iter().map(|t| walk(&t.layout, cx)).collect() }
+    }
+    pub(crate) fn save_layout(&self, cx: &App) {
+        let l = self.snapshot(cx);
+        if l.tabs.is_empty() { return; }
+        if let Err(e) = ssh_term_proto::session_store::save(&data_dir().join("layout.json"), &l) { eprintln!("layout save: {e:#}"); }
+    }
+    /// Rebuild tabs from layout.json. Shells start fresh in the saved cwd; nothing is re-run.
+    fn restore_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        use ssh_term_proto::session_store::{NodeSave, PaneSave};
+        let Some(l) = ssh_term_proto::session_store::load(&data_dir().join("layout.json")) else { return false };
+        if l.tabs.is_empty() { return false; }
+        fn build(r: &mut Root, n: &NodeSave, window: &mut Window, cx: &mut Context<Root>) -> Node<Entity<TermView>> {
+            match n {
+                NodeSave::Leaf { pane } => Node::Leaf(match pane.clone() {
+                    PaneSave::Local { cwd, daemon_id, resume } => r.open_pane_with(Spec::Local, PaneInit { cwd: (!cwd.is_empty()).then_some(cwd), daemon_id, resume }, window, cx),
+                    PaneSave::Ssh { target, resume } => r.open_pane_with(Spec::Ssh(target), PaneInit { resume, ..Default::default() }, window, cx),
+                }),
+                NodeSave::Split { vertical, ratio, a, b } => Node::Split { dir: if *vertical { Dir::Vertical } else { Dir::Horizontal }, ratio: *ratio, a: Box::new(build(r, a, window, cx)), b: Box::new(build(r, b, window, cx)) },
+            }
+        }
+        for n in &l.tabs {
+            let layout = build(self, n, window, cx);
+            let focused = layout.leaves()[0].clone();
+            self.tabs.push(Tab { layout, focused });
+        }
+        self.active = l.active.min(self.tabs.len() - 1);
+        self.log("layout.restore", format!("{} tabs from {}", self.tabs.len(), l.saved_at));
+        self.toast(t("main.layout_restored").into(), cx);
+        self.focus_active(window, cx);
+        true
+    }
+    fn should_close(&mut self, _w: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.save_layout(cx);
+        if self.quit_ok { return true; }
+        let agents = self.running_agents(cx);
+        let live = self.tabs.iter().flat_map(|t| t.layout.leaves()).filter(|v| { let v = v.read(cx); v.daemon_id.is_none() && v.session.as_ref().is_some_and(|s| !s.exited.load(Ordering::Acquire)) }).count();
+        if config::get().session.confirm_close && (agents > 0 || live > 0) { self.quit_confirm = true; cx.notify(); return false; }
+        self.log("app.quit", "window closed");
+        true
+    }
+    fn running_agents(&self, cx: &App) -> usize { self.tabs.iter().flat_map(|t| t.layout.leaves()).filter(|v| v.read(cx).agent_label().is_some()).count() }
+
     fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.get(self.active) { let fh = tab.focused.read(cx).focus.clone(); window.focus(&fh, cx); }
     }
@@ -550,16 +659,33 @@ pub(crate) fn sync_component_theme(th: &Theme, cx: &mut App) {
     cx.refresh_windows();
 }
 
-fn render_node(node: &Node<Entity<TermView>>, th: &Theme) -> AnyElement {
-    match node {
-        Node::Leaf(p) => div().flex_1().size_full().flex().overflow_hidden().child(p.clone()).into_any_element(),
-        Node::Split { dir, a, b } => {
-            let d = div().flex_1().size_full().flex().overflow_hidden();
-            let (d, divider) = match dir {
-                Dir::Vertical => (d.flex_row(), div().w(px(1.)).h_full().bg(c(th.surface1))),
-                Dir::Horizontal => (d.flex_col(), div().h(px(1.)).w_full().bg(c(th.surface1))),
-            };
-            d.child(render_node(a, th)).child(divider).child(render_node(b, th)).into_any_element()
+impl Root {
+    fn render_node(&self, tab: usize, node: &Node<Entity<TermView>>, path: Vec<bool>, th: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        match node {
+            Node::Leaf(p) => div().flex_1().size_full().flex().overflow_hidden().child(p.clone()).into_any_element(),
+            Node::Split { dir, ratio, a, b } => {
+                let vertical = *dir == Dir::Vertical;
+                let id = SharedString::from(format!("split-{tab}-{}", path.iter().map(|b| if *b { '1' } else { '0' }).collect::<String>()));
+                let d = div().id(id.clone()).flex_1().size_full().flex().overflow_hidden();
+                let d = if vertical { d.flex_row() } else { d.flex_col() };
+                let (pa, pb) = { let mut x = path.clone(); x.push(false); let mut y = path.clone(); y.push(true); (x, y) };
+                let first = div().flex().overflow_hidden().flex_shrink_0().child(self.render_node(tab, a, pa, th, cx));
+                let first = if vertical { first.h_full().w(gpui::relative(*ratio)) } else { first.w_full().h(gpui::relative(*ratio)) };
+                let second = div().flex_1().flex().overflow_hidden().child(self.render_node(tab, b, pb, th, cx));
+                let drag = DividerDrag { tab, path: path.clone() };
+                let divider = div().id(SharedString::from(format!("{id}-div"))).flex_shrink_0().bg(c(th.surface1)).hover(|s| s.bg(c(cur().accent)))
+                    .on_drag(drag, |d: &DividerDrag, _, _, cx| cx.new(|_| d.clone()));
+                let divider = if vertical { divider.w(px(3.)).h_full().cursor_col_resize() } else { divider.h(px(3.)).w_full().cursor_row_resize() };
+                let me_path = path.clone();
+                d.on_drag_move(cx.listener(move |this, ev: &gpui::DragMoveEvent<DividerDrag>, _w, cx| {
+                    let dd = ev.drag(cx).clone();
+                    if dd.path != me_path || dd.tab != tab { return; }
+                    let b = ev.bounds;
+                    let r = if vertical { (ev.event.position.x - b.left()) / b.size.width } else { (ev.event.position.y - b.top()) / b.size.height };
+                    if let Some(t) = this.tabs.get_mut(tab) { if t.layout.set_ratio(&dd.path, r) { cx.notify(); } }
+                }))
+                .child(first).child(divider).child(second).into_any_element()
+            }
         }
     }
 }
@@ -629,7 +755,7 @@ impl Render for Root {
         .child(tb_btn("close-pane", IconName::X, t("ui.close_pane")).on_click(cx.listener(|this, _, w, cx| this.close_pane(w, cx))));
 
         let panes = match self.tabs.get(self.active) {
-            Some(tab) => div().flex_1().flex().overflow_hidden().child(render_node(&tab.layout, &th)),
+            Some(tab) => div().flex_1().flex().overflow_hidden().child(self.render_node(self.active, &tab.layout, vec![], &th, cx)),
             None => div().flex_1().flex().flex_col().items_center().justify_center().gap_3().bg(c(th.base))
                 .child(icon(IconName::SquareTerminal, 36., c(th.overlay0)))
                 .child(div().text_size(px(13.)).text_color(c(th.subtext)).child(t("ui.no_open_terminals")))
@@ -747,6 +873,23 @@ impl Render for Root {
                     .child(ui::button("ap-deny", t("ui.deny"), 0).on_click(cx.listener(|this, _, _w, cx| this.answer_approval(false, cx))))
                     .child(ui::button("ap-allow", t("ui.allow_once"), 1).on_click(cx.listener(|this, _, _w, cx| this.answer_approval(true, cx)))))));
         } }
+        if self.quit_confirm {
+            let agents = self.running_agents(cx);
+            let panes = self.tabs.iter().map(|t| t.layout.leaves().len()).sum::<usize>();
+            let daemon = self.tabs.iter().flat_map(|t| t.layout.leaves()).filter(|v| v.read(cx).daemon_id.is_some()).count();
+            root = root.child(ui::modal(ui::card(520.).p_5().gap_3()
+                .child(div().flex().items_center().gap_2().child(icon(IconName::TriangleAlert, 16., c(th.warning)))
+                    .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("main.quit_title"))))
+                .child(div().text_size(px(12.5)).text_color(c(th.subtext)).child(tf("main.quit_body", &[("p", &panes), ("a", &agents), ("d", &daemon)])))
+                .child(div().text_size(px(11.5)).text_color(c(th.overlay1)).child(t("main.quit_note")))
+                .child(div().flex().gap_2().justify_end()
+                    .child(ui::button("quit-cancel", t("ui.cancel"), 0).on_click(cx.listener(|this, _, _w, cx| { this.quit_confirm = false; cx.notify(); })))
+                    .child(ui::button("quit-ok", t("main.quit_ok"), 2).on_click(cx.listener(|this, _, w, cx| {
+                        this.quit_ok = true; this.save_layout(cx); this.log("app.quit", "confirmed");
+                        for v in this.tabs.iter().flat_map(|t| t.layout.leaves()) { if let Some(s) = &v.read(cx).session { if v.read(cx).daemon_id.is_none() { s.close(); } } }
+                        w.remove_window(); cx.quit();
+                    }))))));
+        }
         if let Some((msg, _)) = &self.toast {
             root = root.child(div().absolute().bottom(px(40.)).right(px(16.)).max_w(px(460.)).px_4().py_2().rounded_lg().bg(c(th.base)).border_1().border_color(c(th.surface1)).shadow_lg()
                 .flex().items_center().gap_2().text_size(px(12.)).text_color(c(th.text)).child(icon(IconName::Info, 14., c(th.accent))).child(msg.clone()));
@@ -786,7 +929,7 @@ fn main() {
                     let audit = audit_log();
                     let mut root = Root {
                         rt, default_target, tabs: vec![], active: 0, themes, histories: HashMap::new(),
-                        manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], policy_port: None, overlay: Overlay::None, sftp_views: HashMap::new(), sftp_current: None, port_view: None,
+                        manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], policy_port: None, overlay: Overlay::None, sftp_views: HashMap::new(), sftp_current: None, port_view: None, quit_confirm: false, quit_ok: false,
                         host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, collapsed: HashSet::new(), sidebar_visible: true, audit, audit_verify: None,
                         settings_dirty: vec![], toast: None, toast_seq: 0, _subs: vec![],
                     };
@@ -825,7 +968,17 @@ fn main() {
                         }).is_err() { break; }
                     }).detach();
                     if let Some(e) = load_err.clone() { root.toast(e, cx); }
-                    if config::get().general.startup != "blank" {
+                    let st = config::get();
+                    let want_restore = (st.general.startup == "restore" || (st.session.restore_layout && st.general.startup != "blank")) && std::env::var("AGENTSHELL_NO_RESTORE").is_err();
+                    let restored = want_restore && root.restore_layout(window, cx);
+                    // keep layout.json fresh (crash-safe) and save on close
+                    cx.spawn(async move |this, cx| loop {
+                        cx.background_executor().timer(std::time::Duration::from_secs(5)).await;
+                        if this.update(cx, |r, cx| r.save_layout(cx)).is_err() { break; }
+                    }).detach();
+                    let me = cx.entity().downgrade();
+                    window.on_window_should_close(cx, move |w, cx| me.update(cx, |r, cx| r.should_close(w, cx)).unwrap_or(true));
+                    if !restored && config::get().general.startup != "blank" {
                         let l = root.open_pane(Spec::Local, window, cx);
                         let mut layout = Node::Leaf(l.clone());
                         if let Some(t) = root.default_target.clone() {

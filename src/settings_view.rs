@@ -132,7 +132,7 @@ impl SettingsView {
         use Cat::*;
         vec![
             r(General, t("ui.interface_language"), t("ui.applies_immediately_follow_system_reads"), Ctl::Choice("general.language", opts(&[("system", t("ui.follow_system")), ("zh-CN", "简体中文"), ("en", "English")])), false),
-            r(General, t("ui.on_startup"), t("ui.what_to_open_when_the"), Ctl::Choice("general.startup", opts(&[("local", t("ui.local_terminal")), ("restore", t("ui.restore_layout_coming_soon")), ("blank", t("ui.blank"))])), false),
+            r(General, t("ui.on_startup"), t("ui.what_to_open_when_the"), Ctl::Choice("general.startup", opts(&[("local", t("ui.local_terminal")), ("restore", t("ui.restore_layout")), ("blank", t("ui.blank"))])), false),
             r(General, t("ui.check_for_updates_automatically"), "", Ctl::Toggle("general.check_updates"), true),
             r(General, t("ui.update_channel"), "", Ctl::Choice("general.update_channel", opts(&[("stable", t("ui.stable")), ("beta", t("ui.beta"))])), true),
             r(General, t("ui.config_file"), t("ui.all_settings_are_stored_here"), Ctl::Info(config::config_path().display().to_string()), false),
@@ -204,9 +204,10 @@ impl SettingsView {
             r(Audit, t("ui.retention_days"), "", Ctl::Text("audit.retention_days", "90"), true),
             r(Audit, t("ui.log_manually_typed_commands"), t("ui.by_default_only_connections_permissions"), Ctl::Toggle("audit.log_commands"), true),
 
-            r(Session, t("ui.persistent_sessions"), t("ui.resume_via_remote_tmux_after"), Ctl::Choice("session.persistent", opts(&[("off", t("ui.off")), ("tmux", "tmux")])), true),
-            r(Session, t("ui.restore_layout_on_startup"), "", Ctl::Toggle("session.restore_layout"), true),
-            r(Session, t("ui.confirm_before_closing"), t("ui.confirm_closing_a_tab_while"), Ctl::Toggle("session.confirm_close"), true),
+            r(Session, t("ui.persistent_sessions"), t("ui.resume_via_remote_tmux_after"), Ctl::Choice("session.persistent", opts(&[("off", t("ui.off")), ("tmux", "tmux")])), false),
+            r(Session, t("ui.local_daemon"), t("ui.local_daemon.d"), Ctl::Toggle("session.local_daemon"), false),
+            r(Session, t("ui.restore_layout_on_startup"), "", Ctl::Toggle("session.restore_layout"), false),
+            r(Session, t("ui.confirm_before_closing"), t("ui.confirm_closing_a_tab_while"), Ctl::Toggle("session.confirm_close"), false),
             r(Session, t("ui.auto_reconnect"), "", Ctl::Toggle("session.auto_reconnect"), false),
 
             r(Notify, t("ui.desktop_notifications"), "", Ctl::Toggle("notify.desktop"), false),
