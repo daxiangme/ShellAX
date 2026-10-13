@@ -563,6 +563,7 @@ impl Root {
                 match cx.open_window(opts, move |w, cx| {
                     let inner = vv.clone();
                     w.on_window_should_close(cx, move |_, cx| { inner.update(cx, |_, cx| cx.emit(sftp_view::SftpEvent::Move(SftpMode::Tab))); false });
+                    if !chrome::NATIVE_LIGHTS { w.set_client_inset(px(0.)); }
                     let d = cx.new(|_| SftpWindow { view: vv });
                     cx.new(|cx| gpui_component::Root::new(d, w, cx))
                 }) {
@@ -1743,6 +1744,8 @@ fn main() {
         cx.open_window(
             chrome::window_options(bounds, Some("AgentShell".into())),
             move |window, cx| {
+                // no transparent shadow inset around client-drawn windows (no compositor alpha on X11)
+                if !chrome::NATIVE_LIGHTS { window.set_client_inset(px(0.)); }
                 let view = cx.new(|cx| {
                     let (hk_tx, hk_rx) = flume::unbounded::<HostKeyPrompt>();
                     let (au_tx, au_rx) = flume::unbounded::<ssh::AuthPrompt>();
@@ -1891,7 +1894,16 @@ fn shown_title(v: &TermView) -> SharedString { v.shown_title() }
 /// Root view of a detached SFTP window (PRD 5.21). Closing it re-attaches the view as a tab.
 struct SftpWindow { view: Entity<sftp_view::SftpView> }
 impl Render for SftpWindow {
-    fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().flex().flex_col().bg(c(cur().base)).text_color(c(cur().text)).child(self.view.clone())
+    fn render(&mut self, w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let th = cur();
+        let v = self.view.clone();
+        let title = ssh_term_proto::sftp_mode::title(&v.read(_cx).target.label());
+        // own title bar: traffic lights (close = re-attach as tab), drag to move
+        let bar = chrome::drag_region(div().id("sftp-win-titlebar")).h(px(chrome::TITLE_H)).flex_shrink_0().flex().items_center().bg(c(th.crust)).border_b_1().border_color(c(th.surface1).opacity(0.6))
+            .child(chrome::traffic_lights("sftp-lights", w, move |_, cx| v.update(cx, |_, cx| cx.emit(sftp_view::SftpEvent::Move(SftpMode::Tab)))))
+            .child(div().flex_1().text_center().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).text_color(c(th.subtext)).child(title))
+            .child(div().w(px(chrome::LIGHTS_W)));
+        div().size_full().relative().flex().flex_col().bg(c(th.base)).font_family(theme::ui_font()).text_color(c(th.text))
+            .child(bar).child(self.view.clone()).children(chrome::resize_edges(w))
     }
 }
