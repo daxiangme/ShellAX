@@ -49,4 +49,5 @@
 - ☑ 7.10 "即将支持"占位清零：透明度（窗口透明背景 + 终端区域 alpha）、界面字号（gpui-component 主题字号 + 根元素默认字号）实现；删除 Row.soon/ui::soon 与 5 个废弃键，修正 settings.agent_sock 文案；`rg "即将支持|coming soon|Soon" src locales` 为 0
 
 ## 8 整体测试
-- ☐ release 无警告、clippy、全部测试；TEST_REPORT.md；screenshot-final-*.png；PRD v1.0、README
+- ☑ release 0 警告、clippy 0 警告、cargo test --release 94/94 无跳过（testenv/test.env，新增 sshd3 :2224 keyboard-interactive）、e2e_hooks 7/7；TEST_REPORT.md（通过 55 / 失败 12 / 未能验证 7）；新增截图 approval-card / hostkey / password-prompt / keyboard-interactive / credentials / agents-settings / agent-page；PRD v1.0（v0.8 备份 PRD-v0.8.md）、README
+- ☑ 8.1 本轮额外修复：SSH keyboard-interactive 认证（PRD 3.1 P0）、agentshell CLI EPIPE、透明度绘制到网格背景

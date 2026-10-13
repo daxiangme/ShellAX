@@ -1,5 +1,38 @@
 # ssh-term-proto
 
+> **当前状态（v8 / 对应 PRD v1.0，2026-10-13）**：PROGRESS.md 1–8 全部完成，设置页没有“即将支持”项。逐项测试结果见 `TEST_REPORT.md`；下面 v2–v7 各节是历史记录，其中“只有界面 / 即将支持”的说法已过时。
+
+## 构建与测试（v8）
+```bash
+export PATH=$HOME/.cargo/bin:$PATH        # 需要 rustc ≥ 1.89（本机 1.99）；/usr/bin 的 1.85 编不过依赖
+cargo build --release                      # 0 警告
+cargo clippy --release --all-targets       # 0 警告
+# 测试用 sshd：2222 仅公钥，2223 密码+转发，2224 keyboard-interactive（PAM，需 root 启动）
+sudo /usr/sbin/sshd -f $PWD/testenv/sshd3_config -E $PWD/testenv/sshd3.log   # 若 2224 未运行
+source testenv/test.env                    # TEST_SSH_PORT/PORT2/PORT3/USER/KEY/PASSWORD/PP_KEY/PP（仅本机回环测试账号）
+eval $(ssh-agent -s) && ssh-add testenv/client_ed25519   # agent_auth 需要 SSH_AUTH_SOCK
+cargo test --release                       # 94 个，全部通过，无跳过（变量缺失时用例会打印 skip 并直接返回）
+tools/e2e_hooks.sh                         # 外部 Agent hook 端到端 7/7
+tools/gui_final.sh                         # 在 DISPLAY=:2 启动 release GUI（隔离配置 /tmp/stp-gui）
+```
+
+## v8 新增 / 变化
+- 配置写回保留注释、空行和键顺序（toml_edit 合并；解析失败才整文件重写）。
+- 光标闪烁：软件渲染器（llvmpipe 等）下光标常亮，闪烁时整窗软件重绘约占 23% CPU；`AGENTSHELL_FORCE_BLINK=1` 可强制闪烁。硬件 GPU 下行为不变。
+- 外观：窗口透明度（透明窗口背景 + 终端区 alpha）、界面字号（gpui-component 控件和默认文本）。
+- SSH：keyboard-interactive（2FA / PAM）认证；连接前先用 none 探测服务器提供的方式，不再对不接受密码的主机弹密码框；2FA 回答不保存。
+- `agentshell status | head` 不再因 EPIPE panic。
+- clippy 全部清零。
+
+## 已知问题（v8）
+- 未实现的 PRD 项：`agentshell exec/hosts/upload/download` 凭据桥；内置 AI 对话中的 run_command 工具调用与逐条审批；审批卡“本会话总是允许 / 拒绝并说明原因”；终端搜索、矩形选择、纯文本 URL 识别、OSC 52；审计过滤；AI 首次发送提示与按主机禁读；HTTP/SOCKS 出站代理；托盘；SFTP 内置编辑。详见 TEST_REPORT.md 第 6 节、PRD 9.2 Q19–Q23。
+- 透明度在本机（llvmpipe + Xfwm 合成）截图中看不到效果，需在真 GPU 上复测。
+- 软件渲染下空闲 RSS 约 169MB；release 二进制 82MB（strip 后 61MB），发布需 strip。
+- IME 预编辑没有在本机实测（无输入法守护进程）。
+- 设置里的浮点值写回会带 f32 误差（如 `opacity = 0.8199999928474426`），读取无影响。
+
+---
+
 最小原型：一个 GPUI 窗口，左右分屏两个终端：
 - 左：`portable-pty` 本地 shell
 - 右：`russh` SSH 会话（公钥认证，PTY + shell）
