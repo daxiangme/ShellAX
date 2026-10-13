@@ -10,6 +10,7 @@
 | release 构建 | `cargo build --release`（rustc 1.99.0，`~/.cargo/bin` 工具链；系统 /usr/bin 的 1.85 不满足依赖 MSRV） | **通过**，0 警告 |
 | clippy | `cargo clippy --release --all-targets` | **通过**，0 警告 0 错误（本轮修掉 21 条） |
 | 全部测试 | `source testenv/test.env; eval $(ssh-agent -s); ssh-add testenv/client_ed25519; cargo test --release` | **通过**：94 个（lib 64、agentshell 4、GUI bin 11、daemon 1、headless 6、ssh_features 8），0 失败 0 忽略 |
+| 稳定性 | 全量测试连续 3 次 | **通过**，3×94/94。修复 1 个偶发失败：`forward::Running::stop` 只 abort 不等待，监听端口在 stop 返回后仍可能短暂可连（port_forwards_local_remote_socks 偶发断言失败）；现在 abort 后 await 任务结束，单测连续 8 次通过 |
 | 跳过检查 | `--nocapture` 下 grep `skip` | 0 个跳过。所需变量：TEST_SSH_PORT=2222、TEST_SSH_PORT2=2223（密码+转发）、TEST_SSH_PORT3=2224（keyboard-interactive/PAM）、TEST_SSH_USER=sshtest、TEST_SSH_KEY、TEST_SSH_PASSWORD、TEST_SSH_PP_KEY、TEST_SSH_PP、SSH_AUTH_SOCK（见 testenv/test.env） |
 | 外部 Agent hook 端到端 | `tools/e2e_hooks.sh`（真实 Claude Code / Codex / Grok CLI + mock LLM） | **通过** 7/7 |
 | “即将支持”残留 | `rg "即将支持|[Cc]oming soon|\bSoon\b|_soon|soon\(" src locales` | **通过**，0 处 |

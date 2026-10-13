@@ -118,7 +118,8 @@ impl Running {
     }
     pub async fn stop(&self) {
         let h = self.task.lock().unwrap().take();
-        if let Some(h) = h { h.abort(); }
+        // wait for the aborted task so the listener is really closed when stop() returns
+        if let Some(h) = h { h.abort(); let _ = h.await; }
         let c = self.conn.lock().unwrap().take();
         if let (Some(c), State::Running { port }) = (c, self.state()) {
             if self.spec.kind == Kind::R { let _ = c.cancel_remote_forward(&self.spec.bind_addr, port as u32).await; }
