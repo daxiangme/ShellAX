@@ -5,11 +5,11 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::ssh::SshTarget;
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
 pub struct HostEntry {
     pub name: String,
     pub host: String,
@@ -19,6 +19,18 @@ pub struct HostEntry {
     pub port: Option<u16>,
     #[serde(default)]
     pub identity_file: Option<String>,
+    /// Sidebar group (config.toml hosts only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// "key" | "agent" | "password" (password auth: not implemented yet).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<String>,
+    /// Production host: shown with a red tag; permission rules can target it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub production: bool,
+    /// ProxyJump host (stored; jump connections not implemented yet).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jump: Option<String>,
     /// "config" or "ssh_config"
     #[serde(skip)]
     pub source: &'static str,
@@ -55,7 +67,7 @@ pub fn parse_ssh_config(body: &str) -> Vec<HostEntry> {
         for alias in pats {
             if alias.contains(['*', '?', '!']) { continue; }
             // first obtained value wins, over all blocks whose patterns match this alias, in file order
-            let mut e = HostEntry { name: alias.clone(), host: alias.clone(), user: None, port: None, identity_file: None, source: "ssh_config" };
+            let mut e = HostEntry { name: alias.clone(), host: alias.clone(), user: None, port: None, identity_file: None, source: "ssh_config", ..Default::default() };
             let (mut hn, mut us, mut po, mut id) = (false, false, false, false);
             for (bp, opts) in &blocks {
                 let pos = bp.iter().any(|p| !p.starts_with('!') && matches(p, alias));

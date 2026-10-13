@@ -44,7 +44,12 @@ Copyright 2025, Command Line Inc.
 | alacritty_terminal 0.26.0 | Apache-2.0 |
 | russh 0.64.1 (+ aws-lc-rs backend) | russh: Apache-2.0；aws-lc-rs: "ISC AND (Apache-2.0 OR ISC)"；aws-lc-sys: ISC AND Apache-2.0 AND MIT AND BSD-3-Clause 等组合（发布前需单独核对） |
 | portable-pty 0.9.0 | MIT |
+| gpui-component 0.7.3, gpui-base 0.7.3, gpui-component-macros 0.7.3 (settings inputs / switches) | Apache-2.0 |
+| gpui-kit-assets 0.7.3 (embedded Lucide icon SVGs) | crate Apache-2.0; icons ISC — Copyright (c) Lucide Icons and Contributors (crate ships `LICENSE-LUCIDE`) |
+| sha2 0.10, chrono 0.4, serde_json 1 (audit log) | MIT OR Apache-2.0 |
 | regex 1.x, serde, toml, tokio, flume, anyhow, libc | MIT OR Apache-2.0 |
 | Catppuccin Mocha / Latte palettes (`themes/catppuccin-*.toml`) | MIT, © Catppuccin |
+
+Transitive notes (pre-existing, unchanged in v5): `self_cell` and `r-efi` are dual/tri-licensed and used under Apache-2.0/MIT; `dwrote` (Windows only), `cbindgen` (build tool) and `option-ext` (build-time, via rust-embed's proc-macro) are MPL-2.0 — not modified, no source copied.
 
 Fonts are **not** bundled (see README "字体许可").

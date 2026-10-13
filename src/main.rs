@@ -1,10 +1,16 @@
-//! ssh-term-proto v4 UI: host sidebar (config + ~/.ssh/config), tabs with split panes,
-//! host-key confirmation, agent status, themes. Terminal grid painted by our own elements.
+//! AgentShell prototype v5 UI: sidebar (host search / groups / function area), tabs with split
+//! panes, settings page, command palette, host dialog, tool panels, status bar.
+mod actions;
 mod config;
+mod host_dialog;
+mod palette;
+mod panels;
+mod settings_view;
 mod termview;
 mod theme;
+mod ui;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
@@ -12,49 +18,62 @@ use gpui::{
     div, prelude::*, px, size, AnyElement, App, Bounds, Context, Entity, FontWeight, Hsla, KeyDownEvent, SharedString,
     Window, WindowAppearance, WindowBounds, WindowOptions,
 };
+use gpui_component::input::{Input, InputEvent, InputState};
 use ssh_term_proto::agent::{self, AgentState, Manifest};
+use ssh_term_proto::audit::AuditLog;
 use ssh_term_proto::hosts::{self, HostEntry};
 use ssh_term_proto::layout::{auto_direction, Dir, Node};
+use ssh_term_proto::policy::Mode;
 use ssh_term_proto::ssh::{self, HostKeyDecision, HostKeyPrompt, SshTarget};
 use ssh_term_proto::suggest::History;
 use ssh_term_proto::{local, term::Size};
+
+use actions::Action;
+use host_dialog::{HostDialog, HostEvent};
+use palette::{Item, Palette, PaletteEvent};
+use settings_view::{Cat, SettingsEvent, SettingsView};
 use termview::{Spec, TermView};
 use theme::{c, cur, Appearance, Theme};
+use ui::{icon, IconName};
 
-static FONT: std::sync::OnceLock<config::FontConfig> = std::sync::OnceLock::new();
-pub fn fcfg() -> &'static config::FontConfig { FONT.get_or_init(config::FontConfig::platform_default) }
-pub fn font_size() -> f32 { fcfg().size }
-pub fn line_h() -> f32 { (fcfg().size * fcfg().line_height).round() }
+pub fn font_size() -> f32 { config::get().font.size.clamp(6.0, 48.0) }
+pub fn line_h() -> f32 { let f = config::get(); (f.font.size.clamp(6.0, 48.0) * f.font.line_height.clamp(0.8, 3.0)).round() }
 
-// ---------------------------------------------------------------- app shell
-struct Tab { layout: Node<Entity<TermView>>, focused: Entity<TermView> }
-
-#[derive(Clone, Copy, PartialEq)]
-enum ThemeMode { System, Fixed(usize) }
-
-struct Root {
-    rt: Arc<tokio::runtime::Runtime>,
-    hosts: Vec<HostEntry>,
-    default_target: SshTarget,
-    known_hosts: std::path::PathBuf,
-    tabs: Vec<Tab>,
-    active: usize,
-    themes: Vec<Arc<Theme>>,
-    mode: ThemeMode,
-    histories: HashMap<String, Arc<Mutex<History>>>,
-    manifests: Arc<Vec<Manifest>>,
-    hk_tx: flume::Sender<HostKeyPrompt>,
-    hk_pending: Vec<HostKeyPrompt>,
-    _subs: Vec<gpui::Subscription>,
-}
-
-fn data_dir() -> std::path::PathBuf {
+pub(crate) fn data_dir() -> std::path::PathBuf {
     std::env::var_os("XDG_DATA_HOME").map(Into::into)
         .unwrap_or_else(|| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share"))
         .join("agentshell")
 }
 
-fn env_target(known_hosts: &std::path::Path) -> SshTarget {
+// ---------------------------------------------------------------- app shell
+struct Tab { layout: Node<Entity<TermView>>, focused: Entity<TermView> }
+
+pub(crate) enum Overlay { None, Settings(Entity<SettingsView>), Palette(Entity<Palette>), Host(Entity<HostDialog>), Audit, Sftp, Port, Ai }
+
+pub(crate) struct Root {
+    rt: Arc<tokio::runtime::Runtime>,
+    default_target: Option<SshTarget>,
+    tabs: Vec<Tab>,
+    active: usize,
+    themes: Vec<Arc<Theme>>,
+    histories: HashMap<String, Arc<Mutex<History>>>,
+    manifests: Arc<Vec<Manifest>>,
+    hk_tx: flume::Sender<HostKeyPrompt>,
+    hk_pending: Vec<HostKeyPrompt>,
+    overlay: Overlay,
+    host_search: Entity<InputState>,
+    collapsed: HashSet<String>,
+    sidebar_visible: bool,
+    audit: Arc<AuditLog>,
+    pub(crate) audit_verify: Option<Result<usize, (usize, String)>>,
+    settings_dirty: Vec<String>,
+    toast: Option<(String, u64)>,
+    toast_seq: u64,
+    _subs: Vec<gpui::Subscription>,
+}
+
+fn env_target(known_hosts: &std::path::Path) -> Option<SshTarget> {
+    std::env::var("SSH_HOST").ok()?;
     let e = HostEntry {
         name: "env".into(),
         host: std::env::var("SSH_HOST").unwrap_or_else(|_| "127.0.0.1".into()),
@@ -62,14 +81,28 @@ fn env_target(known_hosts: &std::path::Path) -> SshTarget {
         user: std::env::var("SSH_USER").ok(),
         identity_file: std::env::var("SSH_KEY").ok(),
         source: "env",
+        ..Default::default()
     };
-    hosts::to_target(&e, known_hosts)
+    Some(hosts::to_target(&e, known_hosts))
 }
 
 impl Root {
+    fn log(&self, kind: &str, detail: impl AsRef<str>) { let _ = self.audit.append(kind, "user", detail.as_ref()); }
+
+    pub(crate) fn toast(&mut self, msg: String, cx: &mut Context<Self>) {
+        self.toast_seq += 1;
+        let seq = self.toast_seq;
+        self.toast = Some((msg, seq));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_secs(4)).await;
+            let _ = this.update(cx, |r, cx| { if r.toast.as_ref().is_some_and(|t| t.1 == seq) { r.toast = None; cx.notify(); } });
+        }).detach();
+    }
+
     fn history_for(&mut self, key: &str) -> Arc<Mutex<History>> {
+        if !config::get().suggest.local_history { return Arc::new(Mutex::new(History::new())); }
         self.histories.entry(key.to_string()).or_insert_with(|| {
-            // persisted per host: ~/.local/share/agentshell/history/<key>.txt
             let fname: String = key.chars().map(|c| if c.is_ascii_alphanumeric() || "@.-_".contains(c) { c } else { '_' }).collect();
             Arc::new(Mutex::new(History::open(data_dir().join("history").join(format!("{fname}.txt")))))
         }).clone()
@@ -80,12 +113,15 @@ impl Root {
         let m = self.manifests.clone();
         match spec {
             Spec::Local => {
-                let sh = std::env::var("SHELL").unwrap_or_else(|_| "bash".into());
+                let shell = config::get().terminal.shell.clone();
+                let sh = if shell.is_empty() { std::env::var("SHELL").unwrap_or_else(|_| "bash".into()) } else { shell.clone() };
                 let title = format!("本地 · {}", sh.rsplit('/').next().unwrap_or("sh"));
-                cx.new(|cx| TermView::new(&title, Spec::Local, local::spawn_local(init, None), h, m, window, cx))
+                let sess = local::spawn_local(init, (!shell.is_empty()).then_some(shell.as_str()));
+                cx.new(|cx| TermView::new(&title, Spec::Local, sess, h, m, window, cx))
             }
             Spec::Ssh(t) => {
                 let title = t.label();
+                self.log("ssh.connect", format!("{} (known_hosts: {})", t.label(), t.known_hosts.display()));
                 let s = ssh::spawn_ssh(self.rt.handle(), t.clone(), init, self.hk_tx.clone());
                 cx.new(|cx| TermView::new(&title, Spec::Ssh(t), Ok(s), h, m, window, cx))
             }
@@ -96,6 +132,7 @@ impl Root {
         let fh = pane.read(cx).focus.clone();
         self.tabs.push(Tab { layout: Node::Leaf(pane.clone()), focused: pane });
         self.active = self.tabs.len() - 1;
+        self.overlay = Overlay::None;
         window.focus(&fh, cx);
         cx.notify();
     }
@@ -103,9 +140,12 @@ impl Root {
         let tab = self.tabs.get(self.active)?;
         tab.layout.leaves().into_iter().find(|p| p.read(cx).focus.is_focused(window)).or_else(|| Some(tab.focused.clone()))
     }
-    /// Split the focused pane; `dir` None = zellij's automatic rule (split along the longer side).
+    pub(crate) fn focused_ssh_label(&self, cx: &App) -> Option<String> {
+        let tab = self.tabs.get(self.active)?;
+        match &tab.focused.read(cx).spec { Spec::Ssh(t) => Some(t.label()), _ => None }
+    }
     fn split(&mut self, dir: Option<Dir>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(target) = self.focused_pane(window, cx) else { return };
+        let Some(target) = self.focused_pane(window, cx) else { return self.new_tab(Spec::Local, window, cx) };
         let (spec, sz) = { let v = target.read(cx); (v.spec.clone(), v.session.as_ref().map(|s| s.size())) };
         let dir = dir.or_else(|| sz.and_then(|s| auto_direction(s.rows, s.cols))).unwrap_or(Dir::Vertical);
         let pane = self.open_pane(spec, window, cx);
@@ -121,43 +161,306 @@ impl Root {
         let Some(target) = self.focused_pane(window, cx) else { return };
         let Some(tab) = self.tabs.get_mut(self.active) else { return };
         if !tab.layout.remove(&target) {
-            if self.tabs.len() > 1 { self.tabs.remove(self.active); self.active = self.active.min(self.tabs.len() - 1); }
+            self.tabs.remove(self.active);
+            self.active = self.active.min(self.tabs.len().saturating_sub(1));
         } else {
             tab.focused = tab.layout.leaves()[0].clone();
         }
-        if let Some(tab) = self.tabs.get(self.active) { let fh = tab.focused.read(cx).focus.clone(); window.focus(&fh, cx); }
+        self.focus_active(window, cx);
         cx.notify();
     }
-    fn apply_theme(&self, window: &Window) {
-        let idx = match self.mode {
-            ThemeMode::Fixed(i) => i,
-            ThemeMode::System => {
-                let want = match window.appearance() { WindowAppearance::Dark | WindowAppearance::VibrantDark => Appearance::Dark, _ => Appearance::Light };
-                self.themes.iter().position(|t| t.appearance == want).unwrap_or(0)
-            }
-        };
-        theme::set_current(self.themes[idx].clone());
+    fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get(self.active) { let fh = tab.focused.read(cx).focus.clone(); window.focus(&fh, cx); }
+    }
+
+    // ---- theme
+    fn theme_index(&self, window: &Window) -> usize {
+        let s = config::get();
+        let by_name = |n: &str| self.themes.iter().position(|t| t.name.eq_ignore_ascii_case(n));
+        if s.appearance.theme == "system" {
+            let dark = matches!(window.appearance(), WindowAppearance::Dark | WindowAppearance::VibrantDark);
+            let want = if dark { &s.appearance.dark_theme } else { &s.appearance.light_theme };
+            by_name(want).or_else(|| self.themes.iter().position(|t| t.appearance == if dark { Appearance::Dark } else { Appearance::Light })).unwrap_or(0)
+        } else {
+            by_name(&s.appearance.theme).unwrap_or(0)
+        }
+    }
+    fn apply_theme(&self, window: &Window, cx: &mut App) {
+        let th = self.themes[self.theme_index(window)].clone();
+        theme::set_current(th.clone());
+        sync_component_theme(&th, cx);
     }
     fn cycle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let cur_idx = self.themes.iter().position(|t| t.name == cur().name).unwrap_or(0);
-        self.mode = ThemeMode::Fixed((cur_idx + 1) % self.themes.len());
-        self.apply_theme(window);
+        let next = self.themes[(cur_idx + 1) % self.themes.len()].name.clone();
+        self.report(config::update(|s| s.appearance.theme = next), cx);
+        self.apply_theme(window, cx);
         self.refresh_all(cx);
     }
-    fn refresh_all(&self, cx: &mut Context<Self>) {
-        // theme changes must invalidate cached grid layers too: re-notify everything
-        cx.refresh_windows();
+    fn refresh_all(&self, cx: &mut Context<Self>) { cx.refresh_windows(); cx.notify(); }
+    fn report(&mut self, err: Option<String>, cx: &mut Context<Self>) { if let Some(e) = err { self.toast(e, cx); } }
+
+    fn set_mode(&mut self, m: Mode, cx: &mut Context<Self>) {
+        let old = config::get().permissions.mode;
+        if old == m { return; }
+        let err = config::update(|s| s.permissions.mode = m);
+        self.log("permission.mode", format!("{} → {}", old.label(), m.label()));
+        self.report(err, cx);
+        self.toast(format!("权限模式：{} — {}", m.label(), m.desc()), cx);
+    }
+
+    fn answer_hostkey(&mut self, d: HostKeyDecision, cx: &mut Context<Self>) {
+        if !self.hk_pending.is_empty() {
+            let p = self.hk_pending.remove(0);
+            let what = match d { HostKeyDecision::AcceptAndSave => "hostkey.accept_save", HostKeyDecision::AcceptOnce => "hostkey.accept_once", HostKeyDecision::Reject => "hostkey.reject" };
+            self.log(what, format!("{}:{} {} {}", p.host, p.port, p.algorithm, p.fingerprint));
+            let _ = p.reply.send(d);
+        }
         cx.notify();
     }
-    fn answer_hostkey(&mut self, d: HostKeyDecision, cx: &mut Context<Self>) {
-        if !self.hk_pending.is_empty() { let p = self.hk_pending.remove(0); let _ = p.reply.send(d); }
+
+    // ---- overlays
+    pub(crate) fn close_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.overlay, Overlay::Settings(_)) && !self.settings_dirty.is_empty() {
+            let mut paths = std::mem::take(&mut self.settings_dirty);
+            paths.sort();
+            paths.dedup();
+            self.log("settings.change", paths.join(", "));
+        }
+        self.overlay = Overlay::None;
+        self.focus_active(window, cx);
         cx.notify();
+    }
+    pub(crate) fn open_settings(&mut self, cat: Cat, window: &mut Window, cx: &mut Context<Self>) {
+        let names = self.themes.iter().map(|t| (t.name.clone(), t.appearance == Appearance::Dark)).collect();
+        let v = cx.new(|cx| SettingsView::new(cat, names, window, cx));
+        self._subs.push(cx.subscribe_in(&v, window, |this, _, ev: &SettingsEvent, window, cx| match ev {
+            SettingsEvent::Close => this.close_overlay(window, cx),
+            SettingsEvent::OpenAudit => { this.close_overlay(window, cx); this.overlay = Overlay::Audit; }
+            SettingsEvent::Changed(path) => {
+                this.settings_dirty.push(path.clone());
+                if path == "suggest.clear_history" { for h in this.histories.values() { h.lock().unwrap().clear(); } }
+                this.apply_theme(window, cx);
+                this.refresh_all(cx);
+            }
+        }));
+        v.update(cx, |s, cx| s.focus_search(window, cx));
+        self.overlay = Overlay::Settings(v);
+        cx.notify();
+    }
+    fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.overlay, Overlay::Palette(_)) { return self.close_overlay(window, cx); }
+        let hosts = self.host_targets().into_iter().map(|(e, t)| (e.name.clone(), t.label())).collect();
+        let p = cx.new(|cx| Palette::new(hosts, window, cx));
+        self._subs.push(cx.subscribe_in(&p, window, |this, _, ev: &PaletteEvent, window, cx| match ev {
+            PaletteEvent::Close => this.close_overlay(window, cx),
+            PaletteEvent::Run(Item::Act(a)) => { this.close_overlay(window, cx); this.run(*a, window, cx); }
+            PaletteEvent::Run(Item::Host(i, _, _)) => {
+                let t = this.host_targets().get(*i).map(|(_, t)| t.clone());
+                this.close_overlay(window, cx);
+                if let Some(t) = t { this.new_tab(Spec::Ssh(t), window, cx); }
+            }
+        }));
+        self.overlay = Overlay::Palette(p);
+        cx.notify();
+    }
+    fn open_host_dialog(&mut self, existing: Option<HostEntry>, window: &mut Window, cx: &mut Context<Self>) {
+        let d = cx.new(|cx| HostDialog::new(existing, window, cx));
+        self._subs.push(cx.subscribe_in(&d, window, |this, _, ev: &HostEvent, window, cx| {
+            match ev {
+                HostEvent::Saved(n) => { this.log("host.save", n); this.toast(format!("已保存主机 {n}"), cx); }
+                HostEvent::Deleted(n) => { this.log("host.delete", n); this.toast(format!("已删除主机 {n}"), cx); }
+                HostEvent::Close => {}
+            }
+            this.close_overlay(window, cx);
+        }));
+        self.overlay = Overlay::Host(d);
+        cx.notify();
+    }
+
+    fn run(&mut self, a: Action, window: &mut Window, cx: &mut Context<Self>) {
+        match a {
+            Action::CommandPalette => self.open_palette(window, cx),
+            Action::OpenSettings => self.open_settings(Cat::General, window, cx),
+            Action::NewLocalTab => self.new_tab(Spec::Local, window, cx),
+            Action::NewHost => self.open_host_dialog(None, window, cx),
+            Action::SplitAuto => self.split(None, window, cx),
+            Action::SplitRight => self.split(Some(Dir::Vertical), window, cx),
+            Action::SplitDown => self.split(Some(Dir::Horizontal), window, cx),
+            Action::ClosePane => self.close_pane(window, cx),
+            Action::NextTab | Action::PrevTab => {
+                let n = self.tabs.len();
+                if n > 0 { self.active = if a == Action::NextTab { (self.active + 1) % n } else { (self.active + n - 1) % n }; self.focus_active(window, cx); }
+            }
+            Action::CycleTheme => self.cycle_theme(window, cx),
+            Action::ThemeSystem => { self.report(config::update(|s| s.appearance.theme = "system".into()), cx); self.apply_theme(window, cx); self.refresh_all(cx); }
+            Action::CyclePermissionMode => { let m = config::get().permissions.mode.next(); self.set_mode(m, cx); }
+            Action::ModeAsk => self.set_mode(Mode::Ask, cx),
+            Action::ModePlan => self.set_mode(Mode::Plan, cx),
+            Action::ModeAuto => self.set_mode(Mode::Auto, cx),
+            Action::OpenSftp => self.overlay = Overlay::Sftp,
+            Action::OpenPortForward => self.overlay = Overlay::Port,
+            Action::OpenAi => self.overlay = Overlay::Ai,
+            Action::OpenAudit => { self.audit_verify = None; self.overlay = Overlay::Audit; }
+            Action::OpenAbout => self.open_settings(Cat::About, window, cx),
+            Action::ClearHistory => {
+                for h in self.histories.values() { h.lock().unwrap().clear(); }
+                let dir = data_dir().join("history");
+                if let Ok(d) = std::fs::read_dir(&dir) { for e in d.flatten() { let _ = std::fs::write(e.path(), ""); } }
+                self.toast("已清空命令建议历史".into(), cx);
+            }
+            Action::ToggleSidebar => self.sidebar_visible = !self.sidebar_visible,
+            Action::SettingsPermissions => self.open_settings(Cat::Permissions, window, cx),
+            Action::SettingsAppearance => self.open_settings(Cat::Appearance, window, cx),
+            Action::SettingsTerminal => self.open_settings(Cat::Terminal, window, cx),
+            Action::SettingsSsh => self.open_settings(Cat::Ssh, window, cx),
+            Action::SettingsKeys => self.open_settings(Cat::Keys, window, cx),
+        }
+        cx.notify();
+    }
+
+    fn host_targets(&self) -> Vec<(HostEntry, SshTarget)> {
+        let s = config::get();
+        let kh = s.known_hosts_path();
+        s.all_hosts().into_iter().map(|h| { let t = hosts::to_target(&h, &kh); (h, t) }).collect()
+    }
+
+    // ---------------------------------------------------------------- sidebar
+    fn sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let th = cur();
+        let open: Vec<(String, bool)> = self.tabs.iter().flat_map(|t| t.layout.leaves()).map(|p| {
+            let v = p.read(cx);
+            let label = match &v.spec { Spec::Local => "local".to_string(), Spec::Ssh(t) => t.label() };
+            (label, v.session.as_ref().is_some_and(|s| s.connected.load(Ordering::Acquire)))
+        }).collect();
+        let online = |label: &str| open.iter().any(|(l, on)| l == label && *on);
+        let q = self.host_search.read(cx).value().to_string().to_lowercase();
+
+        // groups: (group name, entries)
+        struct E { name: String, detail: String, spec: Spec, letter: &'static str, prod: bool, edit: Option<HostEntry>, label: String }
+        let mut groups: Vec<(String, Vec<E>)> = vec![];
+        let mut push = |g: &str, e: E| {
+            if !q.is_empty() && !format!("{} {}", e.name, e.detail).to_lowercase().contains(&q) { return; }
+            match groups.iter_mut().find(|(n, _)| n == g) { Some((_, v)) => v.push(e), None => groups.push((g.to_string(), vec![e])) }
+        };
+        let sh = { let s = config::get().terminal.shell.clone(); if s.is_empty() { std::env::var("SHELL").unwrap_or_else(|_| "bash".into()) } else { s } };
+        push("快速连接", E { name: "本地终端".into(), detail: format!("{} · portable-pty", sh.rsplit('/').next().unwrap_or("sh")), spec: Spec::Local, letter: "L", prod: false, edit: None, label: "local".into() });
+        if let Some(dt) = self.default_target.clone() {
+            push("快速连接", E { name: dt.label(), detail: "环境变量 SSH_HOST".into(), label: dt.label(), spec: Spec::Ssh(dt), letter: "S", prod: false, edit: None });
+        }
+        for (h, t) in self.host_targets() {
+            let g = if h.source == "config" { h.group.clone().unwrap_or_else(|| "未分组".into()) } else { "~/.ssh/config".into() };
+            let edit = (h.source == "config").then(|| h.clone());
+            push(&g, E { name: h.name.clone(), detail: t.label(), label: t.label(), spec: Spec::Ssh(t), letter: "S", prod: h.production, edit });
+        }
+
+        let header = div().h(px(48.)).px_4().flex().items_center().gap_2()
+            .child(div().size(px(22.)).rounded_md().bg(c(th.accent).opacity(0.18)).flex().items_center().justify_center().child(icon(IconName::SquareTerminal, 13., c(th.accent))))
+            .child(div().text_color(c(th.text)).font_weight(FontWeight::SEMIBOLD).text_size(px(13.5)).child("AgentShell"))
+            .child(div().flex_1())
+            .child(div().id("sb-collapse").size(px(24.)).rounded_md().flex().items_center().justify_center().cursor_pointer().hover(|d| d.bg(c(cur().surface0)))
+                .on_click(cx.listener(|this, _, _w, cx| { this.sidebar_visible = false; cx.notify(); })).child(icon(IconName::Layers, 14., c(th.overlay1))));
+        let search = div().px_3().pb_2().flex().items_center().gap_2()
+            .child(div().flex_1().child(Input::new(&self.host_search).prefix(icon(IconName::Search, 13., c(th.overlay1))).cleanable(true)))
+            .child(div().id("new-host").size(px(30.)).rounded_md().flex().items_center().justify_center().cursor_pointer()
+                .bg(c(th.surface0)).border_1().border_color(c(th.surface1)).hover(|d| d.bg(c(cur().surface1)))
+                .on_click(cx.listener(|this, _, w, cx| this.open_host_dialog(None, w, cx)))
+                .child(icon(IconName::Plus, 15., c(th.text))));
+
+        let mut list = div().id("host-list").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().pb_2();
+        let mut idx = 0usize;
+        for (gname, entries) in groups {
+            let collapsed = self.collapsed.contains(&gname) && q.is_empty();
+            let g2 = gname.clone();
+            list = list.child(div().id(SharedString::from(format!("grp-{gname}"))).mx_2().mt_2().px_2().h(px(24.)).flex().items_center().gap_1().cursor_pointer().rounded_md()
+                .hover(|d| d.bg(c(cur().surface0).opacity(0.5)))
+                .on_click(cx.listener(move |this, _, _w, cx| { if !this.collapsed.remove(&g2) { this.collapsed.insert(g2.clone()); } cx.notify(); }))
+                .child(icon(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown }, 12., c(th.overlay0)))
+                .child(div().text_size(px(10.5)).font_weight(FontWeight::MEDIUM).text_color(c(th.overlay0)).child(gname.clone()))
+                .child(div().flex_1())
+                .child(div().text_size(px(10.5)).text_color(c(th.overlay0)).child(entries.len().to_string())));
+            if collapsed { continue; }
+            for e in entries {
+                let accent = if matches!(e.spec, Spec::Local) { c(th.info) } else if e.prod { c(th.error) } else { c(th.warning) };
+                let dot = if online(&e.label) { c(th.success) } else { c(th.surface2) };
+                let spec = e.spec.clone();
+                let gid = SharedString::from(format!("host-row-{idx}"));
+                let mut row = div().id(("host", idx)).group(gid.clone()).mx_2().px_2().py(px(5.)).rounded_lg().flex().items_center().gap_3().cursor_pointer()
+                    .hover(|s| s.bg(c(cur().surface0)))
+                    .on_click(cx.listener(move |this, _, w, cx| this.new_tab(spec.clone(), w, cx)))
+                    .child(div().size(px(26.)).rounded_md().flex().items_center().justify_center().bg(accent.opacity(0.18)).text_color(accent).text_size(px(12.)).font_weight(FontWeight::BOLD).child(e.letter))
+                    .child(div().flex_1().min_w_0().flex().flex_col().overflow_hidden()
+                        .child(div().flex().items_center().gap_1().child(div().text_size(px(12.5)).text_color(c(th.text)).child(e.name.clone()))
+                            .when(e.prod, |d| d.child(ui::tag("生产", c(th.error)))))
+                        .child(div().text_size(px(10.5)).text_color(c(th.overlay0)).child(e.detail.clone())));
+                if let Some(h) = e.edit.clone() {
+                    row = row.child(div().id(("host-edit", idx)).size(px(22.)).rounded_md().flex().items_center().justify_center().invisible()
+                        .group_hover(gid, |s| s.visible()).hover(|s| s.bg(c(cur().surface1)))
+                        .on_click(cx.listener(move |this, _, w, cx| { cx.stop_propagation(); this.open_host_dialog(Some(h.clone()), w, cx); }))
+                        .child(icon(IconName::Pencil, 12., c(th.overlay1))));
+                }
+                list = list.child(row.child(div().size(px(7.)).rounded_full().bg(dot)));
+                idx += 1;
+            }
+        }
+        if idx == 0 { list = list.child(div().px_4().py_3().text_size(px(11.5)).text_color(c(th.overlay0)).child("没有匹配的主机")); }
+
+        // ---- function area (bottom-left)
+        let items: [(Action, &str, IconName); 7] = [
+            (Action::OpenSftp, "SFTP 文件", IconName::FolderSync),
+            (Action::OpenPortForward, "端口转发", IconName::ArrowLeftRight),
+            (Action::OpenAi, "AI / Agent", IconName::Bot),
+            (Action::OpenAudit, "审计日志", IconName::ScrollText),
+            (Action::CommandPalette, "命令面板", IconName::Command),
+            (Action::OpenSettings, "设置", IconName::Settings),
+            (Action::OpenAbout, "帮助与关于", IconName::CircleQuestionMark),
+        ];
+        let n_agents = self.tabs.iter().flat_map(|t| t.layout.leaves()).filter(|p| p.read(cx).agent.is_some()).count();
+        let mut tools = div().px_2().py_2().flex().flex_col().gap(px(1.)).border_t_1().border_color(c(th.surface0));
+        for (i, (a, label, ic)) in items.into_iter().enumerate() {
+            let b = a.binding();
+            tools = tools.child(div().id(("tool", i)).h(px(30.)).px_2().rounded_md().flex().items_center().gap_3().cursor_pointer()
+                .hover(|d| d.bg(c(cur().surface0)))
+                .on_click(cx.listener(move |this, _, w, cx| this.run(a, w, cx)))
+                .child(icon(ic, 15., c(th.overlay1)))
+                .child(div().flex_1().text_size(px(12.5)).text_color(c(th.subtext)).child(label))
+                .when(a == Action::OpenAi && n_agents > 0, |d| d.child(ui::tag(format!("{n_agents}"), c(th.accent))))
+                .when(!b.is_empty() && matches!(a, Action::CommandPalette | Action::OpenSettings), |d| d.child(ui::kbd(&b))));
+        }
+
+        div().w(px(248.)).h_full().flex().flex_col().bg(c(th.crust)).border_r_1().border_color(c(th.surface0))
+            .child(header).child(search).child(list).child(tools)
     }
 }
 
-fn icon_badge(letter: &str, color: Hsla) -> impl IntoElement {
-    div().size(px(26.)).rounded_md().flex().items_center().justify_center()
-        .bg(color.opacity(0.18)).text_color(color).text_size(px(12.)).font_weight(FontWeight::BOLD).child(letter.to_string())
+pub(crate) fn sync_component_theme(th: &Theme, cx: &mut App) {
+    use gpui_component::{Theme as CTheme, ThemeMode};
+    CTheme::change(if th.appearance == Appearance::Dark { ThemeMode::Dark } else { ThemeMode::Light }, None, cx);
+    let th = th.clone();
+    CTheme::update(cx, move |t| {
+        t.colors.background = c(th.mantle);
+        t.colors.foreground = c(th.text);
+        t.colors.border = c(th.surface1);
+        t.colors.input = c(th.surface1);
+        t.colors.ring = c(th.accent);
+        t.colors.caret = c(th.accent);
+        t.colors.primary = c(th.accent);
+        t.colors.primary_foreground = c(th.base);
+        t.colors.muted_foreground = c(th.overlay0);
+        t.colors.accent = c(th.surface0);
+        t.colors.accent_foreground = c(th.text);
+        t.colors.selection = c(th.accent).opacity(0.3);
+        t.colors.switch = c(th.surface2);
+        t.colors.switch_thumb = gpui::white();
+        t.colors.popover = c(th.base);
+        t.colors.popover_foreground = c(th.text);
+        t.font_size = px(13.);
+        t.font_family = SharedString::from("Inter");
+        t.radius = px(6.);
+        t.focus_ring = false;
+        t.shadow = false;
+    });
+    cx.refresh_windows();
 }
 
 fn render_node(node: &Node<Entity<TermView>>, th: &Theme) -> AnyElement {
@@ -174,62 +477,20 @@ fn render_node(node: &Node<Entity<TermView>>, th: &Theme) -> AnyElement {
     }
 }
 
-fn state_color(st: AgentState, th: &Theme) -> Hsla {
+pub(crate) fn state_color(st: AgentState, th: &Theme) -> Hsla {
     match st { AgentState::Working => c(th.warning), AgentState::Blocked => c(th.error), AgentState::Idle => c(th.success), AgentState::Unknown => c(th.overlay1) }
 }
 
 impl Render for Root {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
-        let open_labels: Vec<(String, bool)> = self.tabs.iter().flat_map(|t| t.layout.leaves()).map(|p| {
-            let v = p.read(cx);
-            let label = match &v.spec { Spec::Local => "local".to_string(), Spec::Ssh(t) => t.label() };
-            (label, v.session.as_ref().is_some_and(|s| s.connected.load(Ordering::Acquire)))
-        }).collect();
-        let online = |label: &str| open_labels.iter().any(|(l, on)| l == label && *on);
-
-        let mut sidebar = div().w(px(232.)).h_full().flex().flex_col().bg(c(th.crust)).border_r_1().border_color(c(th.surface0))
-            .child(div().h(px(44.)).px_4().flex().items_center().gap_2()
-                .child(div().size(px(10.)).rounded_full().bg(c(th.accent)))
-                .child(div().text_color(c(th.text)).font_weight(FontWeight::SEMIBOLD).text_size(px(13.)).child("AgentShell")))
-            .child(div().px_4().pt_2().pb_1().text_size(px(10.5)).text_color(c(th.overlay0)).child("主机"));
-        let sh = std::env::var("SHELL").unwrap_or_else(|_| "bash".into());
-        let mut entries: Vec<(SharedString, SharedString, Option<SshTarget>, &'static str)> = vec![
-            ("本地".into(), format!("{} · portable-pty", sh.rsplit('/').next().unwrap_or("sh")).into(), None, "L"),
-        ];
-        let dt = self.default_target.clone();
-        entries.push((dt.label().into(), "环境变量 · russh".into(), Some(dt), "S"));
-        for h in &self.hosts {
-            let t = hosts::to_target(h, &self.known_hosts);
-            let src = if h.source == "config" { "config.toml" } else { "~/.ssh/config" };
-            entries.push((h.name.clone().into(), format!("{} · {src}", t.label()).into(), Some(t), "S"));
-        }
-        for (i, (name, detail, target, letter)) in entries.into_iter().enumerate() {
-            let accent = if target.is_none() { c(th.info) } else { c(th.warning) };
-            let label = target.as_ref().map(|t| t.label()).unwrap_or_else(|| "local".into());
-            let dot = if online(&label) { c(th.success) } else { c(th.surface2) };
-            let spec = match target { Some(t) => Spec::Ssh(t), None => Spec::Local };
-            sidebar = sidebar.child(
-                div().id(("host", i)).mx_2().px_2().py(px(6.)).rounded_lg().flex().items_center().gap_3().cursor_pointer()
-                    .hover(|s| s.bg(c(cur().surface0)))
-                    .on_click(cx.listener(move |this, _, w, cx| this.new_tab(spec.clone(), w, cx)))
-                    .child(icon_badge(letter, accent))
-                    .child(div().flex_1().flex().flex_col().overflow_hidden()
-                        .child(div().text_size(px(12.5)).text_color(c(th.text)).child(name))
-                        .child(div().text_size(px(10.5)).text_color(c(th.overlay0)).child(detail)))
-                    .child(div().size(px(8.)).rounded_full().bg(dot)),
-            );
-        }
-        sidebar = sidebar.child(div().flex_1()).child(
-            div().m_3().p_3().rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.surface0)).text_size(px(11.)).text_color(c(th.subtext))
-                .flex().flex_col().gap_1()
-                .child("Ctrl+Shift+D 分屏 · W 关闭")
-                .child("Ctrl+Shift+C / V 复制粘贴")
-                .child("Shift+PgUp / 滚轮 回看")
-                .child("Ctrl+Shift+T 切换主题")
-                .child("→ / Tab 接受灰色建议"));
+        let s = config::get();
 
         let mut tabbar = div().h(px(40.)).px_2().flex().items_center().gap_1().bg(c(th.crust)).border_b_1().border_color(c(th.surface0));
+        if !self.sidebar_visible {
+            tabbar = tabbar.child(div().id("sb-show").size(px(28.)).rounded_lg().flex().items_center().justify_center().cursor_pointer().hover(|d| d.bg(c(cur().surface0)))
+                .on_click(cx.listener(|this, _, _w, cx| { this.sidebar_visible = true; cx.notify(); })).child(icon(IconName::Layers, 14., c(th.overlay1))));
+        }
         for (i, t) in self.tabs.iter().enumerate() {
             let active = i == self.active;
             let panes = t.layout.leaves();
@@ -237,14 +498,13 @@ impl Render for Root {
                 let first = panes[0].read(cx).title.clone();
                 if panes.len() > 1 { format!("{first} +{}", panes.len() - 1).into() } else { first }
             };
-            // most urgent agent state among the tab's panes: Blocked > Working > Idle
             let agent = panes.iter().filter_map(|p| p.read(cx).agent_label())
                 .max_by_key(|(_, st)| match st { AgentState::Blocked => 3, AgentState::Working => 2, AgentState::Idle => 1, _ => 0 });
             let mut tabel = div().id(("tab", i)).h(px(30.)).pl_3().pr_1().rounded_lg().flex().items_center().gap_2().cursor_pointer()
                 .bg(if active { c(th.base) } else { c(th.crust) })
                 .border_1().border_color(if active { c(th.surface0) } else { c(th.crust) })
                 .hover(|s| s.bg(c(cur().mantle)))
-                .on_click(cx.listener(move |this, _, _w, cx| { this.active = i; cx.notify(); }))
+                .on_click(cx.listener(move |this, _, w, cx| { this.active = i; this.focus_active(w, cx); cx.notify(); }))
                 .child(div().size(px(6.)).rounded_full().bg(if active { c(th.accent) } else { c(th.surface2) }))
                 .child(div().text_size(px(12.)).text_color(if active { c(th.text) } else { c(th.overlay1) }).child(title));
             if let Some((name, st)) = agent {
@@ -252,30 +512,37 @@ impl Render for Root {
                 tabel = tabel.child(div().px(px(6.)).rounded_md().bg(col.opacity(0.18)).text_color(col).text_size(px(11.)).child(format!("● {name} {}", st.label_zh())));
             }
             tabel = tabel.child(div().id(("close", i)).size(px(20.)).rounded_md().flex().items_center().justify_center()
-                .text_size(px(13.)).text_color(c(th.overlay0)).hover(|s| s.bg(c(cur().surface1)).text_color(c(cur().text)))
-                .on_click(cx.listener(move |this, _, _w, cx| {
+                .hover(|s| s.bg(c(cur().surface1)))
+                .on_click(cx.listener(move |this, _, w, cx| {
                     cx.stop_propagation();
-                    if this.tabs.len() > 1 { this.tabs.remove(i); this.active = this.active.min(this.tabs.len() - 1); cx.notify(); }
+                    this.tabs.remove(i);
+                    this.active = this.active.min(this.tabs.len().saturating_sub(1));
+                    this.focus_active(w, cx);
+                    cx.notify();
                 }))
-                .child("×"));
+                .child(icon(IconName::X, 12., c(th.overlay0))));
             tabbar = tabbar.child(tabel);
         }
+        let tb_btn = |id: &'static str, ic: IconName, label: &'static str| div().id(id).px_2().h(px(26.)).rounded_md().flex().items_center().gap_1().cursor_pointer()
+            .text_size(px(11.5)).text_color(c(th.overlay1)).hover(|s| s.bg(c(cur().surface0))).child(icon(ic, 13., c(th.overlay1))).child(label);
         tabbar = tabbar.child(
             div().id("new-tab").size(px(28.)).rounded_lg().flex().items_center().justify_center().cursor_pointer()
-                .text_color(c(th.overlay1)).text_size(px(16.)).hover(|s| s.bg(c(cur().surface0)).text_color(c(cur().text)))
+                .hover(|s| s.bg(c(cur().surface0)))
                 .on_click(cx.listener(|this, _, w, cx| this.new_tab(Spec::Local, w, cx)))
-                .child("+"),
+                .child(icon(IconName::Plus, 15., c(th.overlay1))),
         ).child(div().flex_1())
-        .child(div().id("split-auto").px_2().h(px(26.)).rounded_md().flex().items_center().cursor_pointer().text_size(px(11.5)).text_color(c(th.overlay1))
-            .hover(|s| s.bg(c(cur().surface0))).on_click(cx.listener(|this, _, w, cx| this.split(Some(Dir::Vertical), w, cx))).child("⫿ 左右分屏"))
-        .child(div().id("split-down").px_2().h(px(26.)).rounded_md().flex().items_center().cursor_pointer().text_size(px(11.5)).text_color(c(th.overlay1))
-            .hover(|s| s.bg(c(cur().surface0))).on_click(cx.listener(|this, _, w, cx| this.split(Some(Dir::Horizontal), w, cx))).child("☰ 上下分屏"))
-        .child(div().id("close-pane").px_2().h(px(26.)).rounded_md().flex().items_center().cursor_pointer().text_size(px(11.5)).text_color(c(th.overlay1))
-            .hover(|s| s.bg(c(cur().surface0))).on_click(cx.listener(|this, _, w, cx| this.close_pane(w, cx))).child("✕ 关闭分屏"));
+        .child(tb_btn("split-right", IconName::LayoutGrid, "左右分屏").on_click(cx.listener(|this, _, w, cx| this.split(Some(Dir::Vertical), w, cx))))
+        .child(tb_btn("split-down", IconName::LayoutGrid, "上下分屏").on_click(cx.listener(|this, _, w, cx| this.split(Some(Dir::Horizontal), w, cx))))
+        .child(tb_btn("close-pane", IconName::X, "关闭分屏").on_click(cx.listener(|this, _, w, cx| this.close_pane(w, cx))));
 
         let panes = match self.tabs.get(self.active) {
             Some(tab) => div().flex_1().flex().overflow_hidden().child(render_node(&tab.layout, &th)),
-            None => div().flex_1(),
+            None => div().flex_1().flex().flex_col().items_center().justify_center().gap_3().bg(c(th.base))
+                .child(icon(IconName::SquareTerminal, 36., c(th.overlay0)))
+                .child(div().text_size(px(13.)).text_color(c(th.subtext)).child("没有打开的终端"))
+                .child(div().flex().gap_2()
+                    .child(ui::button("empty-local", "打开本地终端", 1).on_click(cx.listener(|this, _, w, cx| this.new_tab(Spec::Local, w, cx))))
+                    .child(ui::button("empty-palette", "命令面板", 0).on_click(cx.listener(|this, _, w, cx| this.open_palette(w, cx))))),
         };
 
         let (status, scolor, dims, title, hist) = match self.focused_pane(window, cx) {
@@ -288,8 +555,11 @@ impl Render for Root {
             }
             None => ("—", c(th.overlay0), String::new(), SharedString::from(""), String::new()),
         };
-        let theme_label = match self.mode { ThemeMode::System => format!("◐ {}（跟随系统）", th.name), ThemeMode::Fixed(_) => format!("◐ {}", th.name) };
-        let statusbar = div().h(px(26.)).px_3().flex().items_center().gap_4().bg(c(th.crust)).border_t_1().border_color(c(th.surface0))
+        let theme_label = if s.appearance.theme == "system" { format!("{}（跟随系统）", th.name) } else { th.name.clone() };
+        let mode = s.permissions.mode;
+        let mode_col = match mode { Mode::Ask => c(th.accent), Mode::Plan => c(th.info), Mode::Auto => c(th.warning) };
+        let sb_btn = |id: &'static str| div().id(id).px_2().h(px(20.)).rounded_md().flex().items_center().gap_1().cursor_pointer().hover(|s| s.bg(c(cur().surface0)));
+        let statusbar = div().h(px(26.)).px_3().flex().items_center().gap_3().bg(c(th.crust)).border_t_1().border_color(c(th.surface0))
             .text_size(px(11.)).text_color(c(th.subtext))
             .child(div().flex().items_center().gap_2().child(div().size(px(7.)).rounded_full().bg(scolor)).child(status))
             .child(title)
@@ -297,54 +567,63 @@ impl Render for Root {
             .child(hist)
             .child(dims)
             .child("UTF-8")
-            .child(div().id("theme-btn").px_2().rounded_md().cursor_pointer().hover(|s| s.bg(c(cur().surface0)))
-                .on_click(cx.listener(|this, _, w, cx| this.cycle_theme(w, cx))).child(theme_label))
-            .child(div().id("theme-sys").px_2().rounded_md().cursor_pointer().hover(|s| s.bg(c(cur().surface0)))
-                .on_click(cx.listener(|this, _, w, cx| { this.mode = ThemeMode::System; this.apply_theme(w); this.refresh_all(cx); }))
-                .child("系统"))
-            .child(div().px_2().py(px(1.)).rounded_md().bg(c(th.accent).opacity(0.18)).text_color(c(th.accent)).font_weight(FontWeight::SEMIBOLD).child("AI: Ask 模式"));
+            .child(sb_btn("theme-btn").on_click(cx.listener(|this, _, w, cx| this.cycle_theme(w, cx))).child(icon(IconName::Palette, 12., c(th.overlay1))).child(theme_label))
+            .child(sb_btn("mode-btn").bg(mode_col.opacity(0.16)).text_color(mode_col).font_weight(FontWeight::SEMIBOLD)
+                .on_click(cx.listener(|this, _, w, cx| this.run(Action::CyclePermissionMode, w, cx)))
+                .child(icon(IconName::Shield, 12., mode_col)).child(format!("权限：{}", mode.label())));
 
-        let mut root = div().size_full().relative().flex().flex_row().bg(c(th.crust)).font_family(SharedString::from("Inter"))
+        let mut root = div().size_full().relative().flex().flex_row().bg(c(th.crust)).font_family(SharedString::from("Inter")).text_color(c(th.text))
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, w, cx| {
-                let m = &ev.keystroke.modifiers;
-                if m.control && m.shift && !m.alt {
-                    match ev.keystroke.key.to_ascii_lowercase().as_str() {
-                        "t" => this.cycle_theme(w, cx),
-                        "d" => this.split(None, w, cx),
-                        "w" => this.close_pane(w, cx),
-                        _ => return,
-                    }
+                if ev.keystroke.key == "escape" && !matches!(this.overlay, Overlay::None | Overlay::Palette(_)) {
+                    this.close_overlay(w, cx);
                     cx.stop_propagation();
+                    return;
                 }
-            }))
-            .child(sidebar)
-            .child(div().flex_1().h_full().flex().flex_col().child(tabbar).child(panes).child(statusbar));
+                let ks = actions::keystroke_str(&ev.keystroke);
+                if let Some(a) = actions::find(&ks) { this.run(a, w, cx); cx.stop_propagation(); }
+            }));
+        if self.sidebar_visible { root = root.child(self.sidebar(cx)); }
+        root = root.child(div().flex_1().h_full().flex().flex_col().child(tabbar).child(panes).child(statusbar));
+
+        let overlay: Option<AnyElement> = match &self.overlay {
+            Overlay::None => None,
+            Overlay::Settings(v) => Some(ui::modal(v.clone()).into_any_element()),
+            Overlay::Palette(p) => Some(div().absolute().top_0().left_0().size_full().child(p.clone()).into_any_element()),
+            Overlay::Host(d) => Some(div().absolute().top_0().left_0().size_full().child(d.clone()).into_any_element()),
+            Overlay::Audit => Some(self.audit_panel(cx)),
+            Overlay::Sftp => Some(self.sftp_panel(cx)),
+            Overlay::Port => Some(self.port_panel(cx)),
+            Overlay::Ai => Some(self.ai_panel(cx)),
+        };
+        if let Some(o) = overlay { root = root.child(o); }
 
         // host key confirmation (first connection / TOFU)
         if let Some(p) = self.hk_pending.first() {
-            let btn = |id: &'static str, label: &'static str, bg: Hsla, fg: Hsla| div().id(id).px_3().py(px(6.)).rounded_md().cursor_pointer().bg(bg).text_color(fg).text_size(px(12.5)).child(label);
-            root = root.child(
-                div().absolute().top_0().left_0().size_full().flex().items_center().justify_center().bg(gpui::black().opacity(0.45))
-                    .child(div().w(px(560.)).p_5().rounded_xl().bg(c(th.base)).border_1().border_color(c(th.surface1)).flex().flex_col().gap_3()
-                        .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child("首次连接：确认主机密钥"))
-                        .child(div().text_size(px(12.5)).text_color(c(th.subtext)).child(format!("{}:{} 不在 known_hosts（{}）中。", p.host, p.port, self.known_hosts.display())))
-                        .child(div().p_3().rounded_md().bg(c(th.mantle)).flex().flex_col().gap_1().text_size(px(12.)).text_color(c(th.text))
-                            .child(format!("算法：{}", p.algorithm))
-                            .child(div().font_family(SharedString::from(fcfg().family.clone())).child(format!("指纹：{}", p.fingerprint))))
-                        .child(div().text_size(px(11.5)).text_color(c(th.overlay1)).child("请通过其他渠道核对指纹。接受并保存后，以后密钥变化会被拒绝连接。"))
-                        .child(div().flex().gap_2().justify_end()
-                            .child(btn("hk-reject", "拒绝", c(th.surface0), c(th.text)).on_click(cx.listener(|this, _, _w, cx| this.answer_hostkey(HostKeyDecision::Reject, cx))))
-                            .child(btn("hk-once", "仅本次", c(th.surface0), c(th.text)).on_click(cx.listener(|this, _, _w, cx| this.answer_hostkey(HostKeyDecision::AcceptOnce, cx))))
-                            .child(btn("hk-save", "接受并保存", c(th.accent), c(th.base)).on_click(cx.listener(|this, _, _w, cx| this.answer_hostkey(HostKeyDecision::AcceptAndSave, cx)))))),
-            );
+            root = root.child(ui::modal(ui::card(560.).p_5().gap_3()
+                .child(div().flex().items_center().gap_2().child(icon(IconName::ShieldCheck, 16., c(th.warning)))
+                    .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child("首次连接：确认主机密钥")))
+                .child(div().text_size(px(12.5)).text_color(c(th.subtext)).child(format!("{}:{} 不在 known_hosts（{}）中。", p.host, p.port, s.known_hosts_path().display())))
+                .child(div().p_3().rounded_md().bg(c(th.mantle)).flex().flex_col().gap_1().text_size(px(12.)).text_color(c(th.text))
+                    .child(format!("算法：{}", p.algorithm))
+                    .child(div().font_family(SharedString::from(s.font.family.clone())).child(format!("指纹：{}", p.fingerprint))))
+                .child(div().text_size(px(11.5)).text_color(c(th.overlay1)).child("请通过其他渠道核对指纹。接受并保存后，以后密钥变化会被拒绝连接。"))
+                .child(div().flex().gap_2().justify_end()
+                    .child(ui::button("hk-reject", "拒绝", 0).on_click(cx.listener(|this, _, _w, cx| this.answer_hostkey(HostKeyDecision::Reject, cx))))
+                    .child(ui::button("hk-once", "仅本次", 0).on_click(cx.listener(|this, _, _w, cx| this.answer_hostkey(HostKeyDecision::AcceptOnce, cx))))
+                    .child(ui::button("hk-save", "接受并保存", 1).on_click(cx.listener(|this, _, _w, cx| this.answer_hostkey(HostKeyDecision::AcceptAndSave, cx)))))));
+        }
+        if let Some((msg, _)) = &self.toast {
+            root = root.child(div().absolute().bottom(px(40.)).right(px(16.)).max_w(px(460.)).px_4().py_2().rounded_lg().bg(c(th.base)).border_1().border_color(c(th.surface1)).shadow_lg()
+                .flex().items_center().gap_2().text_size(px(12.)).text_color(c(th.text)).child(icon(IconName::Info, 14., c(th.accent))).child(msg.clone()));
         }
         root
     }
 }
 
 fn main() {
-    let cfg = config::load();
-    let _ = FONT.set(cfg.font.clone());
+    let (settings, load_err) = config::Settings::load();
+    if let Some(e) = &load_err { eprintln!("{e}"); }
+    config::install(settings);
     if std::env::var("PERF_LOG").is_ok() {
         std::thread::spawn(|| {
             use termview::{CURSOR_PAINTS, GRID_PAINTS, ROWS_BUILT};
@@ -357,45 +636,46 @@ fn main() {
     }
     let rt = Arc::new(tokio::runtime::Builder::new_multi_thread().enable_all().worker_threads(2).build().unwrap());
     let themes = theme::load_all();
-    let mode = match cfg.theme.as_deref() {
-        None | Some("system") => ThemeMode::System,
-        Some(name) => themes.iter().position(|t| t.name.eq_ignore_ascii_case(name)).map(ThemeMode::Fixed).unwrap_or(ThemeMode::System),
-    };
-    let default_target = env_target(&cfg.known_hosts);
-    let no_ssh = std::env::var("NO_SSH").is_ok();
-    gpui_platform::application().run(move |cx: &mut App| {
+    let default_target = if std::env::var("NO_SSH").is_ok() { None } else { env_target(&config::get().known_hosts_path()) };
+    gpui_platform::application().with_assets(gpui_kit_assets::AllAssets).run(move |cx: &mut App| {
+        gpui_component::init(cx);
         let bounds = Bounds::centered(None, size(px(1440.), px(860.)), cx);
         cx.open_window(
             WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() },
             move |window, cx| {
-                cx.new(|cx| {
+                let view = cx.new(|cx| {
                     let (hk_tx, hk_rx) = flume::unbounded::<HostKeyPrompt>();
+                    let host_search = cx.new(|cx| InputState::new(window, cx).placeholder("搜索主机"));
+                    let audit = Arc::new(AuditLog::new(config::get().audit_path()));
                     let mut root = Root {
-                        rt, hosts: cfg.hosts.clone(), default_target, known_hosts: cfg.known_hosts.clone(),
-                        tabs: vec![], active: 0, themes, mode, histories: HashMap::new(),
-                        manifests: Arc::new(agent::bundled()), hk_tx, hk_pending: vec![], _subs: vec![],
+                        rt, default_target, tabs: vec![], active: 0, themes, histories: HashMap::new(),
+                        manifests: Arc::new(agent::bundled()), hk_tx, hk_pending: vec![], overlay: Overlay::None,
+                        host_search: host_search.clone(), collapsed: HashSet::new(), sidebar_visible: true, audit, audit_verify: None,
+                        settings_dirty: vec![], toast: None, toast_seq: 0, _subs: vec![],
                     };
-                    root.apply_theme(window);
-                    root._subs.push(cx.observe_window_appearance(window, |this: &mut Root, w, cx| {
-                        if this.mode == ThemeMode::System { this.apply_theme(w); this.refresh_all(cx); }
-                    }));
-                    // host-key prompts from SSH connections -> modal
+                    root.apply_theme(window, cx);
+                    root._subs.push(cx.observe_window_appearance(window, |this: &mut Root, w, cx| { this.apply_theme(w, cx); this.refresh_all(cx); }));
+                    root._subs.push(cx.subscribe_in(&host_search, window, |_, _, ev: &InputEvent, _, cx| if matches!(ev, InputEvent::Change) { cx.notify() }));
                     cx.spawn(async move |this, cx| {
                         while let Ok(p) = hk_rx.recv_async().await {
                             if this.update(cx, |r, cx| { r.hk_pending.push(p); cx.notify(); }).is_err() { break; }
                         }
                     }).detach();
-                    let l = root.open_pane(Spec::Local, window, cx);
-                    let mut layout = Node::Leaf(l.clone());
-                    if !no_ssh {
-                        let r = root.open_pane(Spec::Ssh(root.default_target.clone()), window, cx);
-                        layout.split(&l, r, Dir::Vertical);
+                    if let Some(e) = load_err.clone() { root.toast(e, cx); }
+                    if config::get().general.startup != "blank" {
+                        let l = root.open_pane(Spec::Local, window, cx);
+                        let mut layout = Node::Leaf(l.clone());
+                        if let Some(t) = root.default_target.clone() {
+                            let r = root.open_pane(Spec::Ssh(t), window, cx);
+                            layout.split(&l, r, Dir::Vertical);
+                        }
+                        let fh = l.read(cx).focus.clone();
+                        root.tabs.push(Tab { layout, focused: l });
+                        window.focus(&fh, cx);
                     }
-                    let fh = l.read(cx).focus.clone();
-                    root.tabs.push(Tab { layout, focused: l });
-                    window.focus(&fh, cx);
                     root
-                })
+                });
+                cx.new(|cx| gpui_component::Root::new(view, window, cx))
             },
         ).unwrap();
         cx.activate(true);

@@ -42,13 +42,20 @@ add-zsh-hook preexec __as_preexec
 fn home() -> Option<std::path::PathBuf> { std::env::var_os("HOME").map(Into::into) }
 
 /// Spawn the user's shell in a local PTY and wire it to a new Session.
+/// Shell integration (OSC 133 hooks for bash/zsh): 0 = off, 1 = only for the default $SHELL, 2 = always.
+pub static INTEGRATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
+
 /// `shell`: explicit shell path; None = $SHELL (bash/zsh get OSC 133 integration).
 pub fn spawn_local(size: Size, shell: Option<&str>) -> Result<Arc<Session>> {
     let (session, out_tx, from_ui) = Session::new(size);
     let pty = native_pty_system();
     let pair = pty.openpty(PtySize { rows: size.rows as u16, cols: size.cols as u16, pixel_width: 0, pixel_height: 0 })?;
     let sh = shell.map(str::to_string).unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into()));
-    let integrate = shell.is_none() || std::env::var("AGENTSHELL_INTEGRATE").is_ok();
+    let integrate = match INTEGRATE.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => false,
+        2 => true,
+        _ => shell.is_none() || std::env::var("AGENTSHELL_INTEGRATE").is_ok(),
+    };
     let mut cmd = CommandBuilder::new(&sh);
     let mut hist_file = ".bash_history";
     if integrate && sh.ends_with("bash") {

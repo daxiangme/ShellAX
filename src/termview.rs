@@ -25,7 +25,7 @@ use ssh_term_proto::suggest::{History, InputTracker, Key};
 use ssh_term_proto::term::{Session, Size};
 
 use crate::theme::{c, cur, term_color, Theme};
-use crate::{fcfg, font_size, line_h};
+use crate::{config, font_size, line_h};
 
 pub const PAD: f32 = 10.0;
 const SCROLLBAR_W: f32 = 8.0;
@@ -37,7 +37,8 @@ pub static CURSOR_PAINTS: AtomicU64 = AtomicU64::new(0);
 
 /// Terminal font: primary family + fallback chain, ligatures off (calt/liga/dlig = 0).
 pub fn mono_font(bold: bool, italic: bool) -> Font {
-    let fc = fcfg();
+    let st = config::get();
+    let fc = &st.font;
     let mut f = gpui::font(SharedString::from(fc.family.clone()));
     if !fc.ligatures {
         f.features = gpui::FontFeatures(Arc::new(vec![("calt".into(), 0), ("liga".into(), 0), ("dlig".into(), 0)]));
@@ -92,7 +93,7 @@ struct RowPaint {
 }
 
 #[derive(PartialEq, Clone)]
-struct CacheKey { cols: usize, rows: usize, theme: SharedString, cw: u32, offset: usize, sel: Option<(BPoint, BPoint)>, hover: Option<(i32, usize, usize)> }
+struct CacheKey { cols: usize, rows: usize, theme: SharedString, cw: u32, gen: u64, offset: usize, sel: Option<(BPoint, BPoint)>, hover: Option<(i32, usize, usize)> }
 
 pub struct GridLayer {
     session: Option<Arc<Session>>,
@@ -138,7 +139,7 @@ impl Render for GridLayer {
                 drop(st);
                 let mut term = s.term.lock().unwrap();
                 let (ncols, nrows, offset, history) = { let g = term.grid(); (g.columns(), g.screen_lines(), g.display_offset(), g.history_size()) };
-                let key = CacheKey { cols: ncols, rows: nrows, theme: th.name.clone().into(), cw: cw.to_bits(), offset, sel, hover };
+                let key = CacheKey { cols: ncols, rows: nrows, theme: th.name.clone().into(), cw: cw.to_bits(), gen: config::generation(), offset, sel, hover };
                 let mut cache = cache.borrow_mut();
                 let full = cache.0.as_ref() != Some(&key) || offset != 0;
                 let mut dirty = vec![full; nrows];
@@ -306,7 +307,14 @@ impl Render for CursorLayer {
             let cell = &g[cursor.line][cursor.column];
             let w = if cell.flags.contains(Flags::WIDE_CHAR) { 2.0 * cw } else { cw };
             let b = Bounds::new(point(x, y + px(1.)), size(px(w), px(lh - 2.)));
-            if st.focused {
+            let style = config::get().terminal.cursor_style.clone();
+            if st.focused && style != "block" {
+                if st.blink_on {
+                    let bar = if style == "bar" { Bounds::new(b.origin, size(px(2.), b.size.height)) }
+                              else { Bounds::new(point(x, y + px(lh - 3.)), size(px(w), px(2.))) };
+                    window.paint_quad(fill(bar, c(th.cursor)));
+                }
+            } else if st.focused {
                 if st.blink_on {
                     window.paint_quad(fill(b, c(th.cursor)));
                     let ch = if cell.c != ' ' && cell.c != '\0' { Some(cell.c) } else { st.suggestion.as_ref().and_then(|s| s.chars().next()) };
@@ -348,6 +356,8 @@ pub struct TermView {
     agent_seen: Instant,
     last_detect: Instant,
     detect_scheduled: bool,
+    pub pending_paste: Option<String>,
+    bell_until: Option<Instant>,
     _subs: Vec<Subscription>,
 }
 
@@ -386,7 +396,7 @@ impl TermView {
             selecting: false, scroll_drag: false, history, tracker: InputTracker::new(),
             last_activity: Instant::now(), blink_running: false, last_mouse_cell: None, mouse_down_btn: None,
             manifests, last_command: None, agent: None, agent_seen: Instant::now(), last_detect: Instant::now() - Duration::from_secs(5),
-            detect_scheduled: false, _subs: subs,
+            detect_scheduled: false, pending_paste: None, bell_until: None, _subs: subs,
         }
     }
 
@@ -405,8 +415,18 @@ impl TermView {
     /// Called (coalesced) when the backend produced output.
     fn on_output(&mut self, cx: &mut Context<Self>) {
         if let Some(s) = &self.session {
-            if let Some(seed) = s.history_seed.lock().unwrap().take() { self.history.lock().unwrap().extend_from_bash_history(&seed); }
+            if let Some(seed) = s.history_seed.lock().unwrap().take() { if config::get().suggest.remote_history { self.history.lock().unwrap().extend_from_bash_history(&seed); } }
             if s.exited.load(Ordering::Acquire) || s.conn_error.lock().unwrap().is_some() { cx.notify(); }
+        }
+        if let Some(s) = &self.session {
+            if s.shared.bell.swap(false, Ordering::AcqRel) && config::get().terminal.bell == "visual" {
+                self.bell_until = Some(Instant::now() + Duration::from_millis(180));
+                cx.notify();
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(Duration::from_millis(200)).await;
+                    let _ = this.update(cx, |v, cx| { v.bell_until = None; cx.notify(); });
+                }).detach();
+            }
         }
         self.last_activity = Instant::now();
         self.st.borrow_mut().blink_on = true;
@@ -421,7 +441,7 @@ impl TermView {
     fn kick_blink(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.last_activity = Instant::now();
         self.st.borrow_mut().blink_on = true;
-        if self.blink_running { return; }
+        if self.blink_running || !config::get().terminal.cursor_blink { return; }
         self.blink_running = true;
         cx.spawn_in(window, async move |this, cx| {
             loop {
@@ -467,7 +487,10 @@ impl TermView {
         let idx = if is_shell { None } else {
             // local: fg process is authoritative; ssh: last submitted command / title
             let cmd = if fg.is_some() { None } else { self.last_command.as_deref() };
-            agent::identify(&self.manifests, fg.as_deref(), cmd, &title)
+            agent::identify(&self.manifests, fg.as_deref(), cmd, &title).filter(|i| {
+                let a = &config::get().agents;
+                match self.manifests[*i].id.as_str() { "claude" => a.detect_claude, "codex" => a.detect_codex, "grok" => a.detect_grok, _ => true }
+            })
         };
         let new = idx.map(|i| {
             let screen = s.screen_text();
@@ -517,6 +540,7 @@ impl TermView {
     }
 
     fn compute_suggestion(&self) -> Option<String> {
+        if !config::get().suggest.enabled { return None; }
         let ls = self.line_state()?;
         if ls.alt_screen || !ls.at_eol { return None; }
         let (input, _) = self.tracker.current_input(&ls.before_cursor, ls.prompt_col)?;
@@ -565,6 +589,16 @@ impl TermView {
 
     pub fn paste(&mut self, cx: &mut Context<Self>) {
         let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) else { return };
+        // multi-line paste outside bracketed-paste mode would execute each line: confirm first
+        if config::get().terminal.paste_confirm && text.trim_end().contains('\n') && !self.mode().contains(TermMode::BRACKETED_PASTE) {
+            self.pending_paste = Some(text);
+            cx.notify();
+            return;
+        }
+        self.paste_text(text, cx);
+    }
+
+    pub fn paste_text(&mut self, text: String, cx: &mut Context<Self>) {
         let Some(s) = self.session.clone() else { return };
         let bytes = paste_bytes(&text, self.mode().contains(TermMode::BRACKETED_PASTE));
         self.tracker.key(Key::Other); // pasted text can't be tracked reliably
@@ -595,7 +629,9 @@ impl TermView {
             return;
         }
         let plain = !m.control && !m.alt && !m.platform && !m.shift;
-        if plain && (k.key == "right" || k.key == "tab") {
+        let accept = config::get().suggest.accept.clone();
+        let key_ok = match accept.as_str() { "right" => k.key == "right", "tab" => k.key == "tab", _ => k.key == "right" || k.key == "tab" };
+        if plain && key_ok {
             if let Some(sug) = self.compute_suggestion() {
                 s.write(sug.clone().into_bytes());
                 self.tracker.key(Key::Text(&sug));
@@ -646,7 +682,7 @@ impl TermView {
     fn to_buf(&self, (row, col): (usize, usize)) -> BPoint { (row as i32 - self.offset() as i32, col) }
 
     /// Whether mouse events go to the application (vim/htop) rather than local selection.
-    fn mouse_reporting(&self, shift: bool) -> bool { !shift && self.mode().intersects(TermMode::MOUSE_MODE) }
+    fn mouse_reporting(&self, shift: bool) -> bool { !shift && config::get().terminal.mouse_reporting && self.mode().intersects(TermMode::MOUSE_MODE) }
 
     fn report_mouse(&mut self, button: u8, pressed: bool, cell: (usize, usize), mods: &gpui::Modifiers) {
         let Some(s) = &self.session else { return };
@@ -775,6 +811,7 @@ impl TermView {
                 // X11 convention: selecting also fills the primary selection
                 #[cfg(target_os = "linux")]
                 if let Some(t) = self.selection_text() { cx.write_to_primary(ClipboardItem::new_string(t)); }
+                if config::get().terminal.copy_on_select { self.copy(cx); }
             }
         }
     }
@@ -866,6 +903,22 @@ impl Render for TermView {
         if let Some(e) = &self.error {
             body = body.child(div().absolute().top(px(16.)).left(px(16.)).right(px(16.)).p_3().rounded_md()
                 .bg(c(th.mantle)).border_1().border_color(c(th.error)).text_color(c(th.error)).text_sm().child(format!("连接失败：{e}")));
+        }
+        if let Some(text) = &self.pending_paste {
+            let lines = text.trim_end().lines().count();
+            let preview: String = text.lines().next().unwrap_or("").chars().take(60).collect();
+            let btn = |id: &'static str, label: &'static str, primary: bool| div().id(id).px_3().py(px(4.)).rounded_md().cursor_pointer().text_size(px(12.))
+                .bg(if primary { c(th.accent) } else { c(th.surface0) }).text_color(if primary { c(th.base) } else { c(th.text) }).child(label);
+            body = body.child(div().absolute().bottom(px(12.)).left(px(12.)).right(px(12.)).p_3().rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.warning))
+                .flex().items_center().gap_3().text_size(px(12.)).text_color(c(th.text))
+                .child(div().flex_1().flex().flex_col().gap_1()
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("粘贴 {lines} 行文本？每一行都可能被立即执行")))
+                    .child(div().text_color(c(th.overlay1)).child(format!("{preview} …"))))
+                .child(btn("paste-cancel", "取消", false).on_click(cx.listener(|v, _, _w, cx| { v.pending_paste = None; cx.notify(); })))
+                .child(btn("paste-ok", "粘贴", true).on_click(cx.listener(|v, _, _w, cx| { if let Some(t) = v.pending_paste.take() { v.paste_text(t, cx); } cx.notify(); }))));
+        }
+        if self.bell_until.is_some_and(|t| t > Instant::now()) {
+            body = body.child(div().absolute().top_0().left_0().size_full().border_2().border_color(c(th.warning)).bg(c(th.warning).opacity(0.06)));
         }
         let (status, scolor) = self.status(&th);
         let mut header = div().h(px(26.)).px_3().flex().items_center().gap_2().bg(c(th.mantle)).text_size(px(11.5))

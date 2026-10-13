@@ -5,6 +5,9 @@ use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::{Config, Term};
+
+/// Scrollback lines for new sessions (settings: terminal.scrollback).
+pub static SCROLLBACK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(10_000);
 use alacritty_terminal::vte::ansi::Processor;
 
 /// Messages from the UI/tests to a backend (PTY or SSH).
@@ -105,7 +108,7 @@ impl Session {
         let (out_tx, out_rx) = flume::unbounded::<Vec<u8>>();
         let (wake_tx, wake_rx) = flume::bounded::<()>(1);
         let shared = Shared::default();
-        let cfg = Config { scrolling_history: 10_000, ..Config::default() };
+        let cfg = Config { scrolling_history: SCROLLBACK.load(Ordering::Relaxed), ..Config::default() };
         let term = Term::new(cfg, &size, Listener { tx: to_backend.clone(), shared: shared.clone() });
         let s = Arc::new(Self {
             term: Arc::new(Mutex::new(term)),

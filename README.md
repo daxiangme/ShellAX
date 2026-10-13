@@ -218,3 +218,28 @@ SSH_PORT=2222 SSH_USER=sshtest SSH_KEY=$PWD/testenv/client_ed25519 \
 - SSH 侧 Agent 识别依赖本面板里输入的命令首词或 OSC 标题，通过别名启动时识别不到。
 - zsh 只测了本地（无界面测试），远端 zsh 只读取历史文件。
 - IME 预编辑、macOS/Windows/Wayland 仍未验证。
+
+## v5（2026-10-13）：设置页与功能入口
+
+截图（DISPLAY=:2，1440×860 窗口）：
+- `screenshot-v5-sidebar.png`：侧栏，含主机搜索、新建按钮、分组（快速连接 / 测试 / 生产 / staging / ~/.ssh/config）、生产标记、悬停编辑按钮，以及左下功能区（SFTP、端口转发、AI/Agent、审计日志、命令面板、设置、帮助与关于）
+- `screenshot-v5-settings-{appearance,terminal,ssh,keys,search}.png`：设置页的外观、终端、SSH、快捷键分类和搜索结果
+- `screenshot-v5-permissions.png`：权限与安全：模式卡片、规则表（可改效果/上移/删除/新增）、规则测试器、风险等级
+- `screenshot-v5-new-host.png`、`screenshot-v5-palette.png`、`screenshot-v5-audit.png`、`screenshot-v5-ai-agent.png`、`screenshot-v5-sftp.png`、`screenshot-v5-about.png`
+
+新增文件：`src/config.rs`（重写：完整设置结构、点分路径读写、保存）、`src/settings_view.rs`、`src/palette.rs`、`src/host_dialog.rs`、`src/panels.rs`、`src/actions.rs`、`src/ui.rs`、`src/policy.rs`、`src/audit.rs`。新依赖：`gpui-component 0.7.3`、`gpui-kit-assets 0.7.3`（Lucide 图标，ISC）、`sha2`、`chrono`、`serde_json`。
+
+**真正可用**
+- 设置读写 `~/.config/agentshell/config.toml`（`AGENTSHELL_CONFIG` 可换路径），改动立即写回。立即生效：主题/跟随系统/浅深色主题、字体/回退链/字号/行高/连字、光标样式/闪烁、响铃（闪烁边框）、选中即复制、多行粘贴确认、鼠标上报、命令建议开关/接受键/过滤正则、Agent 识别开关、读取 ssh_config/默认用户端口（主机列表）、快捷键改绑。新会话生效：默认 Shell、回滚行数、Shell 集成开关、本地/远程历史、keepalive、连接超时、known_hosts 路径、未知主机密钥策略（询问/严格/自动接受）。
+- 新建/编辑/删除主机，写入 `[[hosts]]`（含 group、production、auth、jump 字段）。
+- 命令面板 Ctrl+Shift+P：28 个动作和所有主机的模糊搜索，↑↓/Enter/Esc。
+- 状态栏权限模式按钮：点击循环 Ask → Plan → Auto，写配置并记审计。
+- 权限规则编辑器 + 测试器（`policy::decide`，有单元测试）。
+- 审计日志：SHA-256 哈希链 JSONL，查看器、校验、导出（导出到 `~/agentshell-audit-<时间>.jsonl`）。
+- 凭据页：只读扫描 `~/.ssh/id_*` 并显示 SHA-256 指纹；检测 SSH_AUTH_SOCK。外部 Agent 页：只读检测 hook 配置。关于页：显示 THIRD_PARTY_NOTICES。
+
+**只有界面（标“即将支持”）**：界面语言、更新、透明度、界面字号、跳板机、加密算法偏好、Agent 转发、钥匙串、ssh-agent 认证、生成/导入密钥、全部内置 AI 设置、Agent 通知/审批超时/一键安装 hook、生产主机确认、审计保留/记录命令、会话持久化/布局恢复/关闭确认/自动重连、通知、响铃声音、SFTP 远端、端口转发、密码/agent 认证。这些设置能改、会保存，但没有效果。权限模式和规则目前**不拦截任何操作**（还没有内置 AI 和 agent bridge）。
+
+**测试**：`cargo test --release`：库 25 + 二进制 7 + 无界面 6（SSH 用例需 `TEST_SSH_PORT=2222 TEST_SSH_USER=sshtest TEST_SSH_KEY=testenv/client_ed25519`）全部通过；release 构建无警告。
+
+**已知问题**：设置写回会丢掉 config.toml 里手写的注释；多行粘贴确认在 bash/zsh 提示符下不会出现（readline 开了括号粘贴，属预期）；本机 X 环境没有 xclip，粘贴确认没截图验证；首次点击窗口有时只是获得焦点。

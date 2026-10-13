@@ -69,6 +69,14 @@ impl client::Handler for Handler {
                     self.host, self.port, self.known_hosts.display()));
                 Ok(false)
             }
+            KnownHost::Unknown if HOST_KEY_POLICY.load(std::sync::atomic::Ordering::Relaxed) == 1 => {
+                *self.failure.lock().unwrap() = Some(format!("严格模式：{}:{} 不在 known_hosts 中（{fp}），已拒绝连接。", self.host, self.port));
+                Ok(false)
+            }
+            KnownHost::Unknown if HOST_KEY_POLICY.load(std::sync::atomic::Ordering::Relaxed) == 2 => {
+                russh::keys::known_hosts::learn_known_hosts_path(&self.host, self.port, &key, &self.known_hosts)?;
+                Ok(true)
+            }
             KnownHost::Unknown => {
                 let (tx, rx) = flume::bounded(1);
                 self.prompt.send_async(HostKeyPrompt {
@@ -87,6 +95,12 @@ impl client::Handler for Handler {
     }
 }
 
+/// Runtime knobs set from the settings page (ssh.keepalive_secs / connect_timeout_secs / host_key_policy).
+pub static KEEPALIVE_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(30);
+pub static CONNECT_TIMEOUT_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(15);
+/// 0 = ask on unknown keys (TOFU prompt), 1 = strict (reject unknown), 2 = accept-new (save without asking).
+pub static HOST_KEY_POLICY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
 /// Remote history fetch: bash and zsh history, newest 2000 lines each.
 const HISTORY_CMD: &str = "for f in ~/.bash_history ~/.zsh_history; do [ -r \"$f\" ] && tail -n 2000 \"$f\"; done 2>/dev/null";
 
@@ -99,10 +113,17 @@ pub fn spawn_ssh(rt: &tokio::runtime::Handle, target: SshTarget, size: Size, pro
     rt.spawn(async move {
         let failure = Arc::new(std::sync::Mutex::new(None));
         let res: Result<()> = async {
-            let cfg = Arc::new(client::Config { inactivity_timeout: None, keepalive_interval: Some(Duration::from_secs(30)), ..Default::default() });
+            use std::sync::atomic::Ordering::Relaxed;
+            let ka = KEEPALIVE_SECS.load(Relaxed);
+            let cfg = Arc::new(client::Config { inactivity_timeout: None, keepalive_interval: (ka > 0).then(|| Duration::from_secs(ka)), ..Default::default() });
             let handler = Handler { host: target.host.clone(), port: target.port, known_hosts: target.known_hosts.clone(), prompt, failure: failure.clone() };
-            let mut h = tokio::time::timeout(Duration::from_secs(120), client::connect(cfg, (target.host.as_str(), target.port), handler)).await
-                .map_err(|_| anyhow!("连接超时"))??;
+            // TCP connect is bounded by the configured timeout; the handshake (which may wait on the
+            // host-key prompt) gets a separate generous bound.
+            let secs = CONNECT_TIMEOUT_SECS.load(Relaxed).max(1);
+            let tcp = tokio::time::timeout(Duration::from_secs(secs), tokio::net::TcpStream::connect((target.host.as_str(), target.port))).await
+                .map_err(|_| anyhow!("连接超时（{secs} 秒）"))??;
+            let mut h = tokio::time::timeout(Duration::from_secs(300), client::connect_stream(cfg, tcp, handler)).await
+                .map_err(|_| anyhow!("握手超时"))??;
             let mut authed = false;
             let mut last_err = String::from("没有可用的私钥");
             for kp in &target.keys {

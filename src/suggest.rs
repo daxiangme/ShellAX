@@ -83,6 +83,12 @@ impl History {
         true
     }
 
+    /// Forget everything (and truncate the persisted file).
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        if let Some(p) = &self.path { let _ = std::fs::write(p, ""); }
+    }
+
     pub fn len(&self) -> usize { self.entries.len() }
     pub fn is_empty(&self) -> bool { self.entries.is_empty() }
 
@@ -97,7 +103,18 @@ impl History {
 
 /// Heuristic filter for commands that likely contain secrets. Such commands are neither stored
 /// nor suggested.
+/// Extra user regexes (settings: suggest.filter_patterns), checked in addition to the built-ins.
+pub static EXTRA_FILTERS: std::sync::RwLock<Vec<regex::Regex>> = std::sync::RwLock::new(Vec::new());
+
+pub fn set_extra_filters(patterns: &[String]) -> Vec<String> {
+    let mut bad = vec![];
+    let v = patterns.iter().filter_map(|p| regex::Regex::new(p).map_err(|_| bad.push(p.clone())).ok()).collect();
+    *EXTRA_FILTERS.write().unwrap() = v;
+    bad
+}
+
 pub fn is_sensitive(cmd: &str) -> bool {
+    if EXTRA_FILTERS.read().unwrap().iter().any(|r| r.is_match(cmd)) { return true; }
     let l = cmd.to_ascii_lowercase();
     const WORDS: &[&str] = &[
         "password", "passwd=", "pwd=", "secret", "token", "api_key", "apikey", "access_key",
