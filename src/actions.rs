@@ -6,7 +6,7 @@ use crate::ui::IconName;
 pub enum Action {
     CommandPalette, OpenSettings, NewLocalTab, NewHost, SplitAuto, SplitRight, SplitDown, ClosePane,
     NextTab, PrevTab, CycleTheme, ThemeSystem, CyclePermissionMode, ModeAsk, ModePlan, ModeAuto,
-    OpenSftp, OpenPortForward, OpenHostTools, OpenAi, AiCommand, OpenAudit, OpenAbout, ClearHistory, ToggleSidebar,
+    OpenSftp, OpenSftpPopup, OpenSftpTab, OpenSftpSplit, OpenSftpWindow, OpenPortForward, OpenHostTools, OpenAi, AiCommand, OpenAudit, OpenAbout, ClearHistory, ToggleSidebar,
     SettingsPermissions, SettingsAppearance, SettingsTerminal, SettingsSsh, SettingsKeys,
     LaunchAgent1, LaunchAgent2, LaunchAgent3,
     ToggleBroadcast, ToggleRecording, PlayRecording, SnapshotLayout, RollbackLayout, QuickStart,
@@ -18,7 +18,7 @@ impl Action {
     pub const ALL: &'static [Action] = &[
         Action::CommandPalette, Action::OpenSettings, Action::OpenAbout, Action::NewLocalTab, Action::SplitAuto, Action::SplitRight,
         Action::SplitDown, Action::ClosePane, Action::NextTab, Action::PrevTab, Action::NewHost, Action::CycleTheme, Action::ThemeSystem,
-        Action::ToggleSidebar, Action::CyclePermissionMode, Action::ModeAsk, Action::ModePlan, Action::ModeAuto, Action::OpenSftp, Action::OpenPortForward, Action::OpenHostTools,
+        Action::ToggleSidebar, Action::CyclePermissionMode, Action::ModeAsk, Action::ModePlan, Action::ModeAuto, Action::OpenSftp, Action::OpenSftpTab, Action::OpenSftpSplit, Action::OpenSftpWindow, Action::OpenSftpPopup, Action::OpenPortForward, Action::OpenHostTools,
         Action::OpenAi, Action::AiCommand, Action::OpenAudit, Action::ClearHistory,
         Action::SettingsPermissions, Action::SettingsAppearance, Action::SettingsTerminal, Action::SettingsSsh, Action::SettingsKeys,
         Action::LaunchAgent1, Action::LaunchAgent2, Action::LaunchAgent3,
@@ -45,6 +45,10 @@ impl Action {
             Action::ModePlan => i("mode_plan", t("ui.permission_mode_plan_read_only"), t("ui.permissions"), "", I::Shield),
             Action::ModeAuto => i("mode_auto", t("ui.permission_mode_auto_low_risk"), t("ui.permissions"), "", I::Shield),
             Action::OpenSftp => i("sftp", t("ui.sftp_files"), t("ui.tools"), "", I::FolderSync),
+            Action::OpenSftpPopup => i("sftp_popup", t("sftp.open_popup"), t("ui.tools"), "", I::FolderSync),
+            Action::OpenSftpTab => i("sftp_tab", t("sftp.open_tab"), t("ui.tools"), "", I::PanelTop),
+            Action::OpenSftpSplit => i("sftp_split", t("sftp.open_split"), t("ui.tools"), "", I::Columns2),
+            Action::OpenSftpWindow => i("sftp_window", t("sftp.open_window"), t("ui.tools"), "", I::ExternalLink),
             Action::OpenHostTools => i("host_tools", t("hosttools.title"), t("ui.tools"), "", I::ChartPie),
             Action::OpenPortForward => i("port_forward", t("ui.port_forwarding"), t("ui.tools"), "", I::ArrowLeftRight),
             Action::OpenAi => i("ai_panel", t("ui.ai_agent_panel"), t("ui.tools"), "ctrl-shift-a", I::Bot),

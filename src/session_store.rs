@@ -13,9 +13,11 @@ use crate::ssh::SshTarget;
 pub enum PaneSave {
     Local { #[serde(default)] cwd: String, #[serde(default)] daemon_id: Option<String>, #[serde(default)] resume: Option<String> },
     Ssh { target: SshTarget, #[serde(default)] resume: Option<String> },
+    /// SFTP browser pane/tab (PRD 5.21): reopens on the same host and directories.
+    Sftp { target: SshTarget, #[serde(default)] local_dir: String, #[serde(default)] remote_dir: String, #[serde(default)] follow: bool },
 }
 impl PaneSave {
-    pub fn resume(&self) -> Option<&str> { match self { PaneSave::Local { resume, .. } | PaneSave::Ssh { resume, .. } => resume.as_deref() } }
+    pub fn resume(&self) -> Option<&str> { match self { PaneSave::Local { resume, .. } | PaneSave::Ssh { resume, .. } => resume.as_deref(), PaneSave::Sftp { .. } => None } }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -59,6 +61,26 @@ pub fn uuid_like() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sftp_tabs_roundtrip() {
+        let t = SshTarget { host: "h".into(), port: 2222, user: "u".into(), ..Default::default() };
+        let l = LayoutSave { version: 1, saved_at: "x".into(), active: 0, tabs: vec![
+            NodeSave::Leaf { pane: PaneSave::Sftp { target: t.clone(), local_dir: "/tmp/本地 dir".into(), remote_dir: "/srv/a b".into(), follow: false } },
+            NodeSave::Split { vertical: true, ratio: 0.6, a: Box::new(NodeSave::Leaf { pane: PaneSave::Ssh { target: t.clone(), resume: None } }),
+                b: Box::new(NodeSave::Leaf { pane: PaneSave::Sftp { target: t, local_dir: String::new(), remote_dir: "/".into(), follow: true } }) },
+        ] };
+        let p = std::env::temp_dir().join(format!("stp-layout-sftp-{}.json", std::process::id()));
+        save(&p, &l).unwrap();
+        let back = load(&p).unwrap();
+        assert_eq!(back, l);
+        assert!(std::fs::read_to_string(&p).unwrap().contains("\"kind\": \"sftp\""));
+        assert_eq!(back.tabs[0].clone(), l.tabs[0]);
+        // minimal / older sftp entry still loads with defaults
+        let j = r#"{"version":1,"saved_at":"","active":0,"tabs":[{"node":"leaf","pane":{"kind":"sftp","target":{"host":"h","port":22,"user":"u"}}}]}"#;
+        let o: LayoutSave = serde_json::from_str(j).unwrap();
+        assert!(matches!(&o.tabs[0], NodeSave::Leaf { pane: PaneSave::Sftp { follow: false, remote_dir, .. } } if remote_dir.is_empty()));
+        let _ = std::fs::remove_file(p);
+    }
     #[test]
     fn roundtrip() {
         let l = LayoutSave { version: 1, saved_at: "x".into(), active: 1, tabs: vec![

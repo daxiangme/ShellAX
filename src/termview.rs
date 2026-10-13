@@ -428,6 +428,8 @@ impl Render for CursorLayer {
 
 // ---------------------------------------------------------------- pane
 pub struct TermView {
+    /// SFTP browser hosted in this layout leaf (PRD 5.21 tab/split mode); no shell session then.
+    pub sftp: Option<Entity<crate::sftp_view::SftpView>>,
     pub title: SharedString,
     pub spec: Spec,
     pub session: Option<Arc<Session>>,
@@ -519,7 +521,17 @@ pub enum TermEvent { Keyword(String, String), Explain, Agent(String, AgentState)
 /// composition text is only drawn (never sent) until the IME commits it.
 impl TermView {
     /// Pane title in the current UI language (follows a language switch without reopening).
+    /// A layout leaf that hosts an SFTP view instead of a shell (tab / split mode, PRD 5.21).
+    pub fn new_sftp(v: Entity<crate::sftp_view::SftpView>, history: Arc<Mutex<History>>, manifests: Arc<Vec<Manifest>>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let target = v.read(cx).target.clone();
+        let title = ssh_term_proto::sftp_mode::title(&target.label());
+        let mut me = Self::new(&title, Spec::Ssh(target), Err(anyhow::anyhow!("sftp")), history, manifests, window, cx);
+        me.error = None;
+        me.sftp = Some(v);
+        me
+    }
     pub fn shown_title(&self) -> SharedString {
+        if self.sftp.is_some() { return self.title.clone(); }
         match (&self.spec, self.title.rsplit_once(" · ")) {
             (Spec::Local, Some((_, sh))) => tf("main.local_title", &[("shell", &sh)]).into(),
             _ => self.title.clone(),
@@ -593,7 +605,7 @@ impl TermView {
             selecting: false, scroll_drag: false, history, tracker: InputTracker::new(),
             last_activity: Instant::now(), blink_running: false, software_gpu: std::env::var("AGENTSHELL_FORCE_BLINK").ok().map(|_| false), last_mouse_cell: None, mouse_down_btn: None,
             manifests, last_command: None, agent: None, agent_seen: Instant::now(), last_detect: Instant::now() - Duration::from_secs(5),
-            detect_scheduled: false, pending_paste: None, ai: None, daemon_id: None, resume_offer: None, clip_ask: None, pty_ask: None, pty_write_ok: false, search: None, last_agent: None, failed: None, exit_seen: 0, ai_inline_seq: 0, ai_inline: None, bell_until: None, cmd_started: None, ai_capture: None, ctx_menu: None, ctx_pending: None, ctx_confirm: None, ctx_denied: None, _subs: subs,
+            detect_scheduled: false, pending_paste: None, ai: None, daemon_id: None, resume_offer: None, clip_ask: None, pty_ask: None, pty_write_ok: false, search: None, last_agent: None, failed: None, exit_seen: 0, ai_inline_seq: 0, ai_inline: None, bell_until: None, cmd_started: None, ai_capture: None, ctx_menu: None, ctx_pending: None, ctx_confirm: None, ctx_denied: None, sftp: None, _subs: subs,
         }
     }
 
@@ -603,6 +615,7 @@ impl TermView {
             Some(s) if s.exited.load(Ordering::Acquire) => (t("ui.disconnected"), c(th.overlay0)),
             Some(s) if s.connected.load(Ordering::Acquire) => (t("ui.connected"), c(th.success)),
             Some(_) => (t("ui.connecting"), c(th.warning)),
+            None if self.sftp.is_some() => ("SFTP", c(th.accent)),
             None => (t("ui.connection_failed"), c(th.error)),
         }
     }
@@ -1728,6 +1741,10 @@ impl Render for TermView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
         let focused = self.st.borrow().focused;
+        if let Some(v) = self.sftp.clone() {
+            return div().track_focus(&self.focus).flex_1().size_full().flex().flex_col().overflow_hidden()
+                .border_t_2().border_color(if focused { c(th.accent) } else { c(th.bg) }).child(v);
+        }
         let mut body = div().flex_1().size_full().relative()
             .child(self.grid.clone().cached(StyleRefinement::default().size_full()))
             .child(div().absolute().top_0().left_0().size_full().child(self.cursor.clone()));

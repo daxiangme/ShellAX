@@ -201,8 +201,12 @@ impl Default for Audit { fn default() -> Self { Self { dir: s_auditdir(), retent
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
-pub struct SessionCfg { pub persistent: String, pub restore_layout: bool, pub confirm_close: bool, pub auto_reconnect: bool, pub local_daemon: bool }
-impl Default for SessionCfg { fn default() -> Self { Self { persistent: s_off(), restore_layout: t(), confirm_close: t(), auto_reconnect: t(), local_daemon: false } } }
+pub struct SessionCfg { pub persistent: String, pub restore_layout: bool, pub confirm_close: bool, pub auto_reconnect: bool, pub local_daemon: bool,
+    /// Default SFTP open mode (PRD 5.21): popup | tab | split | window.
+    pub sftp_mode: String,
+    /// SFTP split pane follows the neighbouring terminal's cwd (OSC 7 / prompt).
+    pub sftp_follow_cwd: bool }
+impl Default for SessionCfg { fn default() -> Self { Self { persistent: s_off(), restore_layout: t(), confirm_close: t(), auto_reconnect: t(), local_daemon: false, sftp_mode: "popup".into(), sftp_follow_cwd: t() } } }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
