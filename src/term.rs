@@ -217,7 +217,7 @@ impl Session {
                         // Reserve the rows so following text starts below the picture.
                         parser.advance(t, &b"\r\n".repeat(rows));
                     };
-                    let mut run = |t: &mut Term<Listener>, parser: &mut Processor, next_img: &mut u64, (bytes, imgs): (Vec<u8>, Vec<crate::graphics::Image>)| {
+                    let run = |t: &mut Term<Listener>, parser: &mut Processor, next_img: &mut u64, (bytes, imgs): (Vec<u8>, Vec<crate::graphics::Image>)| {
                         // feed text up to each image's offset, place the image, continue
                         let mut pos = 0;
                         for im in imgs { let at = im.at.min(bytes.len()); feed(t, parser, &bytes[pos..at]); pos = at; place(t, vec![im], parser, next_img); }

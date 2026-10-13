@@ -3,14 +3,16 @@
 //! has echo off (password prompts), replacing it with a marker.
 use std::io::Write;
 
-pub struct Recorder { w: std::io::BufWriter<std::fs::File>, start: std::time::Instant, pub redact: bool, hidden: bool }
+pub struct Recorder { w: std::io::BufWriter<std::fs::File>, start: std::time::Instant, pub redact: bool, hidden: bool,
+    /// Redacting: output is held until end of line so a secret split across reads is still caught.
+    pending: String, pending_t: f64 }
 impl Recorder {
     pub fn create(path: &std::path::Path, cols: u16, rows: u16, title: &str, redact: bool) -> std::io::Result<Self> {
         if let Some(p) = path.parent() { std::fs::create_dir_all(p)?; }
         let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
         let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         writeln!(w, "{}", serde_json::json!({"version": 2, "width": cols, "height": rows, "timestamp": ts, "title": title, "env": {"TERM": "xterm-256color"}}))?;
-        Ok(Self { w, start: std::time::Instant::now(), redact, hidden: false })
+        Ok(Self { w, start: std::time::Instant::now(), redact, hidden: false, pending: String::new(), pending_t: 0. })
     }
     /// `echo_off` = the pty is in no-echo mode (password entry): output is hidden.
     pub fn output(&mut self, data: &[u8], echo_off: bool) -> std::io::Result<()> {
@@ -23,13 +25,22 @@ impl Recorder {
         }
         self.hidden = false;
         let s = String::from_utf8_lossy(data);
-        let s = if self.redact { crate::ai::redact(&s).0 } else { s.into_owned() };
+        let s = if self.redact && kind == "o" {
+            if self.pending.is_empty() { self.pending_t = t; }
+            self.pending.push_str(&s);
+            let cut = match self.pending.rfind('\n') { Some(i) => i + 1, None if self.pending.len() > 8192 => self.pending.len(), None => return Ok(()) };
+            let line: String = self.pending.drain(..cut).collect();
+            crate::ai::redact(&line).0
+        } else if self.redact { crate::ai::redact(&s).0 } else { s.into_owned() };
         writeln!(self.w, "{}", serde_json::json!([round(t), kind, s]))?;
         // keep the file usable while recording (crash / live tail)
         self.w.flush()
     }
     pub fn resize(&mut self, cols: u16, rows: u16) -> std::io::Result<()> { writeln!(self.w, "{}", serde_json::json!([round(self.start.elapsed().as_secs_f64()), "r", format!("{cols}x{rows}")])) }
-    pub fn finish(mut self) -> std::io::Result<()> { self.w.flush() }
+    pub fn finish(mut self) -> std::io::Result<()> {
+        if !self.pending.is_empty() { let p = crate::ai::redact(&std::mem::take(&mut self.pending)).0; writeln!(self.w, "{}", serde_json::json!([round(self.pending_t), "o", p]))?; }
+        self.w.flush()
+    }
 }
 fn round(t: f64) -> f64 { (t * 1e6).round() / 1e6 }
 
@@ -66,19 +77,21 @@ mod tests {
         let p = std::env::temp_dir().join(format!("cast-{}.cast", std::process::id()));
         let mut r = super::Recorder::create(&p, 80, 24, "t", true).unwrap();
         r.event_at(0.1, "o", b"$ export API_KEY=sk-abcdefghijklmnopqrstuvwx\r\n", false).unwrap();
+        r.event_at(0.15, "o", b"DEMO_TOKEN=fa", false).unwrap();
+        r.event_at(0.16, "o", b"ke-split-secret\r\n", false).unwrap();
         r.event_at(0.2, "o", b"Password: ", false).unwrap();
         r.event_at(0.3, "o", b"hunter2", true).unwrap();
         r.event_at(0.4, "o", b"\r\n", true).unwrap();
         r.event_at(30.0, "o", b"ok\r\n", false).unwrap();
         r.finish().unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
-        assert!(!text.contains("sk-abcdefghijklmnopqrstuvwx") && !text.contains("hunter2"));
+        assert!(!text.contains("sk-abcdefghijklmnopqrstuvwx") && !text.contains("hunter2") && !text.contains("split-secret"), "{text}");
         assert_eq!(text.matches("[input hidden]").count(), 1);
         let c = super::parse(&text).unwrap();
         assert_eq!((c.width, c.height, c.events.len()), (80, 24, 4));
-        let (s, i) = c.due(0, 0.25, 2.0); assert!(s.contains("Password: ") && i == 2);
+        let (s, i) = c.due(0, 0.25, 2.0); assert!(s.contains("[REDACTED]") && i == 2, "{s}");
         assert!((c.duration(2.0) - 2.3).abs() < 1e-6, "idle compressed");
-        let (s, i) = c.due(i, 10.0, 2.0); assert!(s.ends_with("ok\r\n") && i == 4);
+        let (s, i) = c.due(i, 10.0, 2.0); assert!(s.contains("[input hidden]") && s.contains("Password: [REDACTED]") && i == 4, "{s}");
         assert!(super::parse("{\"version\":1}").is_err());
     }
 }
