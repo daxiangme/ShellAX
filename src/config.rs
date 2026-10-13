@@ -2,13 +2,14 @@
 //!
 //! ```toml
 //! theme = "Catppuccin Mocha"   # or "system"
+//! known_hosts = "~/.ssh/known_hosts"
+//! ssh_config = "~/.ssh/config"
 //! [font]
 //! family = "JetBrains Mono"
 //! fallbacks = ["Noto Sans Mono CJK SC", "Symbols Nerd Font Mono", "Noto Color Emoji"]
 //! size = 13.5
 //! line_height = 1.4            # multiple of font size
 //! ligatures = false
-//! known_hosts = "~/.ssh/known_hosts"   # top-level keys
 //! [[hosts]]
 //! name = "prod"
 //! host = "10.0.0.5"
@@ -78,4 +79,17 @@ pub fn load() -> Config {
     for h in load_ssh_config(&expand_tilde(&ssh_config)) { if !hosts.iter().any(|x| x.name == h.name) { hosts.push(h); } }
     let known_hosts = expand_tilde(&std::env::var("AGENTSHELL_KNOWN_HOSTS").ok().or(file.known_hosts).unwrap_or_else(|| "~/.ssh/known_hosts".into()));
     Config { theme: std::env::var("THEME").ok().or(file.theme), font: f, hosts, known_hosts }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn parses_hosts_and_known_hosts() {
+        let src = "theme = \"system\"\nknown_hosts = \"~/kh\"\n[font]\nsize = 14.0\n[[hosts]]\nname = \"prod\"\nhost = \"10.0.0.5\"\nuser = \"deploy\"\nport = 2200\n";
+        let f: FileConfig = toml::from_str(src).unwrap();
+        assert_eq!(f.known_hosts.as_deref(), Some("~/kh"));
+        assert_eq!(f.font.size, Some(14.0));
+        assert_eq!((f.hosts[0].name.as_str(), f.hosts[0].port), ("prod", Some(2200)));
+    }
 }

@@ -67,10 +67,10 @@ pub fn prims(c: char, w: f32, h: f32) -> Option<Vec<Prim>> {
     let cx = (w / 2.0).floor();
     let cy = (h / 2.0).floor();
     if let Some([l, r, u, d]) = weights(c) {
-        let th = |k: u8| if k == 2 { t2 } else { t1 };
-        // extent past the center so joins are closed
-        let ext_h = [u, d].iter().map(|&k| match k { 0 => 0.0, 3 => 1.5 * t1, k => th(k) / 2.0 }).fold(0.0f32, f32::max);
-        let ext_v = [l, r].iter().map(|&k| match k { 0 => 0.0, 3 => 1.5 * t1, k => th(k) / 2.0 }).fold(0.0f32, f32::max);
+        let th = |k: u8| match k { 0 => 0.0, 2 => t2, 3 => 3.0 * t1, _ => t1 };
+        // pixel-exact joins: a segment reaching the center covers the perpendicular stroke's span
+        let tv = th(u).max(th(d));
+        let thz = th(l).max(th(r));
         let hseg = |x0: f32, x1: f32, k: u8, v: &mut Vec<Prim>| match k {
             0 => {}
             3 => { v.push(Prim::Rect(x0, cy - 1.5 * t1, x1 - x0, t1, 1.0)); v.push(Prim::Rect(x0, cy + 0.5 * t1, x1 - x0, t1, 1.0)); }
@@ -81,10 +81,12 @@ pub fn prims(c: char, w: f32, h: f32) -> Option<Vec<Prim>> {
             3 => { v.push(Prim::Rect(cx - 1.5 * t1, y0, t1, y1 - y0, 1.0)); v.push(Prim::Rect(cx + 0.5 * t1, y0, t1, y1 - y0, 1.0)); }
             k => v.push(Prim::Rect(cx - (th(k) / 2.0).floor(), y0, th(k), y1 - y0, 1.0)),
         };
-        hseg(0.0, cx + ext_h.max(t1 / 2.0), l, &mut v);
-        hseg(cx - ext_h.max(t1 / 2.0), w, r, &mut v);
-        vseg(0.0, cy + ext_v.max(t1 / 2.0), u, &mut v);
-        vseg(cy - ext_v.max(t1 / 2.0), h, d, &mut v);
+        let lo = |t: f32| (t / 2.0).floor();
+        let hi = |t: f32| t - (t / 2.0).floor();
+        hseg(0.0, cx + hi(tv.max(th(l))), l, &mut v);
+        hseg(cx - lo(tv.max(th(r))), w, r, &mut v);
+        vseg(0.0, cy + hi(thz.max(th(u))), u, &mut v);
+        vseg(cy - lo(thz.max(th(d))), h, d, &mut v);
         return Some(v);
     }
     let r = |x: f32, y: f32, ww: f32, hh: f32| Prim::Rect(x, y, ww, hh, 1.0);
@@ -129,6 +131,44 @@ pub fn prims(c: char, w: f32, h: f32) -> Option<Vec<Prim>> {
     Some(v)
 }
 
+/// Rasterize primitives into axis-aligned rects (x, y, w, h, alpha). Triangles and strokes are
+/// scan-converted per pixel row, which renders crisply on every backend without path support.
+pub fn to_rects(prims: &[Prim], h: f32) -> Vec<(f32, f32, f32, f32, f32)> {
+    let mut out = Vec::new();
+    let rows = h.round() as i32;
+    for p in prims {
+        match p {
+            Prim::Rect(x, y, w, hh, a) => out.push((*x, *y, *w, *hh, *a)),
+            Prim::Tri(pts) => for row in 0..rows {
+                let yc = row as f32 + 0.5;
+                let mut xs: Vec<f32> = Vec::new();
+                for i in 0..3 {
+                    let (a, b) = (pts[i], pts[(i + 1) % 3]);
+                    if (a.1 - b.1).abs() < f32::EPSILON { continue; }
+                    let (lo, hi) = if a.1 < b.1 { (a, b) } else { (b, a) };
+                    if yc >= lo.1 && yc <= hi.1 { xs.push(lo.0 + (yc - lo.1) / (hi.1 - lo.1) * (hi.0 - lo.0)); }
+                }
+                if xs.len() >= 2 {
+                    let (x0, x1) = xs.iter().fold((f32::MAX, f32::MIN), |(m, n), &x| (m.min(x), n.max(x)));
+                    if x1 > x0 { out.push((x0, row as f32, x1 - x0, 1.0, 1.0)); }
+                }
+            },
+            Prim::Stroke(pts, t) => for seg in pts.windows(2) {
+                let (a, b) = (seg[0], seg[1]);
+                let (lo, hi) = if a.1 < b.1 { (a, b) } else { (b, a) };
+                for row in lo.1.floor() as i32..hi.1.ceil() as i32 {
+                    let yc = (row as f32 + 0.5).clamp(lo.1, hi.1);
+                    let x = if hi.1 > lo.1 { lo.0 + (yc - lo.1) / (hi.1 - lo.1) * (hi.0 - lo.0) } else { lo.0 };
+                    let slope = if hi.1 > lo.1 { ((hi.0 - lo.0) / (hi.1 - lo.1)).abs() } else { 0.0 };
+                    let wpx = (t * (1.0 + slope * slope).sqrt()).max(*t);
+                    out.push((x - wpx / 2.0, row as f32, wpx, 1.0, 1.0));
+                }
+            },
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,5 +185,19 @@ mod tests {
         assert!(matches!(prims('\u{E0B0}', 8.0, 18.0).unwrap()[0], Prim::Tri(_)));
         assert!(prims('╱', 8.0, 18.0).is_none());
         assert!(prims('a', 8.0, 18.0).is_none());
+    }
+    #[test]
+    fn corner_joins_exactly() {
+        // ┌ : right segment starts where the down segment's left edge is; no stub above the line
+        let p = prims('┌', 8.0, 18.0).unwrap();
+        let ys: Vec<f32> = p.iter().map(|p| match p { Prim::Rect(_, y, ..) => *y, _ => 0.0 }).collect();
+        assert!(ys.iter().all(|&y| y >= 9.0 - 0.01), "{p:?}");
+    }
+    #[test]
+    fn triangle_rasterizes_per_row() {
+        let r = to_rects(&prims('\u{E0B0}', 8.0, 18.0).unwrap(), 18.0);
+        assert_eq!(r.len(), 18);
+        let widest = r.iter().map(|r| r.2).fold(0.0, f32::max);
+        assert!(widest > 7.0 && widest <= 8.0);
     }
 }

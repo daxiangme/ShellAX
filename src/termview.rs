@@ -14,12 +14,12 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::TermMode;
 use gpui::{
     canvas, div, fill, point, prelude::*, px, size, Bounds, ClipboardItem, Context, Entity, FocusHandle, Font,
-    FontWeight, Hsla, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels,
+    FontWeight, Hsla, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
     ScrollDelta, ScrollWheelEvent, ShapedLine, SharedString, StrikethroughStyle, StyleRefinement, Subscription,
     TextAlign, TextRun, UnderlineStyle, Window,
 };
 use ssh_term_proto::agent::{self, AgentState, DetectionInput, Manifest};
-use ssh_term_proto::boxdraw::{self, Prim};
+use ssh_term_proto::boxdraw;
 use ssh_term_proto::ssh::SshTarget;
 use ssh_term_proto::suggest::{History, InputTracker, Key};
 use ssh_term_proto::term::{Session, Size};
@@ -171,7 +171,7 @@ impl Render for GridLayer {
                         let w = f32::from(t.width).min(2.0 * cw);
                         let _ = t.paint(point(origin.x + px(*col as f32 * cw + (2.0 * cw - w) / 2.0), y), px(lh), TextAlign::Left, None, window, cx);
                     }
-                    for &(col, ch, color) in &row.boxes { paint_box(window, ch, origin.x + px(col as f32 * cw), y, cw, lh, color); }
+                    for &(col, ch, color) in &row.boxes { paint_box(window, ch, origin.x + px(col as f32 * cw), origin.x + px((col + 1) as f32 * cw), y, lh, color); }
                 }
                 // scrollbar (only when there is scrollback)
                 if history > 0 {
@@ -189,27 +189,12 @@ impl Render for GridLayer {
     }
 }
 
-fn paint_box(window: &mut Window, ch: char, x: Pixels, y: Pixels, cw: f32, lh: f32, color: Hsla) {
-    let (x, y) = (f32::from(x).round(), f32::from(y).round());
-    let Some(prims) = boxdraw::prims(ch, cw.round(), lh) else { return };
-    for p in prims {
-        match p {
-            Prim::Rect(rx, ry, w, h, a) => window.paint_quad(fill(Bounds::new(point(px(x + rx), px(y + ry)), size(px(w), px(h))), color.opacity(a))),
-            Prim::Tri(pts) => {
-                let mut b = PathBuilder::fill();
-                b.move_to(point(px(x + pts[0].0), px(y + pts[0].1)));
-                b.line_to(point(px(x + pts[1].0), px(y + pts[1].1)));
-                b.line_to(point(px(x + pts[2].0), px(y + pts[2].1)));
-                b.close();
-                if let Ok(path) = b.build() { window.paint_path(path, color); }
-            }
-            Prim::Stroke(pts, w) => {
-                let mut b = PathBuilder::stroke(px(w));
-                b.move_to(point(px(x + pts[0].0), px(y + pts[0].1)));
-                for p in &pts[1..] { b.line_to(point(px(x + p.0), px(y + p.1))); }
-                if let Ok(path) = b.build() { window.paint_path(path, color); }
-            }
-        }
+fn paint_box(window: &mut Window, ch: char, x: Pixels, x_next: Pixels, y: Pixels, lh: f32, color: Hsla) {
+    // snap the cell to whole pixels; width from the next cell's edge so neighbours tile without gaps
+    let (x0, x1, y) = (f32::from(x).round(), f32::from(x_next).round(), f32::from(y).round());
+    let Some(prims) = boxdraw::prims(ch, x1 - x0, lh) else { return };
+    for (rx, ry, w, h, a) in boxdraw::to_rects(&prims, lh) {
+        window.paint_quad(fill(Bounds::new(point(px(x0 + rx), px(y + ry)), size(px(w), px(h))), color.opacity(a)));
     }
 }
 
@@ -246,7 +231,7 @@ fn build_row(g: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::
             let underline = if cell.flags.intersects(Flags::ALL_UNDERLINES) || hovered {
                 Some(UnderlineStyle { thickness: px(if cell.flags.contains(Flags::DOUBLE_UNDERLINE) { 2. } else { 1. }), color: Some(ucolor), wavy: cell.flags.contains(Flags::UNDERCURL) })
             } else if link {
-                Some(UnderlineStyle { thickness: px(1.), color: Some(ucolor.opacity(0.45)), wavy: false })
+                Some(UnderlineStyle { thickness: px(1.), color: Some(ucolor.opacity(0.7)), wavy: false })
             } else { None };
             let st = Style { fg, bold: cell.flags.contains(Flags::BOLD), italic: cell.flags.contains(Flags::ITALIC), underline, strike: cell.flags.contains(Flags::STRIKEOUT) };
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
