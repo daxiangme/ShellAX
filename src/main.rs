@@ -1,6 +1,7 @@
 //! AgentShell prototype v5 UI: sidebar (host search / groups / function area), tabs with split
 //! panes, settings page, command palette, host dialog, tool panels, status bar.
 mod actions;
+mod chrome;
 mod config;
 mod host_dialog;
 mod palette;
@@ -22,7 +23,7 @@ use std::sync::{Arc, Mutex};
 
 use gpui::{
     div, prelude::*, px, size, AnyElement, App, Bounds, Context, Entity, FontWeight, Hsla, KeyDownEvent, SharedString,
-    Window, WindowAppearance, WindowBounds, WindowOptions,
+    Window, WindowAppearance,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use ssh_term_proto::agent::{self, AgentState, Manifest};
@@ -152,6 +153,8 @@ pub(crate) struct Root {
     sftp_windows: Vec<(Entity<sftp_view::SftpView>, gpui::AnyWindowHandle)>,
     /// Sidebar host right-click menu: host spec and position.
     host_menu: Option<(Spec, gpui::Point<gpui::Pixels>)>,
+    /// Split divider being dragged (drawn thicker).
+    drag_div: Option<(usize, Vec<bool>)>,
     _subs: Vec<gpui::Subscription>,
 }
 
@@ -445,6 +448,11 @@ impl Root {
             }
         }).detach();
     }
+    /// Traffic lights for the main window; close goes through the normal quit confirmation.
+    fn lights(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let me = cx.entity().downgrade();
+        chrome::traffic_lights("lights", window, move |w, cx| { let _ = me.update(cx, |r, cx| if r.should_close(w, cx) { w.remove_window(); cx.quit(); }); })
+    }
     // ---- SFTP display modes (PRD 5.21)
     fn new_sftp_view(&mut self, t: SshTarget, remote: Option<String>, local: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Entity<sftp_view::SftpView> {
         let (rt, pr) = (self.rt.handle().clone(), self.prompts.clone());
@@ -551,7 +559,7 @@ impl Root {
                 let title = ssh_term_proto::sftp_mode::title(&v.read(cx).target.label());
                 let bounds = Bounds::centered(None, size(px(1180.), px(760.)), cx);
                 let vv = v.clone();
-                let opts = WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), titlebar: Some(gpui::TitlebarOptions { title: Some(title.into()), ..Default::default() }), ..Default::default() };
+                let opts = chrome::window_options(bounds, Some(title));
                 match cx.open_window(opts, move |w, cx| {
                     let inner = vv.clone();
                     w.on_window_should_close(cx, move |_, cx| { inner.update(cx, |_, cx| cx.emit(sftp_view::SftpEvent::Move(SftpMode::Tab))); false });
@@ -1208,8 +1216,9 @@ impl Root {
     }
 
     // ---------------------------------------------------------------- sidebar
-    fn sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
+        let selected_label = self.tabs.get(self.active).map(|t| match &t.focused.read(cx).spec { Spec::Local => "local".to_string(), Spec::Ssh(t) => t.label() });
         let open: Vec<(String, bool)> = self.tabs.iter().flat_map(|t| t.layout.leaves()).map(|p| {
             let v = p.read(cx);
             let label = match &v.spec { Spec::Local => "local".to_string(), Spec::Ssh(t) => t.label() };
@@ -1240,16 +1249,17 @@ impl Root {
             push(&g, E { name: h.name.clone(), detail: t.label(), label: t.label(), spec: Spec::Ssh(t), letter: "S", prod: h.production, edit });
         }
 
-        let header = div().h(px(48.)).px_4().flex().items_center().gap_2()
-            .child(div().size(px(22.)).rounded_md().bg(c(th.accent).opacity(0.18)).flex().items_center().justify_center().child(icon(IconName::SquareTerminal, 13., c(th.accent))))
-            .child(div().text_color(c(th.text)).font_weight(FontWeight::SEMIBOLD).text_size(px(13.5)).child("AgentShell"))
+        // title-bar part of the sidebar: traffic lights + collapse (Finder layout, PRD 5.22)
+        let header = chrome::drag_region(div().id("sb-titlebar")).h(px(chrome::TITLE_H)).flex_shrink_0().pr_2().flex().items_center().gap_2()
+            .child(self.lights(window, cx))
             .child(div().flex_1())
-            .child(div().id("sb-collapse").size(px(24.)).rounded_md().flex().items_center().justify_center().cursor_pointer().hover(|d| d.bg(c(cur().surface0)))
-                .on_click(cx.listener(|this, _, _w, cx| { this.sidebar_visible = false; cx.notify(); })).child(icon(IconName::Layers, 14., c(th.overlay1))));
+            .child(div().id("sb-collapse").size(px(28.)).rounded(px(6.)).on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()).flex().items_center().justify_center().cursor_pointer().hover(|d| d.bg(c(cur().surface0)))
+                .on_click(cx.listener(|this, _, _w, cx| { this.sidebar_visible = false; cx.notify(); })).child(icon(IconName::PanelLeft, 15., c(th.overlay1))));
         let search = div().px_3().pb_2().flex().items_center().gap_2()
             .child(div().flex_1().child(Input::new(&self.host_search).prefix(icon(IconName::Search, 13., c(th.overlay1))).cleanable(true)))
-            .child(div().id("new-host").size(px(30.)).rounded_md().flex().items_center().justify_center().cursor_pointer()
-                .bg(c(th.surface0)).border_1().border_color(c(th.surface1)).hover(|d| d.bg(c(cur().surface1)))
+            .child(div().id("new-host").size(px(28.)).rounded(px(6.)).flex().items_center().justify_center().cursor_pointer()
+                .hover(|d| d.bg(c(cur().surface0)))
+                .tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(t("ui.new_host_2")).build(w, cx))
                 .on_click(cx.listener(|this, _, w, cx| this.open_host_dialog(None, w, cx)))
                 .child(icon(IconName::Plus, 15., c(th.text))));
 
@@ -1280,14 +1290,15 @@ impl Root {
                 if ssh_term_proto::outline::hidden_by(&parent, &|p| collapsed_set.contains(&format!("\u{1}{p}"))) { continue; }
             }
             let g2 = gname.clone();
-            let mut hdr = div().id(SharedString::from(format!("grp-{gname}"))).mx_2().mt_2().pr_2().pl(px(8. + 12. * sec.depth as f32)).h(px(24.)).flex().items_center().gap_1().cursor_pointer().rounded_md()
-                .hover(|d| d.bg(c(cur().surface0).opacity(0.5)))
+            // Finder source-list section header: small grey uppercase, chevron + count on hover
+            let hg = SharedString::from(format!("grp-g-{gname}"));
+            let mut hdr = div().id(SharedString::from(format!("grp-{gname}"))).group(hg.clone()).mx_2().mt(px(if sec.depth == 0 { 12. } else { 4. })).pr_2().pl(px(8. + 12. * sec.depth as f32)).h(px(20.)).flex().items_center().gap_1().cursor_pointer().rounded(px(6.))
                 .on_click(cx.listener(move |this, _, _w, cx| { if !this.collapsed.remove(&g2) { this.collapsed.insert(g2.clone()); } cx.notify(); }))
-                .child(icon(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown }, 12., c(th.overlay0)))
-                .when(sec.drop.is_some() && !sec.key.starts_with(&ungrouped), |d| d.child(icon(IconName::Folder, 11., c(th.overlay0))))
-                .child(div().text_size(px(10.5)).font_weight(FontWeight::MEDIUM).text_color(c(th.overlay0)).child(sec.name.clone()))
+                .when(sec.drop.is_some() && !sec.key.starts_with(&ungrouped), |d| d.child(icon(IconName::Folder, 11., c(th.overlay1))))
+                .child(div().text_size(px(10.5)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.overlay1)).child(sec.name.to_uppercase()))
                 .child(div().flex_1())
-                .child(div().text_size(px(10.5)).text_color(c(th.overlay0)).child(sec.count.to_string()));
+                .child(div().invisible().group_hover(hg.clone(), |s| s.visible()).text_size(px(10.5)).text_color(c(th.overlay0)).child(sec.count.to_string()))
+                .child(div().when(!collapsed, |d| d.invisible().group_hover(hg, |s| s.visible())).child(icon(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown }, 11., c(th.overlay1))));
             if let Some(target) = sec.drop.clone() {
                 hdr = hdr.drag_over::<HostDrag>(|st, _, _, _| st.bg(c(cur().accent).opacity(0.25)))
                     .on_drop(cx.listener(move |this, d: &HostDrag, _w, cx| this.move_host_to_group(&d.name, &target, cx)));
@@ -1302,14 +1313,15 @@ impl Root {
                 let gid = SharedString::from(format!("host-row-{idx}"));
                 let os_key = match &e.spec { Spec::Ssh(t) => t.pool_key(), _ => e.label.clone() };
                 let os = host_os.get(&os_key).map(|s| s.as_str());
-                let mut row = div().id(("host", idx)).group(gid.clone()).mx_2().px_2().pl(px(8. + 12. * sec.depth as f32)).py(px(5.)).rounded_lg().flex().items_center().gap_3().cursor_pointer()
-                    .hover(|s| s.bg(c(cur().surface0)))
+                let sel = selected_label.as_deref() == Some(e.label.as_str());
+                let mut row = div().id(("host", idx)).group(gid.clone()).mx_2().px_2().pl(px(8. + 12. * sec.depth as f32)).py(px(4.)).rounded(px(6.)).flex().items_center().gap(px(10.)).cursor_pointer()
+                    .when(sel, |d| d.bg(c(th.accent).opacity(0.16)))
+                    .when(!sel, |d| d.hover(|s| s.bg(c(cur().surface0).opacity(0.7))))
                     .on_click(cx.listener(move |this, _, w, cx| this.new_tab(spec.clone(), w, cx)))
                     .on_mouse_down(gpui::MouseButton::Right, cx.listener({ let spec = e.spec.clone(); move |this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.host_menu = Some((spec.clone(), ev.position)); cx.notify(); } }))
-                    .child(div().size(px(26.)).rounded_md().flex().items_center().justify_center().bg(accent.opacity(0.18)).text_color(accent).text_size(px(if os.is_some() { 10.5 } else { 12. })).font_weight(FontWeight::BOLD)
-                        .child(os.map(|o| ssh_term_proto::outline::badge(o).0).unwrap_or(e.letter)))
+                    .child({ let _ = e.letter; icon(if matches!(e.spec, Spec::Local) { IconName::Monitor } else if e.prod { IconName::ShieldAlert } else { IconName::Server }, 16., if e.prod { accent } else { c(th.accent) }) })
                     .child(div().flex_1().min_w_0().flex().flex_col().overflow_hidden()
-                        .child(div().flex().items_center().gap_1().child(div().text_size(px(12.5)).text_color(c(th.text)).child(e.name.clone()))
+                        .child(div().flex().items_center().gap_1().child(div().text_size(px(12.5)).text_color(c(th.text)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(e.name.clone()))
                             .when(e.prod, |d| d.child(ui::tag(t("ui.prod"), c(th.error)))))
                         .child(div().text_size(px(10.5)).text_color(c(th.overlay0)).child(match os { Some(o) => format!("{} · {}", e.detail, ssh_term_proto::outline::badge(o).1), None => e.detail.clone() })));
                 if let Some(h) = &e.edit { let d = HostDrag { name: h.name.clone() }; row = row.on_drag(d, |d: &HostDrag, _, _, cx| cx.new(|_| d.clone())); }
@@ -1319,7 +1331,7 @@ impl Root {
                         .on_click(cx.listener(move |this, _, w, cx| { cx.stop_propagation(); this.open_host_dialog(Some(h.clone()), w, cx); }))
                         .child(icon(IconName::Pencil, 12., c(th.overlay1))));
                 }
-                list = list.child(row.child(div().size(px(7.)).rounded_full().bg(dot)));
+                list = list.child(row.child(div().size(px(6.)).rounded_full().bg(dot)));
                 idx += 1;
             }
         }
@@ -1337,19 +1349,21 @@ impl Root {
             (Action::OpenAbout, t("ui.help_about"), IconName::CircleQuestionMark),
         ];
         let n_agents = self.tabs.iter().flat_map(|t| t.layout.leaves()).filter(|p| p.read(cx).agent.is_some()).count();
-        let mut tools = div().px_2().py_2().flex().flex_col().gap(px(1.)).border_t_1().border_color(c(th.surface0));
+        // bottom-left: icon row with tooltips (label + shortcut)
+        let mut tools = div().px_2().py(px(8.)).flex().items_center().justify_between().border_t_1().border_color(c(th.surface1).opacity(0.5));
         for (i, (a, label, ic)) in items.into_iter().enumerate() {
             let b = a.binding();
-            tools = tools.child(div().id(("tool", i)).h(px(30.)).px_2().rounded_md().flex().items_center().gap_3().cursor_pointer()
+            let tip = if b.is_empty() { label.to_string() } else { format!("{label}  ({})", b.split('-').map(|p| if p.len() == 1 { p.to_uppercase() } else { let mut c = p.chars(); c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default() }).collect::<Vec<_>>().join("+")) };
+            tools = tools.child(div().id(("tool", i)).relative().size(px(26.)).rounded(px(6.)).flex().items_center().justify_center().cursor_pointer()
                 .hover(|d| d.bg(c(cur().surface0)))
                 .on_click(cx.listener(move |this, _, w, cx| this.run(a, w, cx)))
+                .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
                 .child(icon(ic, 15., c(th.overlay1)))
-                .child(div().flex_1().text_size(px(12.5)).text_color(c(th.subtext)).child(label))
-                .when(a == Action::OpenAi && n_agents > 0, |d| d.child(ui::tag(format!("{n_agents}"), c(th.accent))))
-                .when(!b.is_empty() && matches!(a, Action::CommandPalette | Action::OpenSettings), |d| d.child(ui::kbd(&b))));
+                .when(a == Action::OpenAi && n_agents > 0, |d| d.child(div().absolute().top(px(2.)).right(px(2.)).size(px(6.)).rounded_full().bg(c(th.accent)))));
         }
 
-        div().w(px(248.)).h_full().flex().flex_col().bg(c(th.crust)).border_r_1().border_color(c(th.surface0))
+        let vib = if chrome::NATIVE_LIGHTS { 0.72 } else { 1.0 };
+        div().w(px(240.)).flex_shrink_0().h_full().flex().flex_col().bg(c(th.mantle).opacity(vib)).border_r_1().border_color(c(th.surface1).opacity(0.6))
             .child(header).child(search).child(list).child(tools)
     }
 }
@@ -1416,15 +1430,21 @@ impl Root {
                 let first = if vertical { first.h_full().w(gpui::relative(*ratio)) } else { first.w_full().h(gpui::relative(*ratio)) };
                 let second = div().flex_1().flex().overflow_hidden().child(self.render_node(tab, b, pb, th, cx));
                 let drag = DividerDrag { tab, path: path.clone() };
-                let divider = div().id(SharedString::from(format!("{id}-div"))).flex_shrink_0().bg(c(th.surface1)).hover(|s| s.bg(c(cur().accent)))
+                // 1px hairline; 5px hit area; thickens (3px accent) on hover / while dragging
+                let dg = SharedString::from(format!("{id}-dg"));
+                let dragging = cx.has_active_drag() && self.drag_div.as_ref().is_some_and(|(t, p)| *t == tab && *p == path);
+                let line = div().bg(if dragging { c(th.accent) } else { c(th.surface1) }).group_hover(dg.clone(), |s| s.bg(c(cur().accent).opacity(0.8)));
+                let line = if vertical { line.h_full().w(px(if dragging { 3. } else { 1. })).group_hover(dg.clone(), |s| s.w(px(3.))) } else { line.w_full().h(px(if dragging { 3. } else { 1. })).group_hover(dg.clone(), |s| s.h(px(3.))) };
+                let divider = div().id(SharedString::from(format!("{id}-div"))).group(dg).flex_shrink_0().flex().items_center().justify_center().bg(c(th.bg)).child(line)
                     .on_drag(drag, |d: &DividerDrag, _, _, cx| cx.new(|_| d.clone()));
-                let divider = if vertical { divider.w(px(3.)).h_full().cursor_col_resize() } else { divider.h(px(3.)).w_full().cursor_row_resize() };
+                let divider = if vertical { divider.w(px(5.)).h_full().cursor_col_resize() } else { divider.h(px(5.)).w_full().cursor_row_resize() };
                 let me_path = path.clone();
                 d.on_drag_move(cx.listener(move |this, ev: &gpui::DragMoveEvent<DividerDrag>, _w, cx| {
                     let dd = ev.drag(cx).clone();
                     if dd.path != me_path || dd.tab != tab { return; }
                     let b = ev.bounds;
                     let r = if vertical { (ev.event.position.x - b.left()) / b.size.width } else { (ev.event.position.y - b.top()) / b.size.height };
+                    this.drag_div = Some((tab, dd.path.clone()));
                     if let Some(t) = this.tabs.get_mut(tab) { if t.layout.set_ratio(&dd.path, r) { cx.notify(); } }
                 }))
                 .child(first).child(divider).child(second).into_any_element()
@@ -1447,17 +1467,20 @@ impl Render for Root {
         }
         let th = cur();
         let s = config::get();
+        if !cx.has_active_drag() { self.drag_div = None; }
         self.probe_os(cx);
         // appearance.opacity: transparent window background, terminal area drawn with alpha
         let op = s.appearance.opacity.clamp(0.5, 1.0);
-        let want = if op < 0.999 { gpui::WindowBackgroundAppearance::Transparent } else { gpui::WindowBackgroundAppearance::Opaque };
+        let want = if chrome::NATIVE_LIGHTS { gpui::WindowBackgroundAppearance::Blurred } else if op < 0.999 { gpui::WindowBackgroundAppearance::Transparent } else { gpui::WindowBackgroundAppearance::Opaque };
         if self.bg_seen != Some(want) { self.bg_seen = Some(want); window.set_background_appearance(want); }
         let ui = s.appearance.ui_font_size.clamp(10., 20.);
         if self.ui_size_seen != ui { self.ui_size_seen = ui; gpui_component::Theme::global_mut(cx).font_size = px(ui); }
 
-        let mut tabbar = div().h(px(40.)).px_2().flex().items_center().gap_1().bg(c(th.crust)).border_b_1().border_color(c(th.surface0));
+        // title bar row = tab row (PRD 5.22): drag moves the window, double-click zooms
+        let mut tabbar = chrome::drag_region(div().id("titlebar")).h(px(chrome::TITLE_H)).flex_shrink_0().pl_2().pr_2().flex().items_center().gap(px(2.)).bg(c(th.crust)).border_b_1().border_color(c(th.surface1).opacity(0.6));
         if !self.sidebar_visible {
-            tabbar = tabbar.child(div().id("sb-show").size(px(28.)).rounded_lg().flex().items_center().justify_center().cursor_pointer().hover(|d| d.bg(c(cur().surface0)))
+            tabbar = tabbar.child(self.lights(window, cx));
+            tabbar = tabbar.child(div().id("sb-show").size(px(28.)).rounded(px(6.)).flex().items_center().justify_center().cursor_pointer().hover(|d| d.bg(c(cur().surface0)))
                 .on_click(cx.listener(|this, _, _w, cx| { this.sidebar_visible = true; cx.notify(); })).child(icon(IconName::Layers, 14., c(th.overlay1))));
         }
         for (i, t) in self.tabs.iter().enumerate() {
@@ -1469,20 +1492,26 @@ impl Render for Root {
             };
             let agent = panes.iter().filter_map(|p| p.read(cx).agent_label())
                 .max_by_key(|(_, st)| match st { AgentState::Blocked => 3, AgentState::Working => 2, AgentState::Idle => 1, _ => 0 });
-            let mut tabel = div().id(("tab", i)).h(px(30.)).pl_3().pr_1().rounded_lg().flex().items_center().gap_2().cursor_pointer()
-                .bg(if active { c(th.base) } else { c(th.crust) })
-                .border_1().border_color(if active { c(th.surface0) } else { c(th.crust) })
-                .hover(|s| s.bg(c(cur().mantle)))
+            // Safari-like flat tab: active = raised light pill with soft shadow, others flat; faint 1px separators
+            if i > 0 && !active && i != self.active + 1 {
+                tabbar = tabbar.child(div().w(px(1.)).h(px(16.)).flex_shrink_0().bg(c(th.surface2).opacity(0.5)));
+            }
+            let tg = SharedString::from(format!("tab-g-{i}"));
+            let mut tabel = div().id(("tab", i)).group(tg.clone()).h(px(28.)).min_w(px(120.)).max_w(px(260.)).pl(px(12.)).pr(px(4.)).rounded(px(6.)).flex().items_center().gap(px(6.)).cursor_pointer()
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .when(active, |d| d.bg(c(th.base).opacity(if th.appearance == Appearance::Dark { 0.55 } else { 0.95 })).shadow(chrome::soft_shadow(false)))
+                .when(!active, |d| d.hover(|s| s.bg(c(cur().surface0).opacity(0.6))))
                 .on_click(cx.listener(move |this, _, w, cx| { this.active = i; this.focus_active(w, cx); cx.notify(); }))
                 .child(if panes[0].read(cx).sftp.is_some() { icon(IconName::FolderSync, 12., if active { c(th.accent) } else { c(th.overlay1) }).into_any_element() } else { div().size(px(6.)).rounded_full().bg(if active { c(th.accent) } else { c(th.surface2) }).into_any_element() })
-                .child(div().text_size(px(12.)).text_color(if active { c(th.text) } else { c(th.overlay1) }).child(title.clone()));
+                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.)).text_color(if active { c(th.text) } else { c(th.subtext) }).when(active, |d| d.font_weight(FontWeight::MEDIUM)).child(title.clone()));
             if let Some((name, st)) = agent {
                 let col = state_color(st, &th);
                 tabel = tabel.child(div().px(px(6.)).rounded_md().bg(col.opacity(0.18)).text_color(col).text_size(px(11.)).child(format!("● {name} {}", st.label())));
             }
             let drag = TabDrag { idx: i, title: title.clone() };
             tabel = tabel.on_drag(drag, |d: &TabDrag, _, _, cx| cx.new(|_| d.clone()));
-            tabel = tabel.child(div().id(("close", i)).size(px(20.)).rounded_md().flex().items_center().justify_center()
+            tabel = tabel.child(div().id(("close", i)).size(px(18.)).rounded(px(4.)).flex().items_center().justify_center()
+                .when(!active, |d| d.invisible().group_hover(tg.clone(), |s| s.visible()))
                 .hover(|s| s.bg(c(cur().surface1)))
                 .on_click(cx.listener(move |this, _, w, cx| {
                     cx.stop_propagation();
@@ -1494,16 +1523,19 @@ impl Render for Root {
                 .child(icon(IconName::X, 12., c(th.overlay0))));
             tabbar = tabbar.child(tabel);
         }
-        let tb_btn = |id: &'static str, ic: IconName, label: &'static str| div().id(id).px_2().h(px(26.)).rounded_md().flex().items_center().gap_1().cursor_pointer()
-            .text_size(px(11.5)).text_color(c(th.overlay1)).hover(|s| s.bg(c(cur().surface0))).child(icon(ic, 13., c(th.overlay1))).child(label);
+        // toolbar buttons: line icons with tooltips (macOS toolbar style)
+        let tb_btn = |id: &'static str, ic: IconName, label: &'static str| div().id(id).size(px(28.)).rounded(px(6.)).flex().items_center().justify_center().cursor_pointer()
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .hover(|s| s.bg(c(cur().surface0))).child(icon(ic, 15., c(th.overlay1)))
+            .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(label).build(w, cx));
         tabbar = tabbar.child(
-            div().id("new-tab").size(px(28.)).rounded_lg().flex().items_center().justify_center().cursor_pointer()
+            div().id("new-tab").size(px(28.)).rounded(px(6.)).on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()).flex().items_center().justify_center().cursor_pointer()
                 .hover(|s| s.bg(c(cur().surface0)))
                 .on_click(cx.listener(|this, _, w, cx| this.new_tab(Spec::Local, w, cx)))
                 .child(icon(IconName::Plus, 15., c(th.overlay1))),
         ).child(div().flex_1())
-        .child(tb_btn("split-right", IconName::LayoutGrid, t("ui.split_left_right")).on_click(cx.listener(|this, _, w, cx| this.split(Some(Dir::Vertical), w, cx))))
-        .child(tb_btn("split-down", IconName::LayoutGrid, t("ui.split_top_bottom")).on_click(cx.listener(|this, _, w, cx| this.split(Some(Dir::Horizontal), w, cx))))
+        .child(tb_btn("split-right", IconName::Columns2, t("ui.split_left_right")).on_click(cx.listener(|this, _, w, cx| this.split(Some(Dir::Vertical), w, cx))))
+        .child(tb_btn("split-down", IconName::Rows2, t("ui.split_top_bottom")).on_click(cx.listener(|this, _, w, cx| this.split(Some(Dir::Horizontal), w, cx))))
         .child(tb_btn("close-pane", IconName::X, t("ui.close_pane")).on_click(cx.listener(|this, _, w, cx| this.close_pane(w, cx))));
 
         let panes = match self.tabs.get(self.active) {
@@ -1545,7 +1577,7 @@ impl Render for Root {
                 .child(icon(IconName::Shield, 12., mode_col)).child(tf("main.perm_status", &[("mode", &mode.label())]))
                 .when(org.is_some(), |d| d.child(div().pl_1().child(t("main.org_badge")))));
 
-        let mut root = div().size_full().relative().flex().flex_row().bg(c(th.crust).opacity(op)).font_family(theme::ui_font()).text_size(px(s.appearance.ui_font_size.clamp(10., 20.))).text_color(c(th.text))
+        let mut root = div().size_full().relative().flex().flex_row().bg(c(th.crust).opacity(if chrome::NATIVE_LIGHTS { 0. } else { op })).font_family(theme::ui_font()).text_size(px(s.appearance.ui_font_size.clamp(10., 20.))).text_color(c(th.text))
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, w, cx| {
                 if ev.keystroke.key == "escape" && !matches!(this.overlay, Overlay::None | Overlay::Palette(_)) {
                     this.close_overlay(w, cx);
@@ -1555,8 +1587,9 @@ impl Render for Root {
                 let ks = actions::keystroke_str(&ev.keystroke);
                 if let Some(a) = actions::find(&ks) { this.run(a, w, cx); cx.stop_propagation(); }
             }));
-        if self.sidebar_visible { root = root.child(self.sidebar(cx)); }
-        root = root.child(div().flex_1().h_full().flex().flex_col().child(tabbar).child(panes).child(statusbar));
+        if self.sidebar_visible { root = root.child(self.sidebar(window, cx)); }
+        root = root.child(div().flex_1().min_w_0().h_full().flex().flex_col().bg(c(th.crust).opacity(op)).child(tabbar).child(panes).child(statusbar));
+        if let Some(e) = chrome::resize_edges(window) { root = root.child(e); }
 
         let host_menu = self.host_menu.clone().map(|(spec, pos)| self.host_menu_el(spec, pos, cx));
         let overlay: Option<AnyElement> = match &self.overlay {
@@ -1708,7 +1741,7 @@ fn main() {
         theme::set_ui_font(theme::pick_ui_font(&cx.text_system().all_font_names()));
         let bounds = Bounds::centered(None, size(px(1440.), px(860.)), cx);
         cx.open_window(
-            WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() },
+            chrome::window_options(bounds, Some("AgentShell".into())),
             move |window, cx| {
                 let view = cx.new(|cx| {
                     let (hk_tx, hk_rx) = flume::unbounded::<HostKeyPrompt>();
@@ -1718,7 +1751,7 @@ fn main() {
                     let audit = audit_log();
                     let mut root = Root {
                         rt, default_target, tabs: vec![], active: 0, themes, histories: HashMap::new(),
-                        manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], deny_reason: None, policy_port: None, overlay: Overlay::None, sftp_views: HashMap::new(), sftp_current: None, sftp_windows: vec![], host_menu: None, port_view: None, quit_confirm: false, modal: None, quit_ok: false, chat_view: None,
+                        manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], deny_reason: None, policy_port: None, overlay: Overlay::None, sftp_views: HashMap::new(), sftp_current: None, sftp_windows: vec![], host_menu: None, drag_div: None, port_view: None, quit_confirm: false, modal: None, quit_ok: false, chat_view: None,
                         host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., collapsed: HashSet::new(), host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: true, audit, audit_verify: None, audit_filter: Default::default(),
                         settings_dirty: vec![], toast: None, toast_seq: 0, _subs: vec![],
                     };
