@@ -282,8 +282,13 @@ pub fn connect<'a>(tg: &'a SshTarget, prompts: &'a Prompts) -> std::pin::Pin<Box
                 let h = tokio::time::timeout(Duration::from_secs(300), client::connect_stream(cfg, stream, handler)).await.map_err(|_| anyhow!(t("ssh.handshake_timeout")))??;
                 Ok((h, Some(jc)))
             } else {
-                let tcp = tokio::time::timeout(Duration::from_secs(secs), tokio::net::TcpStream::connect((tg.host.as_str(), tg.port))).await
-                    .map_err(|_| anyhow!(tf("ssh.connect_timeout", &[("secs", &secs)])))??;
+                // ssh.proxy: HTTP CONNECT / SOCKS5 tunnel for the first hop (jump hosts ride on it)
+                let tcp = match crate::proxy::for_host(&tg.host)? {
+                    Some(p) => tokio::time::timeout(Duration::from_secs(secs), crate::proxy::connect(&p, &tg.host, tg.port)).await
+                        .map_err(|_| anyhow!(tf("ssh.connect_timeout", &[("secs", &secs)])))??,
+                    None => tokio::time::timeout(Duration::from_secs(secs), tokio::net::TcpStream::connect((tg.host.as_str(), tg.port))).await
+                        .map_err(|_| anyhow!(tf("ssh.connect_timeout", &[("secs", &secs)])))??,
+                };
                 let _ = tcp.set_nodelay(true);
                 let h = tokio::time::timeout(Duration::from_secs(300), client::connect_stream(cfg, tcp, handler)).await.map_err(|_| anyhow!(t("ssh.handshake_timeout")))??;
                 Ok((h, None))

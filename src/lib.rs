@@ -10,6 +10,7 @@ pub mod policy;
 pub mod hooks;
 pub mod policy_server;
 pub mod broker;
+pub mod proxy;
 pub mod boxdraw;
 pub mod hosts;
 pub mod keygen;

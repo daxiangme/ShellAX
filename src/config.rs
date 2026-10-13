@@ -102,13 +102,17 @@ pub struct Ssh {
     pub known_hosts: String, pub host_key_policy: String, pub jump_host: String, pub ciphers: Vec<String>,
     pub read_ssh_config: bool, pub ssh_config: String, pub agent_forwarding: bool,
     pub kex: Vec<String>, pub reconnect: bool, pub reuse_connections: bool, pub remote_agent_hooks: bool,
+    /// Outbound proxy for SSH: socks5://[user:pass@]host:port or http://[user:pass@]host:port (empty = direct)
+    pub proxy: String,
+    /// Hosts that bypass the proxy (globs, comma separated)
+    pub no_proxy: String,
 }
 impl Default for Ssh {
     fn default() -> Self {
         Self { default_user: String::new(), default_port: u_22(), keepalive_secs: u_30(), connect_timeout_secs: u_15(), known_hosts: s_kh(),
             host_key_policy: s_ask(), jump_host: String::new(), ciphers: vec!["chacha20-poly1305@openssh.com".into(), "aes256-gcm@openssh.com".into(), "aes128-ctr".into()],
             read_ssh_config: t(), ssh_config: s_sc(), agent_forwarding: false,
-            kex: vec![], reconnect: t(), reuse_connections: t(), remote_agent_hooks: t() }
+            kex: vec![], reconnect: t(), reuse_connections: t(), remote_agent_hooks: t(), proxy: String::new(), no_proxy: String::new() }
     }
 }
 
@@ -362,6 +366,8 @@ fn apply_runtime(s: &Settings) {
     ssh_term_proto::ssh::CONNECT_TIMEOUT_SECS.store(s.ssh.connect_timeout_secs, Relaxed);
     ssh_term_proto::ssh::RECONNECT.store(s.ssh.reconnect && s.session.auto_reconnect, Relaxed);
     ssh_term_proto::ssh::REUSE.store(s.ssh.reuse_connections, Relaxed);
+    *ssh_term_proto::proxy::URL.lock().unwrap() = s.ssh.proxy.clone();
+    *ssh_term_proto::proxy::NO_PROXY.lock().unwrap() = s.ssh.no_proxy.clone();
     ssh_term_proto::ssh::HOST_KEY_POLICY.store(match s.ssh.host_key_policy.as_str() { "strict" => 1, "accept-new" => 2, _ => 0 }, Relaxed);
     ssh_term_proto::local::INTEGRATE.store(if s.terminal.shell_integration == "off" { 0 } else if s.terminal.shell.is_empty() { 1 } else { 2 }, Relaxed);
     let _ = ssh_term_proto::suggest::set_extra_filters(&s.suggest.filter_patterns);

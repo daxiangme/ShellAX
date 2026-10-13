@@ -170,6 +170,8 @@ impl SettingsView {
             r(Suggest, t("ui.ai_suggest"), t("ui.ai_suggest.d"), Ctl::Toggle("suggest.ai")),
             r(Suggest, t("ui.sensitive_command_filters"), t("ui.regexes_comma_separated_combined_with"), Ctl::Text("suggest.filter_patterns", "(?i)vault +login")),
 
+            r(Ssh, t("ui.ssh_proxy"), t("ui.ssh_proxy_desc"), Ctl::Text("ssh.proxy", "socks5://127.0.0.1:1080")),
+            r(Ssh, t("ui.ssh_no_proxy"), t("ui.ssh_no_proxy_desc"), Ctl::Text("ssh.no_proxy", "10.*, *.lan")),
             r(Ssh, t("ui.default_user"), t("ui.used_when_a_host_has"), Ctl::Text("ssh.default_user", "$USER")),
             r(Ssh, t("ui.default_port"), "", Ctl::Text("ssh.default_port", "22")),
             r(Ssh, t("ui.keepalive_interval_s"), t("ui.0_disables"), Ctl::Text("ssh.keepalive_secs", "30")),
