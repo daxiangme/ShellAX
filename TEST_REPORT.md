@@ -1,17 +1,17 @@
-# TEST_REPORT — AgentShell 原型对照 PRD v1.1（第 13 轮：5.20 右键上下文菜单，2026-10-13）
+# TEST_REPORT — AgentShell 原型对照 PRD v1.2（第 14 轮：5.21 SFTP 显示模式，2026-10-13）
 
 标记：**通过** / **失败**（PRD 要求未实现或不达标）/ **未验证**（只因硬件或平台限制无法在本机验证，写明原因）。
 证据：`T:` 自动化测试；`G:` 本轮在 DISPLAY=:2 实测（截图本轮逐张看过）；`P:` 前几轮 GUI 实测（PROGRESS.md 有记录，截图在仓库）；`M:` 手工测量。
-代码基线：第 13 轮（本报告随同一 commit 提交）；第 0 节为本轮重跑结果，第 1–3 节沿用第 12 轮结论（本轮未改动相关代码路径），第 5b 节为本轮新增 5.20 清单。G: 截图都在 DISPLAY=:2（1920×1200）全屏截取，本轮逐张看过。
+代码基线：第 14 轮（本报告随同一 commit 提交）；第 0 节为本轮重跑结果，第 1–3 节沿用第 12 轮结论，第 5b 节为第 13 轮 5.20 清单，第 5c 节为本轮新增 5.21 清单。G: 截图都在 DISPLAY=:2（1920×1200）全屏截取，本轮逐张看过。
 
 ## 0. 构建与自动化测试
 
 | 项 | 命令 | 结果 |
 |---|---|---|
 | release 构建 | `cargo build --release`（`~/.cargo/bin` 工具链） | **通过**，0 警告 |
-| dist 构建 | `cargo build --profile dist`（fat LTO、cgu=1、panic=abort、strip） | **通过**，0 警告；二进制 46.3MB |
+| dist 构建 | `cargo build --profile dist`（fat LTO、cgu=1、panic=abort、strip） | **通过**，0 警告；二进制 42.8MB |
 | clippy | `cargo clippy --release --all-targets` | **通过**，0 警告 0 错误 |
-| 全量测试 ×3 | `source testenv/test.env; eval $(ssh-agent -s); ssh-add testenv/client_ed25519; cargo test --release -- --nocapture` | **通过**：3 轮均 147/147（lib 103 含新增 ctxmenu 11、agentshell 8、GUI bin 16、ctxmenu_ssh 1（新增）、daemon 1、headless 8、managed_policy 1、ssh_features 9），0 失败 0 忽略 |
+| 全量测试 ×3 | `source testenv/test.env; eval $(ssh-agent -s); ssh-add testenv/client_ed25519; cargo test --release -- --nocapture` | **通过**：3 轮均 152/152（lib 107 含新增 sftp_mode 3 + session_store sftp 1、agentshell 8、GUI bin 16、ctxmenu_ssh 1、daemon 1、headless 8、managed_policy 1、sftp_modes_ssh 1（新增）、ssh_features 9），0 失败 0 忽略 |
 | 跳过检查 | 在 --nocapture 输出里 grep skip | 0 个跳过（sshd 2222 公钥 / 2223 密码+转发 / 2224 keyboard-interactive 都在运行，SSH_AUTH_SOCK 已设） |
 | 外部 Agent hook 端到端 | `tools/e2e_hooks.sh`（真实 Claude Code / Codex / Grok CLI + mock LLM） | **通过** 7/7 |
 | 许可证（第 13 轮） | 右键菜单全部自写（src/ctxmenu.rs、src/ctxmenu_view.rs），无新增依赖；未打开 research/ 下 shell-rs、oxideterm、warp，未读 Zed terminal/terminal_view/editor | 通过 |
@@ -193,6 +193,28 @@
 4. “在内置编辑器打开”只对远端文件（经 SFTP 编辑器）；本地文件给出 `"${EDITOR:-vi}" 文件` 插入命令。
 5. 测试 sshd 的远端 shell 未设置 UTF-8 locale，readline 把中文显示为 `____`（字节正确，执行结果正确，见 GUI 实测）。
 6. 本机 llvmpipe 软件渲染，菜单弹出到屏幕更新约 3–6 秒（截图时等待）。
+
+## 5c. 第 14 轮：PRD 5.21 SFTP 显示模式
+
+| 项 | 结果 | 证据 |
+|---|---|---|
+| 标签页模式：主标签栏独立标签，标题 `SFTP · host`、文件夹图标、双栏；同主机可多开 | 通过 | G: screenshot-final-sftp-tab.png；命令面板“在标签页中打开 SFTP”每次新建视图 |
+| 分屏模式：贴在同主机终端旁 | 通过 | G: screenshot-final-sftp-split.png（宿主机右键菜单 / 命令面板“在分屏中打开”） |
+| 分屏跟随终端目录（OSC 7 / 提示符） | 通过 | T: sftp_mode::tests::follow_*；集成 sftp_modes_ssh（远端 shell 发 OSC 7 → 列出该目录；无 OSC 7 时按提示符；`cd ~` 回到 home）；G: 终端 `cd ctxdemo` 后 SFTP 状态栏“已跟随终端 → /home/sshtest/ctxdemo” |
+| 弹窗模式保留 | 通过 | G: screenshot-final-sftp-popup.png |
+| 分离为独立窗口 / 挂回 | 通过 | G: screenshot-final-sftp-window.png（窗口标题 `SFTP · sshtest@127.0.0.1:2222`）；点“标签页”挂回，窗口关闭；关窗也挂回为标签 |
+| 模式切换保留状态（目录、选中、传输队列） | 通过 | G: 同一视图依次 tab → split → window → tab → popup，远端目录 `/home/sshtest/ctxdemo`、选中 `release 报告.zip`、队列中已完成的下载任务一直保留（见四张截图）；实现上移动的是同一个实体，审计 sftp.mode from/to |
+| 设置：默认打开方式、跟随开关 | 通过 | 设置 → 会话 `session.sftp_mode`、`session.sftp_follow_cwd`；T: i18n 键一致性 |
+| 入口：命令面板 / 侧边栏 / 主机右键菜单 | 通过 | G: 命令面板 sftp_tab / sftp_split；侧边栏主机右键 → 新建终端标签页 / 在标签页 / 分屏 / 新窗口 / 弹窗中打开 SFTP |
+| 布局快照与会话恢复 | 通过 | T: session_store::tests::sftp_tabs_roundtrip（含旧格式默认值）；集成 sftp_modes_ssh（保存的两个 SFTP 叶子在同一主机目录重新打开、follow 标记保留）；G: RESTORE=1 重启后 SFTP 标签回到 ctxdemo、分屏 SFTP 跟随开关为开 |
+| 5.20 右键菜单在各模式可用 | 通过 | G: 分屏和独立窗口里右键 zip → “列出内容”插入到同主机终端（独立窗口时激活主窗口） |
+
+本轮限制（不计失败）：
+1. “模式切换保留状态”只有 GUI 实测，没有自动化测试（GPUI 实体放置逻辑在 bin 内，未接入 gpui 测试上下文）。
+2. 远端 shell 默认不发 OSC 7，跟随依赖提示符含路径（`user@host:dir$` 形式）；tmux 内取当前屏幕的光标行。
+3. 弹窗和独立窗口不写入布局；退出前未挂回的独立窗口在下次启动时不会恢复。
+4. 分屏时窄终端（<90 列且 >30 行）改为上下分；三栏以上布局中 SFTP 栏较窄，权限列在分屏模式隐藏。
+5. 独立窗口使用系统默认标题栏；拖拽标签到窗口外分离未实现（用模式按钮）。
 
 ## 6. 仍存问题（不计失败）
 1. Kitty 图形只做传输即显示（a=T/t/p 直接数据），未做放置 ID 管理、删除、文件/共享内存传输、动画；图片按像素原尺寸绘制，不随字号缩放。

@@ -13,7 +13,10 @@ use ssh_term_proto::term::{Session, Size};
 fn env(k: &str) -> Option<String> { std::env::var(k).ok().filter(|v| !v.is_empty()) }
 fn wait<T>(secs: u64, mut f: impl FnMut() -> Option<T>) -> Option<T> {
     let t0 = Instant::now();
-    loop { if let Some(v) = f() { return Some(v); } if t0.elapsed() > Duration::from_secs(secs) { return None; } std::thread::sleep(Duration::from_millis(100)); }
+    loop {
+        if let Some(v) = f() { return Some(v); }
+        if t0.elapsed() > Duration::from_secs(secs) { return None; } std::thread::sleep(Duration::from_millis(100));
+    }
 }
 fn prompt_line(s: &Session) -> Option<String> { s.screen_text().lines().rev().find(|l| l.trim_end().ends_with('$')).map(str::to_string) }
 

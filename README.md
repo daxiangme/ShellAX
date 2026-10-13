@@ -12,7 +12,7 @@ cargo clippy --release --all-targets       # 0 警告
 sudo /usr/sbin/sshd -f $PWD/testenv/sshd3_config -E $PWD/testenv/sshd3.log   # 若 2224 未运行
 source testenv/test.env                    # TEST_SSH_PORT/PORT2/PORT3/USER/KEY/PASSWORD/PP_KEY/PP（仅本机回环测试账号）
 eval $(ssh-agent -s) && ssh-add testenv/client_ed25519   # agent_auth 需要 SSH_AUTH_SOCK
-cargo test --release                       # 147 个，全部通过，无跳过（变量缺失时用例会打印 skip 并直接返回）
+cargo test --release                       # 152 个，全部通过，无跳过（变量缺失时用例会打印 skip 并直接返回）
 tools/e2e_hooks.sh                         # 外部 Agent hook 端到端 7/7
 tools/gui_final.sh                         # 在 DISPLAY=:2 启动 release GUI（隔离配置 /tmp/stp-gui）
 tools/tray_check.sh                        # 私有 dbus-daemon + SNI watcher，用 busctl 检查托盘
@@ -38,6 +38,13 @@ tools/tray_check.sh                        # 私有 dbus-daemon + SNI watcher，
 - 布局快照：自动保留最近 10 份，命令面板「保存布局快照」「回滚布局快照…」。
 - 快速启动：Ctrl+Shift+O 选目录 + 预设布局（单/左右/主+两侧/2×2/Agent + tail -F 日志）。
 - 审计默认目录遵守 `XDG_DATA_HOME`；测试钩子 `AGENTSHELL_TEST_SLOW_WITHDRAW=1`（撤销的审批卡仍显示，用于验证迟到的允许不执行）。
+
+## 第 14 轮新增：SFTP 显示模式（PRD v1.2 5.21）
+- 四种模式：弹窗（原有）、标签页（主标签栏，`SFTP · host`，同主机可多开）、分屏（贴在终端旁，可跟随终端目录）、独立窗口（关闭或点“标签页”挂回）。
+- SFTP 标题栏的模式按钮随时切换，移动的是同一个视图：目录、选中、传输队列都保留。
+- 设置 → 会话：`sftp_mode` 默认打开方式、`sftp_follow_cwd`；命令面板“在标签页/分屏/新窗口/弹窗中打开 SFTP”；侧边栏主机右键菜单。
+- 布局保存与快照包含 SFTP 标签/分屏（`kind = "sftp"`），重启后在同一目录恢复。
+- 代码：`src/sftp_mode.rs`、`src/sftp_view.rs`、`src/main.rs`（place/move/detach_sftp）、`tests/sftp_modes_ssh.rs`。截图 `screenshot-final-sftp-{tab,split,window,popup}.png`。
 
 ## 第 13 轮新增：右键上下文菜单（PRD v1.1 5.20）
 - 终端输出右键：路径（用 OSC 7 / 本地 /proc / 提示符解析 cwd）、URL、IP:端口、选中文本；SFTP 本地/远端栏右键（Ctrl/Shift 多选）。

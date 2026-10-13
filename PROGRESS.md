@@ -103,3 +103,13 @@
 - ☑ 13.4 集成测试（sshd：插入不执行、回车后解压）
 - ☑ 13.5 截图 screenshot-final-ctxmenu-{terminal-path,inserted,enter-permission,missing-tool,missing-tool-terminal,filepanel-zip,filepanel-inserted,custom-item,settings,selection}.png（逐张看过）
 - ☑ 13.6 全量：release + dist（46.3MB）0 警告、clippy --all-targets 0 警告、cargo test --release 3 轮 147/147、e2e_hooks 7/7；TEST_REPORT 5b 节、README 第 13 轮
+
+# 第 14 轮（PRD v1.2 5.21 SFTP 显示模式）
+- ☑ 14.0 PRD 5.21 写入，v1.2，备份 PRD-v1.1-final.md
+- ☑ 14.1 src/sftp_mode.rs（模式、跟随路径映射、Follow 状态）+ 单测；session_store PaneSave::Sftp
+- ☑ 14.2 GUI：TermView 叶子承载 SftpView（标签/分屏），独立窗口 SftpWindow，弹窗保留；标题栏模式切换；跟随终端目录
+- ☑ 14.3 设置 session.sftp_mode / sftp_follow_cwd；命令面板 4 项；侧边栏主机右键菜单
+- ☑ 14.4 布局保存 / 快照 / 恢复 SFTP 叶子（follow 重新挂到同标签终端）
+- ☑ 14.5 集成测试 tests/sftp_modes_ssh.rs；截图 screenshot-final-sftp-{tab,split,window,popup}.png
+- ☑ 14.6 全量：release + dist（42.8MB）0 警告、clippy 0、cargo test --release 3 轮 152/152、e2e_hooks 7/7；TEST_REPORT 5c、README 第 14 轮
+- 注：tools/gui_final.sh 增加 RESTORE=1（取消 AGENTSHELL_NO_RESTORE）以测试恢复
