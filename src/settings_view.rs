@@ -31,6 +31,14 @@ impl Cat {
             Cat::Audit => t("ui.audit"), Cat::Session => t("ui.sessions_layout"), Cat::Keys => t("ui.keyboard_shortcuts"), Cat::Notify => t("ui.notifications"), Cat::ContextMenu => t("cm.settings_title"), Cat::About => t("ui.about"),
         }
     }
+    /// System Settings-style colored rounded-square icon background (PRD 5.22).
+    fn color(self) -> u32 {
+        match self {
+            Cat::General => 0x8e8e93, Cat::Appearance => 0x5856d6, Cat::Terminal => 0x3a3a3c, Cat::Suggest => 0xffb300, Cat::Ssh => 0x007aff,
+            Cat::Credentials => 0xa2845e, Cat::Ai => 0xaf52de, Cat::Agents => 0x34c759, Cat::Permissions => 0xff3b30, Cat::Audit => 0xff9500,
+            Cat::Session => 0x30b0c7, Cat::Keys => 0x636366, Cat::Notify => 0xff2d55, Cat::ContextMenu => 0x32ade6, Cat::About => 0x0a84ff,
+        }
+    }
     fn icon(self) -> IconName {
         match self {
             Cat::General => IconName::SlidersHorizontal, Cat::Appearance => IconName::Palette, Cat::Terminal => IconName::SquareTerminal,
@@ -310,14 +318,26 @@ impl SettingsView {
             .child(div().flex().items_center().gap_2().text_size(px(13.)).text_color(c(th.text)).child(row.label));
         if !row.desc.is_empty() { left = left.child(div().text_size(px(11.5)).text_color(c(th.overlay1)).child(row.desc)); }
         if let Some(e) = err { left = left.child(div().text_size(px(11.5)).text_color(c(th.error)).child(e)); }
-        div().id(("row", idx)).py(px(10.)).flex().items_center().gap_4().border_b_1().border_color(c(th.surface0))
+        div().id(("row", idx)).px(px(12.)).py(px(8.)).min_h(px(40.)).flex().items_center().gap_4()
             .child(left).child(div().flex_shrink_0().child(ctl)).into_any_element()
+    }
+    /// Grouped inset card (System Settings): rows separated by inset hairlines.
+    fn group_card(rows: Vec<AnyElement>) -> gpui::Div {
+        let th = cur();
+        let dark = th.appearance == crate::theme::Appearance::Dark;
+        let mut card = div().mt_2().rounded(px(10.)).bg(if dark { c(th.surface0).opacity(0.55) } else { c(th.base) }).border_1().border_color(c(th.surface1).opacity(0.6)).flex().flex_col().overflow_hidden();
+        let n = rows.len();
+        for (i, r) in rows.into_iter().enumerate() {
+            card = card.child(r);
+            if i + 1 < n { card = card.child(div().mx(px(12.)).h(px(1.)).bg(c(th.surface1).opacity(0.55))); }
+        }
+        card
     }
 
     // ---------------------------------------------------------------- custom sections
     fn section_title(t: &str) -> impl IntoElement {
         let th = cur();
-        div().pt_5().pb_2().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.subtext)).child(t.to_string())
+        div().pt_5().pb_1().px(px(12.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.subtext)).child(t.to_string())
     }
 
     fn permissions_extra(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -732,16 +752,16 @@ impl Render for SettingsView {
         let rows = self.rows();
 
         // ---- left: search + categories
-        let mut nav = div().w(px(220.)).flex_shrink_0().h_full().flex().flex_col().gap(px(2.)).p_3().bg(c(th.mantle)).border_r_1().border_color(c(th.surface0))
+        let mut nav = div().id("settings-nav").w(px(224.)).flex_shrink_0().h_full().overflow_y_scroll().flex().flex_col().gap(px(1.)).p(px(10.)).bg(c(th.mantle)).border_r_1().border_color(c(th.surface1).opacity(0.6))
             .child(div().pb_2().child(Input::new(&self.search).prefix(icon(IconName::Search, 14., c(th.overlay1))).cleanable(true)));
         for (i, cat) in Cat::ALL.iter().copied().enumerate() {
             let active = query.is_empty() && cat == self.cat;
-            nav = nav.child(div().id(("cat", i)).h(px(30.)).px_2().rounded_md().flex().items_center().gap_2().cursor_pointer()
-                .bg(if active { c(th.surface0) } else { gpui::transparent_black() })
-                .hover(|d| d.bg(c(cur().surface0)))
+            nav = nav.child(div().id(("cat", i)).h(px(28.)).px(px(6.)).rounded(px(6.)).flex().items_center().gap(px(8.)).cursor_pointer()
+                .when(active, |d| d.bg(c(th.accent)))
+                .when(!active, |d| d.hover(|d| d.bg(c(cur().surface0).opacity(0.7))))
                 .on_click(cx.listener(move |this, _, window, cx| { this.cat = cat; this.search.update(cx, |s, cx| s.set_value("", window, cx)); cx.notify(); }))
-                .child(icon(cat.icon(), 15., if active { c(th.accent) } else { c(th.overlay1) }))
-                .child(div().text_size(px(12.5)).text_color(if active { c(th.text) } else { c(th.subtext) }).child(cat.name())));
+                .child(div().size(px(20.)).rounded(px(5.)).flex().items_center().justify_center().bg(c(cat.color())).child(icon(cat.icon(), 12., gpui::white())))
+                .child(div().text_size(px(12.5)).text_color(if active { gpui::white() } else { c(th.text) }).child(cat.name())));
         }
 
         // ---- right: form
@@ -750,9 +770,8 @@ impl Render for SettingsView {
             body = body.child(div().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(self.cat.name()))
                 .child(div().pt_1().pb_2().text_size(px(12.)).text_color(c(th.overlay1)).child(self.cat.desc()));
             let cur_cat = self.cat;
-            for (i, row) in rows.iter().enumerate().filter(|(_, r)| r.cat == cur_cat) {
-                body = body.child(self.row_el(row, i, window, cx));
-            }
+            let els: Vec<AnyElement> = rows.iter().enumerate().filter(|(_, r)| r.cat == cur_cat).map(|(i, row)| self.row_el(row, i, window, cx)).collect();
+            if !els.is_empty() { body = body.child(Self::group_card(els)); }
             let extra = match self.cat {
                 Cat::Permissions => Some(self.permissions_extra(window, cx)),
                 Cat::Credentials => Some(self.credentials_extra(cx)),
@@ -774,14 +793,19 @@ impl Render for SettingsView {
             }).collect();
             body = body.child(div().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(tf("settings.search_results", &[("n", &hits.len())])));
             let mut last = None;
+            let mut group: Vec<AnyElement> = vec![];
             for (i, row) in hits {
-                if last != Some(row.cat) { body = body.child(Self::section_title(row.cat.name())); last = Some(row.cat); }
-                body = body.child(self.row_el(row, i, window, cx));
+                if last != Some(row.cat) {
+                    if !group.is_empty() { body = body.child(Self::group_card(std::mem::take(&mut group))); }
+                    body = body.child(Self::section_title(row.cat.name())); last = Some(row.cat);
+                }
+                group.push(self.row_el(row, i, window, cx));
             }
+            if !group.is_empty() { body = body.child(Self::group_card(group)); }
         }
 
-        let header = div().h(px(48.)).px_5().flex().items_center().gap_2().border_b_1().border_color(c(th.surface0))
-            .child(icon(IconName::Settings, 16., c(th.accent)))
+        let header = div().h(px(44.)).px_4().flex().items_center().gap_2().border_b_1().border_color(c(th.surface1).opacity(0.6))
+            .child(div().size(px(20.)).rounded(px(5.)).flex().items_center().justify_center().bg(c(0x8e8e93)).child(icon(IconName::Settings, 12., gpui::white())))
             .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("ui.settings")))
             .child(div().pl_2().text_size(px(11.)).text_color(c(th.overlay0)).child(t("ui.changes_are_saved_to_config")))
             .child(div().flex_1())
@@ -792,7 +816,7 @@ impl Render for SettingsView {
             .child(header)
             .child(div().flex_1().min_h_0().flex().flex_row()
                 .child(nav)
-                .child(div().id("settings-scroll").flex_1().min_w_0().h_full().overflow_y_scroll().px_6().py_4().child(body.w_full())))
+                .child(div().id("settings-scroll").flex_1().min_w_0().h_full().overflow_y_scroll().px_6().py_4().bg(if th.appearance == crate::theme::Appearance::Dark { c(th.base) } else { c(th.mantle).opacity(0.6) }).child(body.w_full())))
     }
 }
 
