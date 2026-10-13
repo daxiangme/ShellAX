@@ -15,7 +15,7 @@
 - ☑ 2.1 密码认证（钥匙串存储）、ssh-agent 认证、密钥口令（tests/ssh_features.rs）
 - ☑ 2.2 生成/导入密钥（src/keygen.rs，设置页凭据按钮）
 - ☑ 2.3 ProxyJump 跳板机（多级链，测试通过）
-- ◐ 2.4 算法偏好、agent 转发（配置生效；kex 暂无 UI 行）
+- ☑ 2.4 算法偏好（kex/cipher 设置行）、agent 转发
 - ☑ 2.5 keepalive、断线重连、连接复用
 
 ## 3 SFTP（P1）

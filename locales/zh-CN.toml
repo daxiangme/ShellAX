@@ -188,6 +188,7 @@
 "ui.cannot_parse_public_key" = "无法解析公钥"
 "ui.changes_are_saved_to_config" = "修改即保存到 config.toml"
 "ui.check_for_updates_automatically" = "自动检查更新"
+"ui.kex_preference" = "密钥交换（KEX）算法偏好"
 "ui.cipher_preference" = "加密算法偏好"
 "ui.clear_command_history" = "清空命令历史"
 "ui.clear_suggestion_history" = "清空命令建议历史"

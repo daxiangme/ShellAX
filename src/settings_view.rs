@@ -174,6 +174,7 @@ impl SettingsView {
             r(Ssh, t("ui.ssh_config_path"), "", Ctl::Text("ssh.ssh_config", "~/.ssh/config"), false),
             r(Ssh, t("ui.default_jump_host"), t("ui.proxyjump_e_g_bastion"), Ctl::Text("ssh.jump_host", "user@bastion:22"), false),
             r(Ssh, t("ui.cipher_preference"), t("ui.comma_separated_by_priority"), Ctl::Text("ssh.ciphers", ""), false),
+            r(Ssh, t("ui.kex_preference"), t("ui.comma_separated_by_priority"), Ctl::Text("ssh.kex", "curve25519-sha256"), false),
             r(Ssh, t("ui.agent_forwarding"), "", Ctl::Toggle("ssh.agent_forwarding"), false),
 
             r(Credentials, t("ui.use_system_keychain"), t("ui.store_key_passphrases_and_api"), Ctl::Toggle("credentials.use_keychain"), false),

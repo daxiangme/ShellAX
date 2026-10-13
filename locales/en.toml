@@ -188,6 +188,7 @@
 "ui.cannot_parse_public_key" = "Cannot parse public key"
 "ui.changes_are_saved_to_config" = "Changes are saved to config.toml immediately"
 "ui.check_for_updates_automatically" = "Check for updates automatically"
+"ui.kex_preference" = "Key exchange (KEX) preference"
 "ui.cipher_preference" = "Cipher preference"
 "ui.clear_command_history" = "Clear command history"
 "ui.clear_suggestion_history" = "Clear suggestion history"
