@@ -168,8 +168,14 @@ impl Ai {
 #[serde(default)]
 pub struct Agents { pub detect_claude: bool, pub detect_codex: bool, pub detect_grok: bool, pub notify_state: bool, pub approval_timeout_secs: u64, pub on_timeout: String, pub policy_port: u16,
     /// AI typing into a pane running an external agent: ask | ask_first | allow | deny
-    pub write_to_pty: String }
-impl Default for Agents { fn default() -> Self { Self { detect_claude: t(), detect_codex: t(), detect_grok: t(), notify_state: t(), approval_timeout_secs: u_120(), on_timeout: s_deny(), policy_port: 0, write_to_pty: "ask".into() } } }
+    pub write_to_pty: String,
+    /// Agent quick launch entries (palette, AI / Agent panel): name + command typed into a new pane
+    pub quick_launch: Vec<QuickLaunch> }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct QuickLaunch { pub name: String, pub command: String }
+pub fn default_quick_launch() -> Vec<QuickLaunch> { [("Claude Code", "claude"), ("Codex", "codex"), ("Grok", "grok")].iter().map(|(n, c)| QuickLaunch { name: n.to_string(), command: c.to_string() }).collect() }
+impl Default for Agents { fn default() -> Self { Self { detect_claude: t(), detect_codex: t(), detect_grok: t(), notify_state: t(), approval_timeout_secs: u_120(), on_timeout: s_deny(), policy_port: 0, write_to_pty: "ask".into(), quick_launch: default_quick_launch() } } }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -456,6 +462,16 @@ pub fn merge_preserving(old: &str, fresh: &str) -> anyhow::Result<String> {
 
 #[cfg(test)]
 mod ai_output_tests {
+    #[test]
+    fn quick_launch_and_new_defaults() {
+        let a = super::Agents::default();
+        assert_eq!(a.quick_launch.iter().map(|q| q.command.as_str()).collect::<Vec<_>>(), ["claude", "codex", "grok"]);
+        assert_eq!(a.write_to_pty, "ask");
+        let parsed: super::Agents = toml::from_str("[[quick_launch]]\nname = \"Aider\"\ncommand = \"aider --yes\"\n").unwrap();
+        assert_eq!(parsed.quick_launch.len(), 1);
+        assert!(super::Terminal::default().keyword_highlight && !super::Terminal::default().highlights.is_empty());
+        assert!(super::Ai::default().feed_back_results);
+    }
     #[test]
     fn no_output_hosts() {
         let mut a = super::Ai { send_output: true, no_output_hosts: "prod-*, 10.0.0.9".into(), ..Default::default() };

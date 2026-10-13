@@ -310,6 +310,22 @@ impl Root {
         window.focus(&fh, cx);
         cx.notify();
     }
+    /// Agent quick launch: split the focused pane (same host) and start the configured agent in it.
+    pub(crate) fn launch_agent(&mut self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(q) = config::get().agents.quick_launch.get(idx).cloned().filter(|q| !q.command.trim().is_empty()) else { return self.toast(t("ui.launch_agent_none").to_string(), cx) };
+        self.split(None, window, cx);
+        let Some(pane) = self.tabs.get(self.active).map(|t| t.focused.clone()) else { return };
+        let host = pane.read(cx).audit_host();
+        self.log("agent.launch", format!("name={:?} command={:?} host={host}", q.name, q.command));
+        let cmd = q.command.trim().replace(['\r', '\n'], " ");
+        cx.spawn(async move |_, cx| {
+            for _ in 0..100 {
+                let ready = pane.update(cx, |v, _| v.session.clone());
+                if let Some(s) = ready { cx.background_executor().timer(std::time::Duration::from_millis(400)).await; s.write(format!("{cmd}\r").into_bytes()); return; }
+                cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
+            }
+        }).detach();
+    }
     fn close_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(target) = self.focused_pane(window, cx) else { return };
         self.end_pane(&target, cx);
@@ -569,6 +585,9 @@ impl Root {
             Action::OpenSftp => self.open_sftp(window, cx),
             Action::OpenPortForward => { let tg = self.ssh_target_for_tools(cx); let pv = self.port_view(window, cx); pv.update(cx, |v, _| if v.target.is_none() || tg.is_some() { v.target = tg }); self.overlay = Overlay::Port; }
             Action::OpenAi => self.overlay = Overlay::Ai,
+            Action::LaunchAgent1 => self.launch_agent(0, window, cx),
+            Action::LaunchAgent2 => self.launch_agent(1, window, cx),
+            Action::LaunchAgent3 => self.launch_agent(2, window, cx),
             Action::AiCommand => {
                 if let Some(v) = self.focused_pane(window, cx) { v.update(cx, |v, cx| v.ai_from_line(cx)); }
                 self.focus_active(window, cx);

@@ -8,6 +8,7 @@ pub enum Action {
     NextTab, PrevTab, CycleTheme, ThemeSystem, CyclePermissionMode, ModeAsk, ModePlan, ModeAuto,
     OpenSftp, OpenPortForward, OpenAi, AiCommand, OpenAudit, OpenAbout, ClearHistory, ToggleSidebar,
     SettingsPermissions, SettingsAppearance, SettingsTerminal, SettingsSsh, SettingsKeys,
+    LaunchAgent1, LaunchAgent2, LaunchAgent3,
 }
 
 pub struct Info { pub id: &'static str, pub label: &'static str, pub group: &'static str, pub key: &'static str, pub icon: IconName }
@@ -19,6 +20,7 @@ impl Action {
         Action::ToggleSidebar, Action::CyclePermissionMode, Action::ModeAsk, Action::ModePlan, Action::ModeAuto, Action::OpenSftp, Action::OpenPortForward,
         Action::OpenAi, Action::AiCommand, Action::OpenAudit, Action::ClearHistory,
         Action::SettingsPermissions, Action::SettingsAppearance, Action::SettingsTerminal, Action::SettingsSsh, Action::SettingsKeys,
+        Action::LaunchAgent1, Action::LaunchAgent2, Action::LaunchAgent3,
     ];
     pub fn info(self) -> Info {
         use IconName as I;
@@ -53,6 +55,9 @@ impl Action {
             Action::SettingsTerminal => i("settings_terminal", t("ui.settings_terminal"), t("ui.settings"), "", I::Terminal),
             Action::SettingsSsh => i("settings_ssh", t("ui.settings_ssh"), t("ui.settings"), "", I::Server),
             Action::SettingsKeys => i("settings_keys", t("ui.settings_keyboard_shortcuts"), t("ui.settings"), "", I::Keyboard),
+            Action::LaunchAgent1 => i("launch_agent_1", t("ui.launch_agent_1"), t("ui.agents_group"), "ctrl-alt-1", I::Bot),
+            Action::LaunchAgent2 => i("launch_agent_2", t("ui.launch_agent_2"), t("ui.agents_group"), "ctrl-alt-2", I::Bot),
+            Action::LaunchAgent3 => i("launch_agent_3", t("ui.launch_agent_3"), t("ui.agents_group"), "ctrl-alt-3", I::Bot),
         }
     }
     /// Effective binding (user override from settings.keys, else default; "" = unbound).

@@ -122,6 +122,10 @@ impl Root {
             }
         }
         if n == 0 { agents = agents.child(div().p_3().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ui.no_running_claude_code_codex"))); }
+        let mut launch = div().flex().flex_wrap().items_center().gap_2().child(div().text_size(px(12.)).text_color(c(th.subtext)).child(t("ui.launch_agent_title")));
+        for (k, q) in s.agents.quick_launch.iter().enumerate().take(9) {
+            launch = launch.child(ui::button(("ql", k), tf("ui.launch_agent_btn", &[("name", &q.name)]), 0).on_click(cx.listener(move |this, _, w, cx| { this.overlay = Overlay::None; this.launch_agent(k, w, cx); })));
+        }
         let ai = div().p_3().rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.surface0)).flex().flex_col().gap_2()
             .child(div().flex().items_center().gap_2().child(icon(IconName::Sparkles, 15., c(th.accent)))
                 .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("ui.built_in_ai_assistant")))
@@ -134,6 +138,7 @@ impl Root {
             .child(ai)
             .child(div().pt_2().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.subtext)).child(t("ui.external_agents_live_detection")))
             .child(agents)
+            .child(launch)
             .child(div().flex().gap_2().child(ui::button("ai-settings", t("ui.ai_settings"), 0).on_click(cx.listener(|this, _, w, cx| this.open_settings(crate::settings_view::Cat::Ai, w, cx))))
                 .child(ui::button("perm-settings", t("ui.permission_rules"), 0).on_click(cx.listener(|this, _, w, cx| this.open_settings(crate::settings_view::Cat::Permissions, w, cx)))));
         ui::modal(panel_shell("AI / Agent", IconName::Bot, t("ui.agent_state_is_detected_live"), cx).child(body)).into_any_element()
