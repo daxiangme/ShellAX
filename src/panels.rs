@@ -102,7 +102,9 @@ impl Root {
         if n == 0 { agents = agents.child(div().p_3().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ui.no_running_claude_code_codex"))); }
         let ai = div().p_3().rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.surface0)).flex().flex_col().gap_2()
             .child(div().flex().items_center().gap_2().child(icon(IconName::Sparkles, 15., c(th.accent)))
-                .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("ui.built_in_ai_assistant"))).child(ui::soon()))
+                .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("ui.built_in_ai_assistant")))
+                .child(div().flex_1())
+                .child(ui::button("ai-chat-open", t("chat.open"), 1).on_click(cx.listener(|this, _, w, cx| { this.open_chat(w, cx); }))))
             .child(div().text_size(px(12.)).text_color(c(th.subtext)).child(tf("panels.ai_summary", &[("provider", &s.ai.default_provider().map(|p| p.name.clone()).unwrap_or_else(|| t("ai.none").into())), ("model", &s.ai.default_provider().map(|p| p.model.clone()).unwrap_or_default()), ("redact", &if s.ai.redact { t("ui.on") } else { t("ui.off_2") }), ("mode", &s.permissions.mode.label())])))
             .child(div().h(px(64.)).px_3().rounded_md().border_1().border_color(c(th.surface1)).flex().items_center().text_size(px(12.)).text_color(c(th.overlay0))
                 .child(t("ui.in_a_terminal_type_what")));

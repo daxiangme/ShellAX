@@ -8,6 +8,7 @@ mod panels;
 mod settings_view;
 mod sftp_view;
 mod port_view;
+mod chat_view;
 mod termview;
 mod theme;
 mod ui;
@@ -70,7 +71,7 @@ impl Render for DividerDrag { fn render(&mut self, _w: &mut Window, _cx: &mut Co
 
 struct Tab { layout: Node<Entity<TermView>>, focused: Entity<TermView> }
 
-pub(crate) enum Overlay { None, Settings(Entity<SettingsView>), Palette(Entity<Palette>), Host(Entity<HostDialog>), Audit, Sftp, Port, Ai }
+pub(crate) enum Overlay { None, Settings(Entity<SettingsView>), Palette(Entity<Palette>), Host(Entity<HostDialog>), Audit, Sftp, Port, Ai, Chat }
 
 pub(crate) struct Root {
     rt: Arc<tokio::runtime::Runtime>,
@@ -99,6 +100,7 @@ pub(crate) struct Root {
     toast_seq: u64,
     pub(crate) sftp_views: HashMap<String, Entity<sftp_view::SftpView>>,
     pub(crate) port_view: Option<Entity<port_view::PortView>>,
+    pub(crate) chat_view: Option<Entity<chat_view::ChatView>>,
     quit_confirm: bool,
     quit_ok: bool,
     pub(crate) sftp_current: Option<Entity<sftp_view::SftpView>>,
@@ -152,6 +154,14 @@ impl Root {
             if ssh_term_proto::daemon::list(&ssh_term_proto::daemon::socket_path(&data_dir())).is_ok_and(|l| l.iter().any(|i| &i.id == id && i.alive)) { pi.resume = None; }
         }
         let v = self.open_pane_inner(spec, &pi, window, cx);
+        self._subs.push(cx.subscribe_in(&v, window, |this, pane, _ev: &termview::TermEvent, w, cx| {
+            let fc = pane.update(cx, |p, cx| { let f = p.failure_context(); p.failed = None; cx.notify(); f });
+            if let Some((cmd, code, out, host)) = fc {
+                this.log("ai.explain", format!("{cmd:?} exit={code}"));
+                let chat = this.open_chat(w, cx);
+                chat.update(cx, |c, cx| c.explain(cmd, code, out, host, cx));
+            }
+        }));
         v.update(cx, |v, _| { v.resume_offer = pi.resume.clone(); if v.daemon_id.is_none() { v.daemon_id = pi.daemon_id.clone(); } });
         v
     }
@@ -213,6 +223,30 @@ impl Root {
         self.tabs.get(self.active).and_then(|t| of(&t.focused))
             .or_else(|| self.tabs.iter().flat_map(|t| t.layout.leaves()).find_map(|v| of(&v)))
             .or_else(|| self.default_target.clone())
+    }
+    pub(crate) fn open_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<chat_view::ChatView> {
+        let src = self.focused_pane(window, cx).map(|p| p.downgrade());
+        let v = match &self.chat_view {
+            Some(v) => v.clone(),
+            None => {
+                let v = cx.new(|cx| chat_view::ChatView::new(window, cx));
+                self._subs.push(cx.subscribe_in(&v, window, |this, _, ev: &chat_view::ChatEvent, w, cx| match ev {
+                    chat_view::ChatEvent::Close => this.close_overlay(w, cx),
+                    chat_view::ChatEvent::Insert(cmd) => {
+                        // AI output is only inserted, never executed (the user presses Enter)
+                        if let Some(p) = this.tabs.get(this.active).map(|t| t.focused.clone()) { if let Some(s) = &p.read(cx).session { s.write(cmd.clone().into_bytes()); } }
+                        this.log("ai.chat.insert", cmd);
+                        this.close_overlay(w, cx);
+                    }
+                }));
+                self.chat_view = Some(v.clone());
+                v
+            }
+        };
+        v.update(cx, |c, cx| { if src.is_some() { c.source = src; } c.focus(window, cx); });
+        self.overlay = Overlay::Chat;
+        cx.notify();
+        v
     }
     pub(crate) fn port_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<port_view::PortView> {
         if let Some(v) = &self.port_view { return v.clone(); }
@@ -813,6 +847,7 @@ impl Render for Root {
             Overlay::Sftp => Some(self.sftp_panel(cx)),
             Overlay::Port => Some(self.port_panel(cx)),
             Overlay::Ai => Some(self.ai_panel(cx)),
+            Overlay::Chat => self.chat_view.clone().map(|v| ui::modal(v).into_any_element()),
         };
         if let Some(o) = overlay { root = root.child(o); }
 
@@ -929,7 +964,7 @@ fn main() {
                     let audit = audit_log();
                     let mut root = Root {
                         rt, default_target, tabs: vec![], active: 0, themes, histories: HashMap::new(),
-                        manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], policy_port: None, overlay: Overlay::None, sftp_views: HashMap::new(), sftp_current: None, port_view: None, quit_confirm: false, quit_ok: false,
+                        manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], policy_port: None, overlay: Overlay::None, sftp_views: HashMap::new(), sftp_current: None, port_view: None, quit_confirm: false, quit_ok: false, chat_view: None,
                         host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, collapsed: HashSet::new(), sidebar_visible: true, audit, audit_verify: None,
                         settings_dirty: vec![], toast: None, toast_seq: 0, _subs: vec![],
                     };

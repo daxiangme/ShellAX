@@ -32,9 +32,9 @@
 - ☑ 5.4 Agent resume：快照记录面板最近识别到的 Agent → `claude --continue` / `codex resume --last` / `grok --resume`（grok 参数未在本机核实）；进程丢失后恢复布局时显示“恢复 Agent”按钮，点击才运行；daemon 仍持有时不提示
 
 ## 6 内置 AI（P1）
-- ☐ 6.1 对话面板（流式，带脱敏后的终端上下文）
-- ☐ 6.2 命令失败后一键解释
-- ☐ 6.3 AI 命令建议接入灰字
+- ☑ 6.1 对话面板（src/chat_view.rs；ai::chat_stream 支持 OpenAI SSE / Anthropic 流；多轮；附带聚焦终端上下文（按 ai.context 范围、发送前脱敏，mock 日志确认 hunter2 未发出）；停止；代码块“插入终端”只插入不执行；审计 ai.chat*）
+- ☑ 6.2 命令失败一键解释：shell 集成新增 OSC 133;D;$?，非零退出时面板标题出现“解释失败（退出码 N）”，命令与 200 行尾部输出脱敏后流式解释
+- ☑ 6.3 AI 命令建议灰字：suggest.ai 开启且历史无匹配时停顿 600ms 请求命令模型（fast_model），复用灰字 UI 与 →/Tab 接受；含密钥/敏感命令的行不发送
 
 ## 7 其余（P2 / 3.7 设置全表）
 - ☐ 7.1 桌面通知（Agent 等待输入 / 需确认）

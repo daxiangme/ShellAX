@@ -185,6 +185,75 @@ pub fn chat(p: &Provider, key: &str, system: &str, user: &str, max_tokens: Optio
     Ok(Reply { text, latency, model })
 }
 
+/// System prompt for the free-form assistant panel.
+pub const CHAT_SYSTEM_PROMPT: &str = "You are the AgentShell terminal assistant. Answer concisely. When you propose shell commands put each in a fenced code block; never claim you ran anything. Terminal context, if given, is already redacted.";
+/// System prompt for "explain this failure".
+pub const EXPLAIN_SYSTEM_PROMPT: &str = "You explain why a shell command failed. Given the command, its exit status and the (redacted) tail of the terminal output, explain the most likely cause in 2-5 sentences and suggest a fix command in a fenced code block. Do not run anything.";
+
+/// Prompt for "explain this failed command".
+pub fn build_explain_prompt(cmd: &str, code: i32, host: &str, output_tail: &str) -> String {
+    format!("Host: {host}\nCommand: {cmd}\nExit status: {code}\nTerminal output (tail, redacted):\n```\n{output_tail}\n```")
+}
+
+/// Streaming multi-turn chat. `messages` = (role "user"/"assistant", content). Calls `on_delta`
+/// for each text fragment as it arrives (OpenAI `stream: true` SSE / Anthropic message stream).
+pub fn chat_stream(p: &Provider, key: &str, system: &str, messages: &[(String, String)], mut on_delta: impl FnMut(&str) -> bool) -> Result<Reply> {
+    use std::io::BufRead;
+    let agent = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(p.timeout_secs.clamp(1, 30))).timeout_read(Duration::from_secs(p.timeout_secs.max(1))).build();
+    let base = crate::models::api_base(p.kind, &p.base_url);
+    let msgs: Vec<serde_json::Value> = messages.iter().map(|(r, c)| serde_json::json!({"role": r, "content": c})).collect();
+    let t0 = Instant::now();
+    let res = match p.kind {
+        Kind::OpenAi => {
+            let mut all = vec![serde_json::json!({"role": "system", "content": system})];
+            all.extend(msgs);
+            let mut req = agent.post(&format!("{base}/chat/completions")).set("content-type", "application/json").set("accept", "text/event-stream");
+            if !key.is_empty() { req = req.set("authorization", &format!("Bearer {key}")); }
+            req.send_json(serde_json::json!({"model": p.model, "max_tokens": p.max_tokens, "temperature": p.temperature, "stream": true, "messages": all}))
+        }
+        Kind::Anthropic => agent.post(&format!("{base}/messages")).set("x-api-key", key).set("anthropic-version", "2023-06-01").set("content-type", "application/json")
+            .send_json(serde_json::json!({"model": p.model, "max_tokens": p.max_tokens, "temperature": p.temperature, "system": system, "stream": true, "messages": msgs})),
+    };
+    let resp = match res {
+        Ok(r) => r,
+        Err(ureq::Error::Status(code, r)) => { let body = r.into_string().unwrap_or_default(); return Err(anyhow!("HTTP {code}: {}", scrub(&body, key))); }
+        Err(e) => return Err(anyhow!("{}", scrub(&e.to_string(), key))),
+    };
+    let ctype = resp.header("content-type").unwrap_or("").to_string();
+    let mut text = String::new();
+    let mut model = p.model.clone();
+    if !ctype.contains("event-stream") {
+        // server ignored stream=true: plain JSON body
+        let v: serde_json::Value = resp.into_json().map_err(|e| anyhow!("bad JSON: {e}"))?;
+        let t = v.pointer("/choices/0/message/content").or_else(|| v.pointer("/content/0/text")).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+        on_delta(&t);
+        return Ok(Reply { text: t, latency: t0.elapsed(), model });
+    }
+    let rd = std::io::BufReader::new(resp.into_reader());
+    for line in rd.lines() {
+        let line = line.map_err(|e| anyhow!("stream: {e}"))?;
+        let Some(data) = line.strip_prefix("data:") else { continue };
+        let data = data.trim();
+        if data == "[DONE]" { break; }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else { continue };
+        if let Some(m) = v.get("model").and_then(|m| m.as_str()) { model = m.to_string(); }
+        let delta = v.pointer("/choices/0/delta/content").or_else(|| v.pointer("/delta/text")).and_then(|x| x.as_str());
+        if let Some(d) = delta { text.push_str(d); if !on_delta(d) { break; } }
+        if v.get("type").and_then(|t| t.as_str()) == Some("message_stop") { break; }
+        if let Some(e) = v.pointer("/error/message").and_then(|x| x.as_str()) { return Err(anyhow!("{}", scrub(e, key))); }
+    }
+    Ok(Reply { text, latency: t0.elapsed(), model })
+}
+
+/// Inline command completion: returns only the text to append after `prefix` (may be empty).
+pub const COMPLETE_SYSTEM_PROMPT: &str = "Complete the user's partially typed shell command. Reply with the COMPLETE command only, one line, no explanation, no code fence.";
+pub fn completion_suffix(prefix: &str, reply: &str) -> Option<String> {
+    let line = reply.trim().trim_matches('`').lines().map(str::trim).find(|l| !l.is_empty())?;
+    let line = line.strip_prefix("$ ").unwrap_or(line);
+    let suf = line.strip_prefix(prefix)?;
+    (!suf.is_empty() && !suf.contains('\n')).then(|| suf.to_string())
+}
+
 /// Minimal real request (max_tokens = 1) to validate URL, key and model.
 pub fn test_connection(p: &Provider, key: &str) -> Result<Reply> { chat(p, key, "ping", "ping", Some(1)) }
 
@@ -275,5 +344,35 @@ mod tests {
         assert_eq!(r.text, "ok");
         let req = h.join().unwrap().to_lowercase();
         assert!(req.starts_with("post /v1/messages") && req.contains("x-api-key: ak-1234") && req.contains("anthropic-version: 2023-06-01"));
+    }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+    #[test]
+    fn completion_suffix_rules() {
+        assert_eq!(completion_suffix("git st", "git status"), Some("atus".into()));
+        assert_eq!(completion_suffix("git st", "`git stash list`"), Some("ash list".into()));
+        assert_eq!(completion_suffix("ls", "rm -rf /"), None);
+        assert_eq!(completion_suffix("ls", "ls"), None);
+    }
+    #[test]
+    fn openai_sse_stream_is_parsed() {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            let mut b = [0u8; 4096]; let _ = s.read(&mut b);
+            let body = "data: {\"model\":\"m1\",\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\ndata: [DONE]\n\n";
+            let _ = write!(s, "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}", body.len());
+        });
+        let p = Provider { id: "t".into(), name: "t".into(), kind: Kind::OpenAi, base_url: format!("http://127.0.0.1:{port}/v1"), model: "m0".into(), timeout_secs: 5, max_tokens: 50, ..Default::default() };
+        let mut parts = vec![];
+        let r = chat_stream(&p, "", "s", &[("user".into(), "hi".into())], |d| { parts.push(d.to_string()); true }).unwrap();
+        assert_eq!(parts, vec!["Hel", "lo"]);
+        assert_eq!(r.text, "Hello");
+        assert_eq!(r.model, "m1");
     }
 }

@@ -78,8 +78,8 @@ impl Default for Terminal { fn default() -> Self { Self { shell: String::new(), 
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
-pub struct Suggest { pub enabled: bool, pub accept: String, pub local_history: bool, pub remote_history: bool, pub filter_patterns: Vec<String> }
-impl Default for Suggest { fn default() -> Self { Self { enabled: t(), accept: s_both(), local_history: t(), remote_history: t(), filter_patterns: vec!["(?i)vault +login".into()] } } }
+pub struct Suggest { pub enabled: bool, pub accept: String, pub local_history: bool, pub remote_history: bool, pub filter_patterns: Vec<String>, pub ai: bool }
+impl Default for Suggest { fn default() -> Self { Self { enabled: t(), accept: s_both(), local_history: t(), remote_history: t(), filter_patterns: vec!["(?i)vault +login".into()], ai: false } } }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]

@@ -162,6 +162,7 @@ impl SettingsView {
             r(Suggest, t("ui.accept_key"), "", Ctl::Choice("suggest.accept", opts(&[("both", t("ui.or_tab")), ("right", t("ui.only")), ("tab", t("ui.tab_only"))])), false),
             r(Suggest, t("ui.local_history"), t("ui.record_commands_typed_in_this"), Ctl::Toggle("suggest.local_history"), false),
             r(Suggest, t("ui.remote_history"), t("ui.read_remote_bash_history_and"), Ctl::Toggle("suggest.remote_history"), false),
+            r(Suggest, t("ui.ai_suggest"), t("ui.ai_suggest.d"), Ctl::Toggle("suggest.ai"), false),
             r(Suggest, t("ui.sensitive_command_filters"), t("ui.regexes_comma_separated_combined_with"), Ctl::Text("suggest.filter_patterns", "(?i)vault +login"), false),
 
             r(Ssh, t("ui.default_user"), t("ui.used_when_a_host_has"), Ctl::Text("ssh.default_user", "$USER"), false),

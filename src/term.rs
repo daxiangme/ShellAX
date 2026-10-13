@@ -82,6 +82,9 @@ pub struct Session {
     pub fg_probe: Mutex<Option<FgProbe>>,
     /// Current working directory of the shell (local panes), for layout snapshots.
     pub cwd_probe: Mutex<Option<FgProbe>>,
+    /// OSC 133;D exit status of the last command and a counter bumped on each report.
+    pub last_exit: Mutex<Option<i32>>,
+    pub exit_seq: AtomicU64,
     /// Backend connection state (SSH connects asynchronously; local is connected immediately).
     pub connected: AtomicBool,
     pub conn_error: Mutex<Option<String>>,
@@ -127,6 +130,8 @@ impl Session {
             history_seed: Mutex::new(None),
             fg_probe: Mutex::new(None),
             cwd_probe: Mutex::new(None),
+            last_exit: Mutex::new(None),
+            exit_seq: AtomicU64::new(0),
             connected: AtomicBool::new(false),
             conn_error: Mutex::new(None),
         });
@@ -147,6 +152,11 @@ impl Session {
                                 let cur = t.grid().cursor.point;
                                 let mut m = s2.prompt_mark.lock().unwrap();
                                 match payload.first() { Some(b'B') => *m = Some((cur.line.0, cur.column.0)), _ => *m = None }
+                                if payload.first() == Some(&b'D') {
+                                    let code = std::str::from_utf8(payload).ok().and_then(|p| p.split(';').nth(1)).and_then(|c| c.trim().parse::<i32>().ok());
+                                    *s2.last_exit.lock().unwrap() = code;
+                                    s2.exit_seq.fetch_add(1, Ordering::Relaxed);
+                                }
                             } else {
                                 *s2.shared.progress.lock().unwrap() = String::from_utf8_lossy(payload).into_owned();
                             }

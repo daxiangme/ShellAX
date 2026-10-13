@@ -364,6 +364,12 @@ pub struct TermView {
     pub daemon_id: Option<String>,
     /// After a layout restore: agent resume command offered as a button (never auto-run).
     pub resume_offer: Option<String>,
+    /// Last command failed (OSC 133;D non-zero): (command, exit code) → "Explain" button.
+    pub failed: Option<(String, i32)>,
+    exit_seen: u64,
+    ai_inline_seq: u64,
+    /// AI inline completion for an input prefix: (prefix, suffix shown as grey text).
+    ai_inline: Option<(String, String)>,
     /// Last agent seen in this pane (kept for the layout snapshot after it exits).
     pub last_agent: Option<String>,
     bell_until: Option<Instant>,
@@ -383,6 +389,9 @@ pub enum AiCard {
 
 /// Snapshot of what the input line looks like right now.
 struct LineState { before_cursor: String, at_eol: bool, prompt_col: Option<usize>, alt_screen: bool }
+
+pub enum TermEvent { Explain }
+impl gpui::EventEmitter<TermEvent> for TermView {}
 
 impl TermView {
     pub fn new(title: &str, spec: Spec, session: anyhow::Result<Arc<Session>>, history: Arc<Mutex<History>>,
@@ -416,7 +425,7 @@ impl TermView {
             selecting: false, scroll_drag: false, history, tracker: InputTracker::new(),
             last_activity: Instant::now(), blink_running: false, last_mouse_cell: None, mouse_down_btn: None,
             manifests, last_command: None, agent: None, agent_seen: Instant::now(), last_detect: Instant::now() - Duration::from_secs(5),
-            detect_scheduled: false, pending_paste: None, ai: None, daemon_id: None, resume_offer: None, last_agent: None, bell_until: None, _subs: subs,
+            detect_scheduled: false, pending_paste: None, ai: None, daemon_id: None, resume_offer: None, last_agent: None, failed: None, exit_seen: 0, ai_inline_seq: 0, ai_inline: None, bell_until: None, _subs: subs,
         }
     }
 
@@ -448,9 +457,21 @@ impl TermView {
                 }).detach();
             }
         }
+        if let Some(s) = &self.session {
+            let seq = s.exit_seq.load(Ordering::Relaxed);
+            if seq != self.exit_seen {
+                self.exit_seen = seq;
+                let code = *s.last_exit.lock().unwrap();
+                let was = self.failed.is_some();
+                self.failed = match (code, &self.last_command) { (Some(c), Some(cmd)) if c != 0 && self.agent.is_none() => Some((cmd.clone(), c)), _ => None };
+                if was || self.failed.is_some() { cx.notify(); }
+            }
+        }
         self.last_activity = Instant::now();
         self.st.borrow_mut().blink_on = true;
-        self.st.borrow_mut().suggestion = self.compute_suggestion();
+        let sug = self.compute_suggestion();
+        if sug.is_none() { self.schedule_ai_suggestion(cx); }
+        self.st.borrow_mut().suggestion = sug.or_else(|| self.ai_suggestion());
         self.repaint_grid(cx);
         self.schedule_detect(cx);
         // connection state changes show in the header
@@ -559,6 +580,48 @@ impl TermView {
         Some(LineState { before_cursor: before, at_eol, prompt_col, alt_screen: t.mode().contains(TermMode::ALT_SCREEN) })
     }
 
+    fn current_input(&self) -> Option<String> {
+        let ls = self.line_state()?;
+        if ls.alt_screen || !ls.at_eol { return None; }
+        Some(self.tracker.current_input(&ls.before_cursor, ls.prompt_col)?.0)
+    }
+    /// AI grey-text suggestion for the current input, if one has arrived for exactly this prefix.
+    fn ai_suggestion(&self) -> Option<String> {
+        let (p, s) = self.ai_inline.as_ref()?;
+        (self.current_input()?.as_str() == p.as_str()).then(|| s.clone())
+    }
+    /// Debounced AI completion request (suggest.ai): only when history has nothing, never for
+    /// lines containing secrets, never in the alternate screen or while an agent runs.
+    fn schedule_ai_suggestion(&mut self, cx: &mut Context<Self>) {
+        let cfg = config::get();
+        if !(cfg.ai.enabled && cfg.suggest.enabled && cfg.suggest.ai) || self.agent.is_some() { return; }
+        let Some(input) = self.current_input() else { return };
+        if input.trim().len() < 3 || self.ai_inline.as_ref().is_some_and(|(p, _)| *p == input) { return; }
+        if ssh_term_proto::ai::redact(&input).1 > 0 || ssh_term_proto::suggest::is_sensitive(&input) { return; }
+        self.ai_inline_seq += 1;
+        let seq = self.ai_inline_seq;
+        let Some(mut provider) = cfg.ai.default_provider().cloned() else { return };
+        provider.model = provider.command_model().to_string();
+        provider.max_tokens = provider.max_tokens.min(64);
+        let key = crate::secret_store().get(&provider.secret_name()).map(|x| x.0).unwrap_or_default();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(600)).await;
+            let Ok(still) = this.update(cx, |v, _| v.ai_inline_seq == seq && v.current_input().as_deref() == Some(input.as_str())) else { return };
+            if !still { return; }
+            let inp2 = input.clone();
+            let r = cx.background_executor().spawn(async move {
+                ssh_term_proto::ai::chat(&provider, &key, ssh_term_proto::ai::COMPLETE_SYSTEM_PROMPT, &format!("Partial command: {inp2}"), None).ok()
+            }).await;
+            let _ = this.update(cx, |v, cx| {
+                if v.ai_inline_seq != seq { return; }
+                if let Some(suf) = r.and_then(|r| ssh_term_proto::ai::completion_suffix(&input, &r.text)) {
+                    v.ai_inline = Some((input.clone(), suf));
+                    v.st.borrow_mut().suggestion = v.ai_suggestion();
+                    v.repaint_grid(cx);
+                }
+            });
+        }).detach();
+    }
     fn compute_suggestion(&self) -> Option<String> {
         if !config::get().suggest.enabled { return None; }
         let ls = self.line_state()?;
@@ -659,7 +722,8 @@ impl TermView {
         let accept = config::get().suggest.accept.clone();
         let key_ok = match accept.as_str() { "right" => k.key == "right", "tab" => k.key == "tab", _ => k.key == "right" || k.key == "tab" };
         if plain && key_ok {
-            if let Some(sug) = self.compute_suggestion() {
+            if let Some(sug) = self.compute_suggestion().or_else(|| self.ai_suggestion()) {
+                self.ai_inline = None;
                 s.write(sug.clone().into_bytes());
                 self.tracker.key(Key::Text(&sug));
                 self.st.borrow_mut().suggestion = None;
@@ -750,6 +814,25 @@ impl TermView {
         }
         if !cur.is_empty() { out.push(cur.trim_end().to_string()); }
         out
+    }
+    /// Redacted terminal context per the AI settings: (text, redactions, host label).
+    pub fn ai_context(&self) -> (String, usize, String) {
+        let cfg = config::get();
+        let screen = self.screen_lines();
+        let sel = self.selection_text();
+        let inp = ssh_term_proto::ai::ContextInput { selection: sel.as_deref(), last_command: self.last_command.as_deref(), screen: &screen };
+        let opts = ssh_term_proto::ai::ContextOpts { scope: ssh_term_proto::ai::Scope::from_id(&cfg.ai.context), lines: cfg.ai.context_lines as usize, send_output: cfg.ai.send_output, redact: cfg.ai.redact };
+        let (t, n) = ssh_term_proto::ai::build_context(&inp, &opts);
+        (t, n, match &self.spec { Spec::Local => "local".to_string(), Spec::Ssh(t) => t.label() })
+    }
+    /// For "explain failure": command, exit code, redacted output tail (200 lines, always redacted).
+    pub fn failure_context(&self) -> Option<(String, i32, String, String)> {
+        let (cmd, code) = self.failed.clone()?;
+        let lines = self.screen_lines();
+        let tail: Vec<&str> = lines.iter().rev().skip_while(|l| l.trim().is_empty()).take(200).map(|s| s.as_str()).collect::<Vec<_>>().into_iter().rev().collect();
+        let (out, _) = ssh_term_proto::ai::redact(&tail.join("\n"));
+        let (cmd, _) = ssh_term_proto::ai::redact(&cmd);
+        Some((cmd, code, out, match &self.spec { Spec::Local => "local".to_string(), Spec::Ssh(t) => t.label() }))
     }
     pub fn ai_request(&mut self, request: String, cx: &mut Context<Self>) {
         let cfg = config::get();
@@ -1157,6 +1240,11 @@ impl Render for TermView {
         if let Some((name, st)) = self.agent_label() {
             let col = match st { AgentState::Working => c(th.warning), AgentState::Blocked => c(th.error), AgentState::Idle => c(th.success), _ => c(th.overlay1) };
             header = header.child(div().px_2().rounded_md().bg(col.opacity(0.18)).text_color(col).child(format!("{name} · {}", st.label())));
+        }
+        if let Some((cmd, code)) = self.failed.clone() {
+            header = header.child(div().flex_1()).child(div().id("explain-fail").px_2().rounded_md().cursor_pointer().bg(c(th.error).opacity(0.15)).text_color(c(th.error))
+                .child(tf("ai.explain_btn", &[("code", &code)]))
+                .on_click(cx.listener(move |_v, _, _w, cx| { let _ = &cmd; cx.emit(TermEvent::Explain); })));
         }
         div()
             .track_focus(&self.focus)

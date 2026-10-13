@@ -53,6 +53,28 @@ class H(BaseHTTPRequestHandler):
             self.send_response(401); self.end_headers(); self.wfile.write(b'{"error":{"message":"missing or invalid API key"}}'); return
         req = json.loads(body)
         user = req['messages'][-1]['content']
+        system = next((m['content'] for m in req['messages'] if m['role'] == 'system'), '')
+        if req.get('stream') or 'Complete the user' in system:
+            if 'Complete the user' in system:
+                part = user.split('Partial command:')[-1].strip()
+                text = next((c for c in ['git status', 'git stash list', 'docker ps -a', 'systemctl status nginx', 'tail -f /var/log/syslog'] if c.startswith(part) and c != part), part)
+            elif 'explain' in system.lower():
+                text = ('The command exited with a non-zero status. Most likely cause: the file or directory does not exist '
+                        '(see "No such file or directory" in the output).\n\nFix:\n```\nls -la\n```')
+            else:
+                last = user.splitlines()[-1] if user else ''
+                text = ('Mock assistant (streamed). You asked: "%s". I received %d context chars, %d redacted secret(s), %d message(s) of history.\n\n```\ndf -h\n```'
+                        % (last[:80], len(user), user.count('[REDACTED'), len(req['messages']) - 1))
+            if not req.get('stream'):
+                out = {'id': 'mock', 'model': 'mock-gpt', 'choices': [{'index': 0, 'message': {'role': 'assistant', 'content': text}, 'finish_reason': 'stop'}]}
+                b = json.dumps(out).encode()
+                self.send_response(200); self.send_header('content-type', 'application/json'); self.send_header('content-length', str(len(b))); self.end_headers(); self.wfile.write(b); return
+            self.send_response(200); self.send_header('content-type', 'text/event-stream'); self.end_headers()
+            words = text.split(' ')
+            for i, w in enumerate(words):
+                chunk = {'model': 'mock-gpt', 'choices': [{'index': 0, 'delta': {'content': w + (' ' if i < len(words) - 1 else '')}}]}
+                self.wfile.write(('data: ' + json.dumps(chunk) + '\n\n').encode()); self.wfile.flush(); time.sleep(0.04)
+            self.wfile.write(b'data: [DONE]\n\n'); self.wfile.flush(); return
         request_line = next((l for l in user.splitlines() if l.startswith('Request:')), user)
         cmd, ex = pick(request_line)
         time.sleep(0.15)
