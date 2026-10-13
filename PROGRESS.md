@@ -8,7 +8,7 @@
 - ☑ 1.2 生产主机加严：`policy::decide_ctx(.., prod)`；Auto 只放行 R0，R2+ 的允许规则改为询问；AI 执行已接入
 - ☑ 1.3 本地策略服务 `src/policy_server.rs`（127.0.0.1 HTTP + Bearer 令牌，端点文件 0600）+ CLI `src/bin/agentshell.rs`（status/check/hook/install/serve）
 - ☑ 1.4 Hook 安装（`src/hooks.rs`，写前备份、可卸载、幂等）；真实 CLI 验证：Claude Code 2.1.296 / Codex 0.162.1 / Grok 1.0.52 + tools/mock_agent_llm.py，`tools/e2e_hooks.sh` 7/7 通过
-- ◐ 1.5 界面审批卡、超时（agents.on_timeout）、CLI 默认 fail-closed、审计 hook.request/decision/approval 已实现；待：GUI 截图验证
+- ☑ 1.5 界面审批卡（screenshot-v8-approval-card-en.png，点"允许一次"后 hook 返回 allow）、超时（agents.on_timeout）、CLI 默认 fail-closed、审计 hook.request/decision/approval
 - ☐ 1.6 远端 Agent hook 回传：SSH 反向端口转发到本地策略服务
 
 ## 2 SSH（P0/P1）
