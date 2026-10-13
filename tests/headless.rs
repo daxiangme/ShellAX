@@ -141,3 +141,25 @@ fn local_bash_osc133_prompt_mark() {
     let cur = s.term.lock().unwrap().grid().cursor.point;
     assert_eq!((mark.0, mark.1), (cur.line.0, cur.column.0), "mark = input start = cursor at idle prompt");
 }
+
+#[test]
+fn local_pty_graphics_record_notify() {
+    let s = local::spawn_local(Size { cols: 80, rows: 24 }, Some("/bin/bash")).unwrap();
+    let cast = std::env::temp_dir().join(format!("stp-rec-{}.cast", std::process::id()));
+    s.start_recording(&cast, "t", true).unwrap();
+    *s.notifier.lock().unwrap() = Some(ssh_term_proto::notify_rules::Notifier::new(vec![("DEPLOY_DONE".into(), "部署".into())]));
+    // 4x12 sixel image, then a kitty 1x1 PNG-less RGB, then text after them.
+    s.write("printf '\\033Pq\"1;1;4;12#1;2;0;0;100#1!4~-!4~\\033\\\\'; printf '\\033_Ga=T,f=24,s=1,v=1;AP8A\\033\\\\'; echo AFTER_IMG; echo TOKEN=sk-abcdefghijklmnopqrstuvwxyz; echo DEPLOY_DONE\r");
+    let txt = wait_for(&s, "DEPLOY_DONE\n", 10);
+    std::thread::sleep(Duration::from_millis(300));
+    let imgs = s.images.lock().unwrap().clone();
+    assert_eq!(imgs.iter().map(|i| i.image.proto).collect::<Vec<_>>(), vec!["sixel", "kitty"], "{txt}");
+    assert_eq!(imgs[0].image.size(), (4, 12));
+    assert!(imgs[1].row > imgs[0].row, "second image placed below first");
+    assert!(s.notices.lock().unwrap().iter().any(|(t, l)| t == "部署" && l.contains("DEPLOY_DONE")));
+    assert!(s.stop_recording());
+    let rec = std::fs::read_to_string(&cast).unwrap();
+    assert!(rec.contains("AFTER_IMG") && !rec.contains("sk-abcdefghijklmnopqrstuvwxyz"));
+    let c = ssh_term_proto::asciicast::parse(&rec).unwrap();
+    assert_eq!((c.width, c.height), (80, 24));
+}

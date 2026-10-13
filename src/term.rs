@@ -89,6 +89,7 @@ pub struct Session {
     /// Total bytes parsed (perf counter).
     pub bytes: Arc<AtomicU64>,
     tx: flume::Sender<BackendMsg>,
+    inject_tx: flume::Sender<Vec<u8>>,
     wake_tx: flume::Sender<()>,
     size: Mutex<Size>,
     /// OSC 133;B position (screen line, column) = where the user's input starts, if the shell reports it.
@@ -105,7 +106,19 @@ pub struct Session {
     /// Backend connection state (SSH connects asynchronously; local is connected immediately).
     pub connected: AtomicBool,
     pub conn_error: Mutex<Option<String>>,
+    /// Inline images (Sixel/Kitty) placed at absolute grid rows (history-adjusted).
+    pub images: Mutex<Vec<Placed>>,
+    /// Cell size in pixels reported by the UI (for reserving rows under an image).
+    pub cell_px: Mutex<(f32, f32)>,
+    /// asciicast v2 recorder (output stream, redacted by default).
+    pub recorder: Mutex<Option<crate::asciicast::Recorder>>,
+    /// Keyword-triggered notifications; fired (title, line) pairs are queued in `notices`.
+    pub notifier: Mutex<Option<crate::notify_rules::Notifier>>,
+    pub notices: Mutex<Vec<(String, String)>>,
 }
+/// An inline image anchored at `row` = history_size + screen line at decode time.
+#[derive(Clone, Debug)]
+pub struct Placed { pub id: u64, pub row: i64, pub col: usize, pub image: crate::graphics::Image, pub rows: usize, pub cols: usize }
 
 /// Find the next OSC marker of interest in `b`: 133 (shell integration) or 9;4 (progress).
 /// Returns (start, end, kind, payload).
@@ -142,6 +155,7 @@ impl Session {
             shared,
             bytes: Arc::new(AtomicU64::new(0)),
             tx: to_backend,
+            inject_tx: out_tx.clone(),
             wake_tx: wake_tx.clone(),
             size: Mutex::new(size),
             prompt_mark: Arc::new(Mutex::new(None)),
@@ -152,17 +166,25 @@ impl Session {
             exit_seq: AtomicU64::new(0),
             connected: AtomicBool::new(false),
             conn_error: Mutex::new(None),
+            images: Mutex::new(vec![]),
+            cell_px: Mutex::new((8., 16.)),
+            recorder: Mutex::new(None),
+            notifier: Mutex::new(None),
+            notices: Mutex::new(vec![]),
         });
         let s2 = s.clone();
         std::thread::Builder::new()
             .name("term-parser".into())
             .spawn(move || {
                 let mut parser: Processor = Processor::new();
+                let mut gfx = crate::graphics::Extractor::default();
+                let mut next_img = 1u64;
                 let mut pending: Option<Vec<u8>> = None;
                 loop {
                     let first = match pending.take() { Some(b) => b, None => match out_rx.recv() { Ok(b) => b, Err(_) => break } };
+                    let first = s2.side_effects(first, &mut gfx);
                     let mut t = s2.term.lock().unwrap();
-                    let mut feed = |t: &mut Term<Listener>, mut b: &[u8]| {
+                    let feed = |t: &mut Term<Listener>, parser: &mut Processor, mut b: &[u8]| {
                         // split at OSC markers so we can sample the cursor exactly at the 133;B mark
                         while let Some((st, en, kind, payload)) = find_osc(b) {
                             parser.advance(t, &b[..st]);
@@ -183,11 +205,23 @@ impl Session {
                         }
                         parser.advance(t, b);
                     };
-                    let mut n = first.len();
-                    feed(&mut t, &first);
+                    let mut n = first.0.len();
+                    let place = |t: &mut Term<Listener>, imgs: Vec<crate::graphics::Image>, parser: &mut Processor, next_img: &mut u64| for image in imgs {
+                        let (cw, ch) = *s2.cell_px.lock().unwrap();
+                        let (pw, ph) = image.size();
+                        let (cols, rows) = ((pw as f32 / cw.max(1.)).ceil() as usize, (ph as f32 / ch.max(1.)).ceil().max(1.) as usize);
+                        let cur = t.grid().cursor.point;
+                        let row = t.grid().history_size() as i64 + cur.line.0 as i64;
+                        s2.images.lock().unwrap().push(Placed { id: *next_img, row, col: cur.column.0, image, rows, cols });
+                        *next_img += 1;
+                        // Reserve the rows so following text starts below the picture.
+                        parser.advance(t, &b"\r\n".repeat(rows));
+                    };
+                    feed(&mut t, &mut parser, &first.0);
+                    place(&mut t, first.1, &mut parser, &mut next_img);
                     // batch: drain what's already queued, but release the lock every BATCH_BYTES
                     while n < BATCH_BYTES {
-                        match out_rx.try_recv() { Ok(more) => { n += more.len(); feed(&mut t, &more); } Err(_) => break }
+                        match out_rx.try_recv() { Ok(more) => { let more = s2.side_effects(more, &mut gfx); n += more.0.len(); feed(&mut t, &mut parser, &more.0); place(&mut t, more.1, &mut parser, &mut next_img); } Err(_) => break }
                     }
                     drop(t);
                     s2.bytes.fetch_add(n as u64, Ordering::Relaxed);
@@ -200,6 +234,26 @@ impl Session {
             .expect("spawn parser");
         (s, out_tx, from_ui)
     }
+
+    /// Recorder / notifier taps and graphics extraction on raw output.
+    fn side_effects(&self, b: Vec<u8>, gfx: &mut crate::graphics::Extractor) -> (Vec<u8>, Vec<crate::graphics::Image>) {
+        if let Some(r) = self.recorder.lock().unwrap().as_mut() { let _ = r.output(&b, false); }
+        if let Some(n) = self.notifier.lock().unwrap().as_mut() {
+            let f = n.feed(&b, std::time::Instant::now());
+            if !f.is_empty() { self.notices.lock().unwrap().extend(f); }
+        }
+        if !b.contains(&0x1b) && !gfx.busy() { return (b, vec![]); }
+        gfx.feed(&b)
+    }
+    pub fn start_recording(&self, path: &std::path::Path, title: &str, redact: bool) -> std::io::Result<()> {
+        let sz = self.size();
+        *self.recorder.lock().unwrap() = Some(crate::asciicast::Recorder::create(path, sz.cols as u16, sz.rows as u16, title, redact)?);
+        Ok(())
+    }
+    pub fn stop_recording(&self) -> bool { self.recorder.lock().unwrap().take().map(|r| r.finish()).is_some() }
+    pub fn is_recording(&self) -> bool { self.recorder.lock().unwrap().is_some() }
+    /// Feed bytes straight into the parser (playback); goes through the same path as backend output.
+    pub fn inject(&self, b: Vec<u8>) -> bool { self.inject_tx.send(b).is_ok() }
 
     /// Wake the UI (e.g. after a backend state change that produced no output).
     pub fn close(&self) { let _ = self.tx.send(BackendMsg::Close); }

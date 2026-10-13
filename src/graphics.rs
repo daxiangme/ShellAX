@@ -13,7 +13,15 @@ pub struct Extractor { state: St, buf: Vec<u8>, kitty_chunks: Vec<u8>, kitty_key
 #[derive(Default, PartialEq, Clone, Copy)]
 enum St { #[default] Ground, Esc, Dcs, Apc, DcsEsc, ApcEsc }
 
+impl Image {
+    /// Pixel size (PNG: read from the IHDR chunk).
+    pub fn size(&self) -> (u32, u32) {
+        match &self.pixels { Pixels::Rgba { w, h, .. } => (*w, *h), Pixels::Png(b) if b.len() >= 24 => (u32::from_be_bytes([b[16], b[17], b[18], b[19]]), u32::from_be_bytes([b[20], b[21], b[22], b[23]])), Pixels::Png(_) => (0, 0) }
+    }
+}
 impl Extractor {
+    /// Inside a sequence that spans feeds.
+    pub fn busy(&self) -> bool { self.state != St::Ground }
     /// Returns (passthrough bytes, completed images).
     pub fn feed(&mut self, data: &[u8]) -> (Vec<u8>, Vec<Image>) {
         let mut out = Vec::with_capacity(data.len()); let mut imgs = vec![];
