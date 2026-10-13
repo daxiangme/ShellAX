@@ -689,3 +689,5 @@
 "sftp.edit_overwrite" = "仍要覆盖"
 "sftp.edit_close" = "关闭编辑器"
 "sftp.editor_title" = "SFTP · 内置编辑"
+"ui.tray" = "托盘图标"
+"ui.tray_desc" = "显示运行中的 Agent 数；菜单：显示窗口 / 新建本地终端 / 退出（重启生效）"

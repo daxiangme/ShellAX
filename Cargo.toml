@@ -5,6 +5,9 @@ edition = "2021"
 publish = false
 license = "LicenseRef-Proprietary"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = "0.3"
+
 [dependencies]
 # GPUI: gpui-pre weekly snapshot of Zed (Apache-2.0), same pin as gpui-component 0.7.3
 gpui = { package = "gpui-pre", version = "=0.3.9" }
@@ -47,3 +50,6 @@ opt-level = 3
 panic = "abort"
 strip = "symbols"
 debug = false
+
+[dev-dependencies]
+zbus = { version = "5", default-features = false, features = ["tokio"] }

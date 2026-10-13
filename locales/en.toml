@@ -689,3 +689,5 @@
 "sftp.edit_overwrite" = "Overwrite anyway"
 "sftp.edit_close" = "Close editor"
 "sftp.editor_title" = "SFTP · built-in editor"
+"ui.tray" = "Tray icon"
+"ui.tray_desc" = "Shows the running-agent count; menu: show window / new local terminal / quit (restart to apply)"

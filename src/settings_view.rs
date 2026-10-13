@@ -137,6 +137,7 @@ impl SettingsView {
             r(General, t("ui.on_startup"), t("ui.what_to_open_when_the"), Ctl::Choice("general.startup", opts(&[("local", t("ui.local_terminal")), ("restore", t("ui.restore_layout")), ("blank", t("ui.blank"))]))),
             r(General, t("ui.check_for_updates_automatically"), "", Ctl::Toggle("general.check_updates")),
             r(General, t("ui.update_channel"), "", Ctl::Choice("general.update_channel", opts(&[("stable", t("ui.stable")), ("beta", t("ui.beta"))]))),
+            r(General, t("ui.tray"), t("ui.tray_desc"), Ctl::Toggle("general.tray")),
             r(General, t("ui.config_file"), t("ui.all_settings_are_stored_here"), Ctl::Info(config::config_path().display().to_string())),
 
             r(Appearance, t("ui.theme"), t("ui.follow_system_switches_with_the"), Ctl::Choice("appearance.theme", themes)),

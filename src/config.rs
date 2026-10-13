@@ -41,8 +41,10 @@ d!(u_10, u64, 10);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
-pub struct General { pub language: String, pub startup: String, pub check_updates: bool, pub update_channel: String, pub update_url: String }
-impl Default for General { fn default() -> Self { Self { language: s_system(), startup: s_restore(), check_updates: t(), update_channel: s_stable(), update_url: String::new() } } }
+pub struct General { pub language: String, pub startup: String, pub check_updates: bool, pub update_channel: String, pub update_url: String,
+    /// system tray icon with the running-agent count (Linux StatusNotifierItem)
+    pub tray: bool }
+impl Default for General { fn default() -> Self { Self { language: s_system(), startup: s_restore(), check_updates: t(), update_channel: s_stable(), update_url: String::new(), tray: t() } } }
 impl General {
     /// Manifest URL for the selected channel (AGENTSHELL_UPDATE_URL > general.update_url > built-in).
     pub fn manifest_url(&self) -> String {

@@ -1110,6 +1110,36 @@ fn main() {
                             cx.notify();
                         }).is_err() { break; }
                     }).detach();
+                    // system tray: running-agent count + show / new terminal / quit (Linux SNI)
+                    #[cfg(target_os = "linux")]
+                    if config::get().general.tray && std::env::var("AGENTSHELL_NO_TRAY").is_err() {
+                        let (ttx, trx) = flume::unbounded::<ssh_term_proto::tray::TrayCmd>();
+                        let zh = matches!(ssh_term_proto::i18n::current(), ssh_term_proto::i18n::Lang::ZhCn);
+                        let trt = root.rt.handle().clone();
+                        let (htx, hrx) = flume::bounded(1);
+                        root.rt.spawn(async move { let _ = htx.send(ssh_term_proto::tray::spawn(ssh_term_proto::tray::AppTray { agents: 0, waiting: 0, zh, tx: ttx }).await); });
+                        cx.spawn_in(window, async move |this, cx| {
+                            let handle = match hrx.recv_async().await { Ok(Ok(h)) => { let _ = this.update(cx, |r, _| r.log("tray", "StatusNotifierItem registered")); Some(h) } Ok(Err(e)) => { let _ = this.update(cx, |r, _| r.log("tray", format!("{e:#}"))); None } Err(_) => None };
+                            let Some(handle) = handle else { return };
+                            let mut last = (usize::MAX, usize::MAX);
+                            loop {
+                                while let Ok(cmd) = trx.try_recv() {
+                                    let _ = this.update_in(cx, |r, w, cx| match cmd {
+                                        ssh_term_proto::tray::TrayCmd::Show => w.activate_window(),
+                                        ssh_term_proto::tray::TrayCmd::NewLocal => { w.activate_window(); r.new_tab(Spec::Local, w, cx); }
+                                        ssh_term_proto::tray::TrayCmd::Quit => { r.log("tray", "quit"); if r.should_close(w, cx) { w.remove_window(); cx.quit(); } else { w.activate_window(); } }
+                                    });
+                                }
+                                let Ok(now) = this.update(cx, |r, cx| {
+                                    let leaves: Vec<_> = r.tabs.iter().flat_map(|t| t.layout.leaves()).collect();
+                                    let labels: Vec<_> = leaves.iter().filter_map(|v| v.read(cx).agent_label()).collect();
+                                    (labels.len(), labels.iter().filter(|(_, st)| *st == agent::AgentState::Blocked).count())
+                                }) else { break };
+                                if now != last { last = now; let h = handle.clone(); trt.spawn(async move { h.update(move |t| { t.agents = now.0; t.waiting = now.1; }).await; }); }
+                                cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+                            }
+                        }).detach();
+                    }
                     if let Some(e) = load_err.clone() { root.toast(e, cx); }
                     let st = config::get();
                     let want_restore = (st.general.startup == "restore" || (st.session.restore_layout && st.general.startup != "blank")) && std::env::var("AGENTSHELL_NO_RESTORE").is_err();
