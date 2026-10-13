@@ -216,6 +216,18 @@
 4. 分屏时窄终端（<90 列且 >30 行）改为上下分；三栏以上布局中 SFTP 栏较窄，权限列在分屏模式隐藏。
 5. 独立窗口使用系统默认标题栏；拖拽标签到窗口外分离未实现（用模式按钮）。
 
+## 5d. 第 15 轮：PRD 5.22 macOS 风格视觉打磨
+- release / dist / clippy --all-targets：均 0 警告。
+- cargo test --release 连续 3 轮：155 通过，0 失败（新增 theme::macos_themes / accent_mapping / ui_font_chain）。box 重置后补回了缺失的测试夹具 hello_from_sshd.txt。
+- e2e_hooks：3 项通过，4 项失败（环境原因，见下）。
+- 截图：screenshot-macos-{light,dark}-{main,sidebar,settings,ctxmenu,palette,sftp-tab}.png，以及 screenshot-macos-before-after.png
+- GPUI div 不支持缩放变换，弹层动画用 160ms 淡入加 6px 上浮代替 scale。
+- 只有 macOS 有真正的毛玻璃（Blurred），Linux/Windows 降级为不透明 mantle 色。
+- Linux 下只有 GNOME 47+（gsettings accent-color）能跟随系统强调色，其他桌面用默认蓝。
+- macOS 原生红绿灯、SF Pro 和毛玻璃只写了代码，未在真机验证（本机是 Linux/X11）。
+- Linux 客户端装饰由 gpui-component Root 外加 20px 透明阴影边，没有合成器时显示为黑边（本机有 picom，所以正常）；`AGENTSHELL_SERVER_DECORATIONS=1` 可改回系统标题栏。
+- e2e_hooks：box 重置后重装的 claude/codex 版本较新（node 20），4 个 deny/grok 子项失败（输出格式变化，grok CLI 未重装）；denied.txt 未被创建，拦截本身仍有效。钩子逻辑这一轮没有改动。
+
 ## 6. 仍存问题（不计失败）
 1. Kitty 图形只做传输即显示（a=T/t/p 直接数据），未做放置 ID 管理、删除、文件/共享内存传输、动画；图片按像素原尺寸绘制，不随字号缩放。
 2. 录制只录输出流；脱敏开启时按整行写出（未换行的提示符会与下一行一起出现在回放里）；“[input hidden]”依赖调用方传入关回显状态，目前 GUI 只录输出，密码本身不会回显所以不会被录到。

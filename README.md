@@ -39,6 +39,14 @@ tools/tray_check.sh                        # 私有 dbus-daemon + SNI watcher，
 - 快速启动：Ctrl+Shift+O 选目录 + 预设布局（单/左右/主+两侧/2×2/Agent + tail -F 日志）。
 - 审计默认目录遵守 `XDG_DATA_HOME`；测试钩子 `AGENTSHELL_TEST_SLOW_WITHDRAW=1`（撤销的审批卡仍显示，用于验证迟到的允许不执行）。
 
+## 第 15 轮新增：macOS 风格视觉打磨（PRD v1.3 5.22）
+- 标题栏：红绿灯在左上角，标签并入标题栏；侧边栏为 Finder 源列表风格，左下角是带 tooltip 的图标行。
+- Safari 式标签；1px 分隔线，悬停或拖动时变粗；UI 用系统字体（终端字体不变）；圆角 6/10，柔和阴影。
+- 设置页仿 macOS 系统设置；弹层半透明，有淡入加上浮动画；强调色跟随系统。
+- 新增内置主题 macOS Light / macOS Dark，并设为默认。
+- 环境变量：`AGENTSHELL_SERVER_DECORATIONS=1` 使用系统标题栏，`AGENTSHELL_NO_ANIM=1` 关闭动画，`AGENTSHELL_NO_SYSTEM_ACCENT=1` 不跟随系统强调色。
+- 截图：screenshot-macos-{light,dark}-{main,sidebar,settings,ctxmenu,palette,sftp-tab}.png，以及 screenshot-macos-before-after.png
+
 ## 第 14 轮新增：SFTP 显示模式（PRD v1.2 5.21）
 - 四种模式：弹窗（原有）、标签页（主标签栏，`SFTP · host`，同主机可多开）、分屏（贴在终端旁，可跟随终端目录）、独立窗口（关闭或点“标签页”挂回）。
 - SFTP 标题栏的模式按钮随时切换，移动的是同一个视图：目录、选中、传输队列都保留。

@@ -113,3 +113,15 @@
 - ☑ 14.5 集成测试 tests/sftp_modes_ssh.rs；截图 screenshot-final-sftp-{tab,split,window,popup}.png
 - ☑ 14.6 全量：release + dist（42.8MB）0 警告、clippy 0、cargo test --release 3 轮 152/152、e2e_hooks 7/7；TEST_REPORT 5c、README 第 14 轮
 - 注：tools/gui_final.sh 增加 RESTORE=1（取消 AGENTSHELL_NO_RESTORE）以测试恢复
+
+## 第 15 轮：macOS 风格视觉打磨（PRD 5.22）— 完成
+- 提交：31eb8b0 主题/强调色/字体 → 2/6 chrome+侧边栏+标签+分隔线 → 3/6 弹层 → 4/6 设置 → 84e3f67 5/6 SFTP 窗口标题栏 → 6/6 文档与截图。基线 tag：pre-macos-ui。
+- PRD 仓库：beb9923（v1.3，备份 PRD-v1.2-final.md）。
+- 测试：155 项 ×3 轮全部通过；0 警告；e2e_hooks 3/7（环境原因）。
+- 截图脚本：/tmp/shot.sh（截根窗口并裁掉 20px 阴影边）；需要先运行 tools/gui_final.sh，并在 DISPLAY=:2 上有 picom。
+- GPUI div 不支持缩放变换，弹层动画用 160ms 淡入加 6px 上浮代替 scale。
+- 只有 macOS 有真正的毛玻璃（Blurred），Linux/Windows 降级为不透明 mantle 色。
+- Linux 下只有 GNOME 47+（gsettings accent-color）能跟随系统强调色，其他桌面用默认蓝。
+- macOS 原生红绿灯、SF Pro 和毛玻璃只写了代码，未在真机验证（本机是 Linux/X11）。
+- Linux 客户端装饰由 gpui-component Root 外加 20px 透明阴影边，没有合成器时显示为黑边（本机有 picom，所以正常）；`AGENTSHELL_SERVER_DECORATIONS=1` 可改回系统标题栏。
+- e2e_hooks：box 重置后重装的 claude/codex 版本较新（node 20），4 个 deny/grok 子项失败（输出格式变化，grok CLI 未重装）；denied.txt 未被创建，拦截本身仍有效。钩子逻辑这一轮没有改动。
