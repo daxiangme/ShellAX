@@ -159,6 +159,17 @@ fn sftp_ops_and_resumable_transfers() {
         assert_eq!(j.state(), JobState::Done);
         assert_eq!(j.resumed_from.load(std::sync::atomic::Ordering::Relaxed), 1_000_000);
         assert_eq!(s.read(remote.clone()).await.unwrap(), data);
+        // built-in editor: text round trip, conflict detection, binary / size limits
+        let txt = sftp::join(&dir, "conf.txt");
+        sftp::write_text(&s, &txt, "a = 1\n中文\n", None).await.unwrap();
+        let (body, v) = sftp::read_text(&s, &txt).await.unwrap();
+        assert_eq!(body, "a = 1\n中文\n");
+        let v2 = sftp::write_text(&s, &txt, "a = 2\n", Some(v)).await.unwrap();
+        assert!(sftp::write_text(&s, &txt, "stale", Some(v)).await.unwrap_err().to_string().contains("changed on the server"));
+        assert_eq!(sftp::read_text(&s, &txt).await.unwrap().0, "a = 2\n");
+        let _ = v2;
+        assert!(sftp::read_text(&s, &remote).await.is_err(), "3 MB binary refused");
+        sftp::remove(Some(&s), Side::Remote, &txt).await.unwrap();
         // download with a partial local copy → resume
         std::fs::write(ld.join("down.bin"), &data[..123_456]).unwrap();
         let j2 = q.push(Dir::Download, ld.join("down.bin"), remote.clone());

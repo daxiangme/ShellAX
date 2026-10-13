@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{div, prelude::*, px, AnyElement, Context, Entity, ExternalPaths, FontWeight, Window};
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{Editor, EditorState, Input, InputEvent, InputState};
 use gpui_component::Sizable;
 use russh_sftp::client::SftpSession;
 use ssh_term_proto::i18n::{t, tf};
@@ -49,6 +49,8 @@ pub struct SftpView {
     pub queue: Queue,
     edit: Option<(Edit, Side, String, Entity<InputState>)>,
     confirm_delete: Option<(Side, String)>,
+    /// Built-in editor for a remote text file: (path, version when opened, editor, overwrite on next save).
+    editor: Option<(String, sftp::Version, Entity<EditorState>, bool)>,
     ticking: bool,
     _subs: Vec<gpui::Subscription>,
 }
@@ -57,7 +59,7 @@ impl SftpView {
     pub fn new(target: SshTarget, rt: tokio::runtime::Handle, prompts: ssh::Prompts, _w: &mut Window, cx: &mut Context<Self>) -> Self {
         let local_dir = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into()));
         let mut me = Self { target, rt, prompts, sess: None, conn: None, connecting: false, status: String::new(), error: false, local_dir, remote_dir: String::new(),
-            local: vec![], remote: vec![], sel: None, hidden: false, queue: Queue::default(), edit: None, confirm_delete: None, ticking: false, _subs: vec![] };
+            local: vec![], remote: vec![], sel: None, hidden: false, queue: Queue::default(), edit: None, confirm_delete: None, editor: None, ticking: false, _subs: vec![] };
         me.refresh_local();
         me.connect(cx);
         me
@@ -213,6 +215,56 @@ impl SftpView {
         }, move |v, _, cx| v.after_change(msg, cx));
         cx.notify();
     }
+    /// Open the selected remote file in the built-in editor (UTF-8 text up to 2 MB).
+    fn edit_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((Side::Remote, e)) = self.selected().filter(|(_, e)| !e.is_dir) else { self.set_status(t("sftp.edit_select").into(), true); cx.notify(); return };
+        let Some(s) = self.sess.clone() else { return };
+        let path = self.path_of(Side::Remote, &e.name);
+        let p2 = path.clone();
+        let (tx, rx) = flume::bounded(1);
+        self.rt.spawn(async move { let _ = tx.send(sftp::read_text(&s, &p2).await); });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(r) = rx.recv_async().await else { return };
+            let _ = this.update_in(cx, |v, window, cx| {
+                match r {
+                    Ok((text, ver)) => {
+                        let st = cx.new(|cx| EditorState::new(window, cx).line_number(true).default_value(text));
+                        let _ = crate::audit_log().append("sftp.edit.open", "user", &format!("host={} path={path:?} bytes={}", v.target.host, ver.0));
+                        v.editor = Some((path.clone(), ver, st, false));
+                        v.set_status(tf("sftp.edit_opened", &[("p", &path)]), false);
+                    }
+                    Err(e) => v.set_status(format!("{e:#}"), true),
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+    fn save_editor(&mut self, cx: &mut Context<Self>) {
+        let Some((path, ver, st, force)) = self.editor.clone() else { return };
+        let Some(s) = self.sess.clone() else { return };
+        let text = st.read(cx).value().to_string();
+        let (p2, host) = (path.clone(), self.target.host.clone());
+        let (tx, rx) = flume::bounded(1);
+        self.rt.spawn(async move { let _ = tx.send(sftp::write_text(&s, &p2, &text, (!force).then_some(ver)).await.map(|v| (v, text.len()))); });
+        cx.spawn(async move |this, cx| {
+            let Ok(r) = rx.recv_async().await else { return };
+            let _ = this.update(cx, |v, cx| {
+                match r {
+                    Ok((nv, n)) => {
+                        let _ = crate::audit_log().append("sftp.edit.save", "user", &format!("host={host} path={path:?} bytes={n} overwrite={force}"));
+                        if let Some(ed) = v.editor.as_mut() { ed.1 = nv; ed.3 = false; }
+                        v.after_change(tf("sftp.edit_saved", &[("p", &path), ("n", &n)]), cx);
+                    }
+                    Err(e) => {
+                        let msg = format!("{e:#}");
+                        if msg.contains("changed on the server") { if let Some(ed) = v.editor.as_mut() { ed.3 = true; } let _ = crate::audit_log().append("sftp.edit.conflict", "policy", &format!("host={host} path={path:?}")); }
+                        v.set_status(msg, true);
+                    }
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
     fn delete_confirmed(&mut self, cx: &mut Context<Self>) {
         let Some((side, path)) = self.confirm_delete.take() else { return };
         let s = self.sess.clone();
@@ -317,6 +369,7 @@ impl Render for SftpView {
             .child(act("sftp-mkdir", IconName::FolderPlus, t("sftp.mkdir")).on_click(cx.listener(|v, _, w, cx| v.begin_edit(Edit::Mkdir, w, cx))))
             .child(act("sftp-rename", IconName::Pencil, t("sftp.rename")).on_click(cx.listener(|v, _, w, cx| v.begin_edit(Edit::Rename, w, cx))))
             .child(act("sftp-chmod", IconName::Lock, t("sftp.chmod")).on_click(cx.listener(|v, _, w, cx| v.begin_edit(Edit::Chmod, w, cx))))
+            .child(act("sftp-edit", IconName::FileText, t("sftp.edit")).on_click(cx.listener(|v, _, w, cx| v.edit_selected(w, cx))))
             .child(ui::button("sftp-del", t("sftp.delete"), 2).on_click(cx.listener(|v, _, _, cx| {
                 match v.selected() { Some((side, e)) => v.confirm_delete = Some((side, v.path_of(side, &e.name))), None => v.set_status(t("sftp.select_first").into(), true) }
                 cx.notify();
@@ -339,6 +392,21 @@ impl Render for SftpView {
                 .child(ui::button("del-ok", t("sftp.delete"), 2).on_click(cx.listener(|v, _, _, cx| v.delete_confirmed(cx))))
                 .child(ui::button("del-cancel", t("ui.cancel"), 3).on_click(cx.listener(|v, _, _, cx| { v.confirm_delete = None; cx.notify() })))
         });
+        if let Some((path, _, st, force)) = self.editor.clone() {
+            let ed = div().flex_1().min_h_0().px_4().pt_3().flex().flex_col().gap_2()
+                .child(div().flex().items_center().gap_2().text_size(px(12.)).text_color(c(th.text))
+                    .child(icon(IconName::FileText, 14., c(th.accent)))
+                    .child(div().flex_1().min_w_0().overflow_hidden().child(format!("{}:{path}", self.target.label())))
+                    .child(ui::button("ed-save", if force { t("sftp.edit_overwrite") } else { t("ui.save") }, if force { 2 } else { 1 }).on_click(cx.listener(|v, _, _, cx| v.save_editor(cx))))
+                    .child(ui::button("ed-close", t("sftp.edit_close"), 3).on_click(cx.listener(|v, _, _, cx| { v.editor = None; cx.notify() }))))
+                .child(div().flex_1().min_h_0().border_1().border_color(c(th.surface0)).rounded_lg().overflow_hidden().child(Editor::new(&st).h_full()));
+            let status = div().px_4().py_2().text_size(px(11.5)).text_color(if self.error { c(th.error) } else { c(th.overlay1) }).child(self.status.clone());
+            return ui::card(1100.).h(px(700.))
+                .child(div().h(px(48.)).px_5().flex().items_center().gap_2().border_b_1().border_color(c(th.surface0))
+                    .child(icon(IconName::FolderSync, 16., c(th.accent)))
+                    .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("sftp.editor_title"))))
+                .child(ed).child(status);
+        }
         let body = div().flex_1().min_h_0().px_4().pt_3().flex().gap_3()
             .child(self.pane(Side::Local, cx))
             .child(div().w(px(28.)).flex().flex_col().items_center().justify_center().gap_3()

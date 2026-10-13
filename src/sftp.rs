@@ -102,6 +102,42 @@ pub fn remove<'a>(s: Option<&'a SftpSession>, side: Side, path: &'a str) -> std:
 fn no_sftp() -> anyhow::Error { anyhow!("no SFTP session") }
 
 /// "rwxr-xr-x" style rendering.
+/// Largest file the built-in editor opens (PRD 3.5 P1 "内置编辑").
+pub const EDIT_MAX: u64 = 2 << 20;
+
+/// Remote file version used to detect concurrent changes: (size, mtime).
+pub type Version = (u64, u64);
+
+async fn version(s: &SftpSession, path: &str) -> Result<Version> {
+    let m = s.metadata(path.to_string()).await?;
+    Ok((m.size.unwrap_or(0), m.mtime.unwrap_or(0) as u64))
+}
+
+/// Open a remote text file for editing: UTF-8 only, at most [`EDIT_MAX`] bytes.
+pub async fn read_text(s: &SftpSession, path: &str) -> Result<(String, Version)> {
+    let v = version(s, path).await?;
+    if v.0 > EDIT_MAX { return Err(anyhow!("file is {} bytes; the built-in editor opens files up to {} bytes", v.0, EDIT_MAX)); }
+    let mut f = s.open_with_flags(path.to_string(), OpenFlags::READ).await?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).await?;
+    if buf.contains(&0) { return Err(anyhow!("binary file (NUL bytes); not opened in the editor")); }
+    let text = String::from_utf8(buf).map_err(|_| anyhow!("not valid UTF-8; not opened in the editor"))?;
+    Ok((text, v))
+}
+
+/// Save edited text. With `expect`, refuses when the file changed on the server since it was
+/// opened (size or mtime differ), so another writer's change is not silently overwritten.
+pub async fn write_text(s: &SftpSession, path: &str, text: &str, expect: Option<Version>) -> Result<Version> {
+    if let Some(e) = expect {
+        if let Ok(now) = version(s, path).await { if now != e { return Err(anyhow!("{path} changed on the server since it was opened (size/mtime {:?} → {:?}); reopen or save again to overwrite", e, now)); } }
+    }
+    let mut f = s.open_with_flags(path.to_string(), OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE).await?;
+    f.write_all(text.as_bytes()).await?;
+    f.shutdown().await?;
+    drop(f);
+    version(s, path).await
+}
+
 pub fn mode_string(m: u32) -> String {
     let b = |bit: u32, ch: char| if m & bit != 0 { ch } else { '-' };
     [b(0o400,'r'),b(0o200,'w'),b(0o100,'x'),b(0o40,'r'),b(0o20,'w'),b(0o10,'x'),b(0o4,'r'),b(0o2,'w'),b(0o1,'x')].iter().collect()
