@@ -127,6 +127,12 @@ fn env_target(known_hosts: &std::path::Path) -> Option<SshTarget> {
     Some(hosts::resolve(&e, known_hosts, &s.all_hosts(), &s.ssh_opts()))
 }
 
+/// Record the user's acknowledgement of the first-send AI notice (persisted, audited).
+pub(crate) fn ai_consent_ack() {
+    let _ = config::update(|s| s.ai.first_send_ack = true);
+    let _ = audit_log().append("ai.consent", "user", "first-send notice acknowledged");
+}
+
 impl Root {
     fn log(&self, kind: &str, detail: impl AsRef<str>) { let _ = self.audit.append(kind, "user", detail.as_ref()); }
 

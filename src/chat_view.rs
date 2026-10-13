@@ -70,8 +70,13 @@ pub fn code_commands(s: &str) -> Vec<String> {
     out
 }
 
+/// A request held back until the user acknowledges the first-send notice.
+#[derive(Clone)]
+enum Pending { Ask(String), Explain(String, i32, String, String) }
+
 pub struct ChatView {
     pub msgs: Vec<Msg>,
+    pending: Option<Pending>,
     input: Entity<InputState>,
     pub source: Option<WeakEntity<TermView>>,
     with_context: bool,
@@ -84,7 +89,7 @@ impl ChatView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(t("chat.placeholder")));
         let subs = vec![cx.subscribe_in(&input, window, |v, _, ev: &InputEvent, w, cx| if matches!(ev, InputEvent::PressEnter { .. }) { v.send(w, cx) })];
-        Self { msgs: vec![], input, source: None, with_context: true, busy: false, stop: Default::default(), _subs: subs }
+        Self { msgs: vec![], pending: None, input, source: None, with_context: true, busy: false, stop: Default::default(), _subs: subs }
     }
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) { self.input.update(cx, |s, cx| s.focus(window, cx)); }
 
@@ -92,7 +97,11 @@ impl ChatView {
         let q = self.input.read(cx).value().trim().to_string();
         if q.is_empty() || self.busy { return; }
         self.input.update(cx, |s, cx| s.set_value("", window, cx));
+        self.send_text(q, cx);
+    }
+    fn send_text(&mut self, q: String, cx: &mut Context<Self>) {
         let cfg = config::get();
+        if cfg.ai.enabled && !cfg.ai.first_send_ack { self.pending = Some(Pending::Ask(q)); cx.notify(); return; }
         let (ctx, n_red, host) = match (self.with_context, self.source.as_ref().and_then(|w| w.upgrade())) {
             (true, Some(tv)) => tv.read(cx).ai_context(),
             _ => (String::new(), 0, String::new()),
@@ -106,6 +115,8 @@ impl ChatView {
     /// Explain a failed command (from the terminal's "Explain failure" button).
     pub fn explain(&mut self, cmd: String, code: i32, out: String, host: String, cx: &mut Context<Self>) {
         if self.busy { return; }
+        let cfg = config::get();
+        if cfg.ai.enabled && !cfg.ai.first_send_ack { self.pending = Some(Pending::Explain(cmd, code, out, host)); cx.notify(); return; }
         self.msgs.push(Msg { role: "user", text: tf("chat.explain_q", &[("cmd", &cmd), ("code", &code)]), note: Some(tf("chat.ctx_note", &[("host", &host), ("n", &out.chars().count()), ("r", &"✓")])), plan: None });
         let prompt = ssh_term_proto::ai::build_explain_prompt(&cmd, code, &host, &out);
         self.run(ssh_term_proto::ai::EXPLAIN_SYSTEM_PROMPT, prompt, cx);
@@ -248,6 +259,18 @@ impl Render for ChatView {
                     .when_some(plan_el, |d, p| d.child(p))));
         }
         let src = self.source.as_ref().and_then(|w| w.upgrade()).map(|v| v.read(cx).title.to_string()).unwrap_or_else(|| t("chat.no_terminal").into());
+        let consent = self.pending.is_some().then(|| {
+            let text = self.source.as_ref().and_then(|w| w.upgrade()).map(|v| v.read(cx).ai_consent_text()).unwrap_or_default();
+            div().mx_3().mb_2().p_3().rounded_lg().border_1().border_color(c(th.warning)).bg(c(th.warning).opacity(0.08)).flex().flex_col().gap_2().text_size(px(12.))
+                .child(div().font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("ai.consent_title")))
+                .child(div().text_color(c(th.subtext)).child(text))
+                .child(div().flex().gap_2().justify_end()
+                    .child(ui::button("chat-consent-no", t("ui.cancel"), 0).on_click(cx.listener(|v, _, _, cx| { v.pending = None; cx.notify() })))
+                    .child(ui::button("chat-consent-ok", t("ai.consent_ok"), 1).on_click(cx.listener(|v, _, _, cx| {
+                        crate::ai_consent_ack();
+                        match v.pending.take() { Some(Pending::Ask(q)) => v.send_text(q, cx), Some(Pending::Explain(a, b, c2, d)) => v.explain(a, b, c2, d, cx), None => {} }
+                    }))))
+        });
         let bar = div().p_3().border_t_1().border_color(c(th.surface0)).flex().flex_col().gap_2()
             .child(div().flex().items_center().gap_3().text_size(px(11.5)).text_color(c(th.overlay1))
                 .child(Switch::new("chat-ctx").small().checked(self.with_context).label(tf("chat.with_ctx", &[("t", &src), ("scope", &config::get().ai.context)])).on_click(cx.listener(|v, on: &bool, _, cx| { v.with_context = *on; cx.notify() })))
@@ -266,7 +289,7 @@ impl Render for ChatView {
                 .child(div().id("chat-close").size(px(28.)).rounded_md().flex().items_center().justify_center().cursor_pointer()
                     .hover(|d| d.bg(c(cur().surface0))).on_click(cx.listener(|_, _, _, cx| cx.emit(ChatEvent::Close)))
                     .child(icon(IconName::X, 16., c(th.overlay1)))))
-            .child(list).child(bar)
+            .child(list).children(consent).child(bar)
     }
 }
 

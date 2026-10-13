@@ -413,6 +413,8 @@ pub enum AiCard {
     Confirm { command: String, reason: String },
     Denied { command: String, reason: String },
     Error { request: String, message: String },
+    /// First AI request ever: what will be sent, and to whom (PRD: notice before first send).
+    Consent { request: String },
 }
 
 /// Snapshot of what the input line looks like right now.
@@ -965,13 +967,43 @@ impl TermView {
         if !cur.is_empty() { out.push(cur.trim_end().to_string()); }
         out
     }
+    /// Names this pane's host is known by (config name, address, user@host:port) for per-host AI rules.
+    pub fn ai_host_names(&self) -> Vec<String> {
+        match &self.spec {
+            Spec::Local => vec!["local".into()],
+            Spec::Ssh(t) => {
+                let mut v = vec![t.host.clone(), t.label()];
+                v.extend(config::get().all_hosts().into_iter().filter(|e| e.host == t.host && e.port.unwrap_or(22) == t.port).map(|e| e.name));
+                v
+            }
+        }
+    }
+    /// The host is listed in ai.no_output_hosts (independent of ai.send_output).
+    pub fn output_blocked_for_host(&self) -> bool {
+        let mut a = config::get().ai.clone(); a.send_output = true;
+        let names = self.ai_host_names();
+        !a.output_allowed(&names.iter().map(String::as_str).collect::<Vec<_>>())
+    }
+    /// ai.send_output and the host is not in ai.no_output_hosts.
+    pub fn ai_output_allowed(&self) -> bool {
+        let names = self.ai_host_names();
+        config::get().ai.output_allowed(&names.iter().map(String::as_str).collect::<Vec<_>>())
+    }
+    /// One-paragraph notice of what an AI request from this pane sends.
+    pub fn ai_consent_text(&self) -> String {
+        let cfg = config::get();
+        let p = cfg.ai.default_provider().map(|p| format!("{} ({})", p.name, p.base_url)).unwrap_or_default();
+        tf("ai.consent_body", &[("provider", &p), ("scope", &cfg.ai.context),
+            ("output", &if self.ai_output_allowed() { t("ai.consent_output_yes") } else { t("ai.consent_output_no") }),
+            ("redact", &if cfg.ai.redact { t("ai.consent_redact_on") } else { t("ai.consent_redact_off") })])
+    }
     /// Redacted terminal context per the AI settings: (text, redactions, host label).
     pub fn ai_context(&self) -> (String, usize, String) {
         let cfg = config::get();
         let screen = self.screen_lines();
         let sel = self.selection_text();
         let inp = ssh_term_proto::ai::ContextInput { selection: sel.as_deref(), last_command: self.last_command.as_deref(), screen: &screen };
-        let opts = ssh_term_proto::ai::ContextOpts { scope: ssh_term_proto::ai::Scope::from_id(&cfg.ai.context), lines: cfg.ai.context_lines as usize, send_output: cfg.ai.send_output, redact: cfg.ai.redact };
+        let opts = ssh_term_proto::ai::ContextOpts { scope: ssh_term_proto::ai::Scope::from_id(&cfg.ai.context), lines: cfg.ai.context_lines as usize, send_output: self.ai_output_allowed(), redact: cfg.ai.redact };
         let (t, n) = ssh_term_proto::ai::build_context(&inp, &opts);
         (t, n, match &self.spec { Spec::Local => "local".to_string(), Spec::Ssh(t) => t.label() })
     }
@@ -980,7 +1012,8 @@ impl TermView {
         let (cmd, code) = self.failed.clone()?;
         let lines = self.screen_lines();
         let tail: Vec<&str> = lines.iter().rev().skip_while(|l| l.trim().is_empty()).take(200).map(|s| s.as_str()).collect::<Vec<_>>().into_iter().rev().collect();
-        let (out, _) = ssh_term_proto::ai::redact(&tail.join("\n"));
+        // hosts in ai.no_output_hosts never send output, not even for "explain failure"
+        let (out, _) = if !self.output_blocked_for_host() { ssh_term_proto::ai::redact(&tail.join("\n")) } else { (t("ai.output_withheld").to_string(), 0) };
         let (cmd, _) = ssh_term_proto::ai::redact(&cmd);
         Some((cmd, code, out, match &self.spec { Spec::Local => "local".to_string(), Spec::Ssh(t) => t.label() }))
     }
@@ -990,6 +1023,7 @@ impl TermView {
         let Some(mut provider) = cfg.ai.default_provider().cloned() else {
             self.ai = Some(AiCard::Error { request, message: t("ai.no_provider").into() }); cx.notify(); return;
         };
+        if !cfg.ai.first_send_ack { self.ai = Some(AiCard::Consent { request }); cx.notify(); return; }
         let key = crate::secret_store().get(&provider.secret_name()).map(|x| x.0).unwrap_or_default();
         provider.model = provider.command_model().to_string(); // fast model for command generation if set
         // context, honouring scope / send_output / redaction settings
@@ -998,7 +1032,7 @@ impl TermView {
         let inp = ssh_term_proto::ai::ContextInput { selection: sel.as_deref(), last_command: self.last_command.as_deref(), screen: &screen };
         let opts = ssh_term_proto::ai::ContextOpts {
             scope: ssh_term_proto::ai::Scope::from_id(&cfg.ai.context), lines: cfg.ai.context_lines as usize,
-            send_output: cfg.ai.send_output, redact: cfg.ai.redact,
+            send_output: self.ai_output_allowed(), redact: cfg.ai.redact,
         };
         let (ctx_text, mut n_red) = ssh_term_proto::ai::build_context(&inp, &opts);
         let (req_sent, n2) = if cfg.ai.redact { ssh_term_proto::ai::redact(&request) } else { (request.clone(), 0) };
@@ -1120,6 +1154,11 @@ impl TermView {
             AiCard::Error { request, message } => (c(th.error), if request.is_empty() { t("ai.card_hint").to_string() } else { tf("ai.card_error", &[("req", &request)]) },
                 div().text_color(c(th.error)).child(message),
                 div().flex().gap_2().child(btn("ai-cancel", t("ai.btn_close"), 0).on_click(cx.listener(|v, _, _w, cx| v.ai_cancel(cx))))),
+            AiCard::Consent { request } => (c(th.warning), t("ai.consent_title").to_string(),
+                div().text_color(c(th.subtext)).child(self.ai_consent_text()),
+                div().flex().gap_2()
+                    .child(btn("ai-cancel", t("ui.cancel"), 0).on_click(cx.listener(|v, _, _w, cx| v.ai_cancel(cx))))
+                    .child(btn("ai-consent", t("ai.consent_ok"), 1).on_click(cx.listener(move |v, _, _w, cx| { crate::ai_consent_ack(); v.ai_request(request.clone(), cx) })))),
         };
         Some(div().id("ai-card").occlude().absolute().bottom(px(12.)).left(px(12.)).right(px(12.)).p_3().rounded_lg().bg(c(th.mantle)).border_1().border_color(border)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())

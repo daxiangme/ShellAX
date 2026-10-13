@@ -132,9 +132,19 @@ pub struct Ai {
     pub chat_models_only: bool,
     /// model list cache lifetime
     pub models_cache_hours: u64,
+    /// The user acknowledged the "data leaves this machine" notice before the first AI request.
+    pub first_send_ack: bool,
+    /// Hosts (names / addresses, glob, comma separated) whose terminal output is never sent to
+    /// AI, even with send_output on: only typed commands are included.
+    pub no_output_hosts: String,
 }
-impl Default for Ai { fn default() -> Self { Self { enabled: t(), default_provider: String::new(), providers: vec![], redact: t(), context: s_screen(), context_lines: u_40(), send_output: false, nl_prefix: "#".into(), chat_models_only: t(), models_cache_hours: 24 } } }
+impl Default for Ai { fn default() -> Self { Self { enabled: t(), default_provider: String::new(), providers: vec![], redact: t(), context: s_screen(), context_lines: u_40(), send_output: false, nl_prefix: "#".into(), chat_models_only: t(), models_cache_hours: 24, first_send_ack: false, no_output_hosts: String::new() } } }
 impl Ai {
+    /// May terminal output of this host (any of the given names) be sent to AI?
+    pub fn output_allowed(&self, names: &[&str]) -> bool {
+        self.send_output && !self.no_output_hosts.split(',').map(str::trim).filter(|p| !p.is_empty())
+            .any(|p| names.iter().any(|n| !n.is_empty() && (p == *n || ssh_term_proto::policy::glob(p, n))))
+    }
     pub fn default_provider(&self) -> Option<&ssh_term_proto::ai::Provider> {
         self.providers.iter().find(|p| p.id == self.default_provider).or(self.providers.first())
     }
@@ -424,6 +434,19 @@ pub fn merge_preserving(old: &str, fresh: &str) -> anyhow::Result<String> {
     }
     merge(doc.as_table_mut(), new.as_table());
     Ok(doc.to_string())
+}
+
+#[cfg(test)]
+mod ai_output_tests {
+    #[test]
+    fn no_output_hosts() {
+        let mut a = super::Ai { send_output: true, no_output_hosts: "prod-*, 10.0.0.9".into(), ..Default::default() };
+        assert!(a.output_allowed(&["local"]));
+        assert!(!a.output_allowed(&["prod-web", "deploy@10.20.0.5:22"]));
+        assert!(!a.output_allowed(&["x", "10.0.0.9"]));
+        a.send_output = false; assert!(!a.output_allowed(&["local"]));
+        assert!(!super::Ai::default().first_send_ack);
+    }
 }
 
 #[cfg(test)]
