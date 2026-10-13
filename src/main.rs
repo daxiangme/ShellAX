@@ -1062,7 +1062,13 @@ fn main() {
                     let (ap_tx, ap_rx) = flume::unbounded::<ssh_term_proto::policy_server::Approval>();
                     let ctx: ssh_term_proto::policy_server::CtxFn = Arc::new(|| config::get().policy_ctx());
                     let bind = format!("127.0.0.1:{}", config::get().agents.policy_port);
-                    match ssh_term_proto::policy_server::start(&bind, None, ctx, Some(ap_tx), root.audit.clone(), Some(ssh_term_proto::policy_server::endpoint_path(&data_dir()))) {
+                    // US-10: agents run commands / transfer files on configured hosts through the App's pool
+                    let targets: ssh_term_proto::broker::TargetsFn = Arc::new(|| {
+                        let s = config::get(); let kh = s.known_hosts_path(); let all = s.all_hosts(); let o = s.ssh_opts();
+                        all.iter().map(|h| (h.name.clone(), hosts::resolve(h, &kh, &all, &o))).collect()
+                    });
+                    let ops: Arc<dyn ssh_term_proto::broker::Ops> = Arc::new(ssh_term_proto::broker::SshOps { rt: root.rt.handle().clone(), targets, prompts: root.prompts.clone() });
+                    match ssh_term_proto::policy_server::start_with_ops(&bind, None, ctx, Some(ap_tx), root.audit.clone(), Some(ssh_term_proto::policy_server::endpoint_path(&data_dir())), Some(ops)) {
                         Ok(srv) => { root.policy_port = Some(srv.port); *ssh::POLICY_ENDPOINT.lock().unwrap() = Some((srv.port, srv.token.clone())); root.log("policy.server", format!("listening on 127.0.0.1:{}", srv.port)); }
                         Err(e) => root.toast(tf("main.policy_server_failed", &[("e", &e)]), cx),
                     }

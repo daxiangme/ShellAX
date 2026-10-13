@@ -81,6 +81,12 @@ pub fn new_token() -> String { use rand::RngCore; let mut b = [0u8; 24]; rand::t
 
 /// Start the server on `bind` (e.g. "127.0.0.1:0"). Writes the endpoint file when given.
 pub fn start(bind: &str, token: Option<String>, ctx: CtxFn, approvals: Option<flume::Sender<Approval>>, audit: Arc<AuditLog>, endpoint_file: Option<PathBuf>) -> Result<Server> {
+    start_with_ops(bind, token, ctx, approvals, audit, endpoint_file, None)
+}
+
+/// Like [`start`], plus the agent-facing remote operations (`/v1/hosts`, `/v1/exec`,
+/// `/v1/upload`, `/v1/download`) backed by the App's connection pool.
+pub fn start_with_ops(bind: &str, token: Option<String>, ctx: CtxFn, approvals: Option<flume::Sender<Approval>>, audit: Arc<AuditLog>, endpoint_file: Option<PathBuf>, ops: Option<Arc<dyn crate::broker::Ops>>) -> Result<Server> {
     let listener = TcpListener::bind(bind)?;
     let port = listener.local_addr()?.port();
     let token = token.unwrap_or_else(new_token);
@@ -89,7 +95,7 @@ pub fn start(bind: &str, token: Option<String>, ctx: CtxFn, approvals: Option<fl
         let ep = Endpoint { url: format!("http://127.0.0.1:{port}"), token: token.clone(), pid: std::process::id(), host: String::new() };
         write_private(p, &serde_json::to_string_pretty(&ep)?)?;
     }
-    let shared = Arc::new(Shared { token: token.clone(), ctx, approvals, audit, next: AtomicU64::new(1), session_allow: Default::default() });
+    let shared = Arc::new(Shared { token: token.clone(), ctx, approvals, audit, next: AtomicU64::new(1), session_allow: Default::default(), ops });
     std::thread::Builder::new().name("policy-server".into()).spawn(move || {
         for s in listener.incoming().flatten() {
             let sh = shared.clone();
@@ -113,7 +119,7 @@ fn write_private(p: &Path, text: &str) -> Result<()> {
     Ok(())
 }
 
-struct Shared { token: String, ctx: CtxFn, approvals: Option<flume::Sender<Approval>>, audit: Arc<AuditLog>, next: AtomicU64,
+struct Shared { token: String, ctx: CtxFn, approvals: Option<flume::Sender<Approval>>, audit: Arc<AuditLog>, next: AtomicU64, ops: Option<Arc<dyn crate::broker::Ops>>,
     /// (principal, agent session, command prefix) → highest risk the user allowed for it
     session_allow: std::sync::Mutex<std::collections::HashMap<(String, String, String), Risk>> }
 
@@ -172,6 +178,10 @@ fn handle(stream: TcpStream, sh: &Shared) -> Result<()> {
         let d = match eff { Effect::Allow => "allow", Effect::Ask => "ask", Effect::Deny => "deny" };
         return Ok(respond(stream, "200 OK", &json!({"decision": d, "risk": risk.label(), "reason": reason}).to_string(), &[])?);
     }
+    if matches!(path.as_str(), "/v1/hosts" | "/v1/exec" | "/v1/upload" | "/v1/download") {
+        let (status, out) = remote_op(sh, &path, &body, &host_hdr);
+        return Ok(respond(stream, status, &out.to_string(), &[])?);
+    }
     if let Some(rest) = path.strip_prefix("/v1/hook/") {
         let mut it = rest.split('/');
         let Some(agent) = it.next().and_then(Agent::parse) else { return Ok(respond(stream, "404 Not Found", r#"{"error":"unknown agent"}"#, &[])?) };
@@ -182,6 +192,48 @@ fn handle(stream: TcpStream, sh: &Shared) -> Result<()> {
         return Ok(respond(stream, "200 OK", &out, &[("X-AgentShell-Exit", code.to_string())])?);
     }
     Ok(respond(stream, "404 Not Found", "{}", &[])?)
+}
+
+/// US-10: agent-initiated remote operations. Every call names a host from the App's list and
+/// goes through the same permission engine (and approval card) as hook requests.
+fn remote_op(sh: &Shared, path: &str, body: &str, host_hdr: &str) -> (&'static str, serde_json::Value) {
+    #[derive(Deserialize, Default)]
+    #[serde(default)]
+    struct Op { principal: String, session: String, host: String, command: String, local: String, remote: String, timeout_secs: u64 }
+    let Some(ops) = sh.ops.clone() else { return ("501 Not Implemented", json!({"error": "remote operations need the AgentShell app"})) };
+    let o: Op = match serde_json::from_str(body) { Ok(o) => o, Err(e) => return ("400 Bad Request", json!({"error": e.to_string()})) };
+    let principal = if o.principal.is_empty() { "cli".to_string() } else { o.principal.clone() };
+    if path == "/v1/hosts" {
+        let hs = ops.hosts();
+        let _ = sh.audit.append("agentshell.hosts", &principal, &format!("n={}", hs.len()));
+        return ("200 OK", json!({"hosts": hs}));
+    }
+    // a caller on a remote host (reverse forward) must not move files on the App's machine
+    if !host_hdr.is_empty() && path != "/v1/exec" { return ("403 Forbidden", json!({"error": "upload/download are only available to local callers"})); }
+    if o.host.is_empty() { return ("400 Bad Request", json!({"error": "host is required"})); }
+    let (action, command, kind) = match path {
+        "/v1/exec" => ("exec", o.command.clone(), "agentshell.exec"),
+        "/v1/upload" => ("write", format!("cp {} {}", crate::ssh::sh_quote(&o.local), crate::ssh::sh_quote(&o.remote)), "agentshell.upload"),
+        _ => ("exec", format!("cat {}", crate::ssh::sh_quote(&o.remote)), "agentshell.download"),
+    };
+    if command.trim().is_empty() || (path != "/v1/exec" && (o.local.is_empty() || o.remote.is_empty())) { return ("400 Bad Request", json!({"error": "missing command / local / remote"})); }
+    let req = HookReq { event: "agentshell".into(), tool: kind.trim_start_matches("agentshell.").into(), command: command.clone(), action: action.into(), cwd: String::new(), session: o.session.clone() };
+    let (eff, risk, reason) = sh.decide(&principal, &req, &o.host, true);
+    let d = match eff { Effect::Allow => "allow", Effect::Ask => "ask", Effect::Deny => "deny" };
+    if eff != Effect::Allow { return ("200 OK", json!({"decision": d, "risk": risk.label(), "reason": reason})); }
+    let r = match path {
+        "/v1/exec" => ops.exec(&o.host, &o.command, Duration::from_secs(if o.timeout_secs == 0 { 600 } else { o.timeout_secs })).map(|(code, out)| json!({"exit": code, "output": String::from_utf8_lossy(&out)})),
+        "/v1/upload" => ops.upload(&o.host, Path::new(&o.local), &o.remote).map(|n| json!({"bytes": n})),
+        _ => ops.download(&o.host, &o.remote, Path::new(&o.local)).map(|n| json!({"bytes": n})),
+    };
+    match r {
+        Ok(mut v) => {
+            let _ = sh.audit.append(kind, &principal, &format!("host={} session={} effect=Allow command={command:?} result={}", o.host, if o.session.is_empty() { "-" } else { &o.session }, v.get("exit").map(|e| format!("exit {e}")).or_else(|| v.get("bytes").map(|b| format!("{b} bytes"))).unwrap_or_default()));
+            v["decision"] = json!("allow"); v["risk"] = json!(risk.label()); v["reason"] = json!(reason);
+            ("200 OK", v)
+        }
+        Err(e) => { let _ = sh.audit.append(kind, &principal, &format!("host={} error={:?}", o.host, format!("{e:#}"))); ("502 Bad Gateway", json!({"decision": "allow", "error": format!("{e:#}")})) }
+    }
 }
 
 impl Shared {
@@ -335,5 +387,41 @@ mod tests {
         assert!(b.contains("\"allow\""));
         let (_, b, _) = post(&url, "/v1/check", &s.token, Some("prod-web"), r#"{"command":"touch x"}"#, t).unwrap();
         assert!(b.contains("\"ask\""), "{b}");
+    }
+
+    struct FakeOps(std::sync::Mutex<Vec<String>>);
+    impl crate::broker::Ops for FakeOps {
+        fn hosts(&self) -> Vec<crate::broker::HostInfo> { vec![crate::broker::HostInfo { name: "web1".into(), user: "u".into(), host: "10.0.0.1".into(), port: 22, production: false }] }
+        fn exec(&self, host: &str, c: &str, _t: Duration) -> Result<(Option<u32>, Vec<u8>)> { self.0.lock().unwrap().push(format!("exec {host} {c}")); Ok((Some(0), b"hi\n".to_vec())) }
+        fn upload(&self, host: &str, l: &Path, r: &str) -> Result<u64> { self.0.lock().unwrap().push(format!("up {host} {} {r}", l.display())); Ok(3) }
+        fn download(&self, host: &str, r: &str, l: &Path) -> Result<u64> { self.0.lock().unwrap().push(format!("down {host} {r} {}", l.display())); Ok(4) }
+    }
+    #[test]
+    fn remote_ops_go_through_policy() {
+        let dir = std::env::temp_dir().join(format!("as-ops-{}-{}", std::process::id(), new_token()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let audit = Arc::new(AuditLog::new(dir.join("audit.jsonl")));
+        let ops = Arc::new(FakeOps(Default::default()));
+        let (ap_tx, ap_rx) = flume::unbounded::<Approval>();
+        let s = start_with_ops("127.0.0.1:0", None, Arc::new(PolicyCtx::default), Some(ap_tx), audit, None, Some(ops.clone())).unwrap();
+        let url = format!("http://127.0.0.1:{}", s.port); let t = Duration::from_secs(10);
+        let (c, b, _) = post(&url, "/v1/hosts", &s.token, None, "{}", t).unwrap();
+        assert_eq!(c, 200); assert!(b.contains("web1") && !b.contains("password"), "{b}");
+        let (_, b, _) = post(&url, "/v1/exec", &s.token, None, r#"{"host":"web1","command":"uptime"}"#, t).unwrap();
+        assert!(b.contains("\"allow\"") && b.contains("hi"), "{b}");
+        let (_, b, _) = post(&url, "/v1/exec", &s.token, None, r#"{"host":"web1","command":"rm -rf /"}"#, t).unwrap();
+        assert!(b.contains("\"deny\""), "{b}");
+        // R2+ asks: user denies on the card, nothing runs
+        std::thread::spawn(move || { let a = ap_rx.recv().unwrap(); assert_eq!(a.host, "web1"); a.reply.send(Answer::Deny("no".into())).unwrap(); let a = ap_rx.recv().unwrap(); a.reply.send(Answer::Once).unwrap(); });
+        let (_, b, _) = post(&url, "/v1/exec", &s.token, None, r#"{"host":"web1","command":"systemctl restart nginx","session":"s9"}"#, t).unwrap();
+        assert!(b.contains("\"deny\""), "{b}");
+        let (_, b, _) = post(&url, "/v1/upload", &s.token, None, r#"{"host":"web1","local":"/tmp/a","remote":"/tmp/b"}"#, t).unwrap();
+        assert!(b.contains("\"bytes\":3"), "{b}");
+        let (c, _, _) = post(&url, "/v1/download", &s.token, Some("web1"), r#"{"host":"web1","local":"/tmp/a","remote":"/etc/passwd"}"#, t).unwrap();
+        assert_eq!(c, 403);
+        let calls = ops.0.lock().unwrap().clone();
+        assert_eq!(calls, vec!["exec web1 uptime".to_string(), "up web1 /tmp/a /tmp/b".into()]);
+        let log = std::fs::read_to_string(dir.join("audit.jsonl")).unwrap();
+        assert!(log.contains("agentshell.exec") && log.contains("agentshell.upload") && log.contains("agentshell.hosts"));
     }
 }

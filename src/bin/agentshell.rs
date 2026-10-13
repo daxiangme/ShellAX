@@ -7,6 +7,9 @@
 //!   agentshell hook <claude|codex|grok> [PreToolUse|PermissionRequest]   (stdin → stdout)
 //!   agentshell install <claude|codex|grok|all> [--uninstall] [--dry-run] [--home DIR]
 //!   agentshell serve [--bind 127.0.0.1:0]
+//!   agentshell hosts [--json]
+//!   agentshell exec <host> [--timeout S] -- <command…>          exit = remote exit code (126 denied)
+//!   agentshell upload <host> <local> <remote> · download <host> <remote> <local>
 #[allow(dead_code)]
 #[path = "../config.rs"]
 mod config;
@@ -28,7 +31,7 @@ fn data_dir() -> PathBuf {
 fn home() -> PathBuf { PathBuf::from(std::env::var("HOME").unwrap_or_default()) }
 
 fn usage() -> ! {
-    eprintln!("usage:\n  agentshell status\n  agentshell check [--host H] [--principal P] -- <command…>\n  agentshell hook <claude|codex|grok> [event]\n  agentshell install <claude|codex|grok|all> [--uninstall] [--dry-run] [--home DIR]\n  agentshell serve [--bind ADDR]");
+    eprintln!("usage:\n  agentshell status\n  agentshell check [--host H] [--principal P] -- <command…>\n  agentshell hook <claude|codex|grok> [event]\n  agentshell install <claude|codex|grok|all> [--uninstall] [--dry-run] [--home DIR]\n  agentshell serve [--bind ADDR]\n  agentshell hosts [--json]\n  agentshell exec <host> [--timeout S] -- <command…>\n  agentshell upload <host> <local> <remote>\n  agentshell download <host> <remote> <local>");
     std::process::exit(64)
 }
 
@@ -56,6 +59,7 @@ fn main() {
         #[cfg(unix)]
         "daemon" => { let sock = args.first().map(PathBuf::from).unwrap_or_else(|| ssh_term_proto::daemon::socket_path(&data_dir())); if let Err(e) = ssh_term_proto::daemon::serve(&sock) { eprintln!("agentshell daemon: {e:#}"); std::process::exit(1) } }
         "serve" => serve(args, settings),
+        "hosts" | "exec" | "upload" | "download" => remote(&cmd, args),
         "-h" | "--help" | "help" => usage(),
         _ => usage(),
     }
@@ -166,4 +170,54 @@ fn serve(mut args: Vec<String>, s: config::Settings) {
         Ok(srv) => { println!("agentshell policy service on 127.0.0.1:{} (headless: \"ask\" is passed back to the agent)", srv.port); loop { std::thread::park(); } }
         Err(e) => { eprintln!("serve: {e}"); std::process::exit(1) }
     }
+}
+
+/// US-10: remote operations through the running App (credentials never leave it).
+fn remote(cmd: &str, mut args: Vec<String>) {
+    let Some(ep) = ps::read_endpoint(&data_dir()) else { eprintln!("agentshell: AgentShell is not running (no policy endpoint)"); std::process::exit(3) };
+    let principal = opt(&mut args, "--principal").or_else(|| std::env::var("AGENTSHELL_PRINCIPAL").ok()).unwrap_or_else(|| "cli".into());
+    let session = std::env::var("AGENTSHELL_SESSION").unwrap_or_default();
+    let json_out = flag(&mut args, "--json");
+    let timeout: u64 = opt(&mut args, "--timeout").and_then(|t| t.parse().ok()).unwrap_or(600);
+    let abs = |p: &str| std::fs::canonicalize(p).or_else(|_| std::env::current_dir().map(|d| d.join(p))).map(|p| p.display().to_string()).unwrap_or_else(|_| p.to_string());
+    let body = match cmd {
+        "hosts" => serde_json::json!({"principal": principal}),
+        "exec" => {
+            if args.is_empty() { usage() }
+            let host = args.remove(0);
+            if args.first().is_some_and(|a| a == "--") { args.remove(0); }
+            if args.is_empty() { usage() }
+            serde_json::json!({"principal": principal, "session": session, "host": host, "command": args.join(" "), "timeout_secs": timeout})
+        }
+        "upload" if args.len() == 3 => serde_json::json!({"principal": principal, "session": session, "host": args[0], "local": abs(&args[1]), "remote": args[2]}),
+        "download" if args.len() == 3 => serde_json::json!({"principal": principal, "session": session, "host": args[0], "remote": args[1], "local": abs(&args[2])}),
+        _ => usage(),
+    };
+    // approval (up to agents.approval_timeout) + the operation itself
+    let wait = Duration::from_secs(timeout + 300);
+    let (status, b) = match ps::post(&ep.url, &format!("/v1/{cmd}"), &ep.token, None, &body.to_string(), wait) {
+        Ok((s, b, _)) => (s, b),
+        Err(e) => { eprintln!("agentshell: {e:#}"); std::process::exit(3) }
+    };
+    let v: serde_json::Value = serde_json::from_str(&b).unwrap_or_default();
+    if json_out || status != 200 && v.get("error").is_none() { println!("{b}"); }
+    if let Some(e) = v["error"].as_str() { eprintln!("agentshell: {e}"); std::process::exit(if status == 502 { 4 } else { 3 }) }
+    if cmd == "hosts" {
+        if !json_out { for h in v["hosts"].as_array().cloned().unwrap_or_default() {
+            println!("{}\t{}@{}:{}{}", h["name"].as_str().unwrap_or(""), h["user"].as_str().unwrap_or(""), h["host"].as_str().unwrap_or(""), h["port"], if h["production"].as_bool() == Some(true) { "\tproduction" } else { "" });
+        } }
+        return;
+    }
+    let d = v["decision"].as_str().unwrap_or("");
+    if d != "allow" {
+        eprintln!("agentshell: {d} ({}) {}", v["risk"].as_str().unwrap_or("?"), v["reason"].as_str().unwrap_or(""));
+        std::process::exit(126)
+    }
+    if json_out { return; }
+    if cmd == "exec" {
+        use std::io::Write;
+        let _ = std::io::stdout().write_all(v["output"].as_str().unwrap_or("").as_bytes());
+        std::process::exit(v["exit"].as_i64().map(|x| x as i32).unwrap_or(255));
+    }
+    println!("{} bytes", v["bytes"]);
 }
