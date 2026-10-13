@@ -19,16 +19,16 @@ use crate::theme::{c, cur};
 use crate::ui::{self, icon, IconName};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub enum Cat { General, Appearance, Terminal, Suggest, Ssh, Credentials, Ai, Agents, Permissions, Audit, Session, Keys, Notify, About }
+pub enum Cat { General, Appearance, Terminal, Suggest, Ssh, Credentials, Ai, Agents, Permissions, Audit, Session, Keys, Notify, ContextMenu, About }
 
 impl Cat {
-    pub const ALL: [Cat; 14] = [Cat::General, Cat::Appearance, Cat::Terminal, Cat::Suggest, Cat::Ssh, Cat::Credentials, Cat::Ai, Cat::Agents,
-        Cat::Permissions, Cat::Audit, Cat::Session, Cat::Keys, Cat::Notify, Cat::About];
+    pub const ALL: [Cat; 15] = [Cat::General, Cat::Appearance, Cat::Terminal, Cat::Suggest, Cat::Ssh, Cat::Credentials, Cat::Ai, Cat::Agents,
+        Cat::Permissions, Cat::Audit, Cat::Session, Cat::Keys, Cat::Notify, Cat::ContextMenu, Cat::About];
     pub fn name(self) -> &'static str {
         match self {
             Cat::General => t("ui.general"), Cat::Appearance => t("ui.appearance"), Cat::Terminal => t("ui.terminal"), Cat::Suggest => t("ui.suggestions"), Cat::Ssh => "SSH",
             Cat::Credentials => t("ui.credentials_keys"), Cat::Ai => "AI", Cat::Agents => t("ui.external_agents"), Cat::Permissions => t("ui.permissions_security"),
-            Cat::Audit => t("ui.audit"), Cat::Session => t("ui.sessions_layout"), Cat::Keys => t("ui.keyboard_shortcuts"), Cat::Notify => t("ui.notifications"), Cat::About => t("ui.about"),
+            Cat::Audit => t("ui.audit"), Cat::Session => t("ui.sessions_layout"), Cat::Keys => t("ui.keyboard_shortcuts"), Cat::Notify => t("ui.notifications"), Cat::ContextMenu => t("cm.settings_title"), Cat::About => t("ui.about"),
         }
     }
     fn icon(self) -> IconName {
@@ -36,7 +36,7 @@ impl Cat {
             Cat::General => IconName::SlidersHorizontal, Cat::Appearance => IconName::Palette, Cat::Terminal => IconName::SquareTerminal,
             Cat::Suggest => IconName::Lightbulb, Cat::Ssh => IconName::Server, Cat::Credentials => IconName::KeyRound, Cat::Ai => IconName::Sparkles,
             Cat::Agents => IconName::Bot, Cat::Permissions => IconName::ShieldCheck, Cat::Audit => IconName::ScrollText, Cat::Session => IconName::Layers,
-            Cat::Keys => IconName::Keyboard, Cat::Notify => IconName::Bell, Cat::About => IconName::Info,
+            Cat::Keys => IconName::Keyboard, Cat::Notify => IconName::Bell, Cat::ContextMenu => IconName::FileText, Cat::About => IconName::Info,
         }
     }
     fn desc(self) -> &'static str {
@@ -54,6 +54,7 @@ impl Cat {
             Cat::Session => t("ui.persistent_sessions_layout_restore_and"),
             Cat::Keys => t("ui.app_shortcuts_type_e_g"),
             Cat::Notify => t("ui.desktop_notifications_and_sounds"),
+            Cat::ContextMenu => t("cm.settings_desc"),
             Cat::About => t("ui.version_information_and_third_party"),
         }
     }
@@ -94,6 +95,9 @@ pub struct SettingsView {
     key_pass: Entity<InputState>,
     key_import: Entity<InputState>,
     theme_import: Entity<InputState>,
+    /// context_menu.toml editor (created when the section is first shown) and last save result.
+    cm_editor: Option<Entity<gpui_component::input::EditorState>>,
+    cm_note: Option<(bool, String)>,
     _subs: Vec<Subscription>,
 }
 
@@ -113,7 +117,7 @@ impl SettingsView {
         let key_pass = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder(t("ui.key_passphrase_optional")));
         let key_import = cx.new(|cx| InputState::new(window, cx).placeholder(t("ui.key_import_path")));
         let theme_import = cx.new(|cx| InputState::new(window, cx).placeholder(t("ui.theme_import_path")));
-        let mut me = Self { key_pass, key_import, theme_import, cat, search, inputs: HashMap::new(), errors: HashMap::new(), theme_names, new_rule, new_effect: Effect::Allow, tester, notice: None,
+        let mut me = Self { cm_editor: None, cm_note: None, key_pass, key_import, theme_import, cat, search, inputs: HashMap::new(), errors: HashMap::new(), theme_names, new_rule, new_effect: Effect::Allow, tester, notice: None,
             ai_sel: config::get().ai.default_provider().map(|p| p.id.clone()), ai_key, ai_keys: HashMap::new(), ai_note: None, ai_test: HashMap::new(), ai_testing: None, lang_seen: ssh_term_proto::i18n::current() as u8,
             ai_models: HashMap::new(), ai_dropdown: None, ai_model_search, ai_url_gen: 0, _subs: subs };
         if let Some(id) = me.ai_sel.clone() { me.load_models(&id, false, cx); }
@@ -605,6 +609,49 @@ impl SettingsView {
             .into_any_element()
     }
 
+    /// Settings → Context menu: edit context_menu.toml in place (validated on save, hot-reloaded).
+    fn ctxmenu_extra(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        use ssh_term_proto::ctxmenu;
+        let th = cur();
+        let path = ctxmenu::custom_path();
+        let ed = match &self.cm_editor { Some(e) => e.clone(), None => {
+            let text = std::fs::read_to_string(&path).unwrap_or_else(|_| ctxmenu::CUSTOM_EXAMPLE.to_string());
+            let e = cx.new(|cx| gpui_component::input::EditorState::new(window, cx).line_number(true).default_value(text));
+            self.cm_editor = Some(e.clone()); e
+        } };
+        let (_, errs) = ctxmenu::load_custom();
+        let mut col = div().pt_3().flex().flex_col().gap_2().text_size(px(12.)).text_color(c(th.text))
+            .child(div().text_color(c(th.overlay1)).child(tf("cm.settings_file", &[("path", &path.display())])))
+            .child(div().text_size(px(11.5)).text_color(c(th.overlay1)).child(t("cm.settings_help")))
+            .child(div().h(px(360.)).border_1().border_color(c(th.surface0)).rounded_lg().overflow_hidden().child(gpui_component::input::Editor::new(&ed).h_full()))
+            .child(div().flex().gap_2()
+                .child(ui::button("cm-save", t("cm.settings_save"), 1).on_click(cx.listener(|v, _, _w, cx| v.ctxmenu_save(cx))))
+                .child(ui::button("cm-example", t("cm.settings_example"), 0).on_click(cx.listener(|v, _, w, cx| {
+                    if let Some(e) = v.cm_editor.clone() { e.update(cx, |s, cx| { let cur = s.value().to_string(); s.set_value(format!("{}{}{}", cur.trim_end(), if cur.trim().is_empty() { "" } else { "\n\n" }, ssh_term_proto::ctxmenu::CUSTOM_EXAMPLE), w, cx) }); }
+                    cx.notify();
+                })))
+                .child(ui::button("cm-clear-tools", t("cm.settings_clear_tools"), 3).on_click(cx.listener(|v, _, _w, cx| { ssh_term_proto::ctxmenu::clear_tool_cache(); v.cm_note = Some((true, t("cm.settings_tools_cleared").into())); cx.notify(); }))));
+        if let Some((ok, msg)) = &self.cm_note { col = col.child(div().text_color(if *ok { c(th.success) } else { c(th.error) }).child(msg.clone())); }
+        for e in errs.iter() { col = col.child(div().text_color(c(th.error)).child(format!("• {e}"))); }
+        col.into_any_element()
+    }
+    fn ctxmenu_save(&mut self, cx: &mut Context<Self>) {
+        use ssh_term_proto::ctxmenu;
+        let Some(ed) = self.cm_editor.clone() else { return };
+        let text = ed.read(cx).value().to_string();
+        let (items, errs) = ctxmenu::parse_custom(&text);
+        if let Err(e) = toml::from_str::<toml::Table>(&text) { self.cm_note = Some((false, tf("cm.err_toml", &[("e", &e.message().trim())]))); cx.notify(); return; }
+        let path = ctxmenu::custom_path();
+        if let Some(d) = path.parent() { let _ = std::fs::create_dir_all(d); }
+        match std::fs::write(&path, &text) {
+            Ok(()) => {
+                let _ = crate::audit_log().append("settings.change", "user", &format!("context_menu.toml items={} errors={}", items.len(), errs.len()));
+                self.cm_note = Some((errs.is_empty(), tf("cm.settings_saved", &[("n", &items.len())])));
+            }
+            Err(e) => self.cm_note = Some((false, format!("{}: {e}", path.display()))),
+        }
+        cx.notify();
+    }
     fn about_extra(&self) -> AnyElement {
         let th = cur();
         let notices = include_str!("../THIRD_PARTY_NOTICES.md");
@@ -712,6 +759,7 @@ impl Render for SettingsView {
                 Cat::Audit => Some(self.audit_extra(cx)),
                 Cat::Suggest => Some(self.suggest_extra(cx)),
                 Cat::About => Some(self.about_extra()),
+                Cat::ContextMenu => Some(self.ctxmenu_extra(window, cx)),
                 Cat::Appearance => Some(self.appearance_extra(cx)),
                 Cat::General => Some(self.general_extra(cx)),
                 Cat::Ai => Some(self.ai_extra(window, cx)),
