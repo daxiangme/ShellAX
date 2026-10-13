@@ -20,9 +20,17 @@ def handle(c):
         head += d
     line = head.split(b'\r\n')[0].decode()
     open('/tmp/mock_proxy.log', 'a').write(line + '\n')
-    host, port = line.split()[1].rsplit(':', 1)
-    up = socket.create_connection((host, int(port)))
-    c.sendall(b'HTTP/1.1 200 Connection established\r\n\r\n')
+    method, target = line.split()[0], line.split()[1]
+    if method != 'CONNECT':  # absolute-form plain HTTP (AI / update over http://)
+        hp, _, path = target[len('http://'):].partition('/')
+        host, port = (hp.rsplit(':', 1) + ['80'])[:2]
+        up = socket.create_connection((host, int(port)))
+        rest = head.split(b'\r\n', 1)[1]
+        up.sendall(f'{method} /{path} HTTP/1.1\r\n'.encode() + rest)
+    else:
+        host, port = target.rsplit(':', 1)
+        up = socket.create_connection((host, int(port)))
+        c.sendall(b'HTTP/1.1 200 Connection established\r\n\r\n')
     threading.Thread(target=pipe, args=(c, up), daemon=True).start()
     pipe(up, c)
 s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(('127.0.0.1', PORT)); s.listen(16)

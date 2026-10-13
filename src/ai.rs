@@ -144,8 +144,8 @@ fn scrub(s: &str, key: &str) -> String {
 
 /// One chat round-trip. `max_tokens` overrides the provider default (used by "test connection").
 pub fn chat(p: &Provider, key: &str, system: &str, user: &str, max_tokens: Option<u32>) -> Result<Reply> {
-    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(p.timeout_secs.max(1))).build();
     let base = crate::models::api_base(p.kind, &p.base_url);
+    let agent = crate::proxy::ureq_builder(&base, ureq::AgentBuilder::new().timeout(Duration::from_secs(p.timeout_secs.max(1))))?.build();
     let base = base.as_str();
     let mt = max_tokens.unwrap_or(p.max_tokens);
     let t0 = Instant::now();
@@ -199,8 +199,8 @@ pub fn build_explain_prompt(cmd: &str, code: i32, host: &str, output_tail: &str)
 /// for each text fragment as it arrives (OpenAI `stream: true` SSE / Anthropic message stream).
 pub fn chat_stream(p: &Provider, key: &str, system: &str, messages: &[(String, String)], mut on_delta: impl FnMut(&str) -> bool) -> Result<Reply> {
     use std::io::BufRead;
-    let agent = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(p.timeout_secs.clamp(1, 30))).timeout_read(Duration::from_secs(p.timeout_secs.max(1))).build();
     let base = crate::models::api_base(p.kind, &p.base_url);
+    let agent = crate::proxy::ureq_builder(&base, ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(p.timeout_secs.clamp(1, 30))).timeout_read(Duration::from_secs(p.timeout_secs.max(1))))?.build();
     let msgs: Vec<serde_json::Value> = messages.iter().map(|(r, c)| serde_json::json!({"role": r, "content": c})).collect();
     let t0 = Instant::now();
     let res = match p.kind {

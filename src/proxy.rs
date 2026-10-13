@@ -35,6 +35,29 @@ pub fn for_host(host: &str) -> Result<Option<Proxy>> {
     parse(&url).map(Some)
 }
 
+/// Host part of an http(s) URL (for no_proxy matching).
+pub fn url_host(url: &str) -> String {
+    let rest = url.split_once("://").map(|x| x.1).unwrap_or(url);
+    let hp = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let hp = hp.rsplit_once('@').map(|x| x.1).unwrap_or(hp);
+    if let Some(v6) = hp.strip_prefix('[') { return v6.split(']').next().unwrap_or("").to_string(); }
+    hp.split(':').next().unwrap_or("").to_ascii_lowercase()
+}
+
+/// Proxy URL (ureq syntax) to use for an outbound HTTP request to `url` (AI providers, update
+/// checks), honouring ssh.no_proxy. `None` = connect directly.
+pub fn ureq_proxy_for(url: &str) -> Result<Option<String>> {
+    let Some(p) = for_host(&url_host(url))? else { return Ok(None) };
+    let auth = p.user.as_ref().map(|(u, pw)| format!("{u}:{pw}@")).unwrap_or_default();
+    let host = if p.host.contains(':') { format!("[{}]", p.host) } else { p.host.clone() };
+    Ok(Some(format!("{}://{auth}{host}:{}", match p.kind { Kind::Socks5 => "socks5", Kind::Http => "http" }, p.port)))
+}
+
+/// Apply the configured proxy to a ureq agent builder for requests to `url`.
+pub fn ureq_builder(url: &str, b: ureq::AgentBuilder) -> Result<ureq::AgentBuilder> {
+    Ok(match ureq_proxy_for(url)? { Some(u) => b.proxy(ureq::Proxy::new(u).map_err(|e| anyhow!("proxy: {e}"))?), None => b })
+}
+
 fn b64(d: &[u8]) -> String {
     const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut o = String::new();
@@ -99,6 +122,7 @@ pub async fn connect(p: &Proxy, host: &str, port: u16) -> Result<TcpStream> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    static CFG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     #[test]
     fn parse_urls() {
         assert_eq!(parse("socks5://127.0.0.1:1080").unwrap(), Proxy { kind: Kind::Socks5, host: "127.0.0.1".into(), port: 1080, user: None });
@@ -141,8 +165,67 @@ mod tests {
             assert_eq!(&b, b"ping", "{url}");
         }
         assert!(connect(&parse(&format!("http://127.0.0.1:{hport}")).unwrap(), "localhost", eport).await.unwrap_err().to_string().contains("407"));
+        let _g = CFG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         *URL.lock().unwrap() = "socks5://1.2.3.4:1".into(); *NO_PROXY.lock().unwrap() = "10.*, localhost".into();
         assert!(for_host("10.0.0.1").unwrap().is_none() && for_host("example.com").unwrap().is_some());
         URL.lock().unwrap().clear();
+    }
+
+    /// AI requests and update checks go through ssh.proxy (HTTP CONNECT here) and honour no_proxy.
+    #[test]
+    fn http_clients_use_proxy_and_no_proxy() {
+        use std::io::{BufRead, Read as _, Write as _};
+        let _g = CFG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // origin: serves an update manifest and an OpenAI-style reply
+        let origin = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let oport = origin.local_addr().unwrap().port();
+        std::thread::spawn(move || for c in origin.incoming().flatten() {
+            let mut r = std::io::BufReader::new(c.try_clone().unwrap()); let mut line = String::new(); r.read_line(&mut line).unwrap();
+            let mut len = 0; loop { let mut h = String::new(); r.read_line(&mut h).unwrap(); if h.trim().is_empty() { break; } if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") { len = v.trim().parse().unwrap(); } }
+            let mut b = vec![0; len]; r.read_exact(&mut b).unwrap();
+            let body = if line.contains("manifest") { r#"{"version":"99.0.0","url":"x","notes":""}"#.to_string() } else { r#"{"choices":[{"message":{"content":"ok"}}]}"#.to_string() };
+            let mut c = c; let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        });
+        // CONNECT proxy that records tunnels
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let pl = std::net::TcpListener::bind("127.0.0.1:0").unwrap(); let pport = pl.local_addr().unwrap().port();
+        let seen2 = seen.clone();
+        std::thread::spawn(move || for c in pl.incoming().flatten() {
+            let seen = seen2.clone();
+            std::thread::spawn(move || {
+                let mut r = std::io::BufReader::new(c.try_clone().unwrap()); let mut line = String::new(); r.read_line(&mut line).unwrap();
+                let mut hdrs = String::new();
+                loop { let mut h = String::new(); r.read_line(&mut h).unwrap(); if h.trim().is_empty() { break; } hdrs.push_str(&h); }
+                seen.lock().unwrap().push(line.trim().to_string());
+                let mut c2 = c.try_clone().unwrap();
+                let mut up = if line.starts_with("CONNECT ") {
+                    let up = std::net::TcpStream::connect(line.split_whitespace().nth(1).unwrap()).unwrap();
+                    c2.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n").unwrap(); up
+                } else { // absolute-form: GET http://h:p/path HTTP/1.1
+                    let mut it = line.split_whitespace(); let (m, u) = (it.next().unwrap(), it.next().unwrap());
+                    let rest = u.strip_prefix("http://").unwrap(); let (hp, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+                    let mut up = std::net::TcpStream::connect(hp).unwrap();
+                    write!(up, "{m} {} HTTP/1.1\r\n{hdrs}\r\n", if path.is_empty() { "/" } else { path }).unwrap(); up
+                };
+                let _ = &mut up;
+                let (mut a, mut b) = (up.try_clone().unwrap(), c2);
+                std::thread::spawn(move || { let _ = std::io::copy(&mut a, &mut b); });
+                let (mut a, mut b) = (r, up); let _ = std::io::copy(&mut a, &mut b);
+            });
+        });
+        *URL.lock().unwrap() = format!("http://127.0.0.1:{pport}"); NO_PROXY.lock().unwrap().clear();
+        let m = crate::update::check(&format!("http://127.0.0.1:{oport}/manifest.json")).unwrap();
+        assert!(m.is_some());
+        let p = crate::ai::Provider { base_url: format!("http://127.0.0.1:{oport}/v1"), ..Default::default() };
+        let r = crate::ai::chat(&p, "k", "s", "u", Some(5)).unwrap();
+        assert!(r.text.contains("ok"));
+        assert_eq!(seen.lock().unwrap().len(), 2, "{:?}", seen.lock().unwrap());
+        assert!(seen.lock().unwrap().iter().all(|l| l.contains(&format!("127.0.0.1:{oport}"))));
+        // no_proxy: direct
+        *NO_PROXY.lock().unwrap() = "127.0.0.*".into();
+        assert!(crate::update::check(&format!("http://127.0.0.1:{oport}/manifest.json")).unwrap().is_some());
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        assert_eq!(url_host("https://user@API.example.com:443/v1"), "api.example.com");
+        URL.lock().unwrap().clear(); NO_PROXY.lock().unwrap().clear();
     }
 }

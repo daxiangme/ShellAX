@@ -265,7 +265,7 @@
 "ui.default_port" = "默认端口"
 "ui.default_shell" = "默认 Shell"
 "ui.ssh_proxy" = "出站代理"
-"ui.ssh_proxy_desc" = "socks5://[用户:密码@]主机:端口 或 http://…（HTTP CONNECT）；留空直连；新连接生效"
+"ui.ssh_proxy_desc" = "socks5://[用户:密码@]主机:端口 或 http://…（HTTP CONNECT）；留空直连；SSH、AI 请求与更新检查均使用"
 "ui.ssh_no_proxy" = "不走代理的主机"
 "ui.ssh_no_proxy_desc" = "通配，逗号分隔"
 "ui.default_user" = "默认用户名"

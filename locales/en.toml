@@ -265,7 +265,7 @@
 "ui.default_port" = "Default port"
 "ui.default_shell" = "Default shell"
 "ui.ssh_proxy" = "Outbound proxy"
-"ui.ssh_proxy_desc" = "socks5://[user:pass@]host:port or http://… (HTTP CONNECT); empty = direct; applies to new connections"
+"ui.ssh_proxy_desc" = "socks5://[user:pass@]host:port or http://… (HTTP CONNECT); empty = direct; used by SSH, AI requests and update checks"
 "ui.ssh_no_proxy" = "Bypass proxy for"
 "ui.ssh_no_proxy_desc" = "Globs, comma separated"
 "ui.default_user" = "Default user"

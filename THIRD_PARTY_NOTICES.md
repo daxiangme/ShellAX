@@ -53,6 +53,7 @@ Copyright 2025, Command Line Inc.
 | chacha20poly1305 0.10.1 (encrypted fallback file for API keys), rand 0.8 | Apache-2.0 OR MIT |
 | ureq 2.12.1 (AI HTTP client) | MIT OR Apache-2.0 |
 | rustls 0.23 (via ureq "tls") | Apache-2.0 OR ISC OR MIT |
+| socks 0.3.4 (via ureq "socks-proxy"; SOCKS5 for AI/update requests) | MIT OR Apache-2.0 |
 | ring 0.17 (via rustls) | Apache-2.0 AND ISC (`ring` ships its LICENSE incl. the BoringSSL/OpenSSL-derived ISC parts; reproduce it in release notices) |
 | webpki-roots 0.26 / 1.0 (Mozilla CA bundle, via ureq) | CDLA-Permissive-2.0 (data license; permissive, attribution — include the license text in releases) |
 | Catppuccin Mocha / Latte palettes (`themes/catppuccin-*.toml`) | MIT, © Catppuccin |

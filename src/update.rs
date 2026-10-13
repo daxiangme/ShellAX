@@ -42,7 +42,7 @@ pub fn url_for(template: &str, channel: &str) -> String {
 
 /// Ok(Some(manifest)) when a newer version exists.
 pub fn check(url: &str) -> anyhow::Result<Option<Manifest>> {
-    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(10)).build();
+    let agent = crate::proxy::ureq_builder(url, ureq::AgentBuilder::new().timeout(Duration::from_secs(10)))?.build();
     let m: Manifest = agent.get(url).set("User-Agent", &format!("AgentShell/{CURRENT}")).call()?.into_json()?;
     Ok(is_newer(&m.version, CURRENT).then_some(m))
 }
