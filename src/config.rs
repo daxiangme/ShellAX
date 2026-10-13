@@ -216,7 +216,7 @@ impl Settings {
     pub fn save(&self) -> anyhow::Result<()> {
         let p = config_path();
         if let Some(d) = p.parent() { std::fs::create_dir_all(d)?; }
-        let fresh = toml::to_string_pretty(self)?;
+        let fresh = tidy_floats(&toml::to_string_pretty(self)?);
         // keep the user's comments, key order and formatting: merge into the existing document
         let body = match std::fs::read_to_string(&p) {
             Ok(old) => merge_preserving(&old, &fresh).unwrap_or_else(|_| format!("# AgentShell settings — written by the settings page\n{fresh}")),
@@ -361,6 +361,31 @@ pub fn update(f: impl FnOnce(&mut Settings)) -> Option<String> {
     err
 }
 
+/// f32 settings serialize with binary noise (0.82 → 0.8199999928474426): write the shortest
+/// decimal that round-trips through f32 instead.
+pub fn tidy_floats(text: &str) -> String {
+    use toml_edit::{DocumentMut, Item, Value};
+    let Ok(mut doc) = text.parse::<DocumentMut>() else { return text.to_string() };
+    fn fix_v(v: &mut Value) {
+        match v {
+            Value::Float(f) => { let x = *f.value(); let short: f64 = format!("{}", x as f32).parse().unwrap_or(x); if short != x { *v = Value::from(short); } }
+            Value::Array(a) => a.iter_mut().for_each(fix_v),
+            Value::InlineTable(t) => t.iter_mut().for_each(|(_, v)| fix_v(v)),
+            _ => {}
+        }
+    }
+    fn fix(i: &mut Item) {
+        match i {
+            Item::Value(v) => fix_v(v),
+            Item::Table(t) => t.iter_mut().for_each(|(_, i)| fix(i)),
+            Item::ArrayOfTables(a) => a.iter_mut().for_each(|t| t.iter_mut().for_each(|(_, i)| fix(i))),
+            Item::None => {}
+        }
+    }
+    fix(doc.as_item_mut());
+    doc.to_string()
+}
+
 /// Write `fresh` (a full serialization of the settings) into the existing TOML text `old`, keeping
 /// comments, blank lines and key order of `old`. Changed values keep their trailing comment;
 /// keys no longer present are dropped; new keys are appended to their table.
@@ -444,6 +469,16 @@ mod tests {
         let enc = std::fs::read_to_string(dir.join("secrets.enc")).unwrap();
         assert!(!enc.contains("NEVER-IN-CONFIG"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn floats_written_without_f32_noise() {
+        let mut s = Settings::default();
+        s.set("appearance.opacity", toml::Value::Float(0.82f32 as f64)).unwrap();
+        let out = tidy_floats(&toml::to_string_pretty(&s).unwrap());
+        assert!(out.contains("opacity = 0.82\n"), "{out}");
+        assert!(out.contains("line_height = 1.4\n"), "{out}");
+        assert_eq!(Settings::parse(&out).unwrap(), s);
     }
 
     #[test]
