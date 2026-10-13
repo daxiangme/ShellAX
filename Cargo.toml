@@ -34,3 +34,4 @@ tree-sitter = "0.25"
 tree-sitter-bash = "0.25"
 notify-rust = "4"
 russh-sftp = "3"
+getrandom = { version = "0.4", features = ["sys_rng"] }

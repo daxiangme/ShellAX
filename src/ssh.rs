@@ -286,11 +286,11 @@ pub fn connect<'a>(tg: &'a SshTarget, prompts: &'a Prompts) -> std::pin::Pin<Box
 }
 
 async fn authenticate(h: &mut client::Handle<Handler>, tg: &SshTarget, prompts: &Prompts) -> Result<()> {
-    let mode = if tg.auth.is_empty() { "auto" } else { tg.auth.as_str() };
+    let (mode, no_agent) = match tg.auth.as_str() { "" => ("auto", false), "auto-noagent" => ("auto", true), m => (m, false) };
     let mut errors: Vec<String> = Vec::new();
     // 1. ssh-agent
     #[cfg(unix)]
-    if matches!(mode, "auto" | "agent") {
+    if matches!(mode, "auto" | "agent") && !no_agent {
         match russh::keys::agent::client::AgentClient::connect_env().await {
             Ok(mut agent) => {
                 let ids = agent.request_identities().await.unwrap_or_default();

@@ -119,6 +119,10 @@ pub struct SshOpts {
     /// Global ProxyJump used when a host has none.
     pub jump: String,
     pub remote_hooks: bool,
+    /// credentials.use_ssh_agent (false: "auto" skips the agent)
+    pub no_agent: bool,
+    /// credentials.extra_keys, tried after the host's own key
+    pub extra_keys: Vec<String>,
 }
 
 /// Resolve an entry (including its ProxyJump chain `a,b,…`, each a host name from `all` or
@@ -135,6 +139,8 @@ fn resolve_depth(e: &HostEntry, known_hosts: &Path, all: &[HostEntry], o: &SshOp
     t.kex = o.kex.clone();
     t.ciphers = o.ciphers.clone();
     t.remote_hooks = o.remote_hooks;
+    if o.no_agent && t.auth == "auto" { t.auth = "auto-noagent".into(); }
+    for k in &o.extra_keys { let p = expand_tilde(k.trim()); if !k.trim().is_empty() && !t.keys.contains(&p) { t.keys.insert(t.keys.len().min(1), p); } }
     let spec = e.jump.clone().filter(|j| !j.is_empty()).or_else(|| (depth == 0 && !o.jump.is_empty() && o.jump != e.name && o.jump != e.host).then(|| o.jump.clone()));
     if let (Some(spec), true) = (spec, depth < 4) {
         // OpenSSH semantics: "a,b" means connect to a, then through a to b, then to the target

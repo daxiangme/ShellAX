@@ -71,3 +71,7 @@ Fonts are **not** bundled (see README "字体许可").
 ## tree-sitter / tree-sitter-bash（依赖，PROGRESS 1.1）
 
 - tree-sitter 0.25（MIT，Copyright (c) 2018 Max Brunsfeld）、tree-sitter-bash 0.25.1（MIT，Copyright (c) 2017 Max Brunsfeld）、tree-sitter-language（MIT）。作为 crate 依赖链接（含 C 解析器源码，编译进二进制），没有复制代码。用于给命令分段，再做风险分级。
+
+## notify-rust 4.x — MIT OR Apache-2.0 (dependency, unmodified)
+## russh-sftp 3.0.1 — Apache-2.0 (dependency, unmodified)
+## getrandom 0.4 — MIT OR Apache-2.0 (dependency, unmodified)

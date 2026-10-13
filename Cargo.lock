@@ -7255,6 +7255,7 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "flume 0.11.1",
+ "getrandom 0.4.3",
  "gpui-component",
  "gpui-kit-assets",
  "gpui-pre",

@@ -91,6 +91,8 @@ pub struct SettingsView {
     ai_dropdown: Option<&'static str>,
     ai_model_search: Entity<InputState>,
     ai_url_gen: u64,
+    key_pass: Entity<InputState>,
+    key_import: Entity<InputState>,
     _subs: Vec<Subscription>,
 }
 
@@ -107,7 +109,9 @@ impl SettingsView {
         let ai_key = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder(t("ai.key_placeholder")));
         let ai_model_search = cx.new(|cx| InputState::new(window, cx).placeholder(t("models.search")));
         subs.push(cx.subscribe_in(&ai_model_search, window, |_, _, ev: &InputEvent, _, cx| if matches!(ev, InputEvent::Change) { cx.notify() }));
-        let mut me = Self { cat, search, inputs: HashMap::new(), errors: HashMap::new(), theme_names, new_rule, new_effect: Effect::Allow, tester, notice: None,
+        let key_pass = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder(t("ui.key_passphrase_optional")));
+        let key_import = cx.new(|cx| InputState::new(window, cx).placeholder(t("ui.key_import_path")));
+        let mut me = Self { key_pass, key_import, cat, search, inputs: HashMap::new(), errors: HashMap::new(), theme_names, new_rule, new_effect: Effect::Allow, tester, notice: None,
             ai_sel: config::get().ai.default_provider().map(|p| p.id.clone()), ai_key, ai_keys: HashMap::new(), ai_note: None, ai_test: HashMap::new(), ai_testing: None, lang_seen: ssh_term_proto::i18n::current() as u8,
             ai_models: HashMap::new(), ai_dropdown: None, ai_model_search, ai_url_gen: 0, _subs: subs };
         if let Some(id) = me.ai_sel.clone() { me.load_models(&id, false, cx); }
@@ -168,13 +172,13 @@ impl SettingsView {
             r(Ssh, t("ui.unknown_host_keys"), t("ui.what_to_do_on_first"), Ctl::Choice("ssh.host_key_policy", opts(&[("ask", t("ui.ask")), ("strict", t("ui.strict_reject")), ("accept-new", t("ui.accept_new_hosts"))])), false),
             r(Ssh, t("ui.read_ssh_config"), t("ui.list_its_host_entries_in"), Ctl::Toggle("ssh.read_ssh_config"), false),
             r(Ssh, t("ui.ssh_config_path"), "", Ctl::Text("ssh.ssh_config", "~/.ssh/config"), false),
-            r(Ssh, t("ui.default_jump_host"), t("ui.proxyjump_e_g_bastion"), Ctl::Text("ssh.jump_host", "user@bastion:22"), true),
-            r(Ssh, t("ui.cipher_preference"), t("ui.comma_separated_by_priority"), Ctl::Text("ssh.ciphers", ""), true),
-            r(Ssh, t("ui.agent_forwarding"), "", Ctl::Toggle("ssh.agent_forwarding"), true),
+            r(Ssh, t("ui.default_jump_host"), t("ui.proxyjump_e_g_bastion"), Ctl::Text("ssh.jump_host", "user@bastion:22"), false),
+            r(Ssh, t("ui.cipher_preference"), t("ui.comma_separated_by_priority"), Ctl::Text("ssh.ciphers", ""), false),
+            r(Ssh, t("ui.agent_forwarding"), "", Ctl::Toggle("ssh.agent_forwarding"), false),
 
-            r(Credentials, t("ui.use_system_keychain"), t("ui.store_key_passphrases_and_api"), Ctl::Toggle("credentials.use_keychain"), true),
-            r(Credentials, t("ui.use_ssh_agent"), "", Ctl::Toggle("credentials.use_ssh_agent"), true),
-            r(Credentials, t("ui.extra_private_keys"), t("ui.comma_separated_paths_tried_after"), Ctl::Text("credentials.extra_keys", "~/.ssh/work_ed25519"), true),
+            r(Credentials, t("ui.use_system_keychain"), t("ui.store_key_passphrases_and_api"), Ctl::Toggle("credentials.use_keychain"), false),
+            r(Credentials, t("ui.use_ssh_agent"), "", Ctl::Toggle("credentials.use_ssh_agent"), false),
+            r(Credentials, t("ui.extra_private_keys"), t("ui.comma_separated_paths_tried_after"), Ctl::Text("credentials.extra_keys", "~/.ssh/work_ed25519"), false),
 
             r(Ai, t("ui.enable_built_in_ai"), t("ai.enable.d"), Ctl::Toggle("ai.enabled"), false),
             r(Ai, t("ui.redact_before_sending"), t("ui.strip_passwords_tokens_private_keys"), Ctl::Toggle("ai.redact"), false),
@@ -187,8 +191,8 @@ impl SettingsView {
             r(Agents, t("ui.detect_codex"), "", Ctl::Toggle("agents.detect_codex"), false),
             r(Agents, t("ui.detect_grok"), "", Ctl::Toggle("agents.detect_grok"), false),
             r(Agents, t("ui.notify_on_state_change"), t("ui.desktop_notification_when_an_agent"), Ctl::Toggle("agents.notify_state"), true),
-            r(Agents, t("ui.approval_timeout_s"), t("ui.how_long_to_wait_after"), Ctl::Text("agents.approval_timeout_secs", "120"), true),
-            r(Agents, t("ui.on_timeout"), "", Ctl::Choice("agents.on_timeout", opts(&[("deny", t("ui.deny")), ("ask", t("ui.keep_waiting"))])), true),
+            r(Agents, t("ui.approval_timeout_s"), t("ui.how_long_to_wait_after"), Ctl::Text("agents.approval_timeout_secs", "120"), false),
+            r(Agents, t("ui.on_timeout"), "", Ctl::Choice("agents.on_timeout", opts(&[("deny", t("ui.deny")), ("ask", t("ui.keep_waiting"))])), false),
 
             r(Permissions, t("ui.default_mode"), t("ui.also_switchable_from_the_status"), Ctl::Choice("permissions.mode", opts(&[("ask", t("ui.ask_2")), ("plan", t("ui.plan_read_only")), ("auto", t("ui.auto"))])), false),
             r(Permissions, t("ui.max_auto_risk_in_auto"), t("ui.actions_at_or_below_this"), Ctl::Choice("permissions.max_auto_risk", opts(&[("R0", "R0"), ("R1", "R1"), ("R2", "R2")])), false),
@@ -202,10 +206,10 @@ impl SettingsView {
             r(Session, t("ui.persistent_sessions"), t("ui.resume_via_remote_tmux_after"), Ctl::Choice("session.persistent", opts(&[("off", t("ui.off")), ("tmux", "tmux")])), true),
             r(Session, t("ui.restore_layout_on_startup"), "", Ctl::Toggle("session.restore_layout"), true),
             r(Session, t("ui.confirm_before_closing"), t("ui.confirm_closing_a_tab_while"), Ctl::Toggle("session.confirm_close"), true),
-            r(Session, t("ui.auto_reconnect"), "", Ctl::Toggle("session.auto_reconnect"), true),
+            r(Session, t("ui.auto_reconnect"), "", Ctl::Toggle("session.auto_reconnect"), false),
 
-            r(Notify, t("ui.desktop_notifications"), "", Ctl::Toggle("notify.desktop"), true),
-            r(Notify, t("ui.notify_when_an_agent_waits"), "", Ctl::Toggle("notify.agent_blocked"), true),
+            r(Notify, t("ui.desktop_notifications"), "", Ctl::Toggle("notify.desktop"), false),
+            r(Notify, t("ui.notify_when_an_agent_waits"), "", Ctl::Toggle("notify.agent_blocked"), false),
             r(Notify, t("ui.long_command_notification_s"), t("ui.when_a_command_runs_longer"), Ctl::Text("notify.long_command_secs", "10"), true),
             r(Notify, t("ui.sound"), "", Ctl::Toggle("notify.sound"), true),
         ]
@@ -404,7 +408,7 @@ impl SettingsView {
         cx.notify();
     }
 
-    fn credentials_extra(&self) -> AnyElement {
+    fn credentials_extra(&self, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
         let mut list = div().flex().flex_col().rounded_lg().border_1().border_color(c(th.surface0));
         let keys = scan_keys();
@@ -417,10 +421,37 @@ impl SettingsView {
                 .child(ui::tag(kind.clone(), c(th.info))));
         }
         let agent = std::env::var("SSH_AUTH_SOCK").ok().filter(|p| std::path::Path::new(p).exists());
+        let ssh_dir = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".ssh");
+        let (d1, d2) = (ssh_dir.clone(), ssh_dir);
         div().flex().flex_col()
-            .child(Self::section_title(t("ui.local_private_keys_read_only"))).child(list)
-            .child(div().pt_2().flex().gap_2()
-                .child(ui::button("key-gen", t("ui.generate_new_key"), 0).opacity(0.5)).child(ui::button("key-import", t("ui.import"), 0).opacity(0.5)).child(div().pt_1().child(ui::soon())))
+            .child(Self::section_title(t("ui.local_private_keys"))).child(list)
+            .child(Self::section_title(t("ui.generate_new_key")))
+            .child(div().flex().items_center().gap_2()
+                .child(div().w(px(260.)).child(Input::new(&self.key_pass)))
+                .child(ui::button("key-gen", t("ui.generate_ed25519"), 1).on_click(cx.listener(move |this, _, window, cx| {
+                    let pass = this.key_pass.read(cx).value().to_string();
+                    let path = ssh_term_proto::keygen::free_path(&d1, "agentshell_ed25519");
+                    let comment = format!("{}@agentshell", std::env::var("USER").unwrap_or_default());
+                    this.notice = Some(match ssh_term_proto::keygen::generate(&path, &comment, Some(&pass)) {
+                        Ok((p, _, fp)) => { let _ = crate::audit_log().append("ssh.keygen", "user", &format!("{} {fp} encrypted={}", p.display(), !pass.is_empty())); tf("settings.key_generated", &[("path", &p.display()), ("fp", &fp)]) }
+                        Err(e) => tf("settings.key_failed", &[("e", &e)]),
+                    });
+                    this.key_pass.update(cx, |i, cx| i.set_value("", window, cx));
+                    cx.notify();
+                }))))
+            .child(Self::section_title(t("ui.import")))
+            .child(div().flex().items_center().gap_2()
+                .child(div().flex_1().child(Input::new(&self.key_import)))
+                .child(ui::button("key-import", t("ui.import"), 0).on_click(cx.listener(move |this, _, window, cx| {
+                    let src = ssh_term_proto::hosts::expand_tilde(this.key_import.read(cx).value().trim());
+                    this.notice = Some(match ssh_term_proto::keygen::import(&src, &d2) {
+                        Ok((p, fp)) => { let _ = crate::audit_log().append("ssh.keyimport", "user", &format!("{} -> {} {fp}", src.display(), p.display())); tf("settings.key_imported", &[("path", &p.display()), ("fp", &fp)]) }
+                        Err(e) => tf("settings.key_failed", &[("e", &format!("{e:#}"))]),
+                    });
+                    this.key_import.update(cx, |i, cx| i.set_value("", window, cx));
+                    cx.notify();
+                }))))
+            .children(self.notice.clone().map(|n| div().pt_2().text_size(px(12.)).text_color(c(th.subtext)).child(n)))
             .child(Self::section_title("ssh-agent"))
             .child(div().text_size(px(12.)).text_color(c(th.subtext)).child(match agent {
                 Some(p) => tf("settings.agent_sock", &[("p", &p)]),
@@ -429,22 +460,37 @@ impl SettingsView {
             .into_any_element()
     }
 
-    fn agents_extra(&self) -> AnyElement {
+    fn agents_extra(&self, cx: &mut Context<Self>) -> AnyElement {
+        use ssh_term_proto::hooks::{self, Agent};
         let th = cur();
         let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
-        let check = |rel: &str| std::fs::read_to_string(home.join(rel)).map(|b| b.contains("agentshell")).unwrap_or(false);
-        let items = [("Claude Code", ".claude/settings.json", check(".claude/settings.json")), ("Codex", ".codex/config.toml", check(".codex/config.toml")), ("Grok", ".grok/settings.json", check(".grok/settings.json"))];
         let mut list = div().flex().flex_col().rounded_lg().border_1().border_color(c(th.surface0));
-        for (i, (name, file, ok)) in items.iter().enumerate() {
+        for (i, (agent, name)) in [(Agent::Claude, "Claude Code"), (Agent::Codex, "Codex"), (Agent::Grok, "Grok Build")].into_iter().enumerate() {
+            let ok = hooks::installed(agent, &home);
+            let path = hooks::config_path(agent, &home);
+            let h2 = home.clone();
             list = list.child(div().flex().items_center().gap_3().px_3().py(px(8.)).when(i > 0, |d| d.border_t_1().border_color(c(th.surface0)))
                 .child(icon(IconName::Bot, 14., c(th.accent)))
-                .child(div().flex_1().flex().flex_col().child(div().text_size(px(12.5)).text_color(c(th.text)).child(*name))
-                    .child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(format!("~/{file}"))))
-                .child(if *ok { ui::tag(t("ui.hook_installed"), c(th.success)).into_any_element() } else { ui::tag(t("ui.hook_not_installed"), c(th.overlay1)).into_any_element() })
-                .child(ui::button(("hook-install", i), t("ui.install"), 0).opacity(0.5)));
+                .child(div().flex_1().flex().flex_col().child(div().text_size(px(12.5)).text_color(c(th.text)).child(name))
+                    .child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(path.display().to_string())))
+                .child(if ok { ui::tag(t("ui.hook_installed"), c(th.success)).into_any_element() } else { ui::tag(t("ui.hook_not_installed"), c(th.overlay1)).into_any_element() })
+                .child(ui::button(("hook-install", i), if ok { t("ui.uninstall") } else { t("ui.install") }, if ok { 0 } else { 1 }).on_click(cx.listener(move |this, _, _w, cx| {
+                    let cli = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("agentshell"))).filter(|p| p.exists()).map(|p| p.display().to_string()).unwrap_or_else(|| "agentshell".into());
+                    let timeout = config::get().agents.approval_timeout_secs + 15;
+                    this.notice = Some(match hooks::install(agent, &h2, &cli, timeout, ok, false) {
+                        Ok(r) => {
+                            let _ = crate::audit_log().append(if ok { "hook.uninstall" } else { "hook.install" }, "user", &format!("{} {} backup={:?}", agent.id(), r.path.display(), r.backup));
+                            tf(if ok { "settings.hook_removed" } else { "settings.hook_installed" }, &[("agent", &name), ("path", &r.path.display()), ("backup", &r.backup.map(|b| b.display().to_string()).unwrap_or_else(|| "-".into()))])
+                        }
+                        Err(e) => tf("settings.hook_failed", &[("agent", &name), ("e", &e)]),
+                    });
+                    cx.notify();
+                }))));
         }
-        div().flex().flex_col().child(Self::section_title(t("ui.hook_status_read_only_check"))).child(list)
-            .child(div().pt_2().flex().items_center().gap_2().text_size(px(11.5)).text_color(c(th.overlay1)).child(t("ui.install_hooks")).child(ui::soon()))
+        let ep = crate::data_dir().join("policy-endpoint.json");
+        div().flex().flex_col().child(Self::section_title(t("ui.agent_hooks"))).child(list)
+            .children(self.notice.clone().map(|n| div().pt_2().text_size(px(12.)).text_color(c(th.subtext)).child(n)))
+            .child(div().pt_2().text_size(px(11.5)).text_color(c(th.overlay1)).child(tf("settings.hooks_note", &[("ep", &ep.display())])))
             .into_any_element()
     }
 
@@ -549,7 +595,7 @@ pub fn scan_keys() -> Vec<(String, String, String)> {
     let mut names: Vec<String> = rd.filter_map(Result::ok).map(|e| e.file_name().to_string_lossy().to_string()).collect();
     names.sort();
     for n in names {
-        if !n.starts_with("id_") || n.ends_with(".pub") { continue; }
+        if n.ends_with(".pub") || n.starts_with("known_hosts") || n == "config" || n == "authorized_keys" { continue; }
         let Ok(pubs) = std::fs::read_to_string(dir.join(format!("{n}.pub"))) else { continue };
         let kind = pubs.split_whitespace().next().unwrap_or("?").trim_start_matches("ssh-").to_string();
         let fp = russh::keys::PublicKey::from_openssh(pubs.trim()).map(|k| k.fingerprint(russh::keys::HashAlg::Sha256).to_string()).unwrap_or_else(|_| t("ui.cannot_parse_public_key").into());
@@ -599,8 +645,8 @@ impl Render for SettingsView {
             }
             let extra = match self.cat {
                 Cat::Permissions => Some(self.permissions_extra(window, cx)),
-                Cat::Credentials => Some(self.credentials_extra()),
-                Cat::Agents => Some(self.agents_extra()),
+                Cat::Credentials => Some(self.credentials_extra(cx)),
+                Cat::Agents => Some(self.agents_extra(cx)),
                 Cat::Keys => Some(self.keys_extra(window, cx)),
                 Cat::Audit => Some(self.audit_extra(cx)),
                 Cat::Suggest => Some(self.suggest_extra(cx)),

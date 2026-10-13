@@ -274,6 +274,7 @@ impl Settings {
         ssh_term_proto::hosts::SshOpts {
             default_user: self.ssh.default_user.clone(), default_port: self.ssh.default_port, agent_forward: self.ssh.agent_forwarding,
             kex: self.ssh.kex.clone(), ciphers: self.ssh.ciphers.clone(), jump: self.ssh.jump_host.clone(), remote_hooks: self.ssh.remote_agent_hooks,
+            no_agent: !self.credentials.use_ssh_agent, extra_keys: self.credentials.extra_keys.clone(),
         }
     }
     pub fn audit_path(&self) -> PathBuf { ssh_term_proto::hosts::expand_tilde(&self.audit.dir).join("audit.jsonl") }
@@ -330,7 +331,7 @@ fn apply_runtime(s: &Settings) {
     ssh_term_proto::term::SCROLLBACK.store(s.terminal.scrollback.clamp(100, 1_000_000), Relaxed);
     ssh_term_proto::ssh::KEEPALIVE_SECS.store(s.ssh.keepalive_secs, Relaxed);
     ssh_term_proto::ssh::CONNECT_TIMEOUT_SECS.store(s.ssh.connect_timeout_secs, Relaxed);
-    ssh_term_proto::ssh::RECONNECT.store(s.ssh.reconnect, Relaxed);
+    ssh_term_proto::ssh::RECONNECT.store(s.ssh.reconnect && s.session.auto_reconnect, Relaxed);
     ssh_term_proto::ssh::REUSE.store(s.ssh.reuse_connections, Relaxed);
     ssh_term_proto::ssh::HOST_KEY_POLICY.store(match s.ssh.host_key_policy.as_str() { "strict" => 1, "accept-new" => 2, _ => 0 }, Relaxed);
     ssh_term_proto::local::INTEGRATE.store(if s.terminal.shell_integration == "off" { 0 } else if s.terminal.shell.is_empty() { 1 } else { 2 }, Relaxed);

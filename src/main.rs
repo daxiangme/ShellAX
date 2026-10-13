@@ -47,7 +47,10 @@ pub(crate) fn audit_log() -> Arc<AuditLog> {
 }
 
 /// API-key storage: OS keychain first, encrypted 0600 file under data_dir() as fallback.
-pub(crate) fn secret_store() -> ssh_term_proto::secrets::SecretStore { ssh_term_proto::secrets::SecretStore::new(data_dir()) }
+pub(crate) fn secret_store() -> ssh_term_proto::secrets::SecretStore {
+    // credentials.use_keychain = false → encrypted local file only
+    if config::get().credentials.use_keychain { ssh_term_proto::secrets::SecretStore::new(data_dir()) } else { ssh_term_proto::secrets::SecretStore::file_only(data_dir()) }
+}
 
 pub(crate) fn data_dir() -> std::path::PathBuf {
     std::env::var_os("XDG_DATA_HOME").map(Into::into)

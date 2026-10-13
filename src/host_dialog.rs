@@ -32,10 +32,10 @@ impl HostDialog {
             (t("ui.user"), "user", mk(t("ui.empty_uses_the_default_user"), e.user.clone().unwrap_or_default(), window, cx)),
             (t("ui.private_key"), "key", mk(t("ui.ssh_id_ed25519_empty_tries"), e.identity_file.clone().unwrap_or_default(), window, cx)),
             (t("ui.group"), "group", mk(t("ui.e_g_prod_test"), e.group.clone().unwrap_or_default(), window, cx)),
-            (t("ui.jump_host"), "jump", mk(t("ui.user_bastion_22_coming_soon"), e.jump.clone().unwrap_or_default(), window, cx)),
+            (t("ui.jump_host"), "jump", mk(t("ui.jump_placeholder"), e.jump.clone().unwrap_or_default(), window, cx)),
         ];
         fields[0].2.update(cx, |s, cx| s.focus(window, cx));
-        Self { editing: existing.map(|h| h.name), fields, auth: e.auth.unwrap_or_else(|| "key".into()), production: e.production, error: None }
+        Self { editing: existing.map(|h| h.name), fields, auth: e.auth.unwrap_or_else(|| "auto".into()), production: e.production, error: None }
     }
 
     fn val(&self, key: &str, cx: &Context<Self>) -> String {
@@ -66,16 +66,14 @@ impl Render for HostDialog {
         let th = cur();
         let label = |t: &str| div().w(px(70.)).text_size(px(12.5)).text_color(c(th.subtext)).child(t.to_string());
         let mut form = div().p_5().flex().flex_col().gap_3();
-        for (i, (l, key, e)) in self.fields.iter().enumerate() {
-            let mut row = div().flex().items_center().gap_3().child(label(l)).child(div().flex_1().child(Input::new(e)));
-            if *key == "jump" { row = row.child(ui::soon()); }
+        for (i, (l, _key, e)) in self.fields.iter().enumerate() {
+            let row = div().flex().items_center().gap_3().child(label(l)).child(div().flex_1().child(Input::new(e)));
             form = form.child(row);
             if i == 4 {
                 let me = cx.entity().downgrade();
-                let opts = vec![("key".to_string(), t("ui.private_key").to_string()), ("agent".to_string(), "ssh-agent".to_string()), ("password".to_string(), t("ui.password").to_string())];
+                let opts = vec![("auto".to_string(), t("ui.auth_auto").to_string()), ("key".to_string(), t("ui.private_key").to_string()), ("agent".to_string(), "ssh-agent".to_string()), ("password".to_string(), t("ui.password").to_string())];
                 form = form.child(div().flex().items_center().gap_3().child(label(t("ui.authentication")))
-                    .child(ui::segmented("auth", &opts, &self.auth, move |v, _w, cx| { let _ = me.update(cx, |this, cx| { this.auth = v; cx.notify(); }); }))
-                    .when(self.auth != "key", |d| d.child(ui::soon())));
+                    .child(ui::segmented("auth", &opts, &self.auth, move |v, _w, cx| { let _ = me.update(cx, |this, cx| { this.auth = v; cx.notify(); }); })));
             }
         }
         form = form.child(div().flex().items_center().gap_3().child(label(t("ui.production")))

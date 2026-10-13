@@ -11,6 +11,7 @@ pub mod hooks;
 pub mod policy_server;
 pub mod boxdraw;
 pub mod hosts;
+pub mod keygen;
 pub mod layout;
 pub mod local;
 pub mod ssh;
