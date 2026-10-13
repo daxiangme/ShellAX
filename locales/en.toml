@@ -619,3 +619,8 @@
 "ssh.kbd_cancelled" = "keyboard-interactive prompt cancelled"
 "ui.auth_kbd_title" = "Verification"
 "main.auth_kbd_for" = "{target}: {prompt}"
+"ui.osc52_write" = "OSC 52 clipboard write"
+"ui.osc52_write_desc" = "Programs (vim, tmux, remote shells) copying to your clipboard"
+"ui.osc52_read" = "OSC 52 clipboard read"
+"ui.osc52_read_desc" = "Let programs read your clipboard (off: requests are ignored)"
+"term.osc52_ask" = "The program wants to copy {n} bytes to the clipboard: {preview}"

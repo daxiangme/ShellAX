@@ -619,3 +619,8 @@
 "ssh.kbd_cancelled" = "已取消键盘交互验证"
 "ui.auth_kbd_title" = "身份验证"
 "main.auth_kbd_for" = "{target}：{prompt}"
+"ui.osc52_write" = "OSC 52 写剪贴板"
+"ui.osc52_write_desc" = "程序（vim、tmux、远端 shell）写入本机剪贴板"
+"ui.osc52_read" = "OSC 52 读剪贴板"
+"ui.osc52_read_desc" = "允许程序读取本机剪贴板（关闭时忽略请求）"
+"term.osc52_ask" = "程序请求写入剪贴板 {n} 字节：{preview}"

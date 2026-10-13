@@ -36,6 +36,21 @@ pub struct Shared {
     /// OSC 9;4 progress payload (e.g. "4;1;-1"), used by agent detection.
     pub progress: Arc<Mutex<String>>,
     pub bell: Arc<AtomicBool>,
+    /// OSC 52 clipboard writes requested by the program (decided by the UI: allow / ask / deny).
+    pub clip_store: Arc<Mutex<Vec<String>>>,
+    /// OSC 52 clipboard reads; the formatter turns clipboard text into the reply sequence.
+    pub clip_load: Arc<Mutex<Vec<ClipFormatter>>>,
+}
+
+pub type ClipFormatter = Arc<dyn Fn(&str) -> String + Sync + Send + 'static>;
+
+/// OSC 52 write policy (terminal.osc52_write: allow | ask | deny). Payloads over 1 MiB are refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipDecision { Allow, Ask, Deny }
+pub const OSC52_MAX: usize = 1 << 20;
+pub fn osc52_write_decision(mode: &str, len: usize) -> ClipDecision {
+    if len > OSC52_MAX { return ClipDecision::Deny; }
+    match mode { "allow" => ClipDecision::Allow, "deny" | "off" => ClipDecision::Deny, _ => ClipDecision::Ask }
 }
 
 /// Listener that forwards terminal-generated replies (e.g. DA/DSR answers) back to the backend
@@ -52,6 +67,8 @@ impl EventListener for Listener {
             Event::Title(t) => *self.shared.title.lock().unwrap() = t,
             Event::ResetTitle => self.shared.title.lock().unwrap().clear(),
             Event::Bell => self.shared.bell.store(true, Ordering::Release),
+            Event::ClipboardStore(_, text) => self.shared.clip_store.lock().unwrap().push(text),
+            Event::ClipboardLoad(_, f) => self.shared.clip_load.lock().unwrap().push(f),
             _ => {}
         }
     }
@@ -115,7 +132,8 @@ impl Session {
         let (out_tx, out_rx) = flume::unbounded::<Vec<u8>>();
         let (wake_tx, wake_rx) = flume::bounded::<()>(1);
         let shared = Shared::default();
-        let cfg = Config { scrolling_history: SCROLLBACK.load(Ordering::Relaxed), ..Config::default() };
+        // OSC 52 copy and paste both reach the listener; the UI applies terminal.osc52_write / osc52_read
+        let cfg = Config { scrolling_history: SCROLLBACK.load(Ordering::Relaxed), osc52: alacritty_terminal::term::Osc52::CopyPaste, ..Config::default() };
         let term = Term::new(cfg, &size, Listener { tx: to_backend.clone(), shared: shared.clone() });
         let s = Arc::new(Self {
             term: Arc::new(Mutex::new(term)),
@@ -233,5 +251,28 @@ mod tests {
         let b = b"\x1b]9;4;1;-1\x1b\\";
         let (_, _, k, p) = find_osc(b).unwrap();
         assert_eq!((k, p), (b'9', &b"4;1;-1"[..]));
+    }
+
+    #[test]
+    fn osc52_store_and_load_reach_listener() {
+        let (sess, out, rx) = Session::new(Size { cols: 40, rows: 5 });
+        // "hello" = aGVsbG8=
+        out.send(b"\x1b]52;c;aGVsbG8=\x07\x1b]52;c;?\x07".to_vec()).unwrap();
+        let t0 = std::time::Instant::now();
+        while sess.shared.clip_load.lock().unwrap().is_empty() && t0.elapsed().as_secs() < 3 { std::thread::sleep(std::time::Duration::from_millis(10)); }
+        assert_eq!(*sess.shared.clip_store.lock().unwrap(), vec!["hello".to_string()]);
+        let f = sess.shared.clip_load.lock().unwrap().pop().unwrap();
+        let reply = f("hi");
+        assert!(reply.starts_with("\x1b]52;c;aGk="), "{reply:?}");
+        // nothing is sent back by the terminal itself (reads are answered only by the UI)
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn osc52_policy() {
+        assert_eq!(osc52_write_decision("allow", 10), ClipDecision::Allow);
+        assert_eq!(osc52_write_decision("ask", 10), ClipDecision::Ask);
+        assert_eq!(osc52_write_decision("deny", 10), ClipDecision::Deny);
+        assert_eq!(osc52_write_decision("allow", OSC52_MAX + 1), ClipDecision::Deny);
     }
 }

@@ -382,6 +382,8 @@ pub struct TermView {
     pub daemon_id: Option<String>,
     /// After a layout restore: agent resume command offered as a button (never auto-run).
     pub resume_offer: Option<String>,
+    /// OSC 52 write waiting for the user (terminal.osc52_write = ask)
+    pub clip_ask: Option<String>,
     /// Last command failed (OSC 133;D non-zero): (command, exit code) → "Explain" button.
     pub failed: Option<(String, i32)>,
     exit_seen: u64,
@@ -410,7 +412,7 @@ pub enum AiCard {
 /// Snapshot of what the input line looks like right now.
 struct LineState { before_cursor: String, at_eol: bool, prompt_col: Option<usize>, alt_screen: bool }
 
-pub enum TermEvent { Explain, Agent(String, AgentState), LongDone(String, u64, i32) }
+pub enum TermEvent { Explain, Agent(String, AgentState), LongDone(String, u64, i32), Audit(&'static str, String) }
 
 /// IME support (PRD 3.3: IME must work for agents too). Committed text goes to the PTY like typing;
 /// composition text is only drawn (never sent) until the IME commits it.
@@ -486,7 +488,7 @@ impl TermView {
             selecting: false, scroll_drag: false, history, tracker: InputTracker::new(),
             last_activity: Instant::now(), blink_running: false, software_gpu: std::env::var("AGENTSHELL_FORCE_BLINK").ok().map(|_| false), last_mouse_cell: None, mouse_down_btn: None,
             manifests, last_command: None, agent: None, agent_seen: Instant::now(), last_detect: Instant::now() - Duration::from_secs(5),
-            detect_scheduled: false, pending_paste: None, ai: None, daemon_id: None, resume_offer: None, last_agent: None, failed: None, exit_seen: 0, ai_inline_seq: 0, ai_inline: None, bell_until: None, cmd_started: None, _subs: subs,
+            detect_scheduled: false, pending_paste: None, ai: None, daemon_id: None, resume_offer: None, clip_ask: None, last_agent: None, failed: None, exit_seen: 0, ai_inline_seq: 0, ai_inline: None, bell_until: None, cmd_started: None, _subs: subs,
         }
     }
 
@@ -500,6 +502,30 @@ impl TermView {
         }
     }
 
+    /// OSC 52: writes follow terminal.osc52_write (ask shows a bar), reads only when osc52_read is on.
+    fn handle_osc52(&mut self, s: &Arc<Session>, cx: &mut Context<Self>) {
+        let stores: Vec<String> = std::mem::take(&mut *s.shared.clip_store.lock().unwrap());
+        let loads: Vec<ssh_term_proto::term::ClipFormatter> = std::mem::take(&mut *s.shared.clip_load.lock().unwrap());
+        let cfg = config::get();
+        for text in stores {
+            use ssh_term_proto::term::{osc52_write_decision, ClipDecision};
+            match osc52_write_decision(&cfg.terminal.osc52_write, text.len()) {
+                ClipDecision::Allow => { cx.emit(TermEvent::Audit("osc52.write", format!("allowed {} bytes", text.len()))); cx.write_to_clipboard(ClipboardItem::new_string(text)); }
+                ClipDecision::Ask => { self.clip_ask = Some(text); cx.notify(); }
+                ClipDecision::Deny => cx.emit(TermEvent::Audit("osc52.write", format!("denied {} bytes", text.len()))),
+            }
+        }
+        for f in loads {
+            if cfg.terminal.osc52_read {
+                let text = cx.read_from_clipboard().and_then(|i| i.text()).unwrap_or_default();
+                cx.emit(TermEvent::Audit("osc52.read", format!("allowed {} bytes", text.len())));
+                s.write(f(&text).into_bytes());
+            } else {
+                cx.emit(TermEvent::Audit("osc52.read", "denied (terminal.osc52_read = false)".into()));
+            }
+        }
+    }
+
     fn repaint_grid(&self, cx: &mut Context<Self>) { self.grid.update(cx, |_, cx| cx.notify()); self.cursor.update(cx, |_, cx| cx.notify()); }
 
     /// Called (coalesced) when the backend produced output.
@@ -508,6 +534,7 @@ impl TermView {
             if let Some(seed) = s.history_seed.lock().unwrap().take() { if config::get().suggest.remote_history { self.history.lock().unwrap().extend_from_bash_history(&seed); } }
             if s.exited.load(Ordering::Acquire) || s.conn_error.lock().unwrap().is_some() { cx.notify(); }
         }
+        if let Some(s) = self.session.clone() { self.handle_osc52(&s, cx); }
         if let Some(s) = &self.session {
             let rang = s.shared.bell.swap(false, Ordering::AcqRel);
             if rang && config::get().terminal.bell == "sound" { play_sound(); }
@@ -1309,6 +1336,16 @@ impl Render for TermView {
                     .on_click(cx.listener(|v, _, _w, cx| { if let (Some(cmd), Some(s)) = (v.resume_offer.take(), v.session.clone()) { s.write(format!("{cmd}\r").into_bytes()); } cx.notify(); })))
                 .child(div().id("resume-dismiss").px_2().py(px(3.)).rounded_md().cursor_pointer().bg(c(th.surface0)).child(t("term.dismiss"))
                     .on_click(cx.listener(|v, _, _w, cx| { v.resume_offer = None; cx.notify(); }))));
+        }
+        if let Some(text) = self.clip_ask.clone() {
+            let preview: String = text.chars().take(80).collect::<String>().replace(['\n', '\r'], " ");
+            body = body.child(div().absolute().bottom(px(12.)).left(px(12.)).right(px(12.)).p_2().rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.warning))
+                .flex().flex_wrap().items_center().gap_2().text_size(px(12.)).text_color(c(th.text))
+                .child(tf("term.osc52_ask", &[("n", &text.len()), ("preview", &preview)]))
+                .child(div().id("osc52-allow").px_3().py(px(3.)).rounded_md().cursor_pointer().bg(c(th.accent)).text_color(c(th.base)).child(t("ui.allow"))
+                    .on_click(cx.listener(|v, _, _w, cx| { if let Some(t) = v.clip_ask.take() { cx.emit(TermEvent::Audit("osc52.write", format!("approved {} bytes", t.len()))); cx.write_to_clipboard(ClipboardItem::new_string(t)); } cx.notify(); })))
+                .child(div().id("osc52-deny").px_2().py(px(3.)).rounded_md().cursor_pointer().bg(c(th.surface0)).child(t("ui.deny"))
+                    .on_click(cx.listener(|v, _, _w, cx| { if let Some(t) = v.clip_ask.take() { cx.emit(TermEvent::Audit("osc52.write", format!("rejected {} bytes", t.len()))); } cx.notify(); }))));
         }
         if self.bell_until.is_some_and(|t| t > Instant::now()) {
             body = body.child(div().absolute().top_0().left_0().size_full().border_2().border_color(c(th.warning)).bg(c(th.warning).opacity(0.06)));

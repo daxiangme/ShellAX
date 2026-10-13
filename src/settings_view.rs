@@ -155,6 +155,8 @@ impl SettingsView {
             r(Terminal, t("ui.cursor_style"), "", Ctl::Choice("terminal.cursor_style", opts(&[("block", t("ui.block")), ("bar", t("ui.bar")), ("underline", t("ui.underline"))]))),
             r(Terminal, t("ui.cursor_blink"), t("ui.stops_blinking_after_10_s"), Ctl::Toggle("terminal.cursor_blink")),
             r(Terminal, t("ui.bell"), t("ui.on_bel"), Ctl::Choice("terminal.bell", opts(&[("none", t("ui.off")), ("visual", t("ui.flash_border")), ("sound", t("ui.sound"))]))),
+            r(Terminal, t("ui.osc52_write"), t("ui.osc52_write_desc"), Ctl::Choice("terminal.osc52_write", opts(&[("allow", t("ui.allow")), ("ask", t("ui.ask")), ("deny", t("ui.deny"))]))),
+            r(Terminal, t("ui.osc52_read"), t("ui.osc52_read_desc"), Ctl::Toggle("terminal.osc52_read")),
             r(Terminal, t("ui.copy_on_select"), t("ui.copy_to_the_clipboard_on"), Ctl::Toggle("terminal.copy_on_select")),
             r(Terminal, t("ui.confirm_multi_line_paste"), t("ui.confirm_before_pasting_multiple_lines"), Ctl::Toggle("terminal.paste_confirm")),
             r(Terminal, t("ui.mouse_reporting"), t("ui.let_vim_htop_etc_receive"), Ctl::Toggle("terminal.mouse_reporting")),

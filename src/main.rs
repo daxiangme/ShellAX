@@ -172,6 +172,7 @@ impl Root {
                     this.notify_kind(&tf("main.notify_long_done", &[("cmd", &short), ("secs", &secs.to_string()), ("code", &code.to_string())]), false, cx);
                     return;
                 }
+                termview::TermEvent::Audit(kind, detail) => { this.log(kind, detail); return; }
                 termview::TermEvent::Explain => {}
             }
             let fc = pane.update(cx, |p, cx| { let f = p.failure_context(); p.failed = None; cx.notify(); f });

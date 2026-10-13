@@ -80,8 +80,12 @@ pub struct Terminal {
     pub bell: String, pub copy_on_select: bool, pub paste_confirm: bool, pub mouse_reporting: bool,
     /// auto = inject OSC 133 hooks for bash/zsh; off = never
     pub shell_integration: String,
+    /// OSC 52 clipboard write from programs: allow | ask | deny
+    pub osc52_write: String,
+    /// OSC 52 clipboard read (programs reading your clipboard); off by default
+    pub osc52_read: bool,
 }
-impl Default for Terminal { fn default() -> Self { Self { shell: String::new(), scrollback: u_scroll(), cursor_style: s_block(), cursor_blink: t(), bell: s_visual(), copy_on_select: false, paste_confirm: t(), mouse_reporting: t(), shell_integration: s_auto() } } }
+impl Default for Terminal { fn default() -> Self { Self { shell: String::new(), scrollback: u_scroll(), cursor_style: s_block(), cursor_blink: t(), bell: s_visual(), copy_on_select: false, paste_confirm: t(), mouse_reporting: t(), shell_integration: s_auto(), osc52_write: "ask".into(), osc52_read: false } } }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
