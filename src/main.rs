@@ -154,7 +154,24 @@ impl Root {
             if ssh_term_proto::daemon::list(&ssh_term_proto::daemon::socket_path(&data_dir())).is_ok_and(|l| l.iter().any(|i| &i.id == id && i.alive)) { pi.resume = None; }
         }
         let v = self.open_pane_inner(spec, &pi, window, cx);
-        self._subs.push(cx.subscribe_in(&v, window, |this, pane, _ev: &termview::TermEvent, w, cx| {
+        self._subs.push(cx.subscribe_in(&v, window, |this, pane, ev: &termview::TermEvent, w, cx| {
+            match ev {
+                termview::TermEvent::Agent(name, st) => {
+                    if !config::get().agents.notify_state { return; }
+                    // blocked is already covered by approval / agent_blocked; announce idle (done) and blocked
+                    let key = match st { AgentState::Blocked => "main.notify_agent_blocked", AgentState::Idle => "main.notify_agent_idle", _ => return };
+                    if this.pane_visible_focused(pane, w, cx) { return; }
+                    this.notify_kind(&tf(key, &[("agent", name)]), *st == AgentState::Blocked, cx);
+                    return;
+                }
+                termview::TermEvent::LongDone(cmd, secs, code) => {
+                    if this.pane_visible_focused(pane, w, cx) && w.is_window_active() { return; }
+                    let short: String = cmd.chars().take(60).collect();
+                    this.notify_kind(&tf("main.notify_long_done", &[("cmd", &short), ("secs", &secs.to_string()), ("code", &code.to_string())]), false, cx);
+                    return;
+                }
+                termview::TermEvent::Explain => {}
+            }
             let fc = pane.update(cx, |p, cx| { let f = p.failure_context(); p.failed = None; cx.notify(); f });
             if let Some((cmd, code, out, host)) = fc {
                 this.log("ai.explain", format!("{cmd:?} exit={code}"));
@@ -404,9 +421,19 @@ impl Root {
 
     /// Desktop notification (notify.desktop + notify.agent_blocked). Best effort: without a
     /// notification daemon the call fails silently (logged to stderr).
-    pub(crate) fn notify_desktop(&self, body: &str, _cx: &mut Context<Self>) {
+    pub(crate) fn notify_desktop(&self, body: &str, cx: &mut Context<Self>) { self.notify_kind(body, true, cx) }
+
+    /// The pane is on screen in the active tab, focused, and the window is active: no need to notify.
+    fn pane_visible_focused(&self, pane: &Entity<TermView>, w: &mut Window, cx: &mut Context<Self>) -> bool {
+        w.is_window_active() && pane.read(cx).focus.is_focused(w)
+    }
+
+    /// `blocked` = an agent needs the user (gated by notify.agent_blocked); otherwise a general event.
+    pub(crate) fn notify_kind(&self, body: &str, blocked: bool, _cx: &mut Context<Self>) {
         let n = &config::get().notify;
-        if !(n.desktop && n.agent_blocked) { return; }
+        if n.sound { termview::play_sound(); }
+        if !n.desktop || (blocked && !n.agent_blocked) { return; }
+        self.log("notify", body);
         let body = body.to_string();
         std::thread::spawn(move || {
             if let Err(e) = notify_rust::Notification::new().appname("AgentShell").summary("AgentShell").body(&body).show() { eprintln!("notification: {e}"); }

@@ -82,6 +82,8 @@ pub struct PaintState {
     pub focused: bool,
     pub blink_on: bool,
     pub suggestion: Option<String>,
+    /// IME composition text (pre-edit), drawn at the cursor and underlined until committed.
+    pub preedit: Option<String>,
     pub sel: Option<(BPoint, BPoint)>,
     pub hover_link: Option<(i32, usize, usize)>,
 }
@@ -285,6 +287,17 @@ impl Render for CursorLayer {
             if g.display_offset() != 0 { return; }
             let cursor = g.cursor.point;
             let (ncols, nrows) = (g.columns(), g.screen_lines());
+            // IME pre-edit: normal text colour, underlined, over the cursor cell(s)
+            if let Some(pe) = st.preedit.as_ref().filter(|p| !p.is_empty()) {
+                let x = origin.x + px(cursor.column.0 as f32 * cw);
+                let y = origin.y + px(cursor.line.0.max(0) as f32 * lh);
+                let cells: usize = pe.chars().map(|c| if (c as u32) < 0x1100 { 1 } else { 2 }).sum();
+                window.paint_quad(fill(Bounds::new(point(x, y), size(px(cells as f32 * cw), px(lh))), c(th.bg)));
+                let sh = window.text_system().shape_line(pe.clone().into(), px(font_size()), &[plain_run(pe.len(), c(th.text))], None);
+                let _ = sh.paint(point(x, y), px(lh), TextAlign::Left, None, window, cx);
+                window.paint_quad(fill(Bounds::new(point(x, y + px(lh - 2.)), size(px(cells as f32 * cw), px(1.5))), c(th.accent)));
+                return;
+            }
             // suggestion: grey text from the cursor, wrapping onto following rows
             if let Some(sug) = &st.suggestion {
                 let (mut col, mut row) = (cursor.column.0, cursor.line.0.max(0) as usize);
@@ -373,6 +386,8 @@ pub struct TermView {
     /// Last agent seen in this pane (kept for the layout snapshot after it exits).
     pub last_agent: Option<String>,
     bell_until: Option<Instant>,
+    /// command submitted at the prompt and when (for notify.long_command_secs)
+    cmd_started: Option<(Instant, String)>,
     _subs: Vec<Subscription>,
 }
 
@@ -390,7 +405,38 @@ pub enum AiCard {
 /// Snapshot of what the input line looks like right now.
 struct LineState { before_cursor: String, at_eol: bool, prompt_col: Option<usize>, alt_screen: bool }
 
-pub enum TermEvent { Explain }
+pub enum TermEvent { Explain, Agent(String, AgentState), LongDone(String, u64, i32) }
+
+/// IME support (PRD 3.3: IME must work for agents too). Committed text goes to the PTY like typing;
+/// composition text is only drawn (never sent) until the IME commits it.
+impl gpui::EntityInputHandler for TermView {
+    fn text_for_range(&mut self, _r: std::ops::Range<usize>, _a: &mut Option<std::ops::Range<usize>>, _w: &mut Window, _cx: &mut Context<Self>) -> Option<String> { None }
+    fn selected_text_range(&mut self, _i: bool, _w: &mut Window, _cx: &mut Context<Self>) -> Option<gpui::UTF16Selection> {
+        let n = self.st.borrow().preedit.as_ref().map(|p| p.encode_utf16().count()).unwrap_or(0);
+        Some(gpui::UTF16Selection { range: n..n, reversed: false })
+    }
+    fn marked_text_range(&self, _w: &mut Window, _cx: &mut Context<Self>) -> Option<std::ops::Range<usize>> {
+        self.st.borrow().preedit.as_ref().filter(|p| !p.is_empty()).map(|p| 0..p.encode_utf16().count())
+    }
+    fn unmark_text(&mut self, _w: &mut Window, cx: &mut Context<Self>) { self.st.borrow_mut().preedit = None; self.cursor.update(cx, |_, cx| cx.notify()); }
+    fn replace_text_in_range(&mut self, _r: Option<std::ops::Range<usize>>, text: &str, _w: &mut Window, cx: &mut Context<Self>) {
+        self.st.borrow_mut().preedit = None;
+        if let Some(s) = self.session.clone() { if !text.is_empty() { self.tracker.key(Key::Text(text)); s.write(text.as_bytes().to_vec()); self.scroll_to_bottom(cx); } }
+        self.cursor.update(cx, |_, cx| cx.notify());
+    }
+    fn replace_and_mark_text_in_range(&mut self, _r: Option<std::ops::Range<usize>>, text: &str, _sel: Option<std::ops::Range<usize>>, _w: &mut Window, cx: &mut Context<Self>) {
+        self.st.borrow_mut().preedit = (!text.is_empty()).then(|| text.to_string());
+        self.cursor.update(cx, |_, cx| cx.notify());
+    }
+    fn bounds_for_range(&mut self, _r: std::ops::Range<usize>, _eb: Bounds<Pixels>, _w: &mut Window, _cx: &mut Context<Self>) -> Option<Bounds<Pixels>> {
+        // candidate window goes just below the cursor cell
+        let s = self.session.as_ref()?;
+        let cur = s.term.lock().unwrap().grid().cursor.point;
+        let st = self.st.borrow();
+        Some(Bounds::new(point(st.origin.x + px(cur.column.0 as f32 * st.cell_w), st.origin.y + px(cur.line.0.max(0) as f32 * line_h())), size(px(st.cell_w), px(line_h()))))
+    }
+    fn character_index_for_point(&mut self, _p: gpui::Point<Pixels>, _w: &mut Window, _cx: &mut Context<Self>) -> Option<usize> { None }
+}
 impl gpui::EventEmitter<TermEvent> for TermView {}
 
 impl TermView {
@@ -425,7 +471,7 @@ impl TermView {
             selecting: false, scroll_drag: false, history, tracker: InputTracker::new(),
             last_activity: Instant::now(), blink_running: false, last_mouse_cell: None, mouse_down_btn: None,
             manifests, last_command: None, agent: None, agent_seen: Instant::now(), last_detect: Instant::now() - Duration::from_secs(5),
-            detect_scheduled: false, pending_paste: None, ai: None, daemon_id: None, resume_offer: None, last_agent: None, failed: None, exit_seen: 0, ai_inline_seq: 0, ai_inline: None, bell_until: None, _subs: subs,
+            detect_scheduled: false, pending_paste: None, ai: None, daemon_id: None, resume_offer: None, last_agent: None, failed: None, exit_seen: 0, ai_inline_seq: 0, ai_inline: None, bell_until: None, cmd_started: None, _subs: subs,
         }
     }
 
@@ -448,7 +494,9 @@ impl TermView {
             if s.exited.load(Ordering::Acquire) || s.conn_error.lock().unwrap().is_some() { cx.notify(); }
         }
         if let Some(s) = &self.session {
-            if s.shared.bell.swap(false, Ordering::AcqRel) && config::get().terminal.bell == "visual" {
+            let rang = s.shared.bell.swap(false, Ordering::AcqRel);
+            if rang && config::get().terminal.bell == "sound" { play_sound(); }
+            if rang && config::get().terminal.bell == "visual" {
                 self.bell_until = Some(Instant::now() + Duration::from_millis(180));
                 cx.notify();
                 cx.spawn(async move |this, cx| {
@@ -462,6 +510,11 @@ impl TermView {
             if seq != self.exit_seen {
                 self.exit_seen = seq;
                 let code = *s.last_exit.lock().unwrap();
+                if let Some((t0, cmd)) = self.cmd_started.take() {
+                    let secs = t0.elapsed().as_secs();
+                    let lim = config::get().notify.long_command_secs;
+                    if lim > 0 && secs >= lim && self.agent.is_none() { cx.emit(TermEvent::LongDone(cmd, secs, code.unwrap_or(0))); }
+                }
                 let was = self.failed.is_some();
                 self.failed = match (code, &self.last_command) { (Some(c), Some(cmd)) if c != 0 && self.agent.is_none() => Some((cmd.clone(), c)), _ => None };
                 if was || self.failed.is_some() { cx.notify(); }
@@ -545,6 +598,11 @@ impl TermView {
             Some((i, st)) => if self.agent_seen.elapsed() < Duration::from_secs(10) { Some((i, st)) } else { None },
             None => None,
         };
+        if let (Some((pi, ps)), Some((ni, ns))) = (self.agent, new) {
+            if pi == ni && ps != ns && ps != AgentState::Unknown && ns != AgentState::Unknown {
+                cx.emit(TermEvent::Agent(agent::display_name(&self.manifests[ni].id).to_string(), ns));
+            }
+        }
         if new != self.agent { self.agent = new; if let Some((i, _)) = new { self.last_agent = Some(agent::display_name(&self.manifests[i].id).to_string()); } cx.notify(); }
     }
 
@@ -750,7 +808,7 @@ impl TermView {
                         if let Some(cmd) = self.tracker.submitted_input(&ls.before_cursor, ls.prompt_col) {
                             self.history.lock().unwrap().add(&cmd);
                             // remember the command word for agent identification over SSH (not while an agent runs)
-                            if self.agent.is_none() { self.last_command = Some(cmd); }
+                            if self.agent.is_none() { self.cmd_started = Some((Instant::now(), cmd.clone())); self.last_command = Some(cmd); }
                         }
                     }
                 }
@@ -1218,6 +1276,11 @@ impl Render for TermView {
                 .child(btn("paste-cancel", t("ui.cancel"), false).on_click(cx.listener(|v, _, _w, cx| { v.pending_paste = None; cx.notify(); })))
                 .child(btn("paste-ok", t("ui.paste"), true).on_click(cx.listener(|v, _, _w, cx| { if let Some(t) = v.pending_paste.take() { v.paste_text(t, cx); } cx.notify(); }))));
         }
+        {
+            // IME: register this pane as the text input handler while it has focus
+            let (focus, me) = (self.focus.clone(), cx.entity());
+            body = body.child(canvas(|_, _, _| {}, move |bounds, _, window, cx| { window.handle_input(&focus, gpui::ElementInputHandler::new(bounds, me.clone()), cx); }).absolute().size_full());
+        }
         if let Some(card) = self.ai_card(cx) { body = body.child(card); }
         if let Some(cmd) = self.resume_offer.clone() {
             body = body.child(div().absolute().bottom(px(12.)).left(px(12.)).right(px(12.)).p_2().rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.accent))
@@ -1280,4 +1343,18 @@ mod tests {
         assert_eq!(encode_mouse(0, false, 0, 0, false)[3], 35);
         assert_eq!(encode_mouse(64, true, 1, 1, true), b"\x1b[<64;2;2M");
     }
+}
+
+/// Short system sound (notify.sound / terminal.bell = "sound"). Best effort, never blocks the UI.
+pub fn play_sound() {
+    std::thread::spawn(|| {
+        #[cfg(target_os = "macos")]
+        let tries: &[&[&str]] = &[&["afplay", "/System/Library/Sounds/Ping.aiff"]];
+        #[cfg(not(target_os = "macos"))]
+        let tries: &[&[&str]] = &[&["canberra-gtk-play", "-i", "bell"], &["paplay", "/usr/share/sounds/freedesktop/stereo/bell.oga"], &["aplay", "-q", "/usr/share/sounds/alsa/Front_Center.wav"]];
+        for t in tries {
+            if std::process::Command::new(t[0]).args(&t[1..]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success()) { return; }
+        }
+        eprint!("\x07");
+    });
 }

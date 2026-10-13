@@ -152,7 +152,7 @@ impl SettingsView {
             r(Terminal, t("ui.scrollback_lines"), t("ui.applies_to_new_sessions"), Ctl::Text("terminal.scrollback", "10000"), false),
             r(Terminal, t("ui.cursor_style"), "", Ctl::Choice("terminal.cursor_style", opts(&[("block", t("ui.block")), ("bar", t("ui.bar")), ("underline", t("ui.underline"))])), false),
             r(Terminal, t("ui.cursor_blink"), t("ui.stops_blinking_after_10_s"), Ctl::Toggle("terminal.cursor_blink"), false),
-            r(Terminal, t("ui.bell"), t("ui.on_bel"), Ctl::Choice("terminal.bell", opts(&[("none", t("ui.off")), ("visual", t("ui.flash_border")), ("sound", t("ui.sound_coming_soon"))])), false),
+            r(Terminal, t("ui.bell"), t("ui.on_bel"), Ctl::Choice("terminal.bell", opts(&[("none", t("ui.off")), ("visual", t("ui.flash_border")), ("sound", t("ui.sound"))])), false),
             r(Terminal, t("ui.copy_on_select"), t("ui.copy_to_the_clipboard_on"), Ctl::Toggle("terminal.copy_on_select"), false),
             r(Terminal, t("ui.confirm_multi_line_paste"), t("ui.confirm_before_pasting_multiple_lines"), Ctl::Toggle("terminal.paste_confirm"), false),
             r(Terminal, t("ui.mouse_reporting"), t("ui.let_vim_htop_etc_receive"), Ctl::Toggle("terminal.mouse_reporting"), false),
@@ -192,7 +192,7 @@ impl SettingsView {
             r(Agents, t("ui.detect_claude_code"), "", Ctl::Toggle("agents.detect_claude"), false),
             r(Agents, t("ui.detect_codex"), "", Ctl::Toggle("agents.detect_codex"), false),
             r(Agents, t("ui.detect_grok"), "", Ctl::Toggle("agents.detect_grok"), false),
-            r(Agents, t("ui.notify_on_state_change"), t("ui.desktop_notification_when_an_agent"), Ctl::Toggle("agents.notify_state"), true),
+            r(Agents, t("ui.notify_on_state_change"), t("ui.desktop_notification_when_an_agent"), Ctl::Toggle("agents.notify_state"), false),
             r(Agents, t("ui.approval_timeout_s"), t("ui.how_long_to_wait_after"), Ctl::Text("agents.approval_timeout_secs", "120"), false),
             r(Agents, t("ui.on_timeout"), "", Ctl::Choice("agents.on_timeout", opts(&[("deny", t("ui.deny")), ("ask", t("ui.keep_waiting"))])), false),
 
@@ -213,8 +213,8 @@ impl SettingsView {
 
             r(Notify, t("ui.desktop_notifications"), "", Ctl::Toggle("notify.desktop"), false),
             r(Notify, t("ui.notify_when_an_agent_waits"), "", Ctl::Toggle("notify.agent_blocked"), false),
-            r(Notify, t("ui.long_command_notification_s"), t("ui.when_a_command_runs_longer"), Ctl::Text("notify.long_command_secs", "10"), true),
-            r(Notify, t("ui.sound"), "", Ctl::Toggle("notify.sound"), true),
+            r(Notify, t("ui.long_command_notification_s"), t("ui.when_a_command_runs_longer"), Ctl::Text("notify.long_command_secs", "10"), false),
+            r(Notify, t("ui.sound"), "", Ctl::Toggle("notify.sound"), false),
         ]
     }
 

@@ -37,8 +37,8 @@
 - ☑ 6.3 AI 命令建议灰字：suggest.ai 开启且历史无匹配时停顿 600ms 请求命令模型（fast_model），复用灰字 UI 与 →/Tab 接受；含密钥/敏感命令的行不发送
 
 ## 7 其余（P2 / 3.7 设置全表）
-- ☐ 7.1 桌面通知（Agent 等待输入 / 需确认）
-- ☐ 7.2 IME 预编辑
+- ☑ 7.1 桌面通知：Agent 状态变化（等待输入/完成，agents.notify_state）、长命令结束（notify.long_command_secs，基于 OSC 133;D）、notify.sound 与 bell=sound（canberra/paplay/afplay，尽力而为）；可见且聚焦的窗格不打扰；写审计 notify
+- ☑ 7.2 IME 预编辑：TermView 实现 EntityInputHandler，预编辑文本在光标处带下划线绘制、不发送，提交后写入 PTY；候选框定位到光标单元格（本机无 IME 守护进程，预编辑路径未实测）
 - ☑ 7.3 分屏拖拽比例（分隔条拖动，Node::Split.ratio 0.1–0.9，随布局保存）
 - ☐ 7.4 标签标题随语言
 - ☐ 7.5 iTerm2 主题导入
