@@ -1,20 +1,21 @@
-# TEST_REPORT — AgentShell 原型对照 PRD v1.0（第 12 轮收尾，2026-10-13）
+# TEST_REPORT — AgentShell 原型对照 PRD v1.1（第 13 轮：5.20 右键上下文菜单，2026-10-13）
 
 标记：**通过** / **失败**（PRD 要求未实现或不达标）/ **未验证**（只因硬件或平台限制无法在本机验证，写明原因）。
 证据：`T:` 自动化测试；`G:` 本轮在 DISPLAY=:2 实测（截图本轮逐张看过）；`P:` 前几轮 GUI 实测（PROGRESS.md 有记录，截图在仓库）；`M:` 手工测量。
-代码基线：第 12 轮（2a7fbe7 之后，本报告提交前的最后一个代码 commit）。G: 截图都在 DISPLAY=:2（1920×1200）全屏截取，本轮逐张看过。
+代码基线：第 13 轮（本报告随同一 commit 提交）；第 0 节为本轮重跑结果，第 1–3 节沿用第 12 轮结论（本轮未改动相关代码路径），第 5b 节为本轮新增 5.20 清单。G: 截图都在 DISPLAY=:2（1920×1200）全屏截取，本轮逐张看过。
 
 ## 0. 构建与自动化测试
 
 | 项 | 命令 | 结果 |
 |---|---|---|
 | release 构建 | `cargo build --release`（`~/.cargo/bin` 工具链） | **通过**，0 警告 |
-| dist 构建 | `cargo build --profile dist`（fat LTO、cgu=1、panic=abort、strip） | **通过**，0 警告；二进制 46.0MB，gzip 18.2MB |
+| dist 构建 | `cargo build --profile dist`（fat LTO、cgu=1、panic=abort、strip） | **通过**，0 警告；二进制 46.3MB |
 | clippy | `cargo clippy --release --all-targets` | **通过**，0 警告 0 错误 |
-| 全量测试 ×3 | `source testenv/test.env; eval $(ssh-agent -s); ssh-add testenv/client_ed25519; cargo test --release -- --nocapture` | **通过**：3 轮均 135/135（lib 92、agentshell 8、GUI bin 16、daemon 1、headless 8、managed_policy 1、ssh_features 9），0 失败 0 忽略 |
+| 全量测试 ×3 | `source testenv/test.env; eval $(ssh-agent -s); ssh-add testenv/client_ed25519; cargo test --release -- --nocapture` | **通过**：3 轮均 147/147（lib 103 含新增 ctxmenu 11、agentshell 8、GUI bin 16、ctxmenu_ssh 1（新增）、daemon 1、headless 8、managed_policy 1、ssh_features 9），0 失败 0 忽略 |
 | 跳过检查 | 在 --nocapture 输出里 grep skip | 0 个跳过（sshd 2222 公钥 / 2223 密码+转发 / 2224 keyboard-interactive 都在运行，SSH_AUTH_SOCK 已设） |
 | 外部 Agent hook 端到端 | `tools/e2e_hooks.sh`（真实 Claude Code / Codex / Grok CLI + mock LLM） | **通过** 7/7 |
-| 许可证 | 新增代码全部自写（Sixel/Kitty 解码、asciicast、目录同步、广播、快照均按公开规范自写）；本轮新增直接依赖 image 0.25（MIT OR Apache-2.0，原本已是 gpui 的传递依赖）已登记 THIRD_PARTY_NOTICES.md；未打开 research/ 下 shell-rs、oxideterm、warp，未读 Zed terminal/terminal_view/editor | 通过 |
+| 许可证（第 13 轮） | 右键菜单全部自写（src/ctxmenu.rs、src/ctxmenu_view.rs），无新增依赖；未打开 research/ 下 shell-rs、oxideterm、warp，未读 Zed terminal/terminal_view/editor | 通过 |
+| 许可证（第 12 轮） | 新增代码全部自写（Sixel/Kitty 解码、asciicast、目录同步、广播、快照均按公开规范自写）；本轮新增直接依赖 image 0.25（MIT OR Apache-2.0，原本已是 gpui 的传递依赖）已登记 THIRD_PARTY_NOTICES.md；未打开 research/ 下 shell-rs、oxideterm、warp，未读 Zed terminal/terminal_view/editor | 通过 |
 
 ## 1. 用户故事（PRD 2.2）
 
@@ -163,6 +164,35 @@
 ## 5. 统计
 第 1–3 节逐行计 86 行：**通过 82**（其中 4 行“通过 / 未验证”：钥匙串真实平台、硬件 GPU 光标闪烁、真实模型服务商、托盘真实面板；1 行“通过（部分）”：界面字号），**失败 0**，**未验证 4**（IME、透明度、空闲内存、跨平台——都是本机硬件/平台限制：没有输入法程序、没有真 GPU、只有 Linux X11）。
 第 0 节、4b 节全部通过。
+
+## 5b. 第 13 轮：PRD 5.20 右键上下文菜单
+
+| 项 | 结果 | 证据 |
+|---|---|---|
+| 类型判定（zip/tar/tar.gz/tgz/tar.xz/tar.bz2/7z/rar/gz、目录、文本/配置、脚本、可执行、日志） | 通过 | T: ctxmenu::tests::type_detection |
+| 终端输出中的路径 / URL / IP:端口检测（绝对、~/、./、../、相对目录、带扩展名文件名、`:行号`、CJK、版本号不误判） | 通过 | T: ctxmenu::tests::detection_in_terminal_output |
+| 相对路径用 cwd 解析（OSC 7 → 本地 /proc → `user@host:dir$` 提示符兜底；拿不到时保留相对路径并在菜单头提示） | 通过 | T: ctxmenu::tests::resolve_relative_with_cwd、term::tests::osc_scan（OSC 7）；G: screenshot-final-ctxmenu-terminal-path.png（tmux 内远端会话，经提示符解析为 ~/ctxdemo/backup.tar.gz） |
+| 引号转义（空格、单双引号、`$()`、反引号、CJK、emoji、换行；`~/` 保持可展开；`-` 开头加 `./`） | 通过 | T: ctxmenu::tests::quoting_spaces_quotes_cjk_unicode（用真实 sh 往返校验） |
+| 模板展开 {path} {name} {dir} {stem} {ext} {host}（全部转义，`{{`/`}}` 字面量，未知占位符报错） | 通过 | T: ctxmenu::tests::template_expansion |
+| 工具探测与安装提示（apt/yum/dnf/apk/pacman/zypper/brew，按主机缓存 10 分钟） | 通过 | T: ctxmenu::tests::tool_probe_parsing_and_hints；集成：ctxmenu_ssh 在 sshd 上探测；G: screenshot-final-ctxmenu-missing-tool.png（远端无 7z：置灰 + `sudo apt install -y p7zip-full`）、screenshot-final-ctxmenu-missing-tool-terminal.png（远端无 less） |
+| TOML 解析/校验（坏项跳过并报错、未知字段/类型/占位符、语法错误）、热加载（mtime） | 通过 | T: ctxmenu::tests::toml_parsing_and_validation / hot_reload_by_mtime / custom_items_match_and_expand；G: screenshot-final-ctxmenu-settings.png（设置分区编辑、保存后显示“第 4 项：未知占位符 {file}”） |
+| 各类型菜单项与精确命令预览 | 通过 | T: ctxmenu::tests::menus_by_type_with_previews_and_missing_tools；G: screenshot-final-ctxmenu-filepanel-zip.png（`release 报告.zip`：解压到此处/同名目录/列出 + 通用项） |
+| 点击只插入不回车；插入前 Ctrl+U 清空当前行 | 通过 | T: ctxmenu::tests::insert_bytes_never_submit；集成 ctxmenu_ssh：插入后 2 秒远端目标目录不存在、原先输入的行未执行；G: screenshot-final-ctxmenu-inserted.png |
+| 回车后真实执行（远端 zip 解压） | 通过 | 集成 ctxmenu_ssh：回车后 `my 报告/inner.txt` 内容正确；G: 文件面板 → 插入 → 回车 → 权限确认 → 远端 `release 报告/readme.txt` 已解出 |
+| 回车经权限引擎 + 审计 | 通过 | G: screenshot-final-ctxmenu-enter-permission.png（`rm -- ~/ctxdemo/deploy.sh` → “R3 · 无匹配规则；Ask 模式下 R3 需要询问”），审计 ctxmenu.pick / insert / decision / approval / exec |
+| 文件面板插入到该主机会话（无则新开） | 通过 | G: screenshot-final-ctxmenu-filepanel-inserted.png（远端栏自定义项 sha256 插入到同主机 SSH 面板）；代码 Root::pane_for |
+| 多选（Ctrl 切换 / Shift 范围）只显示通用项，两项文件显示 diff | 通过 | T: menus_by_type…（multi-select 段） |
+| 选中文本：复制 / 终端搜索 / 发给 AI 解释 / 粘贴到输入行 | 通过 | G: screenshot-final-ctxmenu-selection.png；AI 解释走对话面板 send_text（首次发送提示与脱敏照常） |
+| 自定义菜单项（匹配扩展名/glob/类型/主机，缺工具置灰） | 通过 | G: screenshot-final-ctxmenu-custom-item.png（config.json：jq 缺失置灰 + `sudo apt install -y jq`、sha256、备份） |
+| i18n（内置项 zh/en） | 通过 | T: i18n::tests::locales_have_identical_keys / every_literal_key_in_source_exists |
+
+本轮限制（不计失败）：
+1. tmux / 全屏程序（alt screen）内无法跟踪对插入命令的手工修改，权限判定使用插入时的原命令；普通 shell 中使用编辑后的实际行。
+2. 远端未发 OSC 7 且提示符不是 `user@host:dir$` 形式时，相对路径保持原样（命令插入同一 shell 仍按当前目录生效），菜单头标注“未知 cwd”。
+3. 终端输出中检测到的路径无法知道是否为目录（以 `/` 结尾才按目录处理）及权限位；“运行”只对脚本扩展名给出。
+4. “在内置编辑器打开”只对远端文件（经 SFTP 编辑器）；本地文件给出 `"${EDITOR:-vi}" 文件` 插入命令。
+5. 测试 sshd 的远端 shell 未设置 UTF-8 locale，readline 把中文显示为 `____`（字节正确，执行结果正确，见 GUI 实测）。
+6. 本机 llvmpipe 软件渲染，菜单弹出到屏幕更新约 3–6 秒（截图时等待）。
 
 ## 6. 仍存问题（不计失败）
 1. Kitty 图形只做传输即显示（a=T/t/p 直接数据），未做放置 ID 管理、删除、文件/共享内存传输、动画；图片按像素原尺寸绘制，不随字号缩放。

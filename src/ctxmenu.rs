@@ -270,7 +270,8 @@ pub fn install_hint(tool: &str, pm: Pm) -> String {
 }
 
 pub const TOOLS_TTL: Duration = Duration::from_secs(600);
-fn tool_cache() -> &'static Mutex<HashMap<String, (Instant, Option<Tools>)>> { static C: OnceLock<Mutex<HashMap<String, (Instant, Option<Tools>)>>> = OnceLock::new(); C.get_or_init(Default::default) }
+type ToolCache = Mutex<HashMap<String, (Instant, Option<Tools>)>>;
+fn tool_cache() -> &'static ToolCache { static C: OnceLock<ToolCache> = OnceLock::new(); C.get_or_init(Default::default) }
 /// Cached tools for a host key; `None` = not probed yet / expired / probe in flight.
 pub fn cached_tools(key: &str) -> Option<Tools> {
     tool_cache().lock().unwrap().get(key).filter(|(at, _)| at.elapsed() < TOOLS_TTL).and_then(|(_, t)| t.clone())

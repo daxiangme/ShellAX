@@ -429,7 +429,7 @@ impl Root {
                 let ready = pane.update(cx, |v, _| v.session.as_ref().is_some_and(|s| s.connected.load(std::sync::atomic::Ordering::Relaxed)));
                 if ready {
                     if waited { cx.background_executor().timer(std::time::Duration::from_millis(600)).await; }
-                    let _ = pane.update(cx, |v, cx| v.insert_command(&cmd, cx));
+                    pane.update(cx, |v, cx| v.insert_command(&cmd, cx));
                     return;
                 }
                 waited = true;

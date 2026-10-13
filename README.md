@@ -12,7 +12,7 @@ cargo clippy --release --all-targets       # 0 警告
 sudo /usr/sbin/sshd -f $PWD/testenv/sshd3_config -E $PWD/testenv/sshd3.log   # 若 2224 未运行
 source testenv/test.env                    # TEST_SSH_PORT/PORT2/PORT3/USER/KEY/PASSWORD/PP_KEY/PP（仅本机回环测试账号）
 eval $(ssh-agent -s) && ssh-add testenv/client_ed25519   # agent_auth 需要 SSH_AUTH_SOCK
-cargo test --release                       # 135 个，全部通过，无跳过（变量缺失时用例会打印 skip 并直接返回）
+cargo test --release                       # 147 个，全部通过，无跳过（变量缺失时用例会打印 skip 并直接返回）
 tools/e2e_hooks.sh                         # 外部 Agent hook 端到端 7/7
 tools/gui_final.sh                         # 在 DISPLAY=:2 启动 release GUI（隔离配置 /tmp/stp-gui）
 tools/tray_check.sh                        # 私有 dbus-daemon + SNI watcher，用 busctl 检查托盘
@@ -38,6 +38,12 @@ tools/tray_check.sh                        # 私有 dbus-daemon + SNI watcher，
 - 布局快照：自动保留最近 10 份，命令面板「保存布局快照」「回滚布局快照…」。
 - 快速启动：Ctrl+Shift+O 选目录 + 预设布局（单/左右/主+两侧/2×2/Agent + tail -F 日志）。
 - 审计默认目录遵守 `XDG_DATA_HOME`；测试钩子 `AGENTSHELL_TEST_SLOW_WITHDRAW=1`（撤销的审批卡仍显示，用于验证迟到的允许不执行）。
+
+## 第 13 轮新增：右键上下文菜单（PRD v1.1 5.20）
+- 终端输出右键：路径（用 OSC 7 / 本地 /proc / 提示符解析 cwd）、URL、IP:端口、选中文本；SFTP 本地/远端栏右键（Ctrl/Shift 多选）。
+- 按类型给出菜单项并显示精确命令（POSIX 单引号转义）；点击**只插入输入行、不回车**；回车时经权限引擎（principal `user:ctxmenu`）判定并审计。
+- 工具探测（按主机缓存）缺工具置灰并给安装命令；自定义 `context_menu.toml`（与 config.toml 同目录，热加载，设置 → 右键菜单可编辑）。
+- 代码：`src/ctxmenu.rs`（纯逻辑 + 11 个单测）、`src/ctxmenu_view.rs`（弹出菜单、探测）、`tests/ctxmenu_ssh.rs`（sshd 集成）。截图 `screenshot-final-ctxmenu-*.png`。
 
 ## 已知问题（第 12 轮）
 - 见 TEST_REPORT.md 第 6 节：Kitty 只支持直接传输显示；录制脱敏按整行写出；本机无桌面通知服务 / xdg-desktop-portal。

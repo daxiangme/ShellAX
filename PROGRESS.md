@@ -101,5 +101,5 @@
 - ☑ 13.2 OSC 7 cwd（term.rs + bash/zsh 集成）
 - ☑ 13.3 GUI：终端右键菜单、SFTP 右键与多选、插入到对应主机会话、设置分区
 - ☑ 13.4 集成测试（sshd：插入不执行、回车后解压）
-- ☑ 13.5 截图 screenshot-final-ctxmenu-*.png
-- ☐ 13.6 全量测试 3 轮 + clippy + dist + e2e_hooks；TEST_REPORT / README
+- ☑ 13.5 截图 screenshot-final-ctxmenu-{terminal-path,inserted,enter-permission,missing-tool,missing-tool-terminal,filepanel-zip,filepanel-inserted,custom-item,settings,selection}.png（逐张看过）
+- ☑ 13.6 全量：release + dist（46.3MB）0 警告、clippy --all-targets 0 警告、cargo test --release 3 轮 147/147、e2e_hooks 7/7；TEST_REPORT 5b 节、README 第 13 轮
