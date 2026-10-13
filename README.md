@@ -1,20 +1,37 @@
 # ssh-term-proto
 
-> **当前状态（v8 / 对应 PRD v1.0，2026-10-13）**：PROGRESS.md 1–8 全部完成，设置页没有“即将支持”项。逐项测试结果见 `TEST_REPORT.md`；下面 v2–v7 各节是历史记录，其中“只有界面 / 即将支持”的说法已过时。
+> **当前状态（第 11 轮 / 对应 PRD v1.0 第 11 轮同步，2026-10-13）**：PROGRESS.md 1–11 全部完成，设置页没有“即将支持”项。逐项测试结果见 `TEST_REPORT.md`；下面 v2–v7 各节是历史记录，其中“只有界面 / 即将支持”的说法已过时。
 
-## 构建与测试（v8）
+## 构建与测试（第 11 轮）
 ```bash
 export PATH=$HOME/.cargo/bin:$PATH        # 需要 rustc ≥ 1.89（本机 1.99）；/usr/bin 的 1.85 编不过依赖
 cargo build --release                      # 0 警告
+cargo build --profile dist                 # 发布包：LTO + strip，约 45MB（gzip 18MB）
 cargo clippy --release --all-targets       # 0 警告
 # 测试用 sshd：2222 仅公钥，2223 密码+转发，2224 keyboard-interactive（PAM，需 root 启动）
 sudo /usr/sbin/sshd -f $PWD/testenv/sshd3_config -E $PWD/testenv/sshd3.log   # 若 2224 未运行
 source testenv/test.env                    # TEST_SSH_PORT/PORT2/PORT3/USER/KEY/PASSWORD/PP_KEY/PP（仅本机回环测试账号）
 eval $(ssh-agent -s) && ssh-add testenv/client_ed25519   # agent_auth 需要 SSH_AUTH_SOCK
-cargo test --release                       # 94 个，全部通过，无跳过（变量缺失时用例会打印 skip 并直接返回）
+cargo test --release                       # 123 个，全部通过，无跳过（变量缺失时用例会打印 skip 并直接返回）
 tools/e2e_hooks.sh                         # 外部 Agent hook 端到端 7/7
 tools/gui_final.sh                         # 在 DISPLAY=:2 启动 release GUI（隔离配置 /tmp/stp-gui）
+tools/tray_check.sh                        # 私有 dbus-daemon + SNI watcher，用 busctl 检查托盘
 ```
+注意：DISPLAY=:2 是 1920×1200，截图缩小查看时 xdotool 坐标要按原始分辨率换算。
+
+## 第 10–11 轮新增
+- 权限：审批卡“本会话总是允许 / 拒绝并说明原因”；调用方（hook / agentshell CLI）断开时自动撤销审批卡、按拒绝处理、迟到的允许不执行，审计 `caller disconnected, approval withdrawn`；组织托管策略 `/etc/agentshell/managed-policy.yaml`；write_to_pty 权限（`agents.write_to_pty`）。
+- `agentshell hosts/exec/upload/download`：借 App 的连接与凭据，全部过策略引擎。
+- 内置 AI：逐条审批执行、结果回传模型；首次发送提示；按主机禁止读取输出。
+- 网络：`ssh.proxy` / `ssh.no_proxy`（HTTP CONNECT / SOCKS5），SSH、AI 请求、更新检查都走。
+- 终端：正则搜索、矩形选择、URL 识别、OSC 52、关键字高亮（`[[terminal.highlights]]`）；拖标签到面板边缘分屏。
+- 主机：分组写成 `a/b/c` 即嵌套；拖主机到分组标题即改组；连接后侧栏显示 OS 徽章（只读 uname 探测，记审计）；ssh:// sftp:// 链接（兼容 Xshell `-url`）；主机工具（监控/进程/服务/Docker，写操作过策略）。
+- 其它：SFTP 内置编辑（冲突检测）、Agent 快速启动（Ctrl+Alt+1/2/3）、托盘（Linux StatusNotifierItem）。
+
+## 已知问题（第 11 轮）
+- 未实现：SFTP 目录同步、端口转发图示、关键字触发通知、快速启动的目录/预设布局、Sixel/Kitty 图形、asciicast 录制、广播输入、布局快照回滚（TEST_REPORT.md 第 6 节，PRD 9.2 Q23）。
+- 本机无法验证：IME 预编辑（无输入法程序）、透明度与空闲内存（无真 GPU）、macOS/Windows、托盘在真实桌面面板上的显示、真实模型服务商。
+
 
 ## v8 新增 / 变化
 - 配置写回保留注释、空行和键顺序（toml_edit 合并；解析失败才整文件重写）。
@@ -24,7 +41,7 @@ tools/gui_final.sh                         # 在 DISPLAY=:2 启动 release GUI�
 - `agentshell status | head` 不再因 EPIPE panic。
 - clippy 全部清零。
 
-## 已知问题（v8）
+## 已知问题（v8，历史）
 - 未实现的 PRD 项：`agentshell exec/hosts/upload/download` 凭据桥；内置 AI 对话中的 run_command 工具调用与逐条审批；审批卡“本会话总是允许 / 拒绝并说明原因”；终端搜索、矩形选择、纯文本 URL 识别、OSC 52；审计过滤；AI 首次发送提示与按主机禁读；HTTP/SOCKS 出站代理；托盘；SFTP 内置编辑。详见 TEST_REPORT.md 第 6 节、PRD 9.2 Q19–Q23。
 - 透明度在本机（llvmpipe + Xfwm 合成）截图中看不到效果，需在真 GPU 上复测。
 - 软件渲染下空闲 RSS 约 169MB；release 二进制 82MB（strip 后 61MB），发布需 strip。
