@@ -75,3 +75,4 @@ Fonts are **not** bundled (see README "字体许可").
 ## notify-rust 4.x — MIT OR Apache-2.0 (dependency, unmodified)
 ## russh-sftp 3.0.1 — Apache-2.0 (dependency, unmodified)
 ## getrandom 0.4 — MIT OR Apache-2.0 (dependency, unmodified)
+## toml_edit 0.22 — MIT OR Apache-2.0 (dependency, unmodified; comment-preserving config writes, PROGRESS 7.8)

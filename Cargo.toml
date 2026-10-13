@@ -17,6 +17,7 @@ anyhow = "1"
 flume = "0.11"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+toml_edit = "0.22"
 regex = "1"
 # UI components (Apache-2.0): inputs, switches, selects for the settings view
 gpui-component = "=0.7.3"

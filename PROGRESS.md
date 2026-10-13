@@ -44,7 +44,7 @@
 - ☑ 7.5 iTerm2 主题导入：.itermcolors plist 解析（自写，无第三方代码）、设置-外观“导入主题”复制到 ~/.config/agentshell/themes 并即时出现在主题列表；Alacritty/自有 TOML 同入口
 - ☑ 7.6 更新检查：src/update.rs 拉取通道清单 JSON（stable/beta，general.update_url 或 AGENTSHELL_UPDATE_URL 覆盖）、版本比较；启动时后台检查并提示，设置-通用“立即检查”。只提示不自动安装（下载+minisign 校验留给发布流水线）；默认清单域名无真实服务器
 - ☑ 7.7 审计保留期：AuditLog::prune 按 retention_days 删除旧记录，首条保留记录的 prev 写入 audit.jsonl.anchor，verify 从锚点校验，剪除本身记一条 audit.prune；audit.log_commands 打开后记录提交的命令（脱敏）
-- ☐ 7.8 配置写回保留注释（toml_edit）
+- ☑ 7.8 配置写回保留注释：Settings::save 用 toml_edit 合并到已有文件（保留注释、空行、键顺序、行尾注释），解析失败回退整写；测试 config::tests::save_preserves_comments
 - ☐ 7.9 光标闪烁 CPU
 - ☐ 7.10 "即将支持"占位清零（当前 32 处）
 

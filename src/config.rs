@@ -216,7 +216,12 @@ impl Settings {
     pub fn save(&self) -> anyhow::Result<()> {
         let p = config_path();
         if let Some(d) = p.parent() { std::fs::create_dir_all(d)?; }
-        let body = format!("# AgentShell settings — written by the settings page\n{}", toml::to_string_pretty(self)?);
+        let fresh = toml::to_string_pretty(self)?;
+        // keep the user's comments, key order and formatting: merge into the existing document
+        let body = match std::fs::read_to_string(&p) {
+            Ok(old) => merge_preserving(&old, &fresh).unwrap_or_else(|_| format!("# AgentShell settings — written by the settings page\n{fresh}")),
+            Err(_) => format!("# AgentShell settings — written by the settings page\n{fresh}"),
+        };
         let tmp = p.with_extension("toml.tmp");
         std::fs::write(&tmp, body)?;
         std::fs::rename(tmp, p)?;
@@ -356,6 +361,39 @@ pub fn update(f: impl FnOnce(&mut Settings)) -> Option<String> {
     err
 }
 
+/// Write `fresh` (a full serialization of the settings) into the existing TOML text `old`, keeping
+/// comments, blank lines and key order of `old`. Changed values keep their trailing comment;
+/// keys no longer present are dropped; new keys are appended to their table.
+pub fn merge_preserving(old: &str, fresh: &str) -> anyhow::Result<String> {
+    use toml_edit::{DocumentMut, Item};
+    let mut doc: DocumentMut = old.parse()?;
+    let new: DocumentMut = fresh.parse()?;
+    fn same(a: &Item, b: &Item) -> bool {
+        match (a.as_value(), b.as_value()) {
+            (Some(x), Some(y)) => { let (mut x, mut y) = (x.clone(), y.clone()); x.decor_mut().clear(); y.decor_mut().clear(); x.to_string().trim() == y.to_string().trim() }
+            _ => a.to_string() == b.to_string(),
+        }
+    }
+    fn merge(dst: &mut toml_edit::Table, src: &toml_edit::Table) {
+        let gone: Vec<String> = dst.iter().map(|(k, _)| k.to_string()).filter(|k| !src.contains_key(k)).collect();
+        for k in gone { dst.remove(&k); }
+        for (k, v) in src.iter() {
+            match (dst.get_mut(k), v) {
+                (Some(Item::Table(dt)), Item::Table(st)) => merge(dt, st),
+                (Some(old), new) if same(old, new) => {}
+                (Some(old), new) => {
+                    let mut new = new.clone();
+                    if let (Some(ov), Some(nv)) = (old.as_value(), new.as_value_mut()) { *nv.decor_mut() = ov.decor().clone(); }
+                    *old = new;
+                }
+                (None, new) => { dst.insert(k, new.clone()); }
+            }
+        }
+    }
+    merge(doc.as_table_mut(), new.as_table());
+    Ok(doc.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,5 +444,19 @@ mod tests {
         let enc = std::fs::read_to_string(dir.join("secrets.enc")).unwrap();
         assert!(!enc.contains("NEVER-IN-CONFIG"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_preserves_comments() {
+        let old = "# my settings\n\n[font]\n# I like big text\nsize = 15.0 # bigger\nfamily = \"JetBrains Mono\"\n\n[general]\nlanguage = \"zh-CN\"\n";
+        let mut s = Settings::parse(old).unwrap();
+        s.set("font.size", toml::Value::Float(16.0)).unwrap();
+        let fresh = toml::to_string_pretty(&s).unwrap();
+        let out = merge_preserving(old, &fresh).unwrap();
+        assert!(out.contains("# my settings\n\n[font]"), "{out}");
+        assert!(out.contains("# I like big text\nsize = 16.0 # bigger"), "{out}");
+        assert!(out.contains("language = \"zh-CN\""));
+        // round-trips to the same settings
+        assert_eq!(Settings::parse(&out).unwrap(), s);
     }
 }
