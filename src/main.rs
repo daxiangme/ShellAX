@@ -285,6 +285,34 @@ impl Root {
         self.port_view = Some(v.clone());
         v
     }
+    /// Open an ssh:// or sftp:// link: a configured host when one matches (keeps its auth,
+    /// jump host and production flag), else an ad-hoc target. Host keys are verified as usual.
+    pub(crate) fn open_link(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let l = match ssh_term_proto::link::parse(url) { Ok(l) => l, Err(e) => return self.toast(e, cx) };
+        if l.dropped_password { self.toast(t("main.link_password_dropped").to_string(), cx); }
+        let s = config::get();
+        let all = s.all_hosts();
+        let found = all.iter().find(|e| (e.name == l.host || e.host == l.host) && l.user.as_ref().is_none_or(|u| e.user.as_ref() == Some(u)) && l.port.is_none_or(|p| e.port.unwrap_or(22) == p)).cloned();
+        let entry = found.unwrap_or_else(|| HostEntry { name: format!("{}{}{}", l.user.as_ref().map(|u| format!("{u}@")).unwrap_or_default(), l.host, l.port.map(|p| format!(":{p}")).unwrap_or_default()), host: l.host.clone(), port: l.port, user: l.user.clone(), source: "link", ..Default::default() });
+        let target = hosts::resolve(&entry, &s.known_hosts_path(), &all, &s.ssh_opts());
+        self.log("link.open", format!("kind={:?} host={} user={} configured={}", l.kind, target.host, target.user, entry.source != "link"));
+        match l.kind {
+            ssh_term_proto::link::Kind::Ssh => self.new_tab(Spec::Ssh(target), window, cx),
+            ssh_term_proto::link::Kind::Sftp => {
+                let key = target.pool_key();
+                let (rt, pr) = (self.rt.handle().clone(), self.prompts.clone());
+                let dir = l.path.clone();
+                let v = match self.sftp_views.get(&key) { Some(v) => v.clone(), None => {
+                    let v = cx.new(|cx| { let mut v = sftp_view::SftpView::new_deferred(target, rt, pr, window, cx); v.initial_dir = dir; v.start(cx); v });
+                    self._subs.push(cx.subscribe_in(&v, window, |this, _, _ev: &sftp_view::SftpEvent, w, cx| this.close_overlay(w, cx)));
+                    self.sftp_views.insert(key, v.clone()); v
+                } };
+                self.sftp_current = Some(v);
+                self.overlay = Overlay::Sftp;
+            }
+        }
+        cx.notify();
+    }
     fn open_sftp(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sftp_current = self.ssh_target_for_tools(cx).map(|t| {
             let key = t.pool_key();
@@ -1030,6 +1058,14 @@ fn main() {
     let (settings, load_err) = config::Settings::load();
     if let Some(e) = &load_err { eprintln!("{e}"); }
     config::install(settings);
+    // ssh:// / sftp:// links (and Xshell -url): hand them to a running instance if there is one
+    let links = ssh_term_proto::link::from_args(&std::env::args().collect::<Vec<_>>());
+    if !links.is_empty() {
+        if let Some(ep) = ssh_term_proto::policy_server::read_endpoint(&data_dir()).filter(|e| e.host.is_empty()) {
+            let ok = links.iter().all(|u| matches!(ssh_term_proto::policy_server::post(&ep.url, "/v1/open", &ep.token, None, &serde_json::json!({"url": u}).to_string(), std::time::Duration::from_secs(5)), Ok((200, _, _))));
+            if ok { eprintln!("opened in the running AgentShell"); return; }
+        }
+    }
     if std::env::var("PERF_LOG").is_ok() {
         std::thread::spawn(|| {
             use termview::{CURSOR_PAINTS, GRID_PAINTS, ROWS_BUILT};
@@ -1102,6 +1138,15 @@ fn main() {
                         Ok(srv) => { root.policy_port = Some(srv.port); *ssh::POLICY_ENDPOINT.lock().unwrap() = Some((srv.port, srv.token.clone())); root.log("policy.server", format!("listening on 127.0.0.1:{}", srv.port)); }
                         Err(e) => root.toast(tf("main.policy_server_failed", &[("e", &e)]), cx),
                     }
+                    // links: from this launch's command line and from later launches (/v1/open)
+                    let (otx, orx) = flume::unbounded::<String>();
+                    let _ = ssh_term_proto::policy_server::OPEN_TX.set(otx.clone());
+                    for u in &links { let _ = otx.send(u.clone()); }
+                    cx.spawn_in(window, async move |this, cx| {
+                        while let Ok(u) = orx.recv_async().await {
+                            if this.update_in(cx, |r, w, cx| { w.activate_window(); r.open_link(&u, w, cx); }).is_err() { break; }
+                        }
+                    }).detach();
                     cx.spawn(async move |this, cx| {
                         while let Ok(a) = ap_rx.recv_async().await {
                             if this.update(cx, |r, cx| { r.approvals.push(a); r.notify_desktop(t("ui.approval_title"), cx); cx.notify(); }).is_err() { break; }

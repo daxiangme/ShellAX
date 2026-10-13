@@ -28,3 +28,4 @@ pub mod term;
 pub mod highlight;
 pub mod tray;
 pub mod managed;
+pub mod link;

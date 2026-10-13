@@ -75,6 +75,9 @@ pub fn read_endpoint(data_dir: &Path) -> Option<Endpoint> {
 
 pub type CtxFn = Arc<dyn Fn() -> PolicyCtx + Send + Sync>;
 
+/// `/v1/open` target: the running App receives ssh:// / sftp:// links here (single instance).
+pub static OPEN_TX: std::sync::OnceLock<flume::Sender<String>> = std::sync::OnceLock::new();
+
 pub struct Server { pub port: u16, pub token: String }
 
 pub fn new_token() -> String { use rand::RngCore; let mut b = [0u8; 24]; rand::thread_rng().fill_bytes(&mut b); b.iter().map(|x| format!("{x:02x}")).collect() }
@@ -177,6 +180,16 @@ fn handle(stream: TcpStream, sh: &Shared) -> Result<()> {
         let (eff, risk, reason) = sh.decide_peer(&principal, &req, &host, c.interactive.unwrap_or(true), Some(&stream));
         let d = match eff { Effect::Allow => "allow", Effect::Ask => "ask", Effect::Deny => "deny" };
         return Ok(respond(stream, "200 OK", &json!({"decision": d, "risk": risk.label(), "reason": reason}).to_string(), &[])?);
+    }
+    if path == "/v1/open" {
+        // only local callers (the second launch of the App); a remote agent may not open sessions here
+        if !host_hdr.is_empty() { return Ok(respond(stream, "403 Forbidden", r#"{"error":"local callers only"}"#, &[])?); }
+        let url = serde_json::from_str::<serde_json::Value>(&body).ok().and_then(|v| v["url"].as_str().map(str::to_string)).unwrap_or_default();
+        if let Err(e) = crate::link::parse(&url) { return Ok(respond(stream, "400 Bad Request", &json!({"error": e}).to_string(), &[])?); }
+        let Some(tx) = OPEN_TX.get() else { return Ok(respond(stream, "501 Not Implemented", r#"{"error":"no UI"}"#, &[])?) };
+        let _ = sh.audit.append("link.open", "user", &format!("url={:?} via=second-instance", crate::link::parse(&url).map(|l| format!("{:?}://{}{}", l.kind, l.user.map(|u| u + "@").unwrap_or_default(), l.host)).unwrap_or_default()));
+        let _ = tx.send(url);
+        return Ok(respond(stream, "200 OK", r#"{"ok":true}"#, &[])?);
     }
     if matches!(path.as_str(), "/v1/hosts" | "/v1/exec" | "/v1/upload" | "/v1/download") {
         let (status, out) = remote_op(sh, &path, &body, &host_hdr, Some(&stream));

@@ -698,3 +698,4 @@
 "main.org_policy_loaded" = "组织策略生效：{p}"
 "main.org_policy_error" = "组织策略无法解析（{e}），已按失败关闭处理：仅允许 Plan 模式"
 "main.org_badge" = "· 组织策略"
+"main.link_password_dropped" = "链接中的密码已忽略（不从 URL 取密码），连接时会按常规方式认证"

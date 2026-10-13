@@ -698,3 +698,4 @@
 "main.org_policy_loaded" = "Organization policy in effect: {p}"
 "main.org_policy_error" = "Organization policy could not be read ({e}); fail-closed: Plan mode only"
 "main.org_badge" = "· org policy"
+"main.link_password_dropped" = "The password in the link was ignored (never taken from URLs); you will be asked to authenticate"

@@ -52,14 +52,25 @@ pub struct SftpView {
     /// Built-in editor for a remote text file: (path, version when opened, editor, overwrite on next save).
     editor: Option<(String, sftp::Version, Entity<EditorState>, bool)>,
     ticking: bool,
+    /// Directory to open first (sftp:// link path) instead of the remote home.
+    pub initial_dir: Option<String>,
     _subs: Vec<gpui::Subscription>,
 }
 
 impl SftpView {
+    /// Like [`new`] but does not connect yet (set `initial_dir`, then call [`start`]).
+    pub fn new_deferred(target: SshTarget, rt: tokio::runtime::Handle, prompts: ssh::Prompts, _w: &mut Window, _cx: &mut Context<Self>) -> Self {
+        let local_dir = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into()));
+        let mut me = Self { target, rt, prompts, sess: None, conn: None, connecting: false, status: String::new(), error: false, local_dir, remote_dir: String::new(),
+            local: vec![], remote: vec![], sel: None, hidden: false, queue: Queue::default(), edit: None, confirm_delete: None, editor: None, ticking: false, initial_dir: None, _subs: vec![] };
+        me.refresh_local();
+        me
+    }
+    pub fn start(&mut self, cx: &mut Context<Self>) { self.connect(cx); }
     pub fn new(target: SshTarget, rt: tokio::runtime::Handle, prompts: ssh::Prompts, _w: &mut Window, cx: &mut Context<Self>) -> Self {
         let local_dir = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into()));
         let mut me = Self { target, rt, prompts, sess: None, conn: None, connecting: false, status: String::new(), error: false, local_dir, remote_dir: String::new(),
-            local: vec![], remote: vec![], sel: None, hidden: false, queue: Queue::default(), edit: None, confirm_delete: None, editor: None, ticking: false, _subs: vec![] };
+            local: vec![], remote: vec![], sel: None, hidden: false, queue: Queue::default(), edit: None, confirm_delete: None, editor: None, ticking: false, initial_dir: None, _subs: vec![] };
         me.refresh_local();
         me.connect(cx);
         me
@@ -73,12 +84,16 @@ impl SftpView {
         self.connecting = true;
         self.set_status(tf("sftp.connecting", &[("t", &self.target.label())]), false);
         let (t, p) = (self.target.clone(), self.prompts.clone());
+        let want = self.initial_dir.take();
         let (tx, rx) = flume::bounded(1);
         self.rt.spawn(async move {
             let r = async {
                 let (conn, _) = ssh::connect_shared(&t, &p).await?;
                 let s = conn.sftp().await?;
-                let home = s.canonicalize(".").await?;
+                let home = match want.as_deref().map(|d| d.strip_prefix("~/").map(str::to_string).unwrap_or_else(|| d.trim_start_matches('~').to_string())) {
+                    Some(d) if !d.is_empty() => match s.canonicalize(d.clone()).await { Ok(p) => p, Err(_) => s.canonicalize(".").await? },
+                    _ => s.canonicalize(".").await?,
+                };
                 let ls = sftp::list_remote(&s, &home, false).await?;
                 Ok::<_, anyhow::Error>((Arc::new(s), home, ls, conn))
             }.await;
