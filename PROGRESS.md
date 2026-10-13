@@ -94,3 +94,12 @@
 - ☑ 12.10 快速启动“选目录 + 预设布局”：Ctrl+Shift+O，目录候选/浏览，预设 单/左右/主+两侧/2×2/Agent+tail -F 最新日志；截图 screenshot-final-quickstart-*.png
 - ☑ 12.11 审批撤销后迟到允许：测试钩子 AGENTSHELL_TEST_SLOW_WITHDRAW 保留卡片，迟到应答发送失败 → 审计 late-answer-ignored + 提示；GUI 实测远端文件未创建；截图 screenshot-final-late-allow-*.png
 - ☑ 12.12 收尾：release / dist（46.0MB）0 警告、clippy --all-targets 0 警告；cargo test --release 3 轮 135/135 无跳过；e2e_hooks 7/7；TEST_REPORT 重写（通过 82 / 失败 0 / 未验证 4）；PRD v1.0、README 同步
+
+# 第 13 轮（PRD v1.1 5.20 右键上下文菜单）
+- ☑ 13.0 PRD 5.20 写入，v1.1，备份 PRD-v1.0-final.md
+- ☐ 13.1 src/ctxmenu.rs 核心（类型判定、路径/URL/IP 检测、引号、模板、工具探测、TOML、菜单构建）+ 单测
+- ☐ 13.2 OSC 7 cwd（term.rs + bash/zsh 集成）
+- ☐ 13.3 GUI：终端右键菜单、SFTP 右键与多选、插入到对应主机会话、设置分区
+- ☐ 13.4 集成测试（sshd：插入不执行、回车后解压）
+- ☐ 13.5 截图 screenshot-final-ctxmenu-*.png
+- ☐ 13.6 全量测试 3 轮 + clippy + dist + e2e_hooks；TEST_REPORT / README
