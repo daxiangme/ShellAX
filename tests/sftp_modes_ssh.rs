@@ -63,7 +63,7 @@ fn follow_cwd_and_restore_against_sshd() {
     assert_eq!(f.step(Some(&pc), &home, &dir2).as_deref(), Some(home.as_str()));
 
     // 3) restore: layout with an SFTP tab and an SFTP split reopens the same host + dirs
-    let l = LayoutSave { version: 1, saved_at: "t".into(), active: 0, tabs: vec![
+    let l = LayoutSave { version: 1, saved_at: "t".into(), active: 0, names: vec![], tabs: vec![
         NodeSave::Leaf { pane: PaneSave::Sftp { target: target.clone(), local_dir: "/tmp".into(), remote_dir: d1.clone(), follow: false } },
         NodeSave::Split { vertical: true, ratio: 0.5, a: Box::new(NodeSave::Leaf { pane: PaneSave::Ssh { target: target.clone(), resume: None } }),
             b: Box::new(NodeSave::Leaf { pane: PaneSave::Sftp { target: target.clone(), local_dir: String::new(), remote_dir: d2.clone(), follow: true } }) },

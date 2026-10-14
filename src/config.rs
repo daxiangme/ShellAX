@@ -617,7 +617,7 @@ mod tests {
     #[test]
     fn host_tree_round_trip() {
         // groups + tags + collapsed state survive a save (merge) / reload; legacy key dropped
-        let old = "# mine\n[[hosts]]\nname = \"db\"\nhost = \"10.0.0.9\"\ngroup = \"prod/db\"\nproduction = true\n";
+        let old = "# mine\n[general]\nlanguage = \"en\"\n\n[[hosts]]\nname = \"db\"\nhost = \"10.0.0.9\"\ngroup = \"prod/db\"\nproduction = true\n";
         let mut s = super::Settings::parse(old).unwrap();
         assert_eq!(s.groups.iter().map(|g| g.path.as_str()).collect::<Vec<_>>(), ["prod", "prod/db"]);
         s.groups[0].tags.push("orange".into());

@@ -219,6 +219,7 @@ pub fn rows(hosts: &[HostEntry], groups: &[GroupEntry], collapsed: &[String], q:
     let hit: Vec<bool> = hosts.iter().map(|h| !searching || host_matches(h, groups, q)).collect();
     let count = |p: &str| hosts.iter().zip(&hit).filter(|(h, ok)| **ok && under(&host_group(h), p)).count();
     let mut out = vec![];
+    #[allow(clippy::too_many_arguments)]
     fn walk(parent: &str, depth: usize, hosts: &[HostEntry], groups: &[GroupEntry], collapsed: &[String], hit: &[bool], searching: bool, count: &dyn Fn(&str) -> usize, out: &mut Vec<Row>) {
         for g in groups.iter().filter(|g| parent_of(&g.path) == parent) {
             let n = count(&g.path);

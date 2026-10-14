@@ -15,7 +15,6 @@ pub struct HostDialog {
     fields: Vec<(&'static str, &'static str, Entity<InputState>)>,
     auth: String,
     tags: Vec<String>,
-    base: HostEntry,
     error: Option<String>,
 }
 
@@ -37,7 +36,7 @@ impl HostDialog {
             (t("ui.jump_host"), "jump", mk(t("ui.jump_placeholder"), e.jump.clone().unwrap_or_default(), window, cx)),
         ];
         fields[0].2.update(cx, |s, cx| s.focus(window, cx));
-        Self { editing: existing.map(|h| h.name), fields, auth: e.auth.clone().unwrap_or_else(|| "auto".into()), tags: e.tags.clone(), base: e, error: None }
+        Self { editing: existing.map(|h| h.name), fields, auth: e.auth.clone().unwrap_or_else(|| "auto".into()), tags: e.tags.clone(), error: None }
     }
 
     fn val(&self, key: &str, cx: &Context<Self>) -> String {
@@ -52,7 +51,7 @@ impl HostDialog {
         let port = if port.is_empty() { None } else { match port.parse::<u16>() { Ok(p) if p > 0 => Some(p), _ => { self.error = Some(t("ui.port_must_be_1_65535").into()); cx.notify(); return; } } };
         let opt = |s: String| (!s.is_empty()).then_some(s);
         let entry = HostEntry { name: name.clone(), host, port, user: opt(self.val("user", cx)), identity_file: opt(self.val("key", cx)),
-            group: opt(self.val("group", cx)).map(|g| ssh_term_proto::outline::normalize(&g)).filter(|g| !g.is_empty()), auth: Some(self.auth.clone()), production: false, tags: self.tags.clone(), jump: opt(self.val("jump", cx)), source: "config", ..self.base.clone() };
+            group: opt(self.val("group", cx)).map(|g| ssh_term_proto::outline::normalize(&g)).filter(|g| !g.is_empty()), auth: Some(self.auth.clone()), production: false, tags: self.tags.clone(), jump: opt(self.val("jump", cx)), source: "config" };
         let editing = self.editing.clone();
         let s = config::get();
         if editing.as_deref() != Some(name.as_str()) && s.hosts.iter().any(|h| h.name == name) { self.error = Some(tf("host.exists", &[("name", &name)])); cx.notify(); return; }
