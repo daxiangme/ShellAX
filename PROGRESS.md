@@ -125,3 +125,13 @@
 - macOS 原生红绿灯、SF Pro 和毛玻璃只写了代码，未在真机验证（本机是 Linux/X11）。
 - Linux 客户端装饰由 gpui-component Root 外加 20px 透明阴影边，没有合成器时显示为黑边（本机有 picom，所以正常）；`AGENTSHELL_SERVER_DECORATIONS=1` 可改回系统标题栏。
 - e2e_hooks：box 重置后重装的 claude/codex 版本较新（node 20），4 个 deny/grok 子项失败（输出格式变化，grok CLI 未重装）；denied.txt 未被创建，拦截本身仍有效。钩子逻辑这一轮没有改动。
+
+## 第 16 轮：主机管理器、颜色标签、窗口控件（PRD 5.23，Windows 实测反馈）— 完成
+- 新模块：src/hosttree.rs（分组树、标签、导入、搜索，纯逻辑有单测）、src/sidebar.rs（侧边栏、右键菜单、导入/删除/重命名弹窗）、src/tabs_ui.rs（标签页菜单、就地重命名、关闭历史、移动到新窗口、窗格悬停工具条）。
+- config：`[[groups]]`、`[tags]`（production 颜色 + names）、`[sidebar] collapsed`；旧 `production = true` 自动迁移为生产标签。~/.ssh/config 主机不再列出，只用于解析和导入。
+- chrome：`AGENTSHELL_CONTROLS=win|mac` 强制样式；Windows 用 window_control_area（Drag 只放在空白 spacer）。
+- 布局快照新增 `names`；移动到新窗口 = 子进程 + `AGENTSHELL_LAYOUT_FILE`（子进程不启动权限服务/托盘/更新检查）。
+- 内置 assets/fonts/SymbolsNerdFontMono-Regular.ttf（MIT，已登记 THIRD_PARTY_NOTICES）。
+- 测试 163 项通过；release / clippy（Linux 与 Windows 目标）0 警告。截图 screenshot-523-*.png（AGENTSHELL_CONTROLS=win，脚本 /tmp/run523.sh + /tmp/shot2.sh 截整窗 1440x860）。
+- PRD 仓库：a975dde（v1.4，备份 PRD-v1.3-final.md）。
+- 限制：Windows 上的 NC 命中/Snap 只能在真机验证（wine 下 GUI 无法运行）；移动到新窗口的标签会重新启动 shell/重连，不迁移正在运行的进程。
