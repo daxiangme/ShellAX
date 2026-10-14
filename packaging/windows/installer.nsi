@@ -1,19 +1,19 @@
-; AgentShell per-user installer (no admin). Build: makensis -DSRC=<dir with AgentShell.exe> -DOUT=<setup.exe> installer.nsi
+; coossh per-user installer (no admin). Build: makensis -DSRC=<dir with coossh.exe> -DOUT=<setup.exe> installer.nsi
 Unicode true
 SetCompressor /SOLID lzma
 SetCompressorDictSize 64
 !include "MUI2.nsh"
-!define APP "AgentShell"
+!define APP "coossh"
 !define VER "0.1.0"
-!define UNKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\AgentShell"
+!define UNKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\coossh"
 Name "${APP} ${VER}"
 OutFile "${OUT}"
 RequestExecutionLevel user
 InstallDir "$LOCALAPPDATA\Programs\${APP}"
 InstallDirRegKey HKCU "Software\${APP}" "InstallDir"
-!define MUI_ICON "agentshell.ico"
-!define MUI_UNICON "agentshell.ico"
-!define MUI_FINISHPAGE_RUN "$INSTDIR\AgentShell.exe"
+!define MUI_ICON "coossh.ico"
+!define MUI_UNICON "coossh.ico"
+!define MUI_FINISHPAGE_RUN "$INSTDIR\coossh.exe"
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
@@ -26,24 +26,25 @@ VIProductVersion "0.1.0.0"
 VIAddVersionKey /LANG=0 "ProductName" "${APP}"
 VIAddVersionKey /LANG=0 "FileDescription" "${APP} Setup"
 VIAddVersionKey /LANG=0 "FileVersion" "${VER}"
-VIAddVersionKey /LANG=0 "LegalCopyright" "AgentShell"
+VIAddVersionKey /LANG=0 "LegalCopyright" "coossh"
 
 Section "Install"
   SetShellVarContext current
   SetOutPath "$INSTDIR"
-  File "${SRC}\AgentShell.exe"
+  File "${SRC}\coossh.exe"
+  File "${SRC}\coossh-cli.exe"
   File "${SRC}\THIRD_PARTY_NOTICES.md"
   File "${SRC}\WINDOWS_TEST.md"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   CreateDirectory "$SMPROGRAMS\${APP}"
-  CreateShortcut "$SMPROGRAMS\${APP}\${APP}.lnk" "$INSTDIR\AgentShell.exe" "" "$INSTDIR\AgentShell.exe" 0
+  CreateShortcut "$SMPROGRAMS\${APP}\${APP}.lnk" "$INSTDIR\coossh.exe" "" "$INSTDIR\coossh.exe" 0
   CreateShortcut "$SMPROGRAMS\${APP}\Uninstall ${APP}.lnk" "$INSTDIR\Uninstall.exe"
-  CreateShortcut "$DESKTOP\${APP}.lnk" "$INSTDIR\AgentShell.exe" "" "$INSTDIR\AgentShell.exe" 0
+  CreateShortcut "$DESKTOP\${APP}.lnk" "$INSTDIR\coossh.exe" "" "$INSTDIR\coossh.exe" 0
   WriteRegStr HKCU "Software\${APP}" "InstallDir" "$INSTDIR"
   WriteRegStr HKCU "${UNKEY}" "DisplayName" "${APP}"
   WriteRegStr HKCU "${UNKEY}" "DisplayVersion" "${VER}"
   WriteRegStr HKCU "${UNKEY}" "Publisher" "${APP}"
-  WriteRegStr HKCU "${UNKEY}" "DisplayIcon" "$INSTDIR\AgentShell.exe"
+  WriteRegStr HKCU "${UNKEY}" "DisplayIcon" "$INSTDIR\coossh.exe"
   WriteRegStr HKCU "${UNKEY}" "InstallLocation" "$INSTDIR"
   WriteRegStr HKCU "${UNKEY}" "UninstallString" '"$INSTDIR\Uninstall.exe"'
   WriteRegDWORD HKCU "${UNKEY}" "NoModify" 1
@@ -52,7 +53,8 @@ SectionEnd
 
 Section "Uninstall"
   SetShellVarContext current
-  Delete "$INSTDIR\AgentShell.exe"
+  Delete "$INSTDIR\coossh.exe"
+  Delete "$INSTDIR\coossh-cli.exe"
   Delete "$INSTDIR\THIRD_PARTY_NOTICES.md"
   Delete "$INSTDIR\WINDOWS_TEST.md"
   Delete "$INSTDIR\Uninstall.exe"
@@ -63,5 +65,5 @@ Section "Uninstall"
   Delete "$DESKTOP\${APP}.lnk"
   DeleteRegKey HKCU "${UNKEY}"
   DeleteRegKey HKCU "Software\${APP}"
-  ; user config (%APPDATA%\AgentShell) and data (%LOCALAPPDATA%\AgentShell) are kept on purpose
+  ; user config (%APPDATA%\coossh) and data (%LOCALAPPDATA%\coossh) are kept on purpose
 SectionEnd

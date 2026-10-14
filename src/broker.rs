@@ -1,4 +1,4 @@
-//! Agent-facing remote operations (PRD US-10: `agentshell exec / hosts / upload / download`).
+//! Agent-facing remote operations (PRD US-10: `coossh-cli exec / hosts / upload / download`).
 //! The policy service calls an [`Ops`] implementation provided by the App, so the agent only
 //! ever names a host from the App's host list: credentials, keys and passwords stay inside the
 //! App, and the App's connection pool is reused (one SSH connection per user@host:port).
@@ -34,7 +34,7 @@ impl SshOps {
     pub fn target(&self, name: &str) -> Result<SshTarget> {
         let all = (self.targets)();
         all.iter().find(|(n, _)| n == name).or_else(|| all.iter().find(|(_, t)| t.host == name || t.label() == name))
-            .map(|(_, t)| t.clone()).ok_or_else(|| anyhow!("unknown host {name:?} (see `agentshell hosts`)"))
+            .map(|(_, t)| t.clone()).ok_or_else(|| anyhow!("unknown host {name:?} (see `coossh-cli hosts`)"))
     }
     fn conn(&self, name: &str) -> Result<Arc<ssh::Conn>> {
         let t = self.target(name)?;

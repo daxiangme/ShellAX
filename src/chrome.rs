@@ -15,19 +15,19 @@ pub fn window_options(bounds: Bounds<Pixels>, title: Option<String>) -> WindowOp
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: Some(gpui::TitlebarOptions { title: title.map(Into::into), appears_transparent: true, traffic_light_position: Some(gpui::point(px(14.), px(13.))) }),
-        window_decorations: Some(if std::env::var_os("AGENTSHELL_SERVER_DECORATIONS").is_some() { WindowDecorations::Server } else { WindowDecorations::Client }),
+        window_decorations: Some(if std::env::var_os("COOSSH_SERVER_DECORATIONS").is_some() { WindowDecorations::Server } else { WindowDecorations::Client }),
         window_background: if cfg!(target_os = "macos") { gpui::WindowBackgroundAppearance::Blurred } else { gpui::WindowBackgroundAppearance::Opaque },
         ..Default::default()
     }
 }
 
 /// Window-control style (PRD 5.23): macOS traffic lights on the left, or Windows-style
-/// minimize / maximize / close on the right (Windows and Linux). `AGENTSHELL_CONTROLS=mac|win`
+/// minimize / maximize / close on the right (Windows and Linux). `COOSSH_CONTROLS=mac|win`
 /// overrides (screenshots / testing).
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Style { Mac, Win }
 pub fn style() -> Style {
-    match std::env::var("AGENTSHELL_CONTROLS").as_deref() {
+    match std::env::var("COOSSH_CONTROLS").as_deref() {
         Ok("mac") => Style::Mac,
         Ok("win") => Style::Win,
         _ => if cfg!(target_os = "macos") { Style::Mac } else { Style::Win },
@@ -126,7 +126,7 @@ pub fn soft_shadow(strong: bool) -> Vec<gpui::BoxShadow> {
 
 /// Fade + rise-in for popups (GPUI divs have no scale transform; 6px rise + fade instead).
 pub fn pop_in(id: impl Into<gpui::ElementId>, el: impl IntoElement + 'static) -> AnyElement {
-    if std::env::var_os("AGENTSHELL_NO_ANIM").is_some() { return el.into_any_element(); }
+    if std::env::var_os("COOSSH_NO_ANIM").is_some() { return el.into_any_element(); }
     div().child(el).with_animation(id, gpui::Animation::new(std::time::Duration::from_millis(160)).with_easing(gpui::ease_out_quint()),
         |d, t| d.opacity(t).mt(px((1. - t) * 6.))).into_any_element()
 }

@@ -603,7 +603,7 @@ impl TermView {
         Self {
             title: title.to_string().into(), spec, session, error, focus, st, grid, cursor,
             selecting: false, scroll_drag: false, history, tracker: InputTracker::new(),
-            last_activity: Instant::now(), blink_running: false, software_gpu: std::env::var("AGENTSHELL_FORCE_BLINK").ok().map(|_| false), last_mouse_cell: None, mouse_down_btn: None,
+            last_activity: Instant::now(), blink_running: false, software_gpu: std::env::var("COOSSH_FORCE_BLINK").ok().map(|_| false), last_mouse_cell: None, mouse_down_btn: None,
             manifests, last_command: None, agent: None, agent_seen: Instant::now(), last_detect: Instant::now() - Duration::from_secs(5),
             detect_scheduled: false, pending_paste: None, ai: None, daemon_id: None, resume_offer: None, clip_ask: None, pty_ask: None, pty_write_ok: false, search: None, last_agent: None, failed: None, exit_seen: 0, ai_inline_seq: 0, ai_inline: None, bell_until: None, cmd_started: None, ai_capture: None, ctx_menu: None, ctx_pending: None, ctx_confirm: None, ctx_denied: None, sftp: None, _subs: subs,
         }
@@ -1249,7 +1249,7 @@ impl TermView {
         let (eff, reason) = policy::decide_host(cfg.permissions.mode, max, &cfg.permissions.rules, "ai", "exec", command, cfg.permissions.dangerous_confirm, prod, &self.audit_host());
         (eff, policy::classify(command), reason)
     }
-    /// Host name used in audit records ("local" for local panes), matching AGENTSHELL_HOST.
+    /// Host name used in audit records ("local" for local panes), matching COOSSH_HOST.
     pub fn audit_host(&self) -> String { match &self.spec { Spec::Local => "local".into(), Spec::Ssh(t) => t.host.clone() } }
     /// Execute: the permission engine decides (mode + rules); every outcome is audited.
     pub fn ai_execute(&mut self, cx: &mut Context<Self>) {

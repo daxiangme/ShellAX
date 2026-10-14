@@ -64,7 +64,7 @@ impl Root {
         if let Some(p) = self.tabs.get(i).map(|t| t.focused.clone()) { let fh = p.read(cx).focus.clone(); window.focus(&fh, cx); }
         self.split(Some(dir), window, cx);
     }
-    /// Move a tab into a new window: a second AgentShell process restores it from its own layout
+    /// Move a tab into a new window: a second coossh process restores it from its own layout
     /// file (shells start fresh in the same cwd / reconnect, like a restored layout).
     fn move_to_window(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get(i) else { return };
@@ -73,7 +73,7 @@ impl Root {
         let file = dir.join(format!("window-{}.json", ssh_term_proto::session_store::uuid_like()));
         let r = ssh_term_proto::session_store::save(&file, &l).map_err(|e| e.to_string()).and_then(|_| {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-            std::process::Command::new(exe).env("AGENTSHELL_LAYOUT_FILE", &file).env_remove("AGENTSHELL_NO_RESTORE").spawn().map(|_| ()).map_err(|e| e.to_string())
+            std::process::Command::new(exe).env("COOSSH_LAYOUT_FILE", &file).env_remove("COOSSH_NO_RESTORE").spawn().map(|_| ()).map_err(|e| e.to_string())
         });
         match r {
             Ok(()) => { self.log("tab.move_window", format!("file={}", file.display())); let t = self.tabs.remove(i); for p in t.layout.leaves() { self.end_pane(&p, cx); } self.active = self.active.min(self.tabs.len().saturating_sub(1)); self.focus_active(window, cx); }

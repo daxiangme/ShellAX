@@ -4,6 +4,15 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 license = "LicenseRef-Proprietary"
+default-run = "coossh"
+
+[[bin]]
+name = "coossh"
+path = "src/main.rs"
+
+[[bin]]
+name = "coossh-cli"
+path = "src/bin/coossh-cli.rs"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = "0.3"

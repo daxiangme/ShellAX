@@ -68,7 +68,7 @@ pub fn parse_request(body: &str) -> Result<HookReq> {
 
 /// Hook response: (stdout/body, exit code for command hooks).
 pub fn render(agent: Agent, event: &str, effect: Effect, reason: &str) -> (String, i32) {
-    let reason = format!("AgentShell: {reason}");
+    let reason = format!("coossh: {reason}");
     match (agent, event) {
         (Agent::Claude, "PermissionRequest") | (Agent::Codex, "PermissionRequest") => {
             let d = match effect {
@@ -100,17 +100,17 @@ pub fn config_path(agent: Agent, home: &Path) -> PathBuf {
     match agent {
         Agent::Claude => home.join(".claude/settings.json"),
         Agent::Codex => home.join(".codex/hooks.json"),
-        Agent::Grok => home.join(".grok/hooks/agentshell.json"),
+        Agent::Grok => home.join(".grok/hooks/coossh.json"),
     }
 }
 
-pub const MARKER: &str = "agentshell hook";
+pub const MARKER: &str = "coossh-cli hook";
 
 fn handler(agent: Agent, cli: &str, event: &str, timeout: u64) -> Value {
     let cmd = format!("{} hook {} {}", shell_quote(cli), agent.id(), event);
     match agent {
-        Agent::Claude => json!({"type": "command", "command": cmd, "timeout": timeout, "onFailure": "block", "statusMessage": "AgentShell policy check"}),
-        Agent::Codex => json!({"type": "command", "command": cmd, "timeout": timeout, "statusMessage": "AgentShell policy check"}),
+        Agent::Claude => json!({"type": "command", "command": cmd, "timeout": timeout, "onFailure": "block", "statusMessage": "coossh policy check"}),
+        Agent::Codex => json!({"type": "command", "command": cmd, "timeout": timeout, "statusMessage": "coossh policy check"}),
         Agent::Grok => json!({"type": "command", "command": cmd, "timeout": timeout}),
     }
 }
@@ -119,7 +119,7 @@ fn shell_quote(s: &str) -> String {
     if s.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+".contains(c)) { s.into() } else { format!("'{}'", s.replace('\'', "'\\''")) }
 }
 
-fn is_ours(h: &Value) -> bool { h.get("command").and_then(|c| c.as_str()).is_some_and(|c| c.contains(" hook ") && (c.contains("agentshell") || c.contains(MARKER))) }
+fn is_ours(h: &Value) -> bool { h.get("command").and_then(|c| c.as_str()).is_some_and(|c| c.contains(" hook ") && (c.contains("coossh") || c.contains("agentshell") || c.contains(MARKER))) }
 
 /// Remove our handlers from a hooks object (keeps everyone else's).
 fn strip_ours(hooks: &mut serde_json::Map<String, Value>) {
@@ -173,13 +173,13 @@ pub fn install(agent: Agent, home: &Path, cli: &str, timeout: u64, remove: bool,
     if dry_run || !changed { return Ok(InstallReport { path, backup: None, content, changed }); }
     let mut backup = None;
     if let Some(o) = &old {
-        let b = path.with_file_name(format!("{}.agentshell-bak-{}", path.file_name().unwrap().to_string_lossy(), chrono::Local::now().format("%Y%m%d-%H%M%S")));
+        let b = path.with_file_name(format!("{}.coossh-bak-{}", path.file_name().unwrap().to_string_lossy(), chrono::Local::now().format("%Y%m%d-%H%M%S")));
         std::fs::write(&b, o)?;
         backup = Some(b);
     }
     if let Some(d) = path.parent() { std::fs::create_dir_all(d)?; }
     if remove && agent == Agent::Grok { let _ = std::fs::remove_file(&path); } else {
-        let tmp = path.with_extension("agentshell-tmp");
+        let tmp = path.with_extension("coossh-tmp");
         std::fs::write(&tmp, &content)?;
         std::fs::rename(&tmp, &path)?;
     }
@@ -223,8 +223,8 @@ mod tests {
     #[test]
     fn merge_is_idempotent_and_keeps_others() {
         let user = r#"{"model":"x","hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"mine.sh"}]}],"Stop":[{"hooks":[{"type":"command","command":"s.sh"}]}]}}"#;
-        let a = merge(Agent::Claude, Some(user), "/opt/agentshell", 130).unwrap();
-        let b = merge(Agent::Claude, Some(&a), "/opt/agentshell", 130).unwrap();
+        let a = merge(Agent::Claude, Some(user), "/opt/coossh", 130).unwrap();
+        let b = merge(Agent::Claude, Some(&a), "/opt/coossh", 130).unwrap();
         assert_eq!(a, b);
         let v: Value = serde_json::from_str(&a).unwrap();
         assert_eq!(v["model"], "x");
@@ -232,7 +232,7 @@ mod tests {
         assert_eq!(v["hooks"]["PreToolUse"][1]["hooks"][0]["onFailure"], "block");
         let back: Value = serde_json::from_str(&unmerge(&a).unwrap()).unwrap();
         assert_eq!(back, serde_json::from_str::<Value>(user).unwrap());
-        let cx: Value = serde_json::from_str(&merge(Agent::Codex, None, "agentshell", 130).unwrap()).unwrap();
+        let cx: Value = serde_json::from_str(&merge(Agent::Codex, None, "coossh", 130).unwrap()).unwrap();
         assert!(cx["hooks"]["PermissionRequest"].is_array());
         assert!(merge(Agent::Claude, Some("{bad"), "a", 1).is_err());
     }
@@ -242,15 +242,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(home.join(".claude")).unwrap();
         std::fs::write(home.join(".claude/settings.json"), r#"{"theme":"dark"}"#).unwrap();
-        let r = install(Agent::Claude, &home, "/x/agentshell", 130, false, false).unwrap();
+        let r = install(Agent::Claude, &home, "/x/coossh", 130, false, false).unwrap();
         assert!(r.backup.as_ref().unwrap().exists() && installed(Agent::Claude, &home));
-        assert!(!install(Agent::Claude, &home, "/x/agentshell", 130, false, false).unwrap().changed);
+        assert!(!install(Agent::Claude, &home, "/x/coossh", 130, false, false).unwrap().changed);
         install(Agent::Claude, &home, "", 0, true, false).unwrap();
         assert!(!installed(Agent::Claude, &home));
-        install(Agent::Grok, &home, "/x/agentshell", 130, false, false).unwrap();
+        install(Agent::Grok, &home, "/x/coossh", 130, false, false).unwrap();
         assert!(installed(Agent::Grok, &home));
         install(Agent::Grok, &home, "", 0, true, false).unwrap();
-        assert!(!home.join(".grok/hooks/agentshell.json").exists());
+        assert!(!home.join(".grok/hooks/coossh.json").exists());
         let _ = std::fs::remove_dir_all(&home);
     }
 }

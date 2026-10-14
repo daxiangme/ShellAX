@@ -10,3 +10,5 @@ dist-win/
 SHA256SUMS
 .env.local
 *.local.toml
+*.log
+SHA256SUMS.txt

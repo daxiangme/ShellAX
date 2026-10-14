@@ -1,6 +1,6 @@
-//! Local keep-alive daemon (`agentshell daemon`): owns local PTYs so shells / agents survive
+//! Local keep-alive daemon (`coossh-cli daemon`): owns local PTYs so shells / agents survive
 //! the window closing; the GUI attaches over a Unix socket and gets the recent output replayed.
-//! Original AgentShell code (the server/client split follows the idea described in herdr's
+//! Original coossh code (the server/client split follows the idea described in herdr's
 //! public docs, Apache-2.0; no herdr code is copied).
 //!
 //! Wire protocol: client sends one JSON line `Req`, then frames `[kind u8][len u32 BE][data]`.
@@ -37,7 +37,7 @@ struct Pty {
 }
 type Map = Arc<Mutex<HashMap<String, Arc<Mutex<Pty>>>>>;
 
-pub fn socket_path(data_dir: &Path) -> PathBuf { data_dir.join("agentshelld.sock") }
+pub fn socket_path(data_dir: &Path) -> PathBuf { data_dir.join("coosshd.sock") }
 
 fn frame(w: &mut impl Write, kind: u8, data: &[u8]) -> std::io::Result<()> {
     let mut v = Vec::with_capacity(5 + data.len());
@@ -126,7 +126,7 @@ fn spawn(req: &Req, map: Map) -> Result<Arc<Mutex<Pty>>> {
     let mut cmd = CommandBuilder::new(&sh);
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
-    cmd.env("AGENTSHELL_DAEMON", "1");
+    cmd.env("COOSSH_DAEMON", "1");
     let cwd = if req.cwd.is_empty() { std::env::var("HOME").unwrap_or_else(|_| "/".into()) } else { req.cwd.clone() };
     cmd.cwd(cwd);
     let mut child = pair.slave.spawn_command(cmd)?;

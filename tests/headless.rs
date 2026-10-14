@@ -99,7 +99,7 @@ fn scrollback_keeps_history() {
 #[test]
 fn local_zsh_integration_and_history() {
     if !std::path::Path::new("/usr/bin/zsh").exists() { eprintln!("no zsh, skipping"); return; }
-    std::env::set_var("AGENTSHELL_INTEGRATE", "1");
+    std::env::set_var("COOSSH_INTEGRATE", "1");
     let s = local::spawn_local(Size { cols: 100, rows: 30 }, Some("/usr/bin/zsh")).unwrap();
     let t0 = Instant::now();
     while s.prompt_mark.lock().unwrap().is_none() && t0.elapsed() < Duration::from_secs(10) {

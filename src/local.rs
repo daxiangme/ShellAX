@@ -21,11 +21,11 @@ fi
 /// zsh integration via a temporary ZDOTDIR: sources the user's real .zshenv/.zshrc, then adds
 /// precmd/preexec hooks. 133;B is (re)appended in precmd because prompt themes rebuild PS1 there.
 pub const ZSH_ZSHENV: &str = r#"
-__as_orig="${AGENTSHELL_ORIG_ZDOTDIR:-$HOME}"
+__as_orig="${COOSSH_ORIG_ZDOTDIR:-$HOME}"
 [ -f "$__as_orig/.zshenv" ] && . "$__as_orig/.zshenv"
 "#;
 pub const ZSH_ZSHRC: &str = r#"
-__as_orig="${AGENTSHELL_ORIG_ZDOTDIR:-$HOME}"
+__as_orig="${COOSSH_ORIG_ZDOTDIR:-$HOME}"
 ZDOTDIR="$__as_orig"
 [ -f "$__as_orig/.zshrc" ] && . "$__as_orig/.zshrc"
 : ${HISTFILE:=$__as_orig/.zsh_history}
@@ -76,20 +76,20 @@ pub fn spawn_local_in(size: Size, shell: Option<&str>, cwd: Option<&std::path::P
     let integrate = match INTEGRATE.load(std::sync::atomic::Ordering::Relaxed) {
         0 => false,
         2 => true,
-        _ => shell.is_none() || std::env::var("AGENTSHELL_INTEGRATE").is_ok(),
+        _ => shell.is_none() || std::env::var("COOSSH_INTEGRATE").is_ok(),
     };
     let mut cmd = CommandBuilder::new(&sh);
     let mut hist_file = ".bash_history";
     if integrate && sh.ends_with("bash") {
-        let rc = std::env::temp_dir().join("agentshell-bash-integration.sh");
+        let rc = std::env::temp_dir().join("coossh-bash-integration.sh");
         let _ = std::fs::write(&rc, BASH_INTEGRATION);
         cmd.args(["--rcfile", rc.to_str().unwrap_or_default()]);
     } else if integrate && sh.ends_with("zsh") {
-        let dir = std::env::temp_dir().join("agentshell-zsh");
+        let dir = std::env::temp_dir().join("coossh-zsh");
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::write(dir.join(".zshenv"), ZSH_ZSHENV);
         let _ = std::fs::write(dir.join(".zshrc"), ZSH_ZSHRC);
-        if let Ok(z) = std::env::var("ZDOTDIR") { cmd.env("AGENTSHELL_ORIG_ZDOTDIR", z); }
+        if let Ok(z) = std::env::var("ZDOTDIR") { cmd.env("COOSSH_ORIG_ZDOTDIR", z); }
         cmd.env("ZDOTDIR", dir.as_os_str());
         hist_file = ".zsh_history";
     }

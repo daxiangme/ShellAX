@@ -56,7 +56,7 @@ pub fn resume_command(agent: &str) -> Option<&'static str> {
 }
 
 /// Stable tmux session name for a pane.
-pub fn new_session_name() -> String { format!("agentshell-{}", &uuid_like()[..8]) }
+pub fn new_session_name() -> String { format!("coossh-{}", &uuid_like()[..8]) }
 pub fn uuid_like() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let n = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
@@ -91,7 +91,7 @@ mod tests {
         let l = LayoutSave { version: 1, saved_at: "x".into(), active: 1, tabs: vec![
             NodeSave::Leaf { pane: PaneSave::Local { cwd: "/tmp".into(), daemon_id: Some("d1".into()), resume: Some("claude --continue".into()) } },
             NodeSave::Split { vertical: true, ratio: 0.3, a: Box::new(NodeSave::Leaf { pane: PaneSave::Local { cwd: String::new(), daemon_id: None, resume: None } }),
-                b: Box::new(NodeSave::Leaf { pane: PaneSave::Ssh { target: SshTarget { host: "h".into(), port: 22, user: "u".into(), tmux: Some("agentshell-1".into()), ..Default::default() }, resume: None } }) },
+                b: Box::new(NodeSave::Leaf { pane: PaneSave::Ssh { target: SshTarget { host: "h".into(), port: 22, user: "u".into(), tmux: Some("coossh-1".into()), ..Default::default() }, resume: None } }) },
         ], names: vec![Some("构建 · web".into()), None] };
         let p = std::env::temp_dir().join(format!("stp-layout-{}.json", std::process::id()));
         save(&p, &l).unwrap();
@@ -102,6 +102,6 @@ mod tests {
         let _ = std::fs::remove_file(p);
         assert_eq!(resume_command("Claude Code"), Some("claude --continue"));
         assert_eq!(resume_command("Codex"), Some("codex resume --last"));
-        assert!(new_session_name().starts_with("agentshell-"));
+        assert!(new_session_name().starts_with("coossh-"));
     }
 }

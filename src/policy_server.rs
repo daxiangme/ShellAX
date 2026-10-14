@@ -1,5 +1,5 @@
 //! Local policy service (PRD 6.9): a tiny HTTP server on 127.0.0.1 that answers permission
-//! questions from external agents' hooks (via the `agentshell` CLI or Claude Code `http` hooks)
+//! questions from external agents' hooks (via the `coossh` CLI or Claude Code `http` hooks)
 //! and from remote hosts through an SSH reverse port forward. Every request needs the bearer
 //! token from the endpoint file (0600). "Ask" decisions are forwarded to the UI as an
 //! [`Approval`] and resolved by the user, by timeout (`agents.on_timeout`), or passed back as
@@ -69,7 +69,7 @@ pub struct Endpoint { pub url: String, pub token: String, pub pid: u32, #[serde(
 pub fn endpoint_path(data_dir: &Path) -> PathBuf { data_dir.join("policy-endpoint.json") }
 
 pub fn read_endpoint(data_dir: &Path) -> Option<Endpoint> {
-    if let (Ok(url), Ok(token)) = (std::env::var("AGENTSHELL_URL"), std::env::var("AGENTSHELL_TOKEN")) { return Some(Endpoint { url, token, pid: 0, host: std::env::var("AGENTSHELL_HOST").unwrap_or_default() }); }
+    if let (Ok(url), Ok(token)) = (std::env::var("COOSSH_URL"), std::env::var("COOSSH_TOKEN")) { return Some(Endpoint { url, token, pid: 0, host: std::env::var("COOSSH_HOST").unwrap_or_default() }); }
     serde_json::from_str(&std::fs::read_to_string(endpoint_path(data_dir)).ok()?).ok()
 }
 
@@ -153,8 +153,8 @@ fn handle(stream: TcpStream, sh: &Shared) -> Result<()> {
             match k.trim().to_ascii_lowercase().as_str() {
                 "content-length" => len = v.parse().unwrap_or(0),
                 "authorization" => auth = v.strip_prefix("Bearer ").unwrap_or(&v).to_string(),
-                "x-agentshell-token" => auth = v,
-                "x-agentshell-host" => host_hdr = v,
+                "x-coossh-token" => auth = v,
+                "x-coossh-host" => host_hdr = v,
                 _ => {}
             }
         }
@@ -163,7 +163,7 @@ fn handle(stream: TcpStream, sh: &Shared) -> Result<()> {
     let mut body = vec![0u8; len];
     r.read_exact(&mut body)?;
     let body = String::from_utf8_lossy(&body).to_string();
-    if method == "GET" && path == "/v1/health" { return Ok(respond(stream, "200 OK", r#"{"ok":true,"service":"agentshell-policy"}"#, &[])?); }
+    if method == "GET" && path == "/v1/health" { return Ok(respond(stream, "200 OK", r#"{"ok":true,"service":"coossh-policy"}"#, &[])?); }
     if !ct_eq(&auth, &sh.token) {
         let _ = sh.audit.append("policy.auth_fail", "policy", &format!("path={path}"));
         return Ok(respond(stream, "401 Unauthorized", r#"{"error":"bad token"}"#, &[])?);
@@ -202,7 +202,7 @@ fn handle(stream: TcpStream, sh: &Shared) -> Result<()> {
         if let Some(ev) = it.next().filter(|e| !e.is_empty()) { req.event = ev.to_string(); }
         let (eff, _risk, reason) = sh.decide_peer(agent.id(), &req, &host_hdr, true, Some(&stream));
         let (out, code) = hooks::render(agent, &req.event, eff, &reason);
-        return Ok(respond(stream, "200 OK", &out, &[("X-AgentShell-Exit", code.to_string())])?);
+        return Ok(respond(stream, "200 OK", &out, &[("X-coossh-Exit", code.to_string())])?);
     }
     Ok(respond(stream, "404 Not Found", "{}", &[])?)
 }
@@ -213,24 +213,24 @@ fn remote_op(sh: &Shared, path: &str, body: &str, host_hdr: &str, peer: Option<&
     #[derive(Deserialize, Default)]
     #[serde(default)]
     struct Op { principal: String, session: String, host: String, command: String, local: String, remote: String, timeout_secs: u64 }
-    let Some(ops) = sh.ops.clone() else { return ("501 Not Implemented", json!({"error": "remote operations need the AgentShell app"})) };
+    let Some(ops) = sh.ops.clone() else { return ("501 Not Implemented", json!({"error": "remote operations need the coossh app"})) };
     let o: Op = match serde_json::from_str(body) { Ok(o) => o, Err(e) => return ("400 Bad Request", json!({"error": e.to_string()})) };
     let principal = if o.principal.is_empty() { "cli".to_string() } else { o.principal.clone() };
     if path == "/v1/hosts" {
         let hs = ops.hosts();
-        let _ = sh.audit.append("agentshell.hosts", &principal, &format!("n={}", hs.len()));
+        let _ = sh.audit.append("coossh.hosts", &principal, &format!("n={}", hs.len()));
         return ("200 OK", json!({"hosts": hs}));
     }
     // a caller on a remote host (reverse forward) must not move files on the App's machine
     if !host_hdr.is_empty() && path != "/v1/exec" { return ("403 Forbidden", json!({"error": "upload/download are only available to local callers"})); }
     if o.host.is_empty() { return ("400 Bad Request", json!({"error": "host is required"})); }
     let (action, command, kind) = match path {
-        "/v1/exec" => ("exec", o.command.clone(), "agentshell.exec"),
-        "/v1/upload" => ("write", format!("cp {} {}", crate::ssh::sh_quote(&o.local), crate::ssh::sh_quote(&o.remote)), "agentshell.upload"),
-        _ => ("exec", format!("cat {}", crate::ssh::sh_quote(&o.remote)), "agentshell.download"),
+        "/v1/exec" => ("exec", o.command.clone(), "coossh.exec"),
+        "/v1/upload" => ("write", format!("cp {} {}", crate::ssh::sh_quote(&o.local), crate::ssh::sh_quote(&o.remote)), "coossh.upload"),
+        _ => ("exec", format!("cat {}", crate::ssh::sh_quote(&o.remote)), "coossh.download"),
     };
     if command.trim().is_empty() || (path != "/v1/exec" && (o.local.is_empty() || o.remote.is_empty())) { return ("400 Bad Request", json!({"error": "missing command / local / remote"})); }
-    let req = HookReq { event: "agentshell".into(), tool: kind.trim_start_matches("agentshell.").into(), command: command.clone(), action: action.into(), cwd: String::new(), session: o.session.clone() };
+    let req = HookReq { event: "coossh".into(), tool: kind.trim_start_matches("coossh.").into(), command: command.clone(), action: action.into(), cwd: String::new(), session: o.session.clone() };
     let (eff, risk, reason) = sh.decide_peer(&principal, &req, &o.host, true, peer);
     // the caller may have gone away while the card was up: never run on its behalf
     if eff == Effect::Allow && peer.is_some_and(peer_closed) {
@@ -339,7 +339,7 @@ pub fn post(url: &str, path: &str, token: &str, host_hdr: Option<&str>, body: &s
     let mut s = TcpStream::connect(addr)?;
     s.set_read_timeout(Some(timeout))?;
     let mut req = format!("POST {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
-    if let Some(h) = host_hdr { req.push_str(&format!("X-AgentShell-Host: {h}\r\n")); }
+    if let Some(h) = host_hdr { req.push_str(&format!("X-coossh-Host: {h}\r\n")); }
     req.push_str("\r\n");
     s.write_all(req.as_bytes())?;
     s.write_all(body.as_bytes())?;
@@ -347,7 +347,7 @@ pub fn post(url: &str, path: &str, token: &str, host_hdr: Option<&str>, body: &s
     s.read_to_string(&mut resp)?;
     let (head, body) = resp.split_once("\r\n\r\n").ok_or_else(|| anyhow!("bad HTTP response"))?;
     let status = head.split_whitespace().nth(1).and_then(|x| x.parse().ok()).unwrap_or(0);
-    let exit = head.lines().find_map(|l| l.strip_prefix("X-AgentShell-Exit: ")).and_then(|x| x.trim().parse().ok());
+    let exit = head.lines().find_map(|l| l.strip_prefix("X-coossh-Exit: ")).and_then(|x| x.trim().parse().ok());
     Ok((status, body.to_string(), exit))
 }
 
@@ -467,7 +467,7 @@ mod tests {
         let calls = ops.0.lock().unwrap().clone();
         assert_eq!(calls, vec!["exec web1 uptime".to_string(), "up web1 /tmp/a /tmp/b".into()]);
         let log = std::fs::read_to_string(dir.join("audit.jsonl")).unwrap();
-        assert!(log.contains("agentshell.exec") && log.contains("agentshell.upload") && log.contains("agentshell.hosts"));
+        assert!(log.contains("coossh.exec") && log.contains("coossh.upload") && log.contains("coossh.hosts"));
     }
 
     #[test]

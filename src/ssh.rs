@@ -241,7 +241,7 @@ impl Conn {
 /// Remote command for a persistent tmux pane (status bar hidden so it looks like a plain shell).
 pub fn tmux_command(name: &str) -> String {
     let n = sh_quote(name);
-    format!("if command -v tmux >/dev/null 2>&1; then exec tmux new-session -A -s {n} \\; set-option status off; else echo '[agentshell] tmux not found, plain shell'; exec \"$SHELL\" -l; fi")
+    format!("if command -v tmux >/dev/null 2>&1; then exec tmux new-session -A -s {n} \\; set-option status off; else echo '[coossh] tmux not found, plain shell'; exec \"$SHELL\" -l; fi")
 }
 
 pub fn sh_quote(s: &str) -> String {
@@ -515,16 +515,16 @@ async fn run_shell(target: &SshTarget, prompts: &Prompts, s: &Arc<Session>, out_
                 Ok(rport) => {
                     let host = if target.host.is_empty() { target.label() } else { target.host.clone() };
                     let body = serde_json::json!({"url": format!("http://127.0.0.1:{rport}"), "token": token, "pid": 0, "host": host}).to_string();
-                    let ok = conn.write_file(".local/share/agentshell/policy-endpoint.json", body.as_bytes()).await.is_ok();
-                    let _ = out_tx.send(format!("\x1b[2m[agentshell] {}\x1b[0m\r\n", tf(if ok { "ssh.remote_hooks_on" } else { "ssh.remote_hooks_write_failed" }, &[("port", &rport)])).into_bytes());
+                    let ok = conn.write_file(".local/share/coossh/policy-endpoint.json", body.as_bytes()).await.is_ok();
+                    let _ = out_tx.send(format!("\x1b[2m[coossh] {}\x1b[0m\r\n", tf(if ok { "ssh.remote_hooks_on" } else { "ssh.remote_hooks_write_failed" }, &[("port", &rport)])).into_bytes());
                 }
-                Err(e) => { let _ = out_tx.send(format!("\x1b[33m[agentshell] {}\x1b[0m\r\n", tf("ssh.remote_hooks_failed", &[("err", &e)])).into_bytes()); }
+                Err(e) => { let _ = out_tx.send(format!("\x1b[33m[coossh] {}\x1b[0m\r\n", tf("ssh.remote_hooks_failed", &[("err", &e)])).into_bytes()); }
             }
         }
     }
     let ch = conn.handle.channel_open_session().await?;
     if target.agent_forward { let _ = ch.agent_forward(false).await; }
-    if target.remote_hooks { let _ = ch.set_env(false, "AGENTSHELL_HOST", target.host.clone()).await; }
+    if target.remote_hooks { let _ = ch.set_env(false, "COOSSH_HOST", target.host.clone()).await; }
     let sz = s.size();
     ch.request_pty(false, "xterm-256color", sz.cols as u32, sz.rows as u32, 0, 0, &[]).await?;
     match &target.tmux {

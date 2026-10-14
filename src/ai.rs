@@ -186,7 +186,7 @@ pub fn chat(p: &Provider, key: &str, system: &str, user: &str, max_tokens: Optio
 }
 
 /// System prompt for the free-form assistant panel.
-pub const CHAT_SYSTEM_PROMPT: &str = "You are the AgentShell terminal assistant. Answer concisely. When you propose shell commands put each in a fenced code block; never claim you ran anything. Terminal context, if given, is already redacted.";
+pub const CHAT_SYSTEM_PROMPT: &str = "You are the coossh terminal assistant. Answer concisely. When you propose shell commands put each in a fenced code block; never claim you ran anything. Terminal context, if given, is already redacted.";
 /// System prompt for "explain this failure".
 pub const EXPLAIN_SYSTEM_PROMPT: &str = "You explain why a shell command failed. Given the command, its exit status and the (redacted) tail of the terminal output, explain the most likely cause in 2-5 sentences and suggest a fix command in a fenced code block. Do not run anything.";
 

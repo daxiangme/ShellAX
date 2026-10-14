@@ -1,4 +1,4 @@
-//! Organization-managed policy (PRD 6.5 P2): `/etc/agentshell/managed-policy.yaml`, read-only,
+//! Organization-managed policy (PRD 6.5 P2): `/etc/coossh/managed-policy.yaml`, read-only,
 //! highest priority. The app never writes it; user settings cannot loosen it:
 //! - `hard_deny` globs deny matching commands for every principal (before user rules),
 //! - `mode.allowed` restricts permission modes (e.g. no Auto),
@@ -15,7 +15,7 @@ use serde::Deserialize;
 
 use crate::policy::{glob, Mode, Risk};
 
-pub const DEFAULT_PATH: &str = "/etc/agentshell/managed-policy.yaml";
+pub const DEFAULT_PATH: &str = "/etc/coossh/managed-policy.yaml";
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 #[serde(default)]
@@ -48,8 +48,8 @@ pub struct AuditRule { pub required: bool, pub retention_days: Option<u64> }
 
 static CURRENT: RwLock<Option<Arc<Managed>>> = RwLock::new(None);
 
-/// Policy file path: `AGENTSHELL_MANAGED_POLICY` (tests / non-default installs) or the default.
-pub fn path() -> PathBuf { std::env::var_os("AGENTSHELL_MANAGED_POLICY").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(DEFAULT_PATH)) }
+/// Policy file path: `COOSSH_MANAGED_POLICY` (tests / non-default installs) or the default.
+pub fn path() -> PathBuf { std::env::var_os("COOSSH_MANAGED_POLICY").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(DEFAULT_PATH)) }
 
 pub fn parse(text: &str, path: &Path) -> Managed {
     match serde_yaml::from_str::<Managed>(text) {

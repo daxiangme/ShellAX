@@ -4,13 +4,13 @@
 //! Portions of this file are derived from herdr `src/detect/manifest.rs`
 //! (https://github.com/herdrdev/herdr, commit dc6b6e5f), Copyright (c) herdr contributors,
 //! licensed under the Apache License, Version 2.0. See THIRD_PARTY_NOTICES.md.
-//! Modifications by AgentShell (2026-10-13):
+//! Modifications by coossh (2026-10-13):
 //!   - kept only the manifest schema, gate compilation/matching and region selection;
 //!   - removed remote manifest updates, overrides, explain/diagnostics, version gating;
 //!   - agents are keyed by manifest id (string) instead of herdr's `Agent` enum;
 //!   - added `identify()` (process name / command word / title hint) and `AgentInfo`.
 //!
-//! Everything outside the functions marked "[herdr]" is original AgentShell code.
+//! Everything outside the functions marked "[herdr]" is original coossh code.
 
 use crate::i18n::t;
 use regex::Regex;
@@ -159,7 +159,7 @@ pub fn display_name(id: &str) -> &str {
     match id { "claude" => "Claude", "codex" => "Codex", "grok" => "Grok", other => other }
 }
 
-/// Identify which agent (manifest index) is running. Original AgentShell logic:
+/// Identify which agent (manifest index) is running. Original coossh logic:
 /// 1) local PTY foreground process name (e.g. "claude", "codex", "grok");
 /// 2) first word of the last command the user submitted (works over SSH);
 /// 3) an OSC title that names the agent.

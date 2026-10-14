@@ -1,6 +1,21 @@
-# ssh-term-proto
+# coossh
 
-> **当前状态（第 11 轮 / 对应 PRD v1.0 第 11 轮同步，2026-10-13）**：PROGRESS.md 1–11 全部完成，设置页没有“即将支持”项。逐项测试结果见 `TEST_REPORT.md`；下面 v2–v7 各节是历史记录，其中“只有界面 / 即将支持”的说法已过时。
+coossh 是用 Rust + GPUI 写的 SSH 终端，内置面向 AI Agent 的权限管控（原型阶段曾叫 AgentShell / ssh-term-proto）。
+
+> **当前状态（第 16 轮 / PRD v1.4，2026-10-14）**：已完成 PRD 5.23（主机管理器、颜色标签、窗口控件、标签页菜单），产品改名为 coossh。
+
+## 文档
+- `docs/PRD.md`：产品需求文档（当前版本），历史版本在 `docs/prd-history/`
+- `docs/PROGRESS.md`：开发进度（每轮记录，可据此续做）
+- `docs/TEST_REPORT.md`：测试报告；`docs/WINDOWS_TEST.md`：Windows 测试说明
+- `docs/screenshots/`：截图（只保留最终版：`screenshot-523-*`、`screenshot-macos-*`、`screenshot-final-*`；下文提到的 v2–v11 截图已删除，在 git 历史中可找回）
+- `THIRD_PARTY_NOTICES.md`：第三方代码、依赖与字体许可
+
+## 程序与目录
+- GUI：`coossh`（Windows `coossh.exe`）；CLI：`coossh-cli`（hook、check、serve、hosts、exec 等子命令）
+- 配置：`~/.config/coossh/config.toml`（Windows `%APPDATA%\coossh`）；数据：`~/.local/share/coossh`（Windows `%LOCALAPPDATA%\coossh`）
+- 首次启动会把旧的 `agentshell` / `AgentShell` 目录改名为新目录（新目录已存在时不动）；钥匙串里旧 `agentshell` 服务的凭据在首次读取时复制过来；配置中的 `AgentShell Midnight/Daylight` 主题名自动改为 `coossh …`；环境变量前缀由 `AGENTSHELL_` 改为 `COOSSH_`。已安装的旧 Agent hook 在重新安装时会被识别并替换。
+- Windows 安装包：`tools/package_win.sh` → `/workspace/dist-win/coossh-Setup-x64.exe`、`coossh-portable-x64.zip`、`SHA256SUMS.txt`
 
 ## 构建与测试（第 11 轮）
 ```bash
@@ -20,8 +35,8 @@ tools/tray_check.sh                        # 私有 dbus-daemon + SNI watcher，
 注意：DISPLAY=:2 是 1920×1200，截图缩小查看时 xdotool 坐标要按原始分辨率换算。
 
 ## 第 10–11 轮新增
-- 权限：审批卡“本会话总是允许 / 拒绝并说明原因”；调用方（hook / agentshell CLI）断开时自动撤销审批卡、按拒绝处理、迟到的允许不执行，审计 `caller disconnected, approval withdrawn`；组织托管策略 `/etc/agentshell/managed-policy.yaml`；write_to_pty 权限（`agents.write_to_pty`）。
-- `agentshell hosts/exec/upload/download`：借 App 的连接与凭据，全部过策略引擎。
+- 权限：审批卡“本会话总是允许 / 拒绝并说明原因”；调用方（hook / coossh CLI）断开时自动撤销审批卡、按拒绝处理、迟到的允许不执行，审计 `caller disconnected, approval withdrawn`；组织托管策略 `/etc/coossh/managed-policy.yaml`；write_to_pty 权限（`agents.write_to_pty`）。
+- `coossh-cli hosts/exec/upload/download`：借 App 的连接与凭据，全部过策略引擎。
 - 内置 AI：逐条审批执行、结果回传模型；首次发送提示；按主机禁止读取输出。
 - 网络：`ssh.proxy` / `ssh.no_proxy`（HTTP CONNECT / SOCKS5），SSH、AI 请求、更新检查都走。
 - 终端：正则搜索、矩形选择、URL 识别、OSC 52、关键字高亮（`[[terminal.highlights]]`）；拖标签到面板边缘分屏。
@@ -33,18 +48,18 @@ tools/tray_check.sh                        # 私有 dbus-daemon + SNI watcher，
 - 端口转发图示：每条规则显示 监听 → SSH 服务器 → 目标。
 - 关键字触发通知：`[[notify.keywords]] pattern = "…" title = "…"`（默认构建/部署结果、OOM/段错误）。
 - Sixel / Kitty 图形：程序输出的图片直接显示在终端里。
-- 录制回放：Ctrl+Shift+R 录制当前面板为 asciicast v2（默认脱敏，`[recording] redact / dir`），命令面板「回放录制」或 `agentshell play file.cast [--speed N] [--idle S]`。
+- 录制回放：Ctrl+Shift+R 录制当前面板为 asciicast v2（默认脱敏，`[recording] redact / dir`），命令面板「回放录制」或 `coossh-cli play file.cast [--speed N] [--idle S]`。
 - 广播输入：Ctrl+Shift+B 把键入同时发到当前标签所有面板；面板红框提示；含生产主机先确认。
 - 布局快照：自动保留最近 10 份，命令面板「保存布局快照」「回滚布局快照…」。
 - 快速启动：Ctrl+Shift+O 选目录 + 预设布局（单/左右/主+两侧/2×2/Agent + tail -F 日志）。
-- 审计默认目录遵守 `XDG_DATA_HOME`；测试钩子 `AGENTSHELL_TEST_SLOW_WITHDRAW=1`（撤销的审批卡仍显示，用于验证迟到的允许不执行）。
+- 审计默认目录遵守 `XDG_DATA_HOME`；测试钩子 `COOSSH_TEST_SLOW_WITHDRAW=1`（撤销的审批卡仍显示，用于验证迟到的允许不执行）。
 
 ## 第 15 轮新增：macOS 风格视觉打磨（PRD v1.3 5.22）
 - 标题栏：红绿灯在左上角，标签并入标题栏；侧边栏为 Finder 源列表风格，左下角是带 tooltip 的图标行。
 - Safari 式标签；1px 分隔线，悬停或拖动时变粗；UI 用系统字体（终端字体不变）；圆角 6/10，柔和阴影。
 - 设置页仿 macOS 系统设置；弹层半透明，有淡入加上浮动画；强调色跟随系统。
 - 新增内置主题 macOS Light / macOS Dark，并设为默认。
-- 环境变量：`AGENTSHELL_SERVER_DECORATIONS=1` 使用系统标题栏，`AGENTSHELL_NO_ANIM=1` 关闭动画，`AGENTSHELL_NO_SYSTEM_ACCENT=1` 不跟随系统强调色。
+- 环境变量：`COOSSH_SERVER_DECORATIONS=1` 使用系统标题栏，`COOSSH_NO_ANIM=1` 关闭动画，`COOSSH_NO_SYSTEM_ACCENT=1` 不跟随系统强调色。
 - 截图：screenshot-macos-{light,dark}-{main,sidebar,settings,ctxmenu,palette,sftp-tab}.png，以及 screenshot-macos-before-after.png
 
 ## 第 14 轮新增：SFTP 显示模式（PRD v1.2 5.21）
@@ -66,14 +81,14 @@ tools/tray_check.sh                        # 私有 dbus-daemon + SNI watcher，
 
 ## v8 新增 / 变化
 - 配置写回保留注释、空行和键顺序（toml_edit 合并；解析失败才整文件重写）。
-- 光标闪烁：软件渲染器（llvmpipe 等）下光标常亮，闪烁时整窗软件重绘约占 23% CPU；`AGENTSHELL_FORCE_BLINK=1` 可强制闪烁。硬件 GPU 下行为不变。
+- 光标闪烁：软件渲染器（llvmpipe 等）下光标常亮，闪烁时整窗软件重绘约占 23% CPU；`COOSSH_FORCE_BLINK=1` 可强制闪烁。硬件 GPU 下行为不变。
 - 外观：窗口透明度（透明窗口背景 + 终端区 alpha）、界面字号（gpui-component 控件和默认文本）。
 - SSH：keyboard-interactive（2FA / PAM）认证；连接前先用 none 探测服务器提供的方式，不再对不接受密码的主机弹密码框；2FA 回答不保存。
-- `agentshell status | head` 不再因 EPIPE panic。
+- `coossh-cli status | head` 不再因 EPIPE panic。
 - clippy 全部清零。
 
 ## 已知问题（v8，历史）
-- 未实现的 PRD 项：`agentshell exec/hosts/upload/download` 凭据桥；内置 AI 对话中的 run_command 工具调用与逐条审批；审批卡“本会话总是允许 / 拒绝并说明原因”；终端搜索、矩形选择、纯文本 URL 识别、OSC 52；审计过滤；AI 首次发送提示与按主机禁读；HTTP/SOCKS 出站代理；托盘；SFTP 内置编辑。详见 TEST_REPORT.md 第 6 节、PRD 9.2 Q19–Q23。
+- 未实现的 PRD 项：`coossh-cli exec/hosts/upload/download` 凭据桥；内置 AI 对话中的 run_command 工具调用与逐条审批；审批卡“本会话总是允许 / 拒绝并说明原因”；终端搜索、矩形选择、纯文本 URL 识别、OSC 52；审计过滤；AI 首次发送提示与按主机禁读；HTTP/SOCKS 出站代理；托盘；SFTP 内置编辑。详见 TEST_REPORT.md 第 6 节、PRD 9.2 Q19–Q23。
 - 透明度在本机（llvmpipe + Xfwm 合成）截图中看不到效果，需在真 GPU 上复测。
 - 软件渲染下空闲 RSS 约 169MB；release 二进制 82MB（strip 后 61MB），发布需 strip。
 - IME 预编辑没有在本机实测（无输入法守护进程）。
@@ -113,14 +128,14 @@ src/
             键盘 → 字节映射（Enter/Backspace/方向键 含 APP_CURSOR/Ctrl+字母/Alt 前缀）；
              点击面板切换焦点；根据窗口 viewport 计算 cols/rows 并 resize
   theme.rs   主题系统：TOML 主题加载、Alacritty 导入、ANSI 16/256/真彩色映射
-  config.rs  ~/.config/agentshell/config.toml（字体族/回退链/字号/行高/连字、默认主题）
+  config.rs  ~/.config/coossh/config.toml（字体族/回退链/字号/行高/连字、默认主题）
   suggest.rs 历史自动建议引擎：History（去重、敏感过滤、落盘）+ InputTracker（OSC 133 / 按键+回显校验）
   termview.rs（v4）终端面板：GridLayer（可缓存的网格层，行级 damage）+ CursorLayer（光标和建议）+ 输入/鼠标/剪贴板/滚动
   agent.rs   （v4）Agent 状态识别，移植自 herdr manifest 引擎；agents/*.toml 为 herdr 原样规则
   layout.rs  （v4）分屏二叉树；auto_direction 移植自 zellij
   hosts.rs   （v4）~/.ssh/config 解析和主机条目
   boxdraw.rs （v4）框线、方块、Powerline 字形的像素栅格化
-themes/            内置主题：catppuccin-mocha/latte（MIT）、agentshell-midnight/daylight（自有）
+themes/            内置主题：catppuccin-mocha/latte（MIT）、coossh-midnight/daylight（自有）
 scripts/fonts.sh   中文/emoji/Nerd 图标/Powerline/连字测试文本
 scripts/colors.sh  打印 16/256/真彩色和粗体、暗淡、反色样例
 tests/headless.rs  无界面测试（见下）
@@ -133,7 +148,7 @@ cargo build
 # 测试用 sshd（已在本机配置：用户 sshtest，端口 2222，仅监听 127.0.0.1）
 sudo /usr/sbin/sshd -f $PWD/testenv/sshd_config -E $PWD/testenv/sshd.log
 SSH_HOST=127.0.0.1 SSH_PORT=2222 SSH_USER=sshtest SSH_KEY=$PWD/testenv/client_ed25519 \
-  DISPLAY=:2 ./target/debug/ssh-term-proto
+  DISPLAY=:2 ./target/debug/coossh
 ```
 环境变量：`SSH_HOST`（默认 127.0.0.1）、`SSH_PORT`（22）、`SSH_USER`（$USER）、`SSH_KEY`（~/.ssh/id_ed25519）、`TERM_FONT`（DejaVu Sans Mono）。
 
@@ -192,7 +207,7 @@ Linux 构建依赖（Debian 13 上实际装的）：`libxkbcommon-dev libxkbcomm
 - 回退链：`Font.fallbacks`，Linux 默认 `JetBrains Mono → Noto Sans Mono CJK SC → Symbols Nerd Font Mono → Noto Color Emoji → DejaVu Sans Mono`；macOS、Windows 默认值见 `config.rs`（未实测）。
 - 连字：`calt/liga/dlig = 0`，`->`、`=>`、`!=` 按原字符显示。
 - 宽字符：`WIDE_CHAR` 单独排版，在 2 格槽位内居中；`WIDE_CHAR_SPACER` 跳过；零宽字符拼到前一个字形。
-- 配置示例（`~/.config/agentshell/config.toml`）：
+- 配置示例（`~/.config/coossh/config.toml`）：
   ```toml
   theme = "system"            # 或主题名
   [font]
@@ -206,7 +221,7 @@ Linux 构建依赖（Debian 13 上实际装的）：`libxkbcommon-dev libxkbcomm
 - 本机为测试装了 Symbols Nerd Font（`~/.local/share/fonts/nerd/`，MIT 字体，内含 CC BY 4.0 等来源的图标）；没有打包进原型。
 
 ### 主题
-- `themes/*.toml` 内置 4 个（Catppuccin Mocha/Latte 为 MIT；AgentShell Midnight/Daylight 为本项目原创）。用户主题放 `~/.config/agentshell/themes/`，原生格式或 Alacritty 配色（自动识别）都行。
+- `themes/*.toml` 内置 4 个（Catppuccin Mocha/Latte 为 MIT；coossh Midnight/Daylight 为本项目原创）。用户主题放 `~/.config/coossh/themes/`，原生格式或 Alacritty 配色（自动识别）都行。
 - 切换：Ctrl+Shift+T 循环、点状态栏主题名循环、点「系统」跟随系统明暗（`observe_window_appearance`，运行时切换在 Xvfb 下无法实测）。
 
 ### 历史自动建议
@@ -242,12 +257,12 @@ Linux 构建依赖（Debian 13 上实际装的）：`libxkbcommon-dev libxkbcomm
 ```bash
 cargo build --release
 SSH_PORT=2222 SSH_USER=sshtest SSH_KEY=$PWD/testenv/client_ed25519 \
-  AGENTSHELL_KNOWN_HOSTS=$PWD/testenv/known_hosts_demo \
-  AGENTSHELL_SSH_CONFIG=$PWD/testenv/ssh_config \
-  PERF_LOG=1 DISPLAY=:2 ./target/release/ssh-term-proto
+  COOSSH_KNOWN_HOSTS=$PWD/testenv/known_hosts_demo \
+  COOSSH_SSH_CONFIG=$PWD/testenv/ssh_config \
+  PERF_LOG=1 DISPLAY=:2 ./target/release/coossh
 ```
-- `AGENTSHELL_KNOWN_HOSTS`：known_hosts 路径（默认 `~/.ssh/known_hosts`）。删掉这个文件就会再次弹出确认框。
-- `AGENTSHELL_SSH_CONFIG`：ssh_config 路径（默认 `~/.ssh/config`）。`testenv/ssh_config` 是测试用的。
+- `COOSSH_KNOWN_HOSTS`：known_hosts 路径（默认 `~/.ssh/known_hosts`）。删掉这个文件就会再次弹出确认框。
+- `COOSSH_SSH_CONFIG`：ssh_config 路径（默认 `~/.ssh/config`）。`testenv/ssh_config` 是测试用的。
 - `PERF_LOG=1`：每秒在 stderr 输出 `grid_paints/s rows_built/s cursor_paints/s`，全为 0 时不输出。
 - `NO_SSH=1`：启动时只开本地面板。
 - config.toml 新增顶层键 `known_hosts`、`ssh_config` 和 `[[hosts]]` 数组（字段 name/host/user/port/identity_file），见 `src/config.rs` 文件头。
@@ -311,12 +326,12 @@ SSH_PORT=2222 SSH_USER=sshtest SSH_KEY=$PWD/testenv/client_ed25519 \
 新增文件：`src/config.rs`（重写：完整设置结构、点分路径读写、保存）、`src/settings_view.rs`、`src/palette.rs`、`src/host_dialog.rs`、`src/panels.rs`、`src/actions.rs`、`src/ui.rs`、`src/policy.rs`、`src/audit.rs`。新依赖：`gpui-component 0.7.3`、`gpui-kit-assets 0.7.3`（Lucide 图标，ISC）、`sha2`、`chrono`、`serde_json`。
 
 **真正可用**
-- 设置读写 `~/.config/agentshell/config.toml`（`AGENTSHELL_CONFIG` 可换路径），改动立即写回。立即生效：主题/跟随系统/浅深色主题、字体/回退链/字号/行高/连字、光标样式/闪烁、响铃（闪烁边框）、选中即复制、多行粘贴确认、鼠标上报、命令建议开关/接受键/过滤正则、Agent 识别开关、读取 ssh_config/默认用户端口（主机列表）、快捷键改绑。新会话生效：默认 Shell、回滚行数、Shell 集成开关、本地/远程历史、keepalive、连接超时、known_hosts 路径、未知主机密钥策略（询问/严格/自动接受）。
+- 设置读写 `~/.config/coossh/config.toml`（`COOSSH_CONFIG` 可换路径），改动立即写回。立即生效：主题/跟随系统/浅深色主题、字体/回退链/字号/行高/连字、光标样式/闪烁、响铃（闪烁边框）、选中即复制、多行粘贴确认、鼠标上报、命令建议开关/接受键/过滤正则、Agent 识别开关、读取 ssh_config/默认用户端口（主机列表）、快捷键改绑。新会话生效：默认 Shell、回滚行数、Shell 集成开关、本地/远程历史、keepalive、连接超时、known_hosts 路径、未知主机密钥策略（询问/严格/自动接受）。
 - 新建/编辑/删除主机，写入 `[[hosts]]`（含 group、production、auth、jump 字段）。
 - 命令面板 Ctrl+Shift+P：28 个动作和所有主机的模糊搜索，↑↓/Enter/Esc。
 - 状态栏权限模式按钮：点击循环 Ask → Plan → Auto，写配置并记审计。
 - 权限规则编辑器 + 测试器（`policy::decide`，有单元测试）。
-- 审计日志：SHA-256 哈希链 JSONL，查看器、校验、导出（导出到 `~/agentshell-audit-<时间>.jsonl`）。
+- 审计日志：SHA-256 哈希链 JSONL，查看器、校验、导出（导出到 `~/coossh-audit-<时间>.jsonl`）。
 - 凭据页：只读扫描 `~/.ssh/id_*` 并显示 SHA-256 指纹；检测 SSH_AUTH_SOCK。外部 Agent 页：只读检测 hook 配置。关于页：显示 THIRD_PARTY_NOTICES。
 
 **只有界面（标“即将支持”）**：界面语言、更新、透明度、界面字号、跳板机、加密算法偏好、Agent 转发、钥匙串、ssh-agent 认证、生成/导入密钥、全部内置 AI 设置、Agent 通知/审批超时/一键安装 hook、生产主机确认、审计保留/记录命令、会话持久化/布局恢复/关闭确认/自动重连、通知、响铃声音、SFTP 远端、端口转发、密码/agent 认证。这些设置能改、会保存，但没有效果。权限模式和规则目前**不拦截任何操作**（还没有内置 AI 和 agent bridge）。
@@ -336,10 +351,10 @@ SSH_PORT=2222 SSH_USER=sshtest SSH_KEY=$PWD/testenv/client_ed25519 \
 ### 内置 AI（自带 Key）
 - 设置 → AI：可以添加多个服务商（类型为 OpenAI 兼容或 Anthropic；可填 Base URL、模型、超时、温度、最大 tokens），并设一个为默认。这些写入 `config.toml` 的 `[[ai.providers]]`。
 - API Key **不写入 config.toml、日志或审计**：
-  - 优先存系统钥匙串（keyring crate：Linux 用 Secret Service，macOS 用钥匙串，Windows 用凭据管理器）。服务名为 `agentshell`，账户为 `ai-provider:<id>`。
-  - 钥匙串不可用时，存到 `$XDG_DATA_HOME/agentshell/secrets.enc`（ChaCha20-Poly1305 加密，密钥文件 `secrets.key`，两者权限都是 0600）。这个加密只防误泄露，不防同一用户的其他进程。
+  - 优先存系统钥匙串（keyring crate：Linux 用 Secret Service，macOS 用钥匙串，Windows 用凭据管理器）。服务名为 `coossh`，账户为 `ai-provider:<id>`。
+  - 钥匙串不可用时，存到 `$XDG_DATA_HOME/coossh/secrets.enc`（ChaCha20-Poly1305 加密，密钥文件 `secrets.key`，两者权限都是 0600）。这个加密只防误泄露，不防同一用户的其他进程。
   - 界面只显示 Key 的后 4 位，并标出当前存储位置。
-  - 设环境变量 `AGENTSHELL_NO_KEYRING=1` 可强制使用文件存储。
+  - 设环境变量 `COOSSH_NO_KEYRING=1` 可强制使用文件存储。
 - “测试连接”会发一次真实的最小请求（max_tokens=1），并显示延迟或错误。
 - 脱敏和上下文范围设置会作用于实际请求：
   - 上下文范围可选：不发送 / 最近命令 / 选中 / 当前屏幕。
@@ -367,7 +382,7 @@ SSH_PORT=2222 SSH_USER=sshtest SSH_KEY=$PWD/testenv/client_ed25519 \
 
 ## 第 10 轮新增（进行中，详见 PROGRESS.md 第 10 节）
 - 审计面板：按决策（允许/询问/拒绝）、主机、会话筛选（`audit::Filter`）。
-- `agentshell hosts | exec <host> -- <cmd> | upload <host> <local> <remote> | download <host> <remote> <local>`：经运行中的 App 执行，复用连接池，凭据不出 App；每次经权限引擎与审批卡，退出码透传，被拒绝时退出码 126；远端（反向转发）调用者不能 upload/download。
+- `coossh-cli hosts | exec <host> -- <cmd> | upload <host> <local> <remote> | download <host> <remote> <local>`：经运行中的 App 执行，复用连接池，凭据不出 App；每次经权限引擎与审批卡，退出码透传，被拒绝时退出码 126；远端（反向转发）调用者不能 upload/download。
 - 内置 AI 对话“逐条执行”：回复中所有代码块命令逐条经权限引擎判定，询问的步骤在对话中逐条批准/跳过/停止。
 - AI 首次发送提示（`ai.first_send_ack`）、按主机禁止发送终端输出（`ai.no_output_hosts`，通配）。
 - SSH 出站代理：`ssh.proxy = "socks5://[u:p@]host:port"` 或 `"http://…"`，`ssh.no_proxy` 例外；测试代理 `tools/mock_proxy.py [port]`。

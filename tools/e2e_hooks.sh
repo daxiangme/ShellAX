@@ -5,8 +5,8 @@
 set -u
 AH=${AH:-/tmp/agenthome}; BIN=/tmp/agents/bin; NM=/tmp/agents/node_modules/.bin
 export HOME=$AH XDG_DATA_HOME=$AH/.local/share PATH=$BIN:$PATH MOCK_KEY=x GROK_DISABLE_AUTOUPDATER=1
-mkdir -p $AH/.config/agentshell $AH/.codex $AH/.grok /tmp/agentwork
-cat > $AH/.config/agentshell/config.toml <<'T'
+mkdir -p $AH/.config/coossh $AH/.codex $AH/.grok /tmp/agentwork
+cat > $AH/.config/coossh/config.toml <<'T'
 [[permissions.rules]]
 id = "deny-touch-test"
 principal = "*"
@@ -18,9 +18,9 @@ T
 printf 'model = "mock-model"\nmodel_provider = "mock"\n[model_providers.mock]\nname = "mock"\nbase_url = "http://127.0.0.1:18090/v1"\nwire_api = "responses"\nenv_key = "MOCK_KEY"\n' > $AH/.codex/config.toml
 printf '[model.mock]\nmodel = "mock-model"\nbase_url = "http://127.0.0.1:18090/v1"\nname = "Mock"\nenv_key = "MOCK_KEY"\napi_backend = "messages"\n[models]\ndefault = "mock"\n' > $AH/.grok/config.toml
 pgrep -f mock_agent_llm >/dev/null || (python3 "$(dirname "$0")/mock_agent_llm.py" 18090 >/dev/null 2>&1 &)
-pgrep -f "agentshell serve" >/dev/null || ($BIN/agentshell serve >/tmp/as-serve.log 2>&1 &)
+pgrep -f "coossh-cli serve" >/dev/null || ($BIN/coossh-cli serve >/tmp/as-serve.log 2>&1 &)
 sleep 1
-$BIN/agentshell install all >/dev/null
+$BIN/coossh-cli install all >/dev/null
 cd /tmp/agentwork && rm -f denied.txt
 pass=0; fail=0
 chk() { if echo "$2" | grep -q "$3"; then echo "PASS $1"; pass=$((pass+1)); else echo "FAIL $1: $2" | head -c 400; echo; fail=$((fail+1)); fi; }
