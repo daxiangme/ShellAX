@@ -81,9 +81,11 @@ impl Render for HostDialog {
         // Finder-style color tags (PRD 5.23); the production color drives the permission engine
         let tags_cfg = config::get().tags.clone();
         let me = cx.entity().downgrade();
-        form = form.child(div().flex().items_center().gap_3().child(label(t("tag.tags")))
-            .child(crate::ui::tag_picker("host-tags", &self.tags, &tags_cfg.all(), move |color, _w, cx| { let _ = me.update(cx, |this, cx| { ssh_term_proto::hosttree::toggle(&mut this.tags, &color); cx.notify(); }); }))
-            .child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(tf("tag.prod_hint", &[("name", &tags_cfg.name(&tags_cfg.production))]))));
+        // chips wrap inside the row; the production hint gets its own wrapped muted line below
+        form = form.child(div().flex().items_start().gap_3().child(label(t("tag.tags")))
+            .child(div().flex_1().min_w_0().flex().flex_col().gap(px(6.))
+                .child(crate::ui::tag_chips("host-tags", &self.tags, &tags_cfg.all(), move |color, _w, cx| { let _ = me.update(cx, |this, cx| { ssh_term_proto::hosttree::toggle(&mut this.tags, &color); cx.notify(); }); }))
+                .child(div().w_full().whitespace_normal().text_size(px(11.)).text_color(c(th.overlay1)).child(tf("tag.prod_hint", &[("name", &tags_cfg.name(&tags_cfg.production))])))));
         if let Some(e) = &self.error { form = form.child(div().text_size(px(12.)).text_color(c(th.error)).child(e.clone())); }
 
         let title = if self.editing.is_some() { t("ui.edit_host") } else { t("ui.new_host") };

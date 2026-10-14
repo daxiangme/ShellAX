@@ -1415,7 +1415,7 @@ impl Render for Root {
             }
             None => ("—", c(th.overlay0), String::new(), SharedString::from(""), String::new()),
         };
-        let theme_label = if s.appearance.theme == "system" { tf("main.theme_system", &[("name", &th.name)]) } else { th.name.clone() };
+        let theme_label = if s.appearance.theme == "system" { tf("main.theme_system", &[("name", &theme::display_name(&th.name))]) } else { theme::display_name(&th.name) };
         let org = ssh_term_proto::managed::get();
         let mode = org.as_ref().map_or(s.permissions.mode, |m| m.clamp_mode(s.permissions.mode));
         let mode_col = match mode { Mode::Ask => c(th.accent), Mode::Plan => c(th.info), Mode::Auto => c(th.warning) };

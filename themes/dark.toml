@@ -1,6 +1,6 @@
-# macOS Dark — original coossh theme. UI tokens follow macOS dark-mode system colors; terminal
+# Dark — original coossh theme. UI tokens follow system dark-mode colors; terminal
 # palette approximates Terminal.app's dark profiles (blue lifted for contrast on dark background).
-name = "macOS Dark"
+name = "Dark"
 appearance = "dark"
 
 [ui]

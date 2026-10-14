@@ -180,8 +180,8 @@ fn luma(c: u32) -> f32 {
 }
 
 pub const BUILTIN: &[&str] = &[
-    include_str!("../themes/macos-light.toml"),
-    include_str!("../themes/macos-dark.toml"),
+    include_str!("../themes/light.toml"),
+    include_str!("../themes/dark.toml"),
     include_str!("../themes/catppuccin-mocha.toml"),
     include_str!("../themes/catppuccin-latte.toml"),
     include_str!("../themes/coossh-midnight.toml"),
@@ -212,7 +212,11 @@ pub fn cur() -> Arc<Theme> {
 pub fn c(hex: u32) -> Hsla { rgb(hex).into() }
 
 /// macOS-style themes get the system accent color (PRD 5.22).
-pub fn is_macos_theme(t: &Theme) -> bool { t.name.starts_with("macOS ") }
+/// User-visible theme name: the built-in "Light" / "Dark" are localized.
+pub fn display_name(name: &str) -> String {
+    match name { "Light" => ssh_term_proto::i18n::t("theme.light").to_string(), "Dark" => ssh_term_proto::i18n::t("theme.dark").to_string(), n => n.to_string() }
+}
+pub fn is_macos_theme(t: &Theme) -> bool { t.name == "Light" || t.name == "Dark" }
 
 /// System accent color. macOS: `defaults read -g AppleAccentColor` (-1 graphite … 6 pink; missing = blue);
 /// GNOME 47+: `gsettings get org.gnome.desktop.interface accent-color`. None = keep the theme's blue.
@@ -308,8 +312,8 @@ mod tests {
     fn macos_themes() {
         let l = Theme::from_toml(BUILTIN[0]).unwrap();
         let d = Theme::from_toml(BUILTIN[1]).unwrap();
-        assert_eq!((l.name.as_str(), l.appearance, l.accent), ("macOS Light", Appearance::Light, 0x007aff));
-        assert_eq!((d.name.as_str(), d.appearance, d.accent), ("macOS Dark", Appearance::Dark, 0x0a84ff));
+        assert_eq!((l.name.as_str(), l.appearance, l.accent), ("Light", Appearance::Light, 0x007aff));
+        assert_eq!((d.name.as_str(), d.appearance, d.accent), ("Dark", Appearance::Dark, 0x0a84ff));
         assert!(is_macos_theme(&l) && is_macos_theme(&d));
         // Terminal.app-like basics: black on white / light on dark, red ≈ 0x990000
         assert_eq!((l.fg, l.bg, l.ansi[1]), (0x000000, 0xffffff, 0x990000));

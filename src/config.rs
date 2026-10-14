@@ -57,7 +57,7 @@ impl General {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Appearance { pub theme: String, pub light_theme: String, pub dark_theme: String, pub opacity: f32, pub ui_font_size: f32 }
-impl Default for Appearance { fn default() -> Self { Self { theme: s_system(), light_theme: "macOS Light".into(), dark_theme: "macOS Dark".into(), opacity: f_one(), ui_font_size: f_ui() } } }
+impl Default for Appearance { fn default() -> Self { Self { theme: s_system(), light_theme: "Light".into(), dark_theme: "Dark".into(), opacity: f_one(), ui_font_size: f_ui() } } }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -327,6 +327,7 @@ impl Settings {
         // built-in themes renamed with the product (AgentShell → coossh)
         for t in [&mut s.appearance.theme, &mut s.appearance.light_theme, &mut s.appearance.dark_theme] {
             if let Some(rest) = t.strip_prefix("AgentShell ") { *t = format!("coossh {rest}"); }
+            if let Some(rest) = t.strip_prefix("macOS ") { *t = rest.to_string(); }
         }
         ssh_term_proto::hosttree::ensure_groups(&s.hosts, &mut s.groups);
         Ok(s)

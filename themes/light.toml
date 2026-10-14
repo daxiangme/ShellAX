@@ -1,6 +1,6 @@
-# macOS Light — original coossh theme. UI tokens follow macOS system colors; terminal palette
+# Light — original coossh theme. UI tokens follow system colors; terminal palette
 # approximates Terminal.app's "Basic" profile (plain hex values, no third-party file used).
-name = "macOS Light"
+name = "Light"
 appearance = "light"
 
 [ui]

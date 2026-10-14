@@ -143,10 +143,10 @@ impl Root {
         let (a, b, d) = (p.clone(), p.clone(), p.clone());
         div().absolute().top(px(4.)).right(px(10.)).flex().items_center().gap(px(2.)).p(px(2.)).rounded(px(7.))
             .bg(c(th.mantle).opacity(0.92)).border_1().border_color(c(th.surface1).opacity(0.7)).shadow(chrome::soft_shadow(false))
-            .invisible().group_hover(group, |s| s.visible())
-            .child(btn(0, IconName::Columns2, t("ui.split_left_right")).on_click(cx.listener(move |this, _, w, cx| { focus(this, &a, w, cx); this.split(Some(Dir::Vertical), w, cx); })))
-            .child(btn(1, IconName::Rows2, t("ui.split_top_bottom")).on_click(cx.listener(move |this, _, w, cx| { focus(this, &b, w, cx); this.split(Some(Dir::Horizontal), w, cx); })))
-            .child(btn(2, IconName::X, t("ui.close_pane")).on_click(cx.listener(move |this, _, w, cx| { focus(this, &d, w, cx); this.close_pane(w, cx); })))
+            .occlude().invisible().group_hover(group, |s| s.visible())
+            .child(btn(0, IconName::Columns2, t("ui.split_left_right")).on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, _, w, cx| { cx.stop_propagation(); focus(this, &a, w, cx); this.split(Some(Dir::Vertical), w, cx); cx.notify(); })))
+            .child(btn(1, IconName::Rows2, t("ui.split_top_bottom")).on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, _, w, cx| { cx.stop_propagation(); focus(this, &b, w, cx); this.split(Some(Dir::Horizontal), w, cx); cx.notify(); })))
+            .child(btn(2, IconName::X, t("ui.close_pane")).on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, _, w, cx| { cx.stop_propagation(); focus(this, &d, w, cx); this.close_pane(w, cx); cx.notify(); })))
             .into_any_element()
     }
 }

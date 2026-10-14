@@ -81,18 +81,15 @@ pub fn card(w: f32) -> Div {
 }
 
 /// Finder tag dots (PRD 5.23), overlapping slightly like Finder's list view.
-pub fn tag_dots(tags: &[String]) -> AnyElement {
-    let ring = c(cur().base);
-    let mut d = div().flex().items_center().flex_shrink_0();
-    for (i, t) in tags.iter().enumerate() {
-        d = d.child(div().size(px(8.)).rounded_full().bg(c(crate::config::get().tags.rgb(t))).border_1().border_color(ring).when(i > 0, |d| d.ml(px(-2.))));
-    }
-    d.into_any_element()
+/// Single Finder-style tag dot (the first tag of a host / group), or nothing.
+pub fn tag_dot(tag: Option<&String>) -> Option<AnyElement> {
+    tag.map(|t| div().size(px(7.)).flex_shrink_0().rounded_full().bg(c(crate::config::get().tags.rgb(t))).into_any_element())
 }
+
 
 /// Row of the seven color tags; selected ones get a check. `names`: (color, display name).
 pub fn tag_picker(base: &'static str, selected: &[String], names: &[(String, String)], on: impl Fn(String, &mut gpui::Window, &mut gpui::App) + 'static + Clone) -> AnyElement {
-    let mut row = div().flex().items_center().gap(px(6.));
+    let mut row = div().flex().flex_wrap().items_center().gap(px(6.));
     for (i, (color, name)) in names.iter().enumerate() {
         let on = on.clone();
         let col = color.clone();
@@ -106,6 +103,28 @@ pub fn tag_picker(base: &'static str, selected: &[String], names: &[(String, Str
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(move |_, w, cx| on(col.clone(), w, cx))
             .when(sel, |d| d.child(icon(IconName::Check, 11., gpui::white()))));
+    }
+    row.into_any_element()
+}
+
+/// Multi-select tag chips (dot + name), wrapping onto more lines; selected chips are highlighted.
+pub fn tag_chips(base: &'static str, selected: &[String], names: &[(String, String)], on: impl Fn(String, &mut gpui::Window, &mut gpui::App) + 'static + Clone) -> AnyElement {
+    let th = cur();
+    let mut row = div().w_full().flex().flex_wrap().gap(px(6.));
+    for (i, (id, name)) in names.iter().enumerate() {
+        let on = on.clone();
+        let idc = id.clone();
+        let sel = selected.iter().any(|t| t == id);
+        let col = c(crate::config::get().tags.rgb(id));
+        row = row.child(div().id((base, i)).h(px(24.)).px(px(9.)).rounded_full().flex().items_center().gap(px(6.)).cursor_pointer()
+            .border_1().border_color(if sel { col } else { c(th.surface1) })
+            .bg(if sel { col.opacity(0.16) } else { gpui::transparent_black() })
+            .hover(|d| d.bg(c(cur().surface0)))
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(move |_, w, cx| on(idc.clone(), w, cx))
+            .child(div().size(px(8.)).flex_shrink_0().rounded_full().bg(col))
+            .child(div().text_size(px(11.5)).whitespace_nowrap().text_color(c(th.text)).child(name.clone()))
+            .when(sel, |d| d.child(icon(IconName::Check, 11., col))));
     }
     row.into_any_element()
 }

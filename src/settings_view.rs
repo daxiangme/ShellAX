@@ -140,9 +140,9 @@ impl SettingsView {
 
     fn rows(&self) -> Vec<Row> {
         let themes: Vec<(String, String)> = std::iter::once(("system".to_string(), t("ui.follow_system").to_string()))
-            .chain(self.theme_names.iter().map(|n| (n.0.clone(), n.0.clone()))).collect();
-        let light: Vec<(String, String)> = self.theme_names.iter().filter(|n| !n.1).map(|n| (n.0.clone(), n.0.clone())).collect();
-        let dark: Vec<(String, String)> = self.theme_names.iter().filter(|n| n.1).map(|n| (n.0.clone(), n.0.clone())).collect();
+            .chain(self.theme_names.iter().map(|n| (n.0.clone(), crate::theme::display_name(&n.0)))).collect();
+        let light: Vec<(String, String)> = self.theme_names.iter().filter(|n| !n.1).map(|n| (n.0.clone(), crate::theme::display_name(&n.0))).collect();
+        let dark: Vec<(String, String)> = self.theme_names.iter().filter(|n| n.1).map(|n| (n.0.clone(), crate::theme::display_name(&n.0))).collect();
         let r = |cat, label, desc, ctl| Row { cat, label, desc, ctl };
         use Cat::*;
         vec![
@@ -225,7 +225,6 @@ impl SettingsView {
 
             r(Permissions, t("ui.default_mode"), t("ui.also_switchable_from_the_status"), Ctl::Choice("permissions.mode", opts(&[("ask", t("ui.ask_2")), ("plan", t("ui.plan_read_only")), ("auto", t("ui.auto"))]))),
             r(Permissions, t("ui.max_auto_risk_in_auto"), t("ui.actions_at_or_below_this"), Ctl::Choice("permissions.max_auto_risk", opts(&[("R0", "R0"), ("R1", "R1"), ("R2", "R2")]))),
-            r(Tags, t("tag.settings_prod"), t("tag.settings_prod_desc"), Ctl::Choice("tags.production", config::get().tags.all())),
             r(Permissions, t("ui.confirm_writes_on_production_hosts"), t("ui.always_ask_for_r1_actions"), Ctl::Toggle("permissions.prod_confirm")),
             r(Permissions, t("ui.double_confirm_dangerous_commands"), t("ui.r4_actions_need_confirmation_even"), Ctl::Toggle("permissions.dangerous_confirm")),
 

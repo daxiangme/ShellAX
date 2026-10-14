@@ -140,13 +140,14 @@ impl Root {
         let detail = match os { Some(o) => format!("{label} · {}", ssh_term_proto::outline::badge(&o).1), None => label.clone() };
         let gid = SharedString::from(format!("hr-g-{idx}"));
         let name = h.name.clone();
-        let mut row = div().id(("host", idx)).group(gid.clone()).mx_2().pr_2().pl(px(8. + 14. * depth as f32 + 14.)).h(px(ROW_H + 4.)).rounded(px(6.)).flex().items_center().gap(px(8.)).cursor_pointer()
+        let mut row = div().id(("host", idx)).group(gid.clone()).mx_2().pr_2().pl(px(8. + 14. * depth as f32 + 14.)).min_h(px(40.)).py(px(4.)).rounded(px(6.)).flex().items_center().gap(px(8.)).cursor_pointer()
             .when(sel, |d| d.bg(c(th.accent).opacity(0.16)))
             .when(!sel, |d| d.hover(|s| s.bg(c(cur().surface0).opacity(0.7))))
-            .child(icon(if prod { IconName::ShieldAlert } else { IconName::Server }, 15., if prod { c(s.tags.rgb(&s.tags.production)) } else { c(th.accent) }))
-            .child(div().flex_1().min_w_0().flex().flex_col().overflow_hidden()
-                .child(div().flex().items_center().gap(px(6.)).child(div().min_w_0().text_size(px(12.5)).text_color(c(th.text)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(h.name.clone())).child(ui::tag_dots(&h.tags)))
-                .child(div().text_size(px(10.5)).text_color(c(th.overlay0)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(detail)));
+            // Finder style: only the first tag shows — it tints the icon and adds a dot before the name
+            .child(icon(if prod { IconName::ShieldAlert } else { IconName::Server }, 15., match h.tags.first() { Some(t0) => c(s.tags.rgb(t0)), None if prod => c(s.tags.rgb(&s.tags.production)), None => c(th.accent) }))
+            .child(div().flex_1().min_w_0().flex().flex_col().gap(px(1.)).overflow_hidden()
+                .child(div().flex().items_center().gap(px(5.)).children(ui::tag_dot(h.tags.first())).child(div().min_w_0().text_size(px(12.5)).line_height(px(17.)).text_color(c(th.text)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(h.name.clone())))
+                .child(div().text_size(px(10.5)).line_height(px(14.)).text_color(c(th.overlay0)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(detail)));
         {
             let n = name.clone();
             row = row.on_click(cx.listener(move |this, ev: &gpui::ClickEvent, w, cx| {
@@ -194,9 +195,9 @@ impl Root {
                 this.sb_save("hosts.group_move", format!("group={from:?} into={to:?}"), |s| { hosttree::move_group(&mut s.hosts, &mut s.groups, &from, &to, None); }, cx);
             }))
             .child(icon(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown }, 11., c(th.overlay1)))
-            .child(icon(IconName::Folder, 14., c(th.accent).opacity(0.85)))
+            .child(icon(IconName::Folder, 14., match tags.first() { Some(t0) => c(config::get().tags.rgb(t0)), None => c(th.accent).opacity(0.85) }))
+            .children(ui::tag_dot(tags.first()))
             .child(div().min_w_0().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(name.to_string()))
-            .child(ui::tag_dots(&tags))
             .child(div().flex_1())
             .child(div().invisible().group_hover(hg, |s| s.visible()).text_size(px(10.5)).text_color(c(th.overlay0)).child(count.to_string()))
             .into_any_element()
@@ -275,23 +276,23 @@ impl Root {
         let sh = crate::shell_display_name();
         let local_sel = ctx.selected.as_deref() == Some("local");
         let local_on = ctx.open.iter().any(|(l, on)| l == "local" && *on);
-        list = list.child(div().id("host-local").mx_2().px_2().pl(px(22.)).h(px(ROW_H + 4.)).rounded(px(6.)).flex().items_center().gap(px(8.)).cursor_pointer()
+        list = list.child(div().id("host-local").mx_2().px_2().pl(px(22.)).min_h(px(40.)).py(px(4.)).rounded(px(6.)).flex().items_center().gap(px(8.)).cursor_pointer()
             .when(local_sel, |d| d.bg(c(th.accent).opacity(0.16))).when(!local_sel, |d| d.hover(|s| s.bg(c(cur().surface0).opacity(0.7))))
             .on_click(cx.listener(|this, _, w, cx| this.new_tab(Spec::Local, w, cx)))
             .on_mouse_down(gpui::MouseButton::Right, cx.listener(|this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.sb_menu = Some(SbMenu { target: SbTarget::Local, pos: ev.position, sub: SbSub::Main }); cx.notify(); }))
             .child(icon(IconName::Monitor, 15., c(th.info)))
-            .child(div().flex_1().min_w_0().flex().flex_col()
-                .child(div().text_size(px(12.5)).text_color(c(th.text)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(t("ui.local_terminal")))
-                .child(div().text_size(px(10.5)).text_color(c(th.overlay0)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(sh)))
+            .child(div().flex_1().min_w_0().flex().flex_col().gap(px(1.)).overflow_hidden()
+                .child(div().text_size(px(12.5)).line_height(px(17.)).text_color(c(th.text)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(t("ui.local_terminal")))
+                .child(div().text_size(px(10.5)).line_height(px(14.)).text_color(c(th.overlay0)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(sh)))
             .child(div().size(px(6.)).rounded_full().bg(if local_on { c(th.success) } else { c(th.surface2) })));
         if let Some(dt) = self.default_target.clone() {
             let l = dt.label();
             let on = ctx.open.iter().any(|(x, o)| *x == l && *o);
-            list = list.child(div().id("host-env").mx_2().px_2().pl(px(22.)).h(px(ROW_H + 4.)).rounded(px(6.)).flex().items_center().gap(px(8.)).cursor_pointer()
+            list = list.child(div().id("host-env").mx_2().px_2().pl(px(22.)).min_h(px(40.)).py(px(4.)).rounded(px(6.)).flex().items_center().gap(px(8.)).cursor_pointer()
                 .hover(|s| s.bg(c(cur().surface0).opacity(0.7)))
                 .on_click(cx.listener(move |this, _, w, cx| this.new_tab(Spec::Ssh(dt.clone()), w, cx)))
                 .child(icon(IconName::Server, 15., c(th.accent)))
-                .child(div().flex_1().min_w_0().flex().flex_col().overflow_hidden().child(div().text_size(px(12.5)).text_color(c(th.text)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(l)).child(div().text_size(px(10.5)).text_color(c(th.overlay0)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(t("ui.ssh_host_environment_variable"))))
+                .child(div().flex_1().min_w_0().flex().flex_col().gap(px(1.)).overflow_hidden().child(div().text_size(px(12.5)).line_height(px(17.)).text_color(c(th.text)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(l)).child(div().text_size(px(10.5)).line_height(px(14.)).text_color(c(th.overlay0)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(t("ui.ssh_host_environment_variable"))))
                 .child(div().size(px(6.)).rounded_full().bg(if on { c(th.success) } else { c(th.surface2) })));
         }
 

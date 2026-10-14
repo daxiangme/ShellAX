@@ -53,7 +53,10 @@ pub fn window_controls(id: &'static str, window: &Window, on_close: impl Fn(&mut
     let fg = c(th.text).opacity(if window.is_window_active() { 0.85 } else { 0.45 });
     let maxed = window.is_maximized();
     let btn = |i: usize, area: gpui::WindowControlArea| div().id((id, i)).w(px(46.)).h_full().flex().items_center().justify_center()
-        .window_control_area(area).on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        .window_control_area(area)
+        // Windows: the NC mouse-down is first offered to GPUI; if it is marked handled, gpui-windows
+        // never records the caption-button press and the button-up does nothing. Let it propagate.
+        .when(!cfg!(windows), |d| d.on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()));
     let line = |w: f32, h: f32| div().w(px(w)).h(px(h)).bg(fg);
     let square = |sz: f32| div().size(px(sz)).border_1().border_color(fg).rounded(px(1.5));
     let max_glyph = if maxed {
@@ -96,6 +99,9 @@ pub fn traffic_lights(id: &'static str, window: &Window, on_close: impl Fn(&mut 
 
 /// Make an element a window drag region (title bar): drag moves, double-click zooms.
 pub fn drag_region<E: InteractiveElement + StatefulInteractiveElement>(el: E) -> E {
+    // Windows: dragging / double-click maximize / snap come from the Drag hit-test areas
+    // (HTCAPTION); a client-side move here would also fire on the caption buttons.
+    if cfg!(windows) { return el; }
     el.on_mouse_down(gpui::MouseButton::Left, |ev, w, _| { if ev.click_count >= 2 { w.titlebar_double_click(); } else { w.start_window_move(); } })
 }
 
