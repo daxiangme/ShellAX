@@ -153,7 +153,7 @@ fn parse_itermcolors(src: &str) -> anyhow::Result<Vec<(String, u32)>> {
 
 /// `~/.config/agentshell/themes`
 pub fn user_dir() -> Option<std::path::PathBuf> {
-    std::env::var("HOME").ok().map(|h| std::path::Path::new(&h).join(".config/agentshell/themes"))
+    Some(ssh_term_proto::platform::config_dir().join("themes"))
 }
 
 /// Parse any supported theme file (AgentShell TOML, Alacritty TOML, iTerm2 .itermcolors).
@@ -250,9 +250,18 @@ pub fn system_accent(dark: bool) -> Option<u32> {
 /// UI font (PRD 5.22): system font, terminal font is separate. First installed family wins.
 pub fn pick_ui_font(installed: &[String]) -> String {
     const CHAIN: &[&str] = &[".SystemUIFont", "SF Pro Text", "SF Pro", "PingFang SC", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI",
-        "Inter", "Cantarell", "Noto Sans", "Ubuntu", "Noto Sans CJK SC", "DejaVu Sans"];
+        "Inter", "Cantarell", "Noto Sans", "Ubuntu", "Noto Sans CJK SC", "DejaVu Sans", "Tahoma", "Arial"];
     if cfg!(target_os = "macos") { return ".SystemUIFont".into(); }
     CHAIN.iter().find(|f| installed.iter().any(|i| i.eq_ignore_ascii_case(f))).map(|s| s.to_string()).unwrap_or_else(|| "Inter".into())
+}
+/// Terminal font actually used: the configured family if installed, else the first installed
+/// configured fallback, else a platform monospace (Win10 has Consolas but not Cascadia Mono).
+pub fn pick_term_font(family: &str, fallbacks: &[String], installed: &[String]) -> Option<String> {
+    const MONO: &[&str] = &["Cascadia Mono", "Consolas", "Menlo", "SF Mono", "JetBrains Mono", "DejaVu Sans Mono", "Noto Sans Mono", "Liberation Mono", "Courier New"];
+    let has = |f: &str| installed.iter().any(|i| i.eq_ignore_ascii_case(f));
+    if installed.is_empty() || has(family) { return None; }
+    fallbacks.iter().map(|s| s.as_str()).filter(|f| { let l = f.to_ascii_lowercase(); l.contains("mono") && !l.contains("symbols") })
+        .chain(MONO.iter().copied()).find(|f| has(f)).map(str::to_string)
 }
 static UI_FONT: RwLock<Option<gpui::SharedString>> = RwLock::new(None);
 pub fn set_ui_font(f: String) { *UI_FONT.write().unwrap() = Some(f.into()); }
@@ -325,6 +334,15 @@ mod tests {
         assert_eq!(pick_ui_font(&v(&["DejaVu Sans", "pingfang sc"])), "PingFang SC");
         assert_eq!(pick_ui_font(&v(&["Segoe UI", "Inter"])), "Segoe UI");
         assert_eq!(pick_ui_font(&v(&[])), "Inter");
+    }
+    #[test]
+    fn term_font_fallback() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let fb = v(&["Microsoft YaHei UI", "Symbols Nerd Font Mono"]);
+        assert_eq!(pick_term_font("Cascadia Mono", &fb, &v(&["Cascadia Mono", "Consolas"])), None);
+        assert_eq!(pick_term_font("Cascadia Mono", &fb, &v(&["Segoe UI", "Consolas"])).as_deref(), Some("Consolas"));
+        assert_eq!(pick_term_font("Cascadia Mono", &fb, &v(&["Symbols Nerd Font Mono", "Consolas"])).as_deref(), Some("Consolas"));
+        assert_eq!(pick_term_font("X", &[], &v(&[])), None);
     }
     #[test]
     fn alacritty_import() {

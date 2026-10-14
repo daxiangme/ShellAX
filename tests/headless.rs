@@ -109,6 +109,7 @@ fn local_zsh_integration_and_history() {
     assert!(s.prompt_mark.lock().unwrap().is_some(), "zsh integration should emit OSC 133;B\n{}", s.screen_text());
 }
 
+#[cfg(unix)]
 #[test]
 fn local_agent_identified_by_foreground_process() {
     let dir = std::env::temp_dir().join(format!("stp-agent-{}", std::process::id()));

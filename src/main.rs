@@ -1,3 +1,4 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
 //! AgentShell prototype v5 UI: sidebar (host search / groups / function area), tabs with split
 //! panes, settings page, command palette, host dialog, tool panels, status bar.
 mod actions;
@@ -204,6 +205,7 @@ impl Root {
         self.open_pane_with(spec, PaneInit::default(), window, cx)
     }
     fn open_pane_with(&mut self, spec: Spec, pi: PaneInit, window: &mut Window, cx: &mut Context<Self>) -> Entity<TermView> {
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut pi = pi;
         // reattaching to a still-running daemon shell: the agent is alive, nothing to resume
         #[cfg(unix)]
@@ -1711,6 +1713,8 @@ impl Render for Root {
 }
 
 fn main() {
+    ssh_term_proto::platform::init_env();
+    ssh_term_proto::platform::init_log_file(&data_dir());
     // organization policy first: read-only, highest priority (PRD 6.5)
     let _ = ssh_term_proto::managed::load();
     let (settings, load_err) = config::Settings::load();
@@ -1739,7 +1743,13 @@ fn main() {
     let default_target = if std::env::var("NO_SSH").is_ok() { None } else { env_target(&config::get().known_hosts_path()) };
     gpui_platform::application().with_assets(gpui_kit_assets::AllAssets).run(move |cx: &mut App| {
         gpui_component::init(cx);
-        theme::set_ui_font(theme::pick_ui_font(&cx.text_system().all_font_names()));
+        let installed = cx.text_system().all_font_names();
+        theme::set_ui_font(theme::pick_ui_font(&installed));
+        let fc = config::get().font.clone();
+        if let Some(f) = theme::pick_term_font(&fc.family, &fc.fallbacks, &installed) {
+            eprintln!("terminal font {:?} not installed, using {f:?}", fc.family);
+            let mut s = (*config::get()).clone(); s.font.family = f; config::install(s);
+        }
         let bounds = Bounds::centered(None, size(px(1440.), px(860.)), cx);
         cx.open_window(
             chrome::window_options(bounds, Some("AgentShell".into())),

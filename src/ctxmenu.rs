@@ -383,7 +383,7 @@ pub fn validate(it: &CustomItem) -> Result<(), String> {
 /// context_menu.toml next to config.toml (AGENTSHELL_CONFIG's directory, else ~/.config/agentshell).
 pub fn custom_path() -> PathBuf {
     if let Ok(p) = std::env::var("AGENTSHELL_CONTEXT_MENU") { return p.into(); }
-    let cfg = std::env::var("AGENTSHELL_CONFIG").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/agentshell/config.toml"));
+    let cfg = std::env::var("AGENTSHELL_CONFIG").map(PathBuf::from).unwrap_or_else(|_| crate::platform::config_dir().join("config.toml"));
     cfg.parent().unwrap_or(Path::new(".")).join("context_menu.toml")
 }
 type Loaded = (Option<SystemTime>, Arc<Vec<CustomItem>>, Arc<Vec<String>>);

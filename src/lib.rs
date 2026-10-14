@@ -18,6 +18,7 @@ pub mod keygen;
 pub mod layout;
 pub mod local;
 pub mod ssh;
+pub mod platform;
 pub mod update;
 pub mod sftp;
 #[cfg(unix)]

@@ -152,6 +152,8 @@ impl client::Handler for Handler {
         Ok(())
     }
     async fn server_channel_open_agent_forward(&mut self, channel: russh::Channel<client::Msg>, reply: client::ChannelOpenHandle, _s: &mut client::Session) -> Result<(), Self::Error> {
+        #[cfg(not(unix))]
+        let _ = (&channel, &reply);
         #[cfg(unix)]
         if let Some(sock) = std::env::var_os("SSH_AUTH_SOCK") {
             reply.accept().await;
@@ -300,6 +302,23 @@ pub fn connect<'a>(tg: &'a SshTarget, prompts: &'a Prompts) -> std::pin::Pin<Box
     })
 }
 
+type DynAgent = russh::keys::agent::client::AgentClient<Box<dyn russh::keys::agent::client::AgentStream + Send + Unpin>>;
+
+/// Unix: $SSH_AUTH_SOCK. Windows: $SSH_AUTH_SOCK or the Win32-OpenSSH pipe, then Pageant.
+async fn connect_agent() -> Result<DynAgent, russh::keys::Error> {
+    use russh::keys::agent::client::AgentClient;
+    #[cfg(unix)]
+    { Ok(AgentClient::connect_env().await?.dynamic()) }
+    #[cfg(windows)]
+    {
+        let pipe = std::env::var_os("SSH_AUTH_SOCK").unwrap_or_else(|| r"\\.\pipe\openssh-ssh-agent".into());
+        match AgentClient::connect_named_pipe(&pipe).await {
+            Ok(a) => Ok(a.dynamic()),
+            Err(e) => AgentClient::connect_pageant().await.map(|a| a.dynamic()).map_err(|_| e),
+        }
+    }
+}
+
 async fn authenticate(h: &mut client::Handle<Handler>, tg: &SshTarget, prompts: &Prompts) -> Result<()> {
     let (mode, no_agent) = match tg.auth.as_str() { "" => ("auto", false), "auto-noagent" => ("auto", true), m => (m, false) };
     let mut errors: Vec<String> = Vec::new();
@@ -311,9 +330,8 @@ async fn authenticate(h: &mut client::Handle<Handler>, tg: &SshTarget, prompts: 
     };
     let offers = |m: russh::MethodKind| offered.as_ref().is_none_or(|v| v.is_empty() || v.contains(&m));
     // 1. ssh-agent
-    #[cfg(unix)]
     if matches!(mode, "auto" | "agent") && !no_agent {
-        match russh::keys::agent::client::AgentClient::connect_env().await {
+        match connect_agent().await {
             Ok(mut agent) => {
                 let ids = agent.request_identities().await.unwrap_or_default();
                 if ids.is_empty() { errors.push(t("ssh.agent_empty").into()); }

@@ -43,6 +43,7 @@ fn opt(args: &mut Vec<String>, name: &str) -> Option<String> {
 }
 
 fn main() {
+    ssh_term_proto::platform::init_env();
     // behave like other CLI tools when piped into `head` etc. (no EPIPE panic)
     #[cfg(unix)]
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL); }

@@ -256,7 +256,7 @@ pub struct Settings {
 
 pub fn config_path() -> PathBuf {
     if let Ok(p) = std::env::var("AGENTSHELL_CONFIG") { return p.into(); }
-    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/agentshell/config.toml")
+    ssh_term_proto::platform::config_dir().join("config.toml")
 }
 
 impl Settings {

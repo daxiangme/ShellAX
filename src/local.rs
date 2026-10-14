@@ -41,6 +41,20 @@ add-zsh-hook precmd __as_precmd
 add-zsh-hook preexec __as_preexec
 "#;
 
+/// Login shell when $SHELL is unset. Windows: PowerShell 7 (pwsh) if on PATH, else
+/// Windows PowerShell, else %COMSPEC% (cmd.exe).
+fn default_shell() -> String {
+    #[cfg(windows)]
+    {
+        let on_path = |exe: &str| std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(exe).is_file()));
+        if on_path("pwsh.exe") { return "pwsh.exe".into(); }
+        if on_path("powershell.exe") { return "powershell.exe".into(); }
+        std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into())
+    }
+    #[cfg(not(windows))]
+    { "/bin/bash".into() }
+}
+
 fn home() -> Option<std::path::PathBuf> { std::env::var_os("HOME").map(Into::into) }
 
 /// Spawn the user's shell in a local PTY and wire it to a new Session.
@@ -55,7 +69,7 @@ pub fn spawn_local_in(size: Size, shell: Option<&str>, cwd: Option<&std::path::P
     let (session, out_tx, from_ui) = Session::new(size);
     let pty = native_pty_system();
     let pair = pty.openpty(PtySize { rows: size.rows as u16, cols: size.cols as u16, pixel_width: 0, pixel_height: 0 })?;
-    let sh = shell.map(str::to_string).unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into()));
+    let sh = shell.map(str::to_string).unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| default_shell()));
     let integrate = match INTEGRATE.load(std::sync::atomic::Ordering::Relaxed) {
         0 => false,
         2 => true,
@@ -94,6 +108,8 @@ pub fn spawn_local_in(size: Size, shell: Option<&str>, cwd: Option<&std::path::P
     let mut reader = pair.master.try_clone_reader()?;
     let mut writer = pair.master.take_writer()?;
     let master = Arc::new(Mutex::new(pair.master));
+    // Windows/ConPTY has no tcgetpgrp: no foreground probe (agent auto-detection off there)
+    #[cfg(unix)]
     {
         // foreground process of the pty (tcgetpgrp) -> /proc/<pid>/comm; used for agent identification
         let m = master.clone();
