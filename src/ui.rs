@@ -79,3 +79,45 @@ pub fn card(w: f32) -> Div {
     let th = cur();
     div().w(px(w)).occlude().on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()).rounded(px(10.)).bg(c(th.base).opacity(0.97)).border_1().border_color(c(th.surface2).opacity(0.45)).shadow(crate::chrome::soft_shadow(true)).flex().flex_col().overflow_hidden()
 }
+
+/// Finder tag dots (PRD 5.23), overlapping slightly like Finder's list view.
+pub fn tag_dots(tags: &[String]) -> AnyElement {
+    let ring = c(cur().base);
+    let mut d = div().flex().items_center().flex_shrink_0();
+    for (i, t) in tags.iter().enumerate() {
+        d = d.child(div().size(px(8.)).rounded_full().bg(c(ssh_term_proto::hosttree::color_rgb(t))).border_1().border_color(ring).when(i > 0, |d| d.ml(px(-2.))));
+    }
+    d.into_any_element()
+}
+
+/// Row of the seven color tags; selected ones get a check. `names`: (color, display name).
+pub fn tag_picker(base: &'static str, selected: &[String], names: &[(String, String)], on: impl Fn(String, &mut gpui::Window, &mut gpui::App) + 'static + Clone) -> AnyElement {
+    let mut row = div().flex().items_center().gap(px(6.));
+    for (i, (color, name)) in names.iter().enumerate() {
+        let on = on.clone();
+        let col = color.clone();
+        let sel = selected.iter().any(|t| t == color);
+        let tip = name.clone();
+        row = row.child(div().id((base, i)).size(px(18.)).rounded_full().cursor_pointer().flex().items_center().justify_center()
+            .bg(c(ssh_term_proto::hosttree::color_rgb(color)))
+            .border_2().border_color(if sel { c(cur().text).opacity(0.55) } else { gpui::transparent_black() })
+            .hover(|d| d.opacity(0.85))
+            .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(move |_, w, cx| on(col.clone(), w, cx))
+            .when(sel, |d| d.child(icon(IconName::Check, 11., gpui::white()))));
+    }
+    row.into_any_element()
+}
+
+/// Menu row (context menus, popover menus): icon + label (+ optional right text), 26px.
+pub fn menu_item(id: impl Into<ElementId>, ic: Option<IconName>, label: impl Into<SharedString>, enabled: bool, danger: bool) -> Stateful<Div> {
+    let th = cur();
+    let col = if !enabled { c(th.overlay0) } else if danger { c(th.error) } else { c(th.text) };
+    div().id(id).h(px(26.)).px(px(10.)).rounded(px(6.)).flex().items_center().gap_2().text_size(px(12.)).text_color(col)
+        .when(enabled, |d| d.cursor_pointer().hover(|d| d.bg(c(cur().accent)).text_color(gpui::white())))
+        .child(match ic { Some(i) => icon(i, 13., if danger { c(th.error) } else { c(th.overlay1) }).into_any_element(), None => div().w(px(13.)).into_any_element() })
+        .child(label.into())
+}
+
+pub fn menu_sep() -> Div { div().mx(px(8.)).my(px(4.)).h(px(1.)).bg(c(cur().surface1).opacity(0.6)) }

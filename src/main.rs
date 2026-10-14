@@ -3,6 +3,8 @@
 //! panes, settings page, command palette, host dialog, tool panels, status bar.
 mod actions;
 mod chrome;
+mod sidebar;
+mod tabs_ui;
 mod config;
 mod host_dialog;
 mod palette;
@@ -26,7 +28,7 @@ use gpui::{
     div, prelude::*, px, size, AnyElement, App, Bounds, Context, Entity, FontWeight, Hsla, KeyDownEvent, SharedString,
     Window, WindowAppearance,
 };
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{InputEvent, InputState};
 use ssh_term_proto::agent::{self, AgentState, Manifest};
 use ssh_term_proto::audit::AuditLog;
 use ssh_term_proto::hosts::{self, HostEntry};
@@ -59,6 +61,14 @@ pub(crate) fn secret_store() -> ssh_term_proto::secrets::SecretStore {
     // credentials.use_keychain = false → encrypted local file only
     if config::get().credentials.use_keychain { ssh_term_proto::secrets::SecretStore::new(data_dir()) } else { ssh_term_proto::secrets::SecretStore::file_only(data_dir()) }
 }
+
+/// Layout file of this window: layout.json, or the file a "move tab to new window" child was
+/// started with (AGENTSHELL_LAYOUT_FILE, PRD 5.23).
+pub(crate) fn layout_file() -> std::path::PathBuf {
+    std::env::var_os("AGENTSHELL_LAYOUT_FILE").map(Into::into).unwrap_or_else(|| data_dir().join("layout.json"))
+}
+/// A secondary window process (moved tab): no policy service / tray / update check of its own.
+pub(crate) fn secondary() -> bool { std::env::var_os("AGENTSHELL_LAYOUT_FILE").is_some() }
 
 pub(crate) fn data_dir() -> std::path::PathBuf {
     std::env::var_os("XDG_DATA_HOME").map(Into::into)
@@ -105,7 +115,7 @@ enum Edge { Left, Right, Top, Bottom }
 #[derive(Clone)]
 enum Modal { Broadcast(Vec<String>), Snapshots, Recordings, QuickStart { dir: String } }
 
-struct Tab { layout: Node<Entity<TermView>>, focused: Entity<TermView> }
+struct Tab { layout: Node<Entity<TermView>>, focused: Entity<TermView>, /** custom name (PRD 5.23) */ name: Option<String> }
 
 pub(crate) enum Overlay { None, Settings(Entity<SettingsView>), Palette(Entity<Palette>), Host(Entity<HostDialog>), Audit, Sftp, Port, Ai, Chat, HostTools(Entity<host_tools_view::HostToolsView>) }
 
@@ -131,7 +141,17 @@ pub(crate) struct Root {
     lang_seen: u8,
     bg_seen: Option<gpui::WindowBackgroundAppearance>,
     ui_size_seen: f32,
-    collapsed: HashSet<String>,
+    /// Sidebar context / "+" menu and its dialogs (PRD 5.23).
+    sb_menu: Option<sidebar::SbMenu>,
+    sb_modal: Option<sidebar::SbModal>,
+    /// Finder tag filter (colors) from the sidebar Tags section.
+    tag_filter: Vec<String>,
+    /// tab right-click menu (tab index, position)
+    tab_menu: Option<(usize, gpui::Point<gpui::Pixels>)>,
+    /// inline tab rename (tab index, input)
+    tab_rename: Option<(usize, Entity<InputState>)>,
+    /// recently closed tabs, newest last
+    closed_tabs: Vec<(ssh_term_proto::session_store::NodeSave, Option<String>)>,
     /// OS id per SSH target label from a one-shot probe (sidebar badge).
     host_os: Arc<Mutex<HashMap<String, String>>>,
     os_probing: HashSet<String>,
@@ -152,8 +172,6 @@ pub(crate) struct Root {
     pub(crate) sftp_current: Option<Entity<sftp_view::SftpView>>,
     /// Detached SFTP windows (PRD 5.21).
     sftp_windows: Vec<(Entity<sftp_view::SftpView>, gpui::AnyWindowHandle)>,
-    /// Sidebar host right-click menu: host spec and position.
-    host_menu: Option<(Spec, gpui::Point<gpui::Pixels>)>,
     /// Split divider being dragged (drawn thicker).
     drag_div: Option<(usize, Vec<bool>)>,
     _subs: Vec<gpui::Subscription>,
@@ -278,8 +296,7 @@ impl Root {
         match spec {
             Spec::Local => {
                 let shell = config::get().terminal.shell.clone();
-                let sh = if shell.is_empty() { std::env::var("SHELL").unwrap_or_else(|_| "bash".into()) } else { shell.clone() };
-                let title = tf("main.local_title", &[("shell", &sh.rsplit('/').next().unwrap_or("sh"))]);
+                let title = tf("main.local_title", &[("shell", &shell_display_name())]);
                 let cwd = pi.cwd.as_deref().map(std::path::Path::new);
                 #[cfg(unix)]
                 if config::get().session.local_daemon {
@@ -313,7 +330,7 @@ impl Root {
     fn new_tab(&mut self, spec: Spec, window: &mut Window, cx: &mut Context<Self>) {
         let pane = self.open_pane(spec, window, cx);
         let fh = pane.read(cx).focus.clone();
-        self.tabs.push(Tab { layout: Node::Leaf(pane.clone()), focused: pane });
+        self.tabs.push(Tab { layout: Node::Leaf(pane.clone()), focused: pane, name: None });
         self.active = self.tabs.len() - 1;
         self.overlay = Overlay::None;
         window.focus(&fh, cx);
@@ -531,7 +548,7 @@ impl Root {
             SftpMode::Tab => {
                 let pane = self.sftp_pane(v, window, cx);
                 let fh = pane.read(cx).focus.clone();
-                self.tabs.push(Tab { layout: Node::Leaf(pane.clone()), focused: pane });
+                self.tabs.push(Tab { layout: Node::Leaf(pane.clone()), focused: pane, name: None });
                 self.active = self.tabs.len() - 1;
                 self.overlay = Overlay::None;
                 window.focus(&fh, cx);
@@ -575,32 +592,6 @@ impl Root {
             }
         }
         cx.notify();
-    }
-    /// Sidebar host right-click menu: new terminal tab + "Open SFTP in tab/split/window/popup".
-    fn host_menu_el(&self, spec: Spec, pos: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) -> AnyElement {
-        let th = cur();
-        let ssh = match &spec { Spec::Ssh(t) => Some(t.clone()), Spec::Local => None };
-        let mut list = ui::popover().id("host-menu").occlude().min_w(px(230.)).p(px(5.)).flex().flex_col()
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| { this.host_menu = None; cx.notify(); }));
-        let item = |id: usize, ic: IconName, label: &str, enabled: bool| div().id(("host-menu-item", id)).h(px(26.)).px(px(10.)).rounded(px(6.)).flex().items_center().gap_2().text_size(px(12.))
-            .text_color(if enabled { c(th.text) } else { c(th.overlay0) }).when(enabled, |d| d.cursor_pointer().hover(|d| d.bg(c(cur().surface0))))
-            .child(icon(ic, 13., c(th.overlay1))).child(label.to_string());
-        let sp = spec.clone();
-        list = list.child(item(0, IconName::SquareTerminal, t("hostmenu.new_tab"), true).on_click(cx.listener(move |this, _, w, cx| { this.host_menu = None; this.new_tab(sp.clone(), w, cx); })));
-        for (i, (m, key, ic)) in [(SftpMode::Tab, "sftp.open_tab", IconName::PanelTop), (SftpMode::Split, "sftp.open_split", IconName::Columns2), (SftpMode::Window, "sftp.open_window", IconName::ExternalLink), (SftpMode::Popup, "sftp.open_popup", IconName::FolderSync)].into_iter().enumerate() {
-            let tg = ssh.clone();
-            let mut el = item(i + 1, ic, t(key), tg.is_some());
-            if let Some(tg) = tg {
-                el = el.on_click(cx.listener(move |this, _, w, cx| {
-                    this.host_menu = None;
-                    // split: next to a terminal on that host (opened if needed)
-                    if m == SftpMode::Split { let p = this.pane_for(Some(tg.clone()), w, cx); let fh = p.read(cx).focus.clone(); w.focus(&fh, cx); }
-                    this.open_sftp_mode(Some(tg.clone()), m, w, cx);
-                }));
-            }
-            list = list.child(el);
-        }
-        gpui::deferred(gpui::anchored().position(pos).snap_to_window_with_margin(px(8.)).child(chrome::pop_in("host-menu-pop", list))).with_priority(3).into_any_element()
     }
     #[allow(dead_code)]
     fn open_sftp(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -743,7 +734,7 @@ impl Root {
             _ => leaf(self, window, cx),
         };
         let focused = layout.leaves()[0].clone();
-        self.tabs.push(Tab { layout, focused });
+        self.tabs.push(Tab { layout, focused, name: None });
         self.active = self.tabs.len() - 1;
         self.log("quickstart.open", format!("dir={dir:?} preset={preset}"));
         if preset == "agent" {
@@ -866,14 +857,6 @@ impl Root {
         self.focus_active(window, cx);
         cx.notify();
     }
-    /// Move a config host into `group` ("" = ungrouped) and save.
-    fn move_host_to_group(&mut self, name: &str, group: &str, cx: &mut Context<Self>) {
-        let g = ssh_term_proto::outline::normalize(group);
-        let r = config::update(|s| if let Some(h) = s.hosts.iter_mut().find(|h| h.name == name) { h.group = (!g.is_empty()).then(|| g.clone()); });
-        if let Some(e) = r { self.toast(e, cx); }
-        self.log("hosts.move", format!("host={name} group={g:?}"));
-        cx.notify();
-    }
     /// Probe the OS of connected SSH panes once per target (read-only `uname`), for the sidebar badge.
     fn probe_os(&mut self, cx: &mut Context<Self>) {
         let todo: Vec<SshTarget> = self.tabs.iter().flat_map(|t| t.layout.leaves()).filter_map(|p| {
@@ -905,29 +888,32 @@ impl Root {
     }
 
     // ---- layout persistence (PRD 3.6)
-    fn snapshot(&self, cx: &App) -> ssh_term_proto::session_store::LayoutSave {
+    /// Saved form of one tab's split tree (layout file, duplicate, reopen, move to window).
+    fn save_node(n: &Node<Entity<TermView>>, cx: &App) -> ssh_term_proto::session_store::NodeSave {
         use ssh_term_proto::session_store::{resume_command, NodeSave, PaneSave};
-        fn walk(n: &Node<Entity<TermView>>, cx: &App) -> NodeSave {
-            match n {
-                Node::Leaf(v) => {
-                    let v = v.read(cx);
-                    if let Some(sv) = &v.sftp { return NodeSave::Leaf { pane: sv.read(cx).save() }; }
-                    let resume = v.agent_label().map(|a| a.0).or(v.last_agent.clone()).and_then(|a| resume_command(&a)).map(str::to_string).or(v.resume_offer.clone());
-                    let pane = match &v.spec {
-                        Spec::Local => PaneSave::Local { cwd: v.session.as_ref().and_then(|s| s.cwd_probe.lock().unwrap().as_ref().and_then(|f| f())).unwrap_or_default(), daemon_id: v.daemon_id.clone(), resume },
-                        Spec::Ssh(t) => PaneSave::Ssh { target: t.clone(), resume },
-                    };
-                    NodeSave::Leaf { pane }
-                }
-                Node::Split { dir, ratio, a, b } => NodeSave::Split { vertical: *dir == Dir::Vertical, ratio: *ratio, a: Box::new(walk(a, cx)), b: Box::new(walk(b, cx)) },
+        match n {
+            Node::Leaf(v) => {
+                let v = v.read(cx);
+                if let Some(sv) = &v.sftp { return NodeSave::Leaf { pane: sv.read(cx).save() }; }
+                let resume = v.agent_label().map(|a| a.0).or(v.last_agent.clone()).and_then(|a| resume_command(&a)).map(str::to_string).or(v.resume_offer.clone());
+                let pane = match &v.spec {
+                    Spec::Local => PaneSave::Local { cwd: v.session.as_ref().and_then(|s| s.cwd_probe.lock().unwrap().as_ref().and_then(|f| f())).unwrap_or_default(), daemon_id: v.daemon_id.clone(), resume },
+                    Spec::Ssh(t) => PaneSave::Ssh { target: t.clone(), resume },
+                };
+                NodeSave::Leaf { pane }
             }
+            Node::Split { dir, ratio, a, b } => NodeSave::Split { vertical: *dir == Dir::Vertical, ratio: *ratio, a: Box::new(Self::save_node(a, cx)), b: Box::new(Self::save_node(b, cx)) },
         }
-        ssh_term_proto::session_store::LayoutSave { version: 1, saved_at: chrono::Local::now().to_rfc3339(), active: self.active, tabs: self.tabs.iter().map(|t| walk(&t.layout, cx)).collect() }
+    }
+    fn snapshot(&self, cx: &App) -> ssh_term_proto::session_store::LayoutSave {
+        let names: Vec<Option<String>> = self.tabs.iter().map(|t| t.name.clone()).collect();
+        ssh_term_proto::session_store::LayoutSave { version: 1, saved_at: chrono::Local::now().to_rfc3339(), active: self.active, tabs: self.tabs.iter().map(|t| Self::save_node(&t.layout, cx)).collect(),
+            names: if names.iter().any(|n| n.is_some()) { names } else { vec![] } }
     }
     pub(crate) fn save_layout(&self, cx: &App) {
         let l = self.snapshot(cx);
         if l.tabs.is_empty() { return; }
-        if let Err(e) = ssh_term_proto::session_store::save(&data_dir().join("layout.json"), &l) { eprintln!("layout save: {e:#}"); }
+        if let Err(e) = ssh_term_proto::session_store::save(&layout_file(), &l) { eprintln!("layout save: {e:#}"); }
         if let Ok(v) = serde_json::to_value(&l) {
             let mut st = ssh_term_proto::snapshot::Store::load(&Self::snapshots_path());
             let same = st.snaps.first().is_some_and(|f| { let (mut a, mut b) = (f.layout.clone(), v.clone()); a["saved_at"] = serde_json::Value::Null; b["saved_at"] = serde_json::Value::Null; a == b });
@@ -936,32 +922,33 @@ impl Root {
     }
     /// Rebuild tabs from layout.json. Shells start fresh in the saved cwd; nothing is re-run.
     fn restore_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some(l) = ssh_term_proto::session_store::load(&data_dir().join("layout.json")) else { return false };
+        let Some(l) = ssh_term_proto::session_store::load(&layout_file()) else { return false };
         if l.tabs.is_empty() { return false; }
         self.restore_from(l, window, cx)
     }
-    fn restore_from(&mut self, l: ssh_term_proto::session_store::LayoutSave, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn build_node(&mut self, n: &ssh_term_proto::session_store::NodeSave, window: &mut Window, cx: &mut Context<Self>) -> Node<Entity<TermView>> {
         use ssh_term_proto::session_store::{NodeSave, PaneSave};
-        if l.tabs.is_empty() { return false; }
-        fn build(r: &mut Root, n: &NodeSave, window: &mut Window, cx: &mut Context<Root>) -> Node<Entity<TermView>> {
-            match n {
-                NodeSave::Leaf { pane } => Node::Leaf(match pane.clone() {
-                    PaneSave::Local { cwd, daemon_id, resume } => r.open_pane_with(Spec::Local, PaneInit { cwd: (!cwd.is_empty()).then_some(cwd), daemon_id, resume }, window, cx),
-                    PaneSave::Ssh { target, resume } => r.open_pane_with(Spec::Ssh(target), PaneInit { resume, ..Default::default() }, window, cx),
-                    PaneSave::Sftp { target, local_dir, remote_dir, follow } => {
-                        let v = r.new_sftp_view(target, (!remote_dir.is_empty()).then_some(remote_dir), (!local_dir.is_empty()).then_some(local_dir), window, cx);
-                        v.update(cx, |v, _| { v.mode = SftpMode::Tab; v.follow.set(follow); });
-                        r.sftp_pane(v, window, cx)
-                    }
-                }),
-                NodeSave::Split { vertical, ratio, a, b } => Node::Split { dir: if *vertical { Dir::Vertical } else { Dir::Horizontal }, ratio: *ratio, a: Box::new(build(r, a, window, cx)), b: Box::new(build(r, b, window, cx)) },
-            }
+        let r = self;
+        match n {
+            NodeSave::Leaf { pane } => Node::Leaf(match pane.clone() {
+                PaneSave::Local { cwd, daemon_id, resume } => r.open_pane_with(Spec::Local, PaneInit { cwd: (!cwd.is_empty()).then_some(cwd), daemon_id, resume }, window, cx),
+                PaneSave::Ssh { target, resume } => r.open_pane_with(Spec::Ssh(target), PaneInit { resume, ..Default::default() }, window, cx),
+                PaneSave::Sftp { target, local_dir, remote_dir, follow } => {
+                    let v = r.new_sftp_view(target, (!remote_dir.is_empty()).then_some(remote_dir), (!local_dir.is_empty()).then_some(local_dir), window, cx);
+                    v.update(cx, |v, _| { v.mode = SftpMode::Tab; v.follow.set(follow); });
+                    r.sftp_pane(v, window, cx)
+                }
+            }),
+            NodeSave::Split { vertical, ratio, a, b } => Node::Split { dir: if *vertical { Dir::Vertical } else { Dir::Horizontal }, ratio: *ratio, a: Box::new(r.build_node(a, window, cx)), b: Box::new(r.build_node(b, window, cx)) },
         }
-        for n in &l.tabs {
-            let layout = build(self, n, window, cx);
+    }
+    fn restore_from(&mut self, l: ssh_term_proto::session_store::LayoutSave, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if l.tabs.is_empty() { return false; }
+        for (i, n) in l.tabs.iter().enumerate() {
+            let layout = self.build_node(n, window, cx);
             self.relink_follow(&layout, cx);
             let focused = layout.leaves()[0].clone();
-            self.tabs.push(Tab { layout, focused });
+            self.tabs.push(Tab { layout, focused, name: l.names.get(i).cloned().flatten() });
         }
         self.active = l.active.min(self.tabs.len() - 1);
         self.log("layout.restore", format!("{} tabs from {}", self.tabs.len(), l.saved_at));
@@ -1128,8 +1115,8 @@ impl Root {
         self.overlay = Overlay::Palette(p);
         cx.notify();
     }
-    fn open_host_dialog(&mut self, existing: Option<HostEntry>, window: &mut Window, cx: &mut Context<Self>) {
-        let d = cx.new(|cx| HostDialog::new(existing, window, cx));
+    fn open_host_dialog(&mut self, existing: Option<HostEntry>, group: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let d = cx.new(|cx| HostDialog::new(existing, group, window, cx));
         self._subs.push(cx.subscribe_in(&d, window, |this, _, ev: &HostEvent, window, cx| {
             match ev {
                 HostEvent::Saved(n) => { this.log("host.save", n); this.toast(tf("main.host_saved", &[("n", &n)]), cx); }
@@ -1147,7 +1134,7 @@ impl Root {
             Action::CommandPalette => self.open_palette(window, cx),
             Action::OpenSettings => self.open_settings(Cat::General, window, cx),
             Action::NewLocalTab => self.new_tab(Spec::Local, window, cx),
-            Action::NewHost => self.open_host_dialog(None, window, cx),
+            Action::NewHost => self.open_host_dialog(None, None, window, cx),
             Action::SplitAuto => self.split(None, window, cx),
             Action::SplitRight => self.split(Some(Dir::Vertical), window, cx),
             Action::SplitDown => self.split(Some(Dir::Horizontal), window, cx),
@@ -1218,157 +1205,6 @@ impl Root {
         all.iter().map(|h| { let t = hosts::resolve(h, &kh, &all, &o); (h.clone(), t) }).collect()
     }
 
-    // ---------------------------------------------------------------- sidebar
-    fn sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let th = cur();
-        let selected_label = self.tabs.get(self.active).map(|t| match &t.focused.read(cx).spec { Spec::Local => "local".to_string(), Spec::Ssh(t) => t.label() });
-        let open: Vec<(String, bool)> = self.tabs.iter().flat_map(|t| t.layout.leaves()).map(|p| {
-            let v = p.read(cx);
-            let label = match &v.spec { Spec::Local => "local".to_string(), Spec::Ssh(t) => t.label() };
-            (label, v.session.as_ref().is_some_and(|s| s.connected.load(Ordering::Acquire)))
-        }).collect();
-        let online = |label: &str| open.iter().any(|(l, on)| l == label && *on);
-        let q = self.host_search.read(cx).value().to_string().to_lowercase();
-
-        // groups: (group name, entries)
-        struct E { name: String, detail: String, spec: Spec, letter: &'static str, prod: bool, edit: Option<HostEntry>, label: String }
-        let ungrouped = t("ui.ungrouped").to_string();
-        let mut nested_paths: Vec<String> = vec![];
-        let mut groups: Vec<(String, Vec<E>)> = vec![];
-        let mut push = |g: &str, e: E| {
-            if !q.is_empty() && !format!("{} {}", e.name, e.detail).to_lowercase().contains(&q) { return; }
-            match groups.iter_mut().find(|(n, _)| n == g) { Some((_, v)) => v.push(e), None => groups.push((g.to_string(), vec![e])) }
-        };
-        let sh = { let s = config::get().terminal.shell.clone(); if s.is_empty() { std::env::var("SHELL").unwrap_or_else(|_| "bash".into()) } else { s } };
-        push(t("ui.quick_connect"), E { name: t("ui.local_terminal").into(), detail: format!("{} · portable-pty", sh.rsplit('/').next().unwrap_or("sh")), spec: Spec::Local, letter: "L", prod: false, edit: None, label: "local".into() });
-        if let Some(dt) = self.default_target.clone() {
-            push(t("ui.quick_connect"), E { name: dt.label(), detail: t("ui.ssh_host_environment_variable").into(), label: dt.label(), spec: Spec::Ssh(dt), letter: "S", prod: false, edit: None });
-        }
-        for (h, t) in self.host_targets() {
-            let g = if h.source == "config" {
-                match h.group.as_deref().map(ssh_term_proto::outline::normalize).filter(|g| !g.is_empty()) { Some(g) => { nested_paths.push(g.clone()); format!("\u{1}{g}") } None => ungrouped.clone() }
-            } else { "~/.ssh/config".into() };
-            let edit = (h.source == "config").then(|| h.clone());
-            push(&g, E { name: h.name.clone(), detail: t.label(), label: t.label(), spec: Spec::Ssh(t), letter: "S", prod: h.production, edit });
-        }
-
-        // title-bar part of the sidebar: traffic lights + collapse (Finder layout, PRD 5.22)
-        let header = chrome::drag_region(div().id("sb-titlebar")).h(px(chrome::TITLE_H)).flex_shrink_0().pr_2().flex().items_center().gap_2()
-            .child(self.lights(window, cx))
-            .child(div().flex_1())
-            .child(div().id("sb-collapse").size(px(28.)).rounded(px(6.)).on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()).flex().items_center().justify_center().cursor_pointer().hover(|d| d.bg(c(cur().surface0)))
-                .on_click(cx.listener(|this, _, _w, cx| { this.sidebar_visible = false; cx.notify(); })).child(icon(IconName::PanelLeft, 15., c(th.overlay1))));
-        let search = div().px_3().pb_2().flex().items_center().gap_2()
-            .child(div().flex_1().child(Input::new(&self.host_search).prefix(icon(IconName::Search, 13., c(th.overlay1))).cleanable(true)))
-            .child(div().id("new-host").size(px(28.)).rounded(px(6.)).flex().items_center().justify_center().cursor_pointer()
-                .hover(|d| d.bg(c(cur().surface0)))
-                .tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(t("ui.new_host_2")).build(w, cx))
-                .on_click(cx.listener(|this, _, w, cx| this.open_host_dialog(None, w, cx)))
-                .child(icon(IconName::Plus, 15., c(th.text))));
-
-        let mut list = div().id("host-list").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().pb_2();
-        let mut idx = 0usize;
-        // section order: quick connect, nested config groups (a/b/c tree, PRD 3.1), ungrouped, ~/.ssh/config
-        let host_os = self.host_os.lock().unwrap().clone();
-        let mut groups: HashMap<String, Vec<E>> = groups.into_iter().collect();
-        struct Sec { key: String, name: String, depth: usize, drop: Option<String>, count: usize }
-        let mut secs: Vec<Sec> = vec![];
-        let qc = t("ui.quick_connect").to_string();
-        let flat = |k: &str, drop: Option<String>, secs: &mut Vec<Sec>, groups: &HashMap<String, Vec<E>>| if let Some(v) = groups.get(k) { secs.push(Sec { key: k.into(), name: k.into(), depth: 0, drop, count: v.len() }); };
-        flat(&qc, None, &mut secs, &groups);
-        let host_groups: Vec<String> = { let mut v = nested_paths.clone(); if !q.is_empty() { v.retain(|p| groups.contains_key(&format!("\u{1}{p}"))); } v };
-        for r in ssh_term_proto::outline::rows(&host_groups) {
-            let count = ssh_term_proto::outline::count_under(&r.path, &host_groups);
-            secs.push(Sec { key: format!("\u{1}{}", r.path), name: r.name, depth: r.depth, drop: Some(r.path), count });
-        }
-        flat(&ungrouped, Some(String::new()), &mut secs, &groups);
-        flat("~/.ssh/config", None, &mut secs, &groups);
-        let collapsed_set = self.collapsed.clone();
-        for sec in secs {
-            let gname = sec.key.clone();
-            let collapsed = self.collapsed.contains(&gname) && q.is_empty();
-            if q.is_empty() && sec.depth > 0 {
-                let path = gname.trim_start_matches('\u{1}').to_string();
-                let parent = path.rsplit_once('/').map(|(p, _)| p.to_string()).unwrap_or_default();
-                if ssh_term_proto::outline::hidden_by(&parent, &|p| collapsed_set.contains(&format!("\u{1}{p}"))) { continue; }
-            }
-            let g2 = gname.clone();
-            // Finder source-list section header: small grey uppercase, chevron + count on hover
-            let hg = SharedString::from(format!("grp-g-{gname}"));
-            let mut hdr = div().id(SharedString::from(format!("grp-{gname}"))).group(hg.clone()).mx_2().mt(px(if sec.depth == 0 { 12. } else { 4. })).pr_2().pl(px(8. + 12. * sec.depth as f32)).h(px(20.)).flex().items_center().gap_1().cursor_pointer().rounded(px(6.))
-                .on_click(cx.listener(move |this, _, _w, cx| { if !this.collapsed.remove(&g2) { this.collapsed.insert(g2.clone()); } cx.notify(); }))
-                .when(sec.drop.is_some() && !sec.key.starts_with(&ungrouped), |d| d.child(icon(IconName::Folder, 11., c(th.overlay1))))
-                .child(div().text_size(px(10.5)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.overlay1)).child(sec.name.to_uppercase()))
-                .child(div().flex_1())
-                .child(div().invisible().group_hover(hg.clone(), |s| s.visible()).text_size(px(10.5)).text_color(c(th.overlay0)).child(sec.count.to_string()))
-                .child(div().when(!collapsed, |d| d.invisible().group_hover(hg, |s| s.visible())).child(icon(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown }, 11., c(th.overlay1))));
-            if let Some(target) = sec.drop.clone() {
-                hdr = hdr.drag_over::<HostDrag>(|st, _, _, _| st.bg(c(cur().accent).opacity(0.25)))
-                    .on_drop(cx.listener(move |this, d: &HostDrag, _w, cx| this.move_host_to_group(&d.name, &target, cx)));
-            }
-            list = list.child(hdr);
-            let entries = groups.remove(&gname).unwrap_or_default();
-            if collapsed { continue; }
-            for e in entries {
-                let accent = if matches!(e.spec, Spec::Local) { c(th.info) } else if e.prod { c(th.error) } else { c(th.warning) };
-                let dot = if online(&e.label) { c(th.success) } else { c(th.surface2) };
-                let spec = e.spec.clone();
-                let gid = SharedString::from(format!("host-row-{idx}"));
-                let os_key = match &e.spec { Spec::Ssh(t) => t.pool_key(), _ => e.label.clone() };
-                let os = host_os.get(&os_key).map(|s| s.as_str());
-                let sel = selected_label.as_deref() == Some(e.label.as_str());
-                let mut row = div().id(("host", idx)).group(gid.clone()).mx_2().px_2().pl(px(8. + 12. * sec.depth as f32)).py(px(4.)).rounded(px(6.)).flex().items_center().gap(px(10.)).cursor_pointer()
-                    .when(sel, |d| d.bg(c(th.accent).opacity(0.16)))
-                    .when(!sel, |d| d.hover(|s| s.bg(c(cur().surface0).opacity(0.7))))
-                    .on_click(cx.listener(move |this, _, w, cx| this.new_tab(spec.clone(), w, cx)))
-                    .on_mouse_down(gpui::MouseButton::Right, cx.listener({ let spec = e.spec.clone(); move |this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.host_menu = Some((spec.clone(), ev.position)); cx.notify(); } }))
-                    .child({ let _ = e.letter; icon(if matches!(e.spec, Spec::Local) { IconName::Monitor } else if e.prod { IconName::ShieldAlert } else { IconName::Server }, 16., if e.prod { accent } else { c(th.accent) }) })
-                    .child(div().flex_1().min_w_0().flex().flex_col().overflow_hidden()
-                        .child(div().flex().items_center().gap_1().child(div().text_size(px(12.5)).text_color(c(th.text)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(e.name.clone()))
-                            .when(e.prod, |d| d.child(ui::tag(t("ui.prod"), c(th.error)))))
-                        .child(div().text_size(px(10.5)).text_color(c(th.overlay0)).child(match os { Some(o) => format!("{} · {}", e.detail, ssh_term_proto::outline::badge(o).1), None => e.detail.clone() })));
-                if let Some(h) = &e.edit { let d = HostDrag { name: h.name.clone() }; row = row.on_drag(d, |d: &HostDrag, _, _, cx| cx.new(|_| d.clone())); }
-                if let Some(h) = e.edit.clone() {
-                    row = row.child(div().id(("host-edit", idx)).size(px(22.)).rounded_md().flex().items_center().justify_center().invisible()
-                        .group_hover(gid, |s| s.visible()).hover(|s| s.bg(c(cur().surface1)))
-                        .on_click(cx.listener(move |this, _, w, cx| { cx.stop_propagation(); this.open_host_dialog(Some(h.clone()), w, cx); }))
-                        .child(icon(IconName::Pencil, 12., c(th.overlay1))));
-                }
-                list = list.child(row.child(div().size(px(6.)).rounded_full().bg(dot)));
-                idx += 1;
-            }
-        }
-        if idx == 0 { list = list.child(div().px_4().py_3().text_size(px(11.5)).text_color(c(th.overlay0)).child(t("ui.no_matching_hosts"))); }
-
-        // ---- function area (bottom-left)
-        let items: [(Action, &str, IconName); 8] = [
-            (Action::OpenSftp, t("ui.sftp_files"), IconName::FolderSync),
-            (Action::OpenPortForward, t("ui.port_forwarding"), IconName::ArrowLeftRight),
-            (Action::OpenHostTools, t("hosttools.title"), IconName::ChartPie),
-            (Action::OpenAi, "AI / Agent", IconName::Bot),
-            (Action::OpenAudit, t("ui.audit_log"), IconName::ScrollText),
-            (Action::CommandPalette, t("ui.command_palette"), IconName::Command),
-            (Action::OpenSettings, t("ui.settings"), IconName::Settings),
-            (Action::OpenAbout, t("ui.help_about"), IconName::CircleQuestionMark),
-        ];
-        let n_agents = self.tabs.iter().flat_map(|t| t.layout.leaves()).filter(|p| p.read(cx).agent.is_some()).count();
-        // bottom-left: icon row with tooltips (label + shortcut)
-        let mut tools = div().px_2().py(px(8.)).flex().items_center().justify_between().border_t_1().border_color(c(th.surface1).opacity(0.5));
-        for (i, (a, label, ic)) in items.into_iter().enumerate() {
-            let b = a.binding();
-            let tip = if b.is_empty() { label.to_string() } else { format!("{label}  ({})", b.split('-').map(|p| if p.len() == 1 { p.to_uppercase() } else { let mut c = p.chars(); c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default() }).collect::<Vec<_>>().join("+")) };
-            tools = tools.child(div().id(("tool", i)).relative().size(px(26.)).rounded(px(6.)).flex().items_center().justify_center().cursor_pointer()
-                .hover(|d| d.bg(c(cur().surface0)))
-                .on_click(cx.listener(move |this, _, w, cx| this.run(a, w, cx)))
-                .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
-                .child(icon(ic, 15., c(th.overlay1)))
-                .when(a == Action::OpenAi && n_agents > 0, |d| d.child(div().absolute().top(px(2.)).right(px(2.)).size(px(6.)).rounded_full().bg(c(th.accent)))));
-        }
-
-        let vib = if chrome::NATIVE_LIGHTS { 0.72 } else { 1.0 };
-        div().w(px(240.)).flex_shrink_0().h_full().flex().flex_col().bg(c(th.mantle).opacity(vib)).border_r_1().border_color(c(th.surface1).opacity(0.6))
-            .child(header).child(search).child(list).child(tools)
-    }
 }
 
 pub(crate) fn sync_component_theme(th: &Theme, cx: &mut App) {
@@ -1405,7 +1241,9 @@ impl Root {
     fn render_node(&self, tab: usize, node: &Node<Entity<TermView>>, path: Vec<bool>, th: &Theme, cx: &mut Context<Self>) -> AnyElement {
         match node {
             Node::Leaf(p) => {
-                let mut d = div().relative().flex_1().size_full().flex().overflow_hidden().child(p.clone());
+                let pg = SharedString::from(format!("pane-g-{}", p.entity_id()));
+                let mut d = div().relative().group(pg.clone()).flex_1().size_full().flex().overflow_hidden().child(p.clone());
+                if !cx.has_active_drag() { d = d.child(self.pane_header(p, pg, cx)); }
                 if cx.has_active_drag() && self.tabs.len() > 1 {
                     // drop zones for a dragged tab: left/right quarter, top/bottom half of the middle (PRD US-03)
                     for (i, edge) in [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom].into_iter().enumerate() {
@@ -1489,9 +1327,9 @@ impl Render for Root {
         for (i, t) in self.tabs.iter().enumerate() {
             let active = i == self.active;
             let panes = t.layout.leaves();
-            let title: SharedString = {
-                let first = shown_title(panes[0].read(cx));
-                if panes.len() > 1 { format!("{first} +{}", panes.len() - 1).into() } else { first }
+            let title: SharedString = match &t.name {
+                Some(n) => n.clone().into(),
+                None => { let first = shown_title(panes[0].read(cx)); if panes.len() > 1 { format!("{first} +{}", panes.len() - 1).into() } else { first } }
             };
             let agent = panes.iter().filter_map(|p| p.read(cx).agent_label())
                 .max_by_key(|(_, st)| match st { AgentState::Blocked => 3, AgentState::Working => 2, AgentState::Idle => 1, _ => 0 });
@@ -1504,9 +1342,15 @@ impl Render for Root {
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .when(active, |d| d.bg(c(th.base).opacity(if th.appearance == Appearance::Dark { 0.55 } else { 0.95 })).shadow(chrome::soft_shadow(false)))
                 .when(!active, |d| d.hover(|s| s.bg(c(cur().surface0).opacity(0.6))))
-                .on_click(cx.listener(move |this, _, w, cx| { this.active = i; this.focus_active(w, cx); cx.notify(); }))
+                .on_click(cx.listener({ let title = title.to_string(); move |this, ev: &gpui::ClickEvent, w, cx| {
+                    this.active = i;
+                    if ev.click_count() >= 2 { this.start_rename(i, title.clone(), w, cx); } else { this.focus_active(w, cx); }
+                    cx.notify();
+                } }))
+                .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.tab_menu = Some((i, ev.position)); cx.notify(); }))
                 .child(if panes[0].read(cx).sftp.is_some() { icon(IconName::FolderSync, 12., if active { c(th.accent) } else { c(th.overlay1) }).into_any_element() } else { div().size(px(6.)).rounded_full().bg(if active { c(th.accent) } else { c(th.surface2) }).into_any_element() })
-                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.)).text_color(if active { c(th.text) } else { c(th.subtext) }).when(active, |d| d.font_weight(FontWeight::MEDIUM)).child(title.clone()));
+                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.)).text_color(if active { c(th.text) } else { c(th.subtext) }).when(active, |d| d.font_weight(FontWeight::MEDIUM))
+                    .child(match &self.tab_rename { Some((j, inp)) if *j == i => gpui_component::Sizable::with_size(gpui_component::input::Input::new(inp).appearance(false), gpui_component::Size::XSmall).into_any_element(), _ => title.clone().into_any_element() }));
             if let Some((name, st)) = agent {
                 let col = state_color(st, &th);
                 tabel = tabel.child(div().px(px(6.)).rounded_md().bg(col.opacity(0.18)).text_color(col).text_size(px(11.)).child(format!("● {name} {}", st.label())));
@@ -1518,28 +1362,24 @@ impl Render for Root {
                 .hover(|s| s.bg(c(cur().surface1)))
                 .on_click(cx.listener(move |this, _, w, cx| {
                     cx.stop_propagation();
-                    this.tabs.remove(i);
-                    this.active = this.active.min(this.tabs.len().saturating_sub(1));
-                    this.focus_active(w, cx);
-                    cx.notify();
+                    this.close_tab(i, w, cx);
                 }))
                 .child(icon(IconName::X, 12., c(th.overlay0))));
             tabbar = tabbar.child(tabel);
         }
-        // toolbar buttons: line icons with tooltips (macOS toolbar style)
-        let tb_btn = |id: &'static str, ic: IconName, label: &'static str| div().id(id).size(px(28.)).rounded(px(6.)).flex().items_center().justify_center().cursor_pointer()
-            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .hover(|s| s.bg(c(cur().surface0))).child(icon(ic, 15., c(th.overlay1)))
-            .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(label).build(w, cx));
+        // "+" then the empty title-bar area (window drag / double-click maximize / Windows snap),
+        // then the window's own min / max / close buttons (Windows/Linux style, PRD 5.23)
         tabbar = tabbar.child(
             div().id("new-tab").size(px(28.)).rounded(px(6.)).on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()).flex().items_center().justify_center().cursor_pointer()
                 .hover(|s| s.bg(c(cur().surface0)))
+                .tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(t("ui.new_tab")).build(w, cx))
                 .on_click(cx.listener(|this, _, w, cx| this.new_tab(Spec::Local, w, cx)))
                 .child(icon(IconName::Plus, 15., c(th.overlay1))),
-        ).child(div().flex_1())
-        .child(tb_btn("split-right", IconName::Columns2, t("ui.split_left_right")).on_click(cx.listener(|this, _, w, cx| this.split(Some(Dir::Vertical), w, cx))))
-        .child(tb_btn("split-down", IconName::Rows2, t("ui.split_top_bottom")).on_click(cx.listener(|this, _, w, cx| this.split(Some(Dir::Horizontal), w, cx))))
-        .child(tb_btn("close-pane", IconName::X, t("ui.close_pane")).on_click(cx.listener(|this, _, w, cx| this.close_pane(w, cx))));
+        ).child(chrome::drag_spacer("title-spacer"));
+        let me = cx.entity().downgrade();
+        if let Some(wc) = chrome::window_controls("winctl", window, move |w, cx| { let _ = me.update(cx, |r, cx| if r.should_close(w, cx) { w.remove_window(); cx.quit(); }); }) {
+            tabbar = tabbar.pr_0().child(wc);
+        }
 
         let panes = match self.tabs.get(self.active) {
             Some(tab) => div().flex_1().flex().overflow_hidden().child(self.render_node(self.active, &tab.layout, vec![], &th, cx)),
@@ -1594,7 +1434,7 @@ impl Render for Root {
         root = root.child(div().flex_1().min_w_0().h_full().flex().flex_col().bg(c(th.crust).opacity(op)).child(tabbar).child(panes).child(statusbar));
         if let Some(e) = chrome::resize_edges(window) { root = root.child(e); }
 
-        let host_menu = self.host_menu.clone().map(|(spec, pos)| self.host_menu_el(spec, pos, cx));
+        let host_menu = self.sb_menu.clone().map(|m| self.sb_menu_el(m, cx));
         let overlay: Option<AnyElement> = match &self.overlay {
             Overlay::None => None,
             Overlay::Settings(v) => Some(ui::modal(v.clone()).into_any_element()),
@@ -1704,6 +1544,8 @@ impl Render for Root {
                     }))))));
         }
         if let Some(m) = self.modal.clone() { root = root.child(self.render_modal(m, cx)); }
+        if let Some(m) = self.sb_modal.clone() { root = root.child(self.sb_modal_el(m, cx)); }
+        if let Some((i, pos)) = self.tab_menu { root = root.child(self.tab_menu_el(i, pos, cx)); }
         if let Some((msg, _)) = &self.toast {
             root = root.child(div().absolute().bottom(px(40.)).right(px(16.)).max_w(px(460.)).px_4().py_2().rounded_lg().bg(c(th.base)).border_1().border_color(c(th.surface1)).shadow_lg()
                 .flex().items_center().gap_2().text_size(px(12.)).text_color(c(th.text)).child(icon(IconName::Info, 14., c(th.accent))).child(msg.clone()));
@@ -1743,6 +1585,9 @@ fn main() {
     let default_target = if std::env::var("NO_SSH").is_ok() { None } else { env_target(&config::get().known_hosts_path()) };
     gpui_platform::application().with_assets(gpui_kit_assets::AllAssets).run(move |cx: &mut App| {
         gpui_component::init(cx);
+        // bundled icon font (Nerd Fonts symbols, MIT): prompts with powerline / devicon glyphs render
+        // even when no Nerd Font is installed (e.g. stock Windows). Used through font.fallbacks.
+        if let Err(e) = cx.text_system().add_fonts(vec![std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/SymbolsNerdFontMono-Regular.ttf").as_slice())]) { eprintln!("nerd font: {e:#}"); }
         let installed = cx.text_system().all_font_names();
         theme::set_ui_font(theme::pick_ui_font(&installed));
         let fc = config::get().font.clone();
@@ -1764,8 +1609,8 @@ fn main() {
                     let audit = audit_log();
                     let mut root = Root {
                         rt, default_target, tabs: vec![], active: 0, themes, histories: HashMap::new(),
-                        manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], deny_reason: None, policy_port: None, overlay: Overlay::None, sftp_views: HashMap::new(), sftp_current: None, sftp_windows: vec![], host_menu: None, drag_div: None, port_view: None, quit_confirm: false, modal: None, quit_ok: false, chat_view: None,
-                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., collapsed: HashSet::new(), host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: true, audit, audit_verify: None, audit_filter: Default::default(),
+                        manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], deny_reason: None, policy_port: None, overlay: Overlay::None, sftp_views: HashMap::new(), sftp_current: None, sftp_windows: vec![], drag_div: None, port_view: None, quit_confirm: false, modal: None, quit_ok: false, chat_view: None,
+                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, sb_modal: None, tag_filter: vec![], tab_menu: None, tab_rename: None, closed_tabs: vec![], host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: true, audit, audit_verify: None, audit_filter: Default::default(),
                         settings_dirty: vec![], toast: None, toast_seq: 0, _subs: vec![],
                     };
                     crate::ctxmenu_view::init(root.rt.handle().clone(), root.prompts.clone());
@@ -1785,7 +1630,7 @@ fn main() {
                     // audit retention (audit.retention_days)
                     match root.audit.prune(ssh_term_proto::managed::get().and_then(|m| m.retention_floor()).map_or(config::get().audit.retention_days, |f| config::get().audit.retention_days.max(f))) { Ok(0) => {}, Ok(n) => eprintln!("audit: pruned {n} records"), Err(e) => eprintln!("audit prune: {e}") }
                     // update check (general.check_updates); quiet on network errors
-                    if config::get().general.check_updates && std::env::var_os("AGENTSHELL_NO_UPDATE_CHECK").is_none() {
+                    if !secondary() && config::get().general.check_updates && std::env::var_os("AGENTSHELL_NO_UPDATE_CHECK").is_none() {
                         let url = config::get().general.manifest_url();
                         cx.spawn(async move |this, cx| {
                             let r = cx.background_executor().spawn(async move { ssh_term_proto::update::check(&url) }).await;
@@ -1806,10 +1651,12 @@ fn main() {
                         all.iter().map(|h| (h.name.clone(), hosts::resolve(h, &kh, &all, &o))).collect()
                     });
                     let ops: Arc<dyn ssh_term_proto::broker::Ops> = Arc::new(ssh_term_proto::broker::SshOps { rt: root.rt.handle().clone(), targets, prompts: root.prompts.clone() });
+                    // a moved-tab window shares the main window's policy service (hooks read its endpoint file)
+                    if secondary() { root.log("policy.server", "secondary window: using the main window's policy service"); } else {
                     match ssh_term_proto::policy_server::start_with_ops(&bind, None, ctx, Some(ap_tx), root.audit.clone(), Some(ssh_term_proto::policy_server::endpoint_path(&data_dir())), Some(ops)) {
                         Ok(srv) => { root.policy_port = Some(srv.port); *ssh::POLICY_ENDPOINT.lock().unwrap() = Some((srv.port, srv.token.clone())); root.log("policy.server", format!("listening on 127.0.0.1:{}", srv.port)); }
                         Err(e) => root.toast(tf("main.policy_server_failed", &[("e", &e)]), cx),
-                    }
+                    }}
                     // links: from this launch's command line and from later launches (/v1/open)
                     let (otx, orx) = flume::unbounded::<String>();
                     let _ = ssh_term_proto::policy_server::OPEN_TX.set(otx.clone());
@@ -1836,7 +1683,7 @@ fn main() {
                     }).detach();
                     // system tray: running-agent count + show / new terminal / quit (Linux SNI)
                     #[cfg(target_os = "linux")]
-                    if config::get().general.tray && std::env::var("AGENTSHELL_NO_TRAY").is_err() {
+                    if !secondary() && config::get().general.tray && std::env::var("AGENTSHELL_NO_TRAY").is_err() {
                         let (ttx, trx) = flume::unbounded::<ssh_term_proto::tray::TrayCmd>();
                         let zh = matches!(ssh_term_proto::i18n::current(), ssh_term_proto::i18n::Lang::ZhCn);
                         let trt = root.rt.handle().clone();
@@ -1870,7 +1717,7 @@ fn main() {
                     }
                     if let Some(e) = load_err.clone() { root.toast(e, cx); }
                     let st = config::get();
-                    let want_restore = (st.general.startup == "restore" || (st.session.restore_layout && st.general.startup != "blank")) && std::env::var("AGENTSHELL_NO_RESTORE").is_err();
+                    let want_restore = secondary() || ((st.general.startup == "restore" || (st.session.restore_layout && st.general.startup != "blank")) && std::env::var("AGENTSHELL_NO_RESTORE").is_err());
                     let restored = want_restore && root.restore_layout(window, cx);
                     // keep layout.json fresh (crash-safe) and save on close
                     cx.spawn(async move |this, cx| loop {
@@ -1887,7 +1734,7 @@ fn main() {
                             layout.split(&l, r, Dir::Vertical);
                         }
                         let fh = l.read(cx).focus.clone();
-                        root.tabs.push(Tab { layout, focused: l });
+                        root.tabs.push(Tab { layout, focused: l, name: None });
                         window.focus(&fh, cx);
                     }
                     root
@@ -1900,6 +1747,14 @@ fn main() {
 }
 
 fn shown_title(v: &TermView) -> SharedString { v.shown_title() }
+
+/// Name of the local shell actually started (PRD 5.23 fix: was always "bash" on Windows).
+pub(crate) fn shell_display_name() -> String {
+    let s = config::get().terminal.shell.clone();
+    let p = if s.is_empty() { ssh_term_proto::local::default_shell_path() } else { s };
+    let base = p.rsplit(['/', '\\']).next().unwrap_or(&p).to_string();
+    base.strip_suffix(".exe").or_else(|| base.strip_suffix(".EXE")).unwrap_or(&base).to_string()
+}
 
 /// Root view of a detached SFTP window (PRD 5.21). Closing it re-attaches the view as a tab.
 struct SftpWindow { view: Entity<sftp_view::SftpView> }

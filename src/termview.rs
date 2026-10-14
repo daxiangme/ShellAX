@@ -1191,7 +1191,7 @@ impl TermView {
         let (ctx_text, mut n_red) = ssh_term_proto::ai::build_context(&inp, &opts);
         let (req_sent, n2) = if cfg.ai.redact { ssh_term_proto::ai::redact(&request) } else { (request.clone(), 0) };
         n_red += n2;
-        let shell = match &self.spec { Spec::Local => std::env::var("SHELL").unwrap_or_else(|_| "sh".into()), Spec::Ssh(_) => "remote POSIX shell".into() };
+        let shell = match &self.spec { Spec::Local => { let s = crate::config::get().terminal.shell.clone(); if s.is_empty() { ssh_term_proto::local::default_shell_path() } else { s } } Spec::Ssh(_) => "remote POSIX shell".into() };
         let host = match &self.spec { Spec::Local => "local".to_string(), Spec::Ssh(t) => t.label() };
         let user = ssh_term_proto::ai::build_user_prompt(&req_sent, &shell, &host, &ctx_text);
         let _ = crate::audit_log().append("ai.request", "user", &format!(

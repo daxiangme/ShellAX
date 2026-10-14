@@ -66,7 +66,7 @@ impl Default for Font {
         let (family, fallbacks): (&str, &[&str]) = if cfg!(target_os = "macos") {
             ("Menlo", &["PingFang SC", "Symbols Nerd Font Mono", "Apple Color Emoji"])
         } else if cfg!(target_os = "windows") {
-            ("Cascadia Mono", &["Microsoft YaHei UI", "Symbols Nerd Font Mono", "Segoe UI Emoji", "Segoe UI Symbol"])
+            ("Cascadia Mono", &["Microsoft YaHei UI", "Symbols Nerd Font Mono", "Segoe UI Symbol", "Segoe Fluent Icons", "Segoe MDL2 Assets", "Segoe UI Emoji"])
         } else {
             ("JetBrains Mono", &["Noto Sans Mono CJK SC", "Symbols Nerd Font Mono", "Noto Color Emoji", "DejaVu Sans Mono"])
         };
@@ -228,6 +228,27 @@ pub struct Recording { pub redact: bool, pub dir: String }
 impl Default for Recording { fn default() -> Self { Self { redact: true, dir: String::new() } } }
 
 
+/// Finder-style color tags (PRD 5.23): custom names per color; one color means "production"
+/// for the permission engine (stricter confirmation, `env:prod` rules).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Tags { pub production: String, pub names: std::collections::BTreeMap<String, String> }
+impl Default for Tags { fn default() -> Self { Self { production: "red".into(), names: Default::default() } } }
+impl Tags {
+    /// Display name: custom name, else "production" for the production color, else the color name.
+    pub fn name(&self, color: &str) -> String {
+        if let Some(n) = self.names.get(color).filter(|n| !n.trim().is_empty()) { return n.clone(); }
+        if color == self.production { return ssh_term_proto::i18n::t("tag.production").to_string(); }
+        ssh_term_proto::i18n::t(&format!("tag.{color}")).to_string()
+    }
+    pub fn all(&self) -> Vec<(String, String)> { ssh_term_proto::hosttree::COLORS.iter().map(|c| (c.to_string(), self.name(c))).collect() }
+}
+
+/// Sidebar state persisted across runs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct Sidebar { pub collapsed: Vec<String> }
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
 pub struct Settings {
@@ -248,6 +269,10 @@ pub struct Settings {
     pub keys: std::collections::BTreeMap<String, String>,
     pub notify: Notify,
     pub hosts: Vec<HostEntry>,
+    /// Host tree groups (PRD 5.23), sidebar order.
+    pub groups: Vec<ssh_term_proto::hosttree::GroupEntry>,
+    pub tags: Tags,
+    pub sidebar: Sidebar,
     /// legacy top-level keys (v0.5 files); folded into sections on load
     #[serde(skip_serializing)] pub theme: Option<String>,
     #[serde(skip_serializing)] pub known_hosts: Option<String>,
@@ -266,6 +291,10 @@ impl Settings {
         if let Some(v) = s.known_hosts.take() { s.ssh.known_hosts = v; }
         if let Some(v) = s.ssh_config.take() { s.ssh.ssh_config = v; }
         for h in &mut s.hosts { h.source = "config"; }
+        // PRD 5.23: production flag -> production color tag; groups referenced by hosts exist
+        let prod = s.tags.production.clone();
+        ssh_term_proto::hosttree::migrate_production(&mut s.hosts, &prod);
+        ssh_term_proto::hosttree::ensure_groups(&s.hosts, &mut s.groups);
         Ok(s)
     }
     pub fn load() -> (Settings, Option<String>) {
@@ -310,8 +339,10 @@ impl Settings {
         };
         tbl.insert(last.into(), val);
         let hosts = std::mem::take(&mut self.hosts);
+        let groups = std::mem::take(&mut self.groups);
         let mut new: Settings = root.try_into()?;
         new.hosts = hosts;
+        new.groups = groups;
         *self = new;
         Ok(())
     }
@@ -326,10 +357,21 @@ impl Settings {
     }
     pub fn get_bool(&self, path: &str) -> bool { matches!(self.get(path), Some(toml::Value::Boolean(true))) }
 
-    /// All hosts: config.toml entries first, then ~/.ssh/config (if enabled), defaults applied.
+    /// Production = carries the production tag itself or through a group.
+    pub fn host_is_production(&self, h: &HostEntry) -> bool { ssh_term_proto::hosttree::is_production(h, &self.groups, &self.tags.production) }
+    /// Hosts of ~/.ssh/config (for import; they are no longer listed automatically).
+    pub fn ssh_config_hosts(&self) -> Vec<HostEntry> {
+        use ssh_term_proto::hosts::{expand_tilde, load_ssh_config};
+        let path = std::env::var("AGENTSHELL_SSH_CONFIG").unwrap_or_else(|_| self.ssh.ssh_config.clone());
+        load_ssh_config(&expand_tilde(&path))
+    }
+    /// Hosts for connection resolution (jump hosts, agents broker): config.toml entries first,
+    /// then ~/.ssh/config (if enabled), defaults applied, production computed from tags.
+    /// The sidebar shows only `self.hosts` (PRD 5.23).
     pub fn all_hosts(&self) -> Vec<HostEntry> {
         use ssh_term_proto::hosts::{expand_tilde, load_ssh_config};
         let mut hosts: Vec<HostEntry> = self.hosts.clone();
+        for h in &mut hosts { h.production = self.host_is_production(h); }
         let path = std::env::var("AGENTSHELL_SSH_CONFIG").unwrap_or_else(|_| self.ssh.ssh_config.clone());
         if self.ssh.read_ssh_config {
             for h in load_ssh_config(&expand_tilde(&path)) { if !hosts.iter().any(|x| x.name == h.name) { hosts.push(h); } }
@@ -360,7 +402,7 @@ impl Settings {
     pub fn policy_ctx(&self) -> ssh_term_proto::policy_server::PolicyCtx {
         use ssh_term_proto::policy::Risk;
         let mut prod_hosts = Vec::new();
-        for h in self.hosts.iter().filter(|h| h.production) {
+        for h in self.hosts.iter().filter(|h| self.host_is_production(h)) {
             prod_hosts.push(h.name.clone());
             if !h.host.is_empty() { prod_hosts.push(h.host.clone()); }
         }
@@ -517,7 +559,10 @@ mod tests {
         assert_eq!(s.ssh.known_hosts, "~/kh");
         assert_eq!(s.font.size, 14.0);
         assert!(s.terminal.copy_on_select && s.terminal.mouse_reporting);
-        assert_eq!((s.hosts[0].name.as_str(), s.hosts[0].port, s.hosts[0].production), ("prod", Some(2200), true));
+        assert_eq!((s.hosts[0].name.as_str(), s.hosts[0].port, s.host_is_production(&s.hosts[0])), ("prod", Some(2200), true));
+        // PRD 5.23: legacy production flag migrated to the production tag
+        assert_eq!((s.hosts[0].production, s.hosts[0].tags.as_slice()), (false, &["red".to_string()][..]));
+        assert!(s.all_hosts()[0].production && s.policy_ctx().prod_hosts.contains(&"prod".to_string()));
     }
     #[test]
     fn dotted_get_set_roundtrip() {
@@ -569,6 +614,26 @@ mod tests {
         assert_eq!(Settings::parse(&out).unwrap(), s);
     }
 
+    #[test]
+    fn host_tree_round_trip() {
+        // groups + tags + collapsed state survive a save (merge) / reload; legacy key dropped
+        let old = "# mine\n[[hosts]]\nname = \"db\"\nhost = \"10.0.0.9\"\ngroup = \"prod/db\"\nproduction = true\n";
+        let mut s = super::Settings::parse(old).unwrap();
+        assert_eq!(s.groups.iter().map(|g| g.path.as_str()).collect::<Vec<_>>(), ["prod", "prod/db"]);
+        s.groups[0].tags.push("orange".into());
+        s.sidebar.collapsed.push("prod".into());
+        s.tags.names.insert("orange".into(), "预发".into());
+        let body = super::merge_preserving(old, &toml::to_string_pretty(&s).unwrap()).unwrap();
+        assert!(body.starts_with("# mine") && !body.contains("production = true"), "{body}");
+        let r = super::Settings::parse(&body).unwrap();
+        assert_eq!((r.groups[0].tags.clone(), r.sidebar.collapsed.clone(), r.tags.name("orange")), (vec!["orange".to_string()], vec!["prod".to_string()], "预发".to_string()));
+        assert!(r.host_is_production(&r.hosts[0]));
+        // production mapped to another color: red no longer means production
+        let mut r2 = r.clone();
+        r2.tags.production = "orange".into();
+        r2.hosts[0].tags.clear();
+        assert!(r2.host_is_production(&r2.hosts[0]), "inherits orange from group prod");
+    }
     #[test]
     fn save_preserves_comments() {
         let old = "# my settings\n\n[font]\n# I like big text\nsize = 15.0 # bigger\nfamily = \"JetBrains Mono\"\n\n[general]\nlanguage = \"zh-CN\"\n";

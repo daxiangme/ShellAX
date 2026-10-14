@@ -41,6 +41,9 @@ add-zsh-hook precmd __as_precmd
 add-zsh-hook preexec __as_preexec
 "#;
 
+/// Shell started for a local pane without an explicit shell: $SHELL, else the platform default.
+pub fn default_shell_path() -> String { std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(default_shell) }
+
 /// Login shell when $SHELL is unset. Windows: PowerShell 7 (pwsh) if on PATH, else
 /// Windows PowerShell, else %COMSPEC% (cmd.exe).
 fn default_shell() -> String {

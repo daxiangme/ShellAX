@@ -19,6 +19,7 @@ pub mod layout;
 pub mod local;
 pub mod ssh;
 pub mod platform;
+pub mod hosttree;
 pub mod update;
 pub mod sftp;
 #[cfg(unix)]

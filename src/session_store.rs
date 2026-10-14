@@ -30,7 +30,12 @@ pub enum NodeSave {
 fn half() -> f32 { 0.5 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
-pub struct LayoutSave { pub version: u32, pub saved_at: String, pub active: usize, pub tabs: Vec<NodeSave> }
+pub struct LayoutSave {
+    pub version: u32, pub saved_at: String, pub active: usize, pub tabs: Vec<NodeSave>,
+    /// Custom tab names (PRD 5.23), parallel to `tabs`; empty when no tab was renamed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub names: Vec<Option<String>>,
+}
 
 pub fn save(path: &Path, l: &LayoutSave) -> Result<()> {
     if let Some(d) = path.parent() { std::fs::create_dir_all(d)?; }
@@ -64,7 +69,7 @@ mod tests {
     #[test]
     fn sftp_tabs_roundtrip() {
         let t = SshTarget { host: "h".into(), port: 2222, user: "u".into(), ..Default::default() };
-        let l = LayoutSave { version: 1, saved_at: "x".into(), active: 0, tabs: vec![
+        let l = LayoutSave { version: 1, saved_at: "x".into(), active: 0, names: vec![], tabs: vec![
             NodeSave::Leaf { pane: PaneSave::Sftp { target: t.clone(), local_dir: "/tmp/本地 dir".into(), remote_dir: "/srv/a b".into(), follow: false } },
             NodeSave::Split { vertical: true, ratio: 0.6, a: Box::new(NodeSave::Leaf { pane: PaneSave::Ssh { target: t.clone(), resume: None } }),
                 b: Box::new(NodeSave::Leaf { pane: PaneSave::Sftp { target: t, local_dir: String::new(), remote_dir: "/".into(), follow: true } }) },
@@ -87,10 +92,13 @@ mod tests {
             NodeSave::Leaf { pane: PaneSave::Local { cwd: "/tmp".into(), daemon_id: Some("d1".into()), resume: Some("claude --continue".into()) } },
             NodeSave::Split { vertical: true, ratio: 0.3, a: Box::new(NodeSave::Leaf { pane: PaneSave::Local { cwd: String::new(), daemon_id: None, resume: None } }),
                 b: Box::new(NodeSave::Leaf { pane: PaneSave::Ssh { target: SshTarget { host: "h".into(), port: 22, user: "u".into(), tmux: Some("agentshell-1".into()), ..Default::default() }, resume: None } }) },
-        ] };
+        ], names: vec![Some("构建 · web".into()), None] };
         let p = std::env::temp_dir().join(format!("stp-layout-{}.json", std::process::id()));
         save(&p, &l).unwrap();
         assert_eq!(load(&p).unwrap(), l);
+        // files written before PRD 5.23 have no names
+        let old: LayoutSave = serde_json::from_str(r#"{"version":1,"saved_at":"x","active":0,"tabs":[]}"#).unwrap();
+        assert!(old.names.is_empty());
         let _ = std::fs::remove_file(p);
         assert_eq!(resume_command("Claude Code"), Some("claude --continue"));
         assert_eq!(resume_command("Codex"), Some("codex resume --last"));

@@ -2,7 +2,6 @@
 use ssh_term_proto::i18n::{t, tf};
 use gpui::{div, prelude::*, px, Context, Entity, EventEmitter, FontWeight, Window};
 use gpui_component::input::{Input, InputState};
-use gpui_component::switch::Switch;
 use ssh_term_proto::hosts::HostEntry;
 
 use crate::config;
@@ -15,15 +14,18 @@ pub struct HostDialog {
     editing: Option<String>,
     fields: Vec<(&'static str, &'static str, Entity<InputState>)>,
     auth: String,
-    production: bool,
+    tags: Vec<String>,
+    base: HostEntry,
     error: Option<String>,
 }
 
 impl EventEmitter<HostEvent> for HostDialog {}
 
 impl HostDialog {
-    pub fn new(existing: Option<HostEntry>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let e = existing.clone().unwrap_or_default();
+    /// `group`: preset group for a new connection ("New connection here").
+    pub fn new(existing: Option<HostEntry>, group: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut e = existing.clone().unwrap_or_default();
+        if existing.is_none() { e.group = group; }
         let mk = |ph: &str, v: String, window: &mut Window, cx: &mut Context<Self>| { let ph = ph.to_string(); cx.new(|cx| InputState::new(window, cx).placeholder(ph).default_value(v)) };
         let fields = vec![
             (t("ui.name"), "name", mk(t("ui.e_g_prod_web_1"), e.name.clone(), window, cx)),
@@ -35,7 +37,7 @@ impl HostDialog {
             (t("ui.jump_host"), "jump", mk(t("ui.jump_placeholder"), e.jump.clone().unwrap_or_default(), window, cx)),
         ];
         fields[0].2.update(cx, |s, cx| s.focus(window, cx));
-        Self { editing: existing.map(|h| h.name), fields, auth: e.auth.unwrap_or_else(|| "auto".into()), production: e.production, error: None }
+        Self { editing: existing.map(|h| h.name), fields, auth: e.auth.clone().unwrap_or_else(|| "auto".into()), tags: e.tags.clone(), base: e, error: None }
     }
 
     fn val(&self, key: &str, cx: &Context<Self>) -> String {
@@ -50,12 +52,13 @@ impl HostDialog {
         let port = if port.is_empty() { None } else { match port.parse::<u16>() { Ok(p) if p > 0 => Some(p), _ => { self.error = Some(t("ui.port_must_be_1_65535").into()); cx.notify(); return; } } };
         let opt = |s: String| (!s.is_empty()).then_some(s);
         let entry = HostEntry { name: name.clone(), host, port, user: opt(self.val("user", cx)), identity_file: opt(self.val("key", cx)),
-            group: opt(self.val("group", cx)).map(|g| ssh_term_proto::outline::normalize(&g)).filter(|g| !g.is_empty()), auth: Some(self.auth.clone()), production: self.production, jump: opt(self.val("jump", cx)), source: "config" };
+            group: opt(self.val("group", cx)).map(|g| ssh_term_proto::outline::normalize(&g)).filter(|g| !g.is_empty()), auth: Some(self.auth.clone()), production: false, tags: self.tags.clone(), jump: opt(self.val("jump", cx)), source: "config", ..self.base.clone() };
         let editing = self.editing.clone();
         let s = config::get();
         if editing.as_deref() != Some(name.as_str()) && s.hosts.iter().any(|h| h.name == name) { self.error = Some(tf("host.exists", &[("name", &name)])); cx.notify(); return; }
         if let Some(e) = config::update(|s| {
             match editing.and_then(|old| s.hosts.iter().position(|h| h.name == old)) { Some(i) => s.hosts[i] = entry, None => s.hosts.push(entry) }
+            ssh_term_proto::hosttree::ensure_groups(&s.hosts, &mut s.groups);
         }) { self.error = Some(e); cx.notify(); return; }
         cx.emit(HostEvent::Saved(name));
     }
@@ -76,9 +79,12 @@ impl Render for HostDialog {
                     .child(ui::segmented("auth", &opts, &self.auth, move |v, _w, cx| { let _ = me.update(cx, |this, cx| { this.auth = v; cx.notify(); }); })));
             }
         }
-        form = form.child(div().flex().items_center().gap_3().child(label(t("ui.production")))
-            .child(Switch::new("prod").checked(self.production).on_click(cx.listener(|this, v: &bool, _w, cx| { this.production = *v; cx.notify(); })))
-            .child(div().text_size(px(11.5)).text_color(c(th.overlay1)).child(t("ui.shows_a_red_prod_tag"))));
+        // Finder-style color tags (PRD 5.23); the production color drives the permission engine
+        let tags_cfg = config::get().tags.clone();
+        let me = cx.entity().downgrade();
+        form = form.child(div().flex().items_center().gap_3().child(label(t("tag.tags")))
+            .child(crate::ui::tag_picker("host-tags", &self.tags, &tags_cfg.all(), move |color, _w, cx| { let _ = me.update(cx, |this, cx| { ssh_term_proto::hosttree::toggle(&mut this.tags, &color); cx.notify(); }); }))
+            .child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(tf("tag.prod_hint", &[("name", &tags_cfg.name(&tags_cfg.production))]))));
         if let Some(e) = &self.error { form = form.child(div().text_size(px(12.)).text_color(c(th.error)).child(e.clone())); }
 
         let title = if self.editing.is_some() { t("ui.edit_host") } else { t("ui.new_host") };

@@ -28,6 +28,9 @@ pub struct HostEntry {
     /// Production host: shown with a red tag; permission rules can target it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub production: bool,
+    /// Finder-style color tags ("red", "blue", …; PRD 5.23).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
     /// ProxyJump host (stored; jump connections not implemented yet).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jump: Option<String>,
@@ -173,7 +176,7 @@ pub fn to_target(e: &HostEntry, known_hosts: &Path) -> SshTarget {
     SshTarget {
         host: e.host.clone(),
         port: e.port.unwrap_or(22),
-        user: e.user.clone().unwrap_or_else(|| std::env::var("USER").unwrap_or_default()),
+        user: e.user.clone().unwrap_or_else(|| std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_default()),
         keys,
         known_hosts: known_hosts.to_path_buf(),
         production: e.production,

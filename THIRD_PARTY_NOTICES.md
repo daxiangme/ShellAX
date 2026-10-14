@@ -93,3 +93,10 @@ Sixel and Kitty graphics decoding, asciicast v2 recording/playback, directory sy
 - fxc.exe / d3dcompiler_47.dll (Microsoft Windows SDK, NuGet package Microsoft.Windows.SDK.CPP) are build tools only and are not redistributed. Only the compiled shader bytecode ends up in the binary.
 ## windows-sys 0.61 — MIT OR Apache-2.0 (dependency, unmodified; Windows only: redirects stderr to the log file)
 ## App icon (packaging/windows/agentshell.ico) — original artwork for this project, generated with ImageMagick
+## Symbols Nerd Font Mono (assets/fonts/SymbolsNerdFontMono-Regular.ttf) — MIT (bundled, unmodified; PRD 5.23)
+Nerd Fonts v3.4.0 "NerdFontsSymbolsOnly" release, Copyright (c) 2014 Ryan L McIntyre. The release ships under the MIT
+license (full text: `assets/fonts/SymbolsNerdFont-LICENSE.txt`). It is embedded in the binary and registered at startup as
+a fallback font for prompt icons (powerline, devicons, etc.). The icon sets it aggregates are credited upstream
+(https://github.com/ryanoasis/nerd-fonts#license): Font Awesome (OFL-1.1), Material Design Icons (Apache-2.0),
+Octicons (MIT), Codicons (CC-BY-4.0), Powerline symbols (MIT), Font Logos (Unlicense), Pomicons (OFL-1.1), Weather Icons (OFL-1.1).
+On Windows the default fallback chain also lists the system fonts "Segoe UI Symbol", "Segoe Fluent Icons" and "Segoe MDL2 Assets" (not bundled).

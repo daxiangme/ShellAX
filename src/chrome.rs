@@ -21,13 +21,61 @@ pub fn window_options(bounds: Bounds<Pixels>, title: Option<String>) -> WindowOp
     }
 }
 
+/// Window-control style (PRD 5.23): macOS traffic lights on the left, or Windows-style
+/// minimize / maximize / close on the right (Windows and Linux). `AGENTSHELL_CONTROLS=mac|win`
+/// overrides (screenshots / testing).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Style { Mac, Win }
+pub fn style() -> Style {
+    match std::env::var("AGENTSHELL_CONTROLS").as_deref() {
+        Ok("mac") => Style::Mac,
+        Ok("win") => Style::Win,
+        _ => if cfg!(target_os = "macos") { Style::Mac } else { Style::Win },
+    }
+}
+
 /// True when we draw our own title bar controls (no server title bar).
 pub fn drawn_controls(window: &Window) -> bool { !NATIVE_LIGHTS && matches!(window.window_decorations(), gpui::Decorations::Client { .. }) }
+
+/// Empty title-bar space that moves the window. On Windows it is a caption hit-test area
+/// (WM_NCHITTEST -> HTCAPTION), so dragging, Aero Snap and double-click maximize are native.
+pub fn drag_spacer(id: &'static str) -> gpui::Stateful<gpui::Div> {
+    div().id(id).flex_1().h_full().min_w(px(24.)).window_control_area(gpui::WindowControlArea::Drag)
+}
+
+/// Windows-style caption buttons (46×TITLE_H): minimize, maximize/restore, close (red hover).
+/// On Windows they are native hit-test areas (HTMINBUTTON / HTMAXBUTTON / HTCLOSE: Snap Layouts
+/// flyout on maximize); elsewhere they are plain click targets.
+pub fn window_controls(id: &'static str, window: &Window, on_close: impl Fn(&mut Window, &mut gpui::App) + 'static) -> Option<AnyElement> {
+    if style() != Style::Win || !drawn_controls(window) { return None; }
+    let th = cur();
+    let fg = c(th.text).opacity(if window.is_window_active() { 0.85 } else { 0.45 });
+    let maxed = window.is_maximized();
+    let btn = |i: usize, area: gpui::WindowControlArea| div().id((id, i)).w(px(46.)).h_full().flex().items_center().justify_center()
+        .window_control_area(area).on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation());
+    let line = |w: f32, h: f32| div().w(px(w)).h(px(h)).bg(fg);
+    let square = |sz: f32| div().size(px(sz)).border_1().border_color(fg).rounded(px(1.5));
+    let max_glyph = if maxed {
+        div().relative().size(px(10.)).child(square(8.).absolute().top(px(2.)).left_0().bg(c(th.crust))).child(div().absolute().top_0().left(px(2.)).size(px(8.)).border_t_1().border_r_1().border_color(fg).rounded_tr(px(1.5)))
+    } else { div().child(square(10.)) };
+    let mut min = btn(0, gpui::WindowControlArea::Min).hover(|d| d.bg(c(cur().surface1).opacity(0.7))).child(line(10., 1.));
+    let mut max = btn(1, gpui::WindowControlArea::Max).hover(|d| d.bg(c(cur().surface1).opacity(0.7))).child(max_glyph);
+    let gid = gpui::SharedString::from(format!("{id}-close"));
+    let mut close = btn(2, gpui::WindowControlArea::Close).group(gid.clone()).hover(|d| d.bg(c(0xc42b1c)))
+        .child(div().text_color(fg).group_hover(gid, |s| s.text_color(gpui::white())).child(crate::ui::icon(crate::ui::IconName::X, 15., fg)));
+    // Windows routes these clicks through the non-client hit test; elsewhere handle them here
+    if !cfg!(windows) {
+        min = min.on_click(|_, w, _| w.minimize_window());
+        max = max.on_click(|_, w, _| w.zoom_window());
+        close = close.on_click(move |_, w, cx| on_close(w, cx));
+    } else { let _ = on_close; }
+    Some(div().flex().h_full().flex_shrink_0().child(min).child(max).child(close).into_any_element())
+}
 
 /// Drawn traffic lights (Linux / Windows); glyphs appear while hovered. On macOS this is just
 /// the space the native buttons occupy.
 pub fn traffic_lights(id: &'static str, window: &Window, on_close: impl Fn(&mut Window, &mut gpui::App) + 'static) -> AnyElement {
-    if !drawn_controls(window) { return div().w(px(if NATIVE_LIGHTS { LIGHTS_W } else { 8. })).flex_shrink_0().into_any_element(); }
+    if !drawn_controls(window) || style() != Style::Mac { return div().w(px(if NATIVE_LIGHTS { LIGHTS_W } else { 8. })).flex_shrink_0().into_any_element(); }
     let active = window.is_window_active();
     let grey = if cur().appearance == Appearance::Dark { 0x4a4a4d } else { 0xd0d0d3 };
     let group = gpui::SharedString::from(format!("{id}-tl"));
@@ -51,8 +99,10 @@ pub fn drag_region<E: InteractiveElement + StatefulInteractiveElement>(el: E) ->
 }
 
 /// Invisible resize handles along the window edges (client decorations on Linux).
+/// Not used on Windows: there the frameless window answers WM_NCHITTEST with the resize borders
+/// itself (gpui-windows), which keeps native Aero Snap / edge-resize behaviour.
 pub fn resize_edges(window: &Window) -> Option<AnyElement> {
-    if !drawn_controls(window) || window.is_maximized() { return None; }
+    if cfg!(windows) || !drawn_controls(window) || window.is_maximized() { return None; }
     let e = |edge: ResizeEdge| div().absolute().on_mouse_down(gpui::MouseButton::Left, move |_, w, cx| { cx.stop_propagation(); w.start_window_resize(edge); });
     const T: f32 = 5.;
     Some(div().absolute().top_0().left_0().size_full()
