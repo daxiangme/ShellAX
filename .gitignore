@@ -3,3 +3,10 @@ testenv/sshd.log
 testenv/*.log
 testenv/*.pid
 target-dist/
+dist/
+dist-win/
+*.exe
+*.zip
+SHA256SUMS
+.env.local
+*.local.toml
