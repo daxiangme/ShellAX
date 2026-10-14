@@ -73,6 +73,29 @@ pub(crate) fn secret_store() -> ssh_term_proto::secrets::SecretStore {
     if config::get().credentials.use_keychain { ssh_term_proto::secrets::SecretStore::new(data_dir()) } else { ssh_term_proto::secrets::SecretStore::file_only(data_dir()) }
 }
 
+/// Old dialogs let users type a password into the "private key" field. A value that is not an
+/// existing file and does not look like a path is moved into the secret store as that host's
+/// password and removed from config.toml (auth becomes "password").
+fn migrate_key_field_passwords() {
+    let Some(store) = ssh::SECRETS.get() else { return };
+    let s = config::get();
+    let looks_like_path = |v: &str| v.contains(['/', '\\']) || v.starts_with('~') || v.starts_with('.') || v.ends_with(".pem") || v.ends_with(".key") || v.ends_with(".ppk") || v.starts_with("id_");
+    let mut moved = vec![];
+    for h in &s.hosts {
+        let Some(v) = h.identity_file.as_deref().filter(|v| !v.trim().is_empty()) else { continue };
+        if hosts::expand_tilde(v).exists() || looks_like_path(v) { continue; }
+        let tg = hosts::resolve(&HostEntry { identity_file: None, ..h.clone() }, &s.known_hosts_path(), &s.all_hosts(), &s.ssh_opts());
+        if store.set(&tg.password_secret(), v).is_ok() { moved.push(h.name.clone()); }
+    }
+    if moved.is_empty() { return; }
+    let _ = config::update(|s| for h in s.hosts.iter_mut().filter(|h| moved.contains(&h.name)) {
+        h.identity_file = None;
+        let a = h.auth.clone().unwrap_or_default();
+        if !a.split(',').any(|m| m.trim() == "password") { h.auth = Some("password".into()); }
+    });
+    eprintln!("moved a password from the private-key field into the secret store for: {}", moved.join(", "));
+}
+
 /// Layout file of this window: layout.json, or the file a "move tab to new window" child was
 /// started with (COOSSH_LAYOUT_FILE, PRD 5.23).
 pub(crate) fn layout_file() -> std::path::PathBuf {
@@ -1129,7 +1152,8 @@ impl Root {
         cx.notify();
     }
     fn open_host_dialog(&mut self, existing: Option<HostEntry>, group: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        let d = cx.new(|cx| HostDialog::new(existing, group, window, cx));
+        let (prompts, rt) = (self.prompts.clone(), self.rt.handle().clone());
+        let d = cx.new(|cx| HostDialog::new(existing, group, prompts, rt, window, cx));
         self._subs.push(cx.subscribe_in(&d, window, |this, _, ev: &HostEvent, window, cx| {
             match ev {
                 HostEvent::Saved(n) => { this.log("host.save", n); this.toast(tf("main.host_saved", &[("n", &n)]), cx); }
@@ -1619,6 +1643,7 @@ fn main() {
                     let (hk_tx, hk_rx) = flume::unbounded::<HostKeyPrompt>();
                     let (au_tx, au_rx) = flume::unbounded::<ssh::AuthPrompt>();
                     let _ = ssh::SECRETS.set(secret_store());
+                    migrate_key_field_passwords();
                     let host_search = cx.new(|cx| InputState::new(window, cx).placeholder(t("ui.search_hosts")));
                     let audit = audit_log();
                     let mut root = Root {

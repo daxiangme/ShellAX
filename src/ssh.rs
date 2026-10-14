@@ -37,6 +37,13 @@ pub struct SshTarget {
     pub remote_hooks: bool,
     /// Persistent session: run the shell inside `tmux new -A -s <name>` on the remote.
     pub tmux: Option<String>,
+    /// OpenSSH certificate (`*-cert.pub`) used with the first identity file ("cert" auth step).
+    pub cert: Option<PathBuf>,
+    /// Unsaved password / passphrase from the host dialog ("Test connection"); never persisted.
+    #[serde(skip)]
+    pub password_override: Option<String>,
+    #[serde(skip)]
+    pub passphrase_override: Option<String>,
 }
 impl SshTarget {
     pub fn label(&self) -> String { format!("{}@{}:{}", self.user, self.host, self.port) }
@@ -103,12 +110,15 @@ pub struct Handler {
     /// Filled when verification fails, so the error shown is meaningful.
     failure: Arc<std::sync::Mutex<Option<String>>>,
     forwards: ForwardMap,
+    /// "algorithm SHA256:…" of the server key, recorded for "Test connection".
+    seen: Arc<std::sync::Mutex<Option<String>>>,
 }
 impl client::Handler for Handler {
     type Error = anyhow::Error;
     async fn check_server_key(&mut self, k: &russh::keys::PublicKeyOrCertificate) -> Result<bool, Self::Error> {
         let key = k.public_key();
         let fp = key.fingerprint(HashAlg::Sha256).to_string();
+        *self.seen.lock().unwrap() = Some(format!("{} {fp}", key.algorithm()));
         match check_known_host(&self.host, self.port, &key, &self.known_hosts)? {
             KnownHost::Match => Ok(true),
             KnownHost::Changed { line } => {
@@ -275,7 +285,7 @@ pub fn connect<'a>(tg: &'a SshTarget, prompts: &'a Prompts) -> std::pin::Pin<Box
         let ka = KEEPALIVE_SECS.load(Relaxed);
         let cfg = Arc::new(client::Config { inactivity_timeout: None, keepalive_interval: (ka > 0).then(|| Duration::from_secs(ka)), keepalive_max: 3, preferred: preferred(tg), ..Default::default() });
         let forwards: ForwardMap = Default::default();
-        let handler = Handler { host: tg.host.clone(), port: tg.port, known_hosts: tg.known_hosts.clone(), prompt: prompts.hostkey.clone(), failure: failure.clone(), forwards: forwards.clone() };
+        let handler = Handler { host: tg.host.clone(), port: tg.port, known_hosts: tg.known_hosts.clone(), prompt: prompts.hostkey.clone(), failure: failure.clone(), forwards: forwards.clone(), seen: Default::default() };
         let secs = CONNECT_TIMEOUT_SECS.load(Relaxed).max(1);
         let res: Result<(client::Handle<Handler>, Option<Arc<Conn>>)> = async {
             if let Some(j) = &tg.jump {
@@ -329,8 +339,12 @@ async fn authenticate(h: &mut client::Handle<Handler>, tg: &SshTarget, prompts: 
         russh::client::AuthResult::Failure { remaining_methods, .. } => Some(remaining_methods.to_vec()),
     };
     let offers = |m: russh::MethodKind| offered.as_ref().is_none_or(|v| v.is_empty() || v.contains(&m));
-    // 1. ssh-agent
-    if matches!(mode, "auto" | "agent") && !no_agent {
+    // methods in the configured order ("password,key,agent" …); "auto" = agent → keys → password → kbd
+    let order: Vec<&str> = if mode == "auto" { vec!["agent", "key", "password"] } else { mode.split(',').map(str::trim).filter(|m| !m.is_empty()).collect() };
+    let single = order.len() == 1;
+    for step in order.iter().copied() {
+    match step {
+    "agent" if !no_agent => {
         match connect_agent().await {
             Ok(mut agent) => {
                 let ids = agent.request_identities().await.unwrap_or_default();
@@ -345,17 +359,25 @@ async fn authenticate(h: &mut client::Handle<Handler>, tg: &SshTarget, prompts: 
                     }
                 }
             }
-            Err(e) => if mode == "agent" { errors.push(tf("ssh.agent_unavailable", &[("err", &e)])); },
+            Err(e) => if single || mode != "auto" { errors.push(tf("ssh.agent_unavailable", &[("err", &e)])); },
         }
     }
-    // 2. key files (passphrase from keychain or prompt)
-    if matches!(mode, "auto" | "key") {
+    "cert" => {
+        // OpenSSH certificate + its private key (first identity file)
+        let (Some(cp), Some(kp)) = (tg.cert.as_ref(), tg.keys.first()) else { errors.push(t("ssh.cert_missing").into()); continue };
+        let cert = match russh::keys::Certificate::read_file(cp) { Ok(c) => c, Err(e) => { errors.push(format!("{}: {e}", cp.display())); continue } };
+        let pp = tg.passphrase_override.clone().or_else(|| SECRETS.get().and_then(|s| s.get(&passphrase_secret(kp))).map(|x| x.0));
+        let key = match load_secret_key(kp, pp.as_deref()) { Ok(k) => k, Err(e) => { errors.push(format!("{}: {e}", kp.display())); continue } };
+        if h.authenticate_openssh_cert(&tg.user, Arc::new(key), cert).await?.success() { return Ok(()); }
+        errors.push(tf("ssh.key_rejected", &[("key", &cp.display())]));
+    }
+    "key" => {
         for kp in &tg.keys {
-            if !kp.exists() { if mode == "key" { errors.push(format!("{}: not found", kp.display())); } continue; }
+            if !kp.exists() { if mode != "auto" { errors.push(format!("{}: not found", kp.display())); } continue; }
             let key = match load_secret_key(kp, None) {
                 Ok(k) => k,
                 Err(russh::keys::Error::KeyIsEncrypted) => {
-                    let saved = SECRETS.get().and_then(|s| s.get(&passphrase_secret(kp))).map(|x| x.0);
+                    let saved = tg.passphrase_override.clone().or_else(|| SECRETS.get().and_then(|s| s.get(&passphrase_secret(kp))).map(|x| x.0));
                     let mut loaded = None;
                     if let Some(p) = saved { loaded = load_secret_key(kp, Some(&p)).ok(); }
                     let mut tries = 0;
@@ -376,9 +398,13 @@ async fn authenticate(h: &mut client::Handle<Handler>, tg: &SshTarget, prompts: 
             errors.push(tf("ssh.key_rejected", &[("key", &kp.display())]));
         }
     }
-    // 3. password (keychain first, then prompt up to 3 times)
-    if matches!(mode, "auto" | "password") && offers(russh::MethodKind::Password) {
+    "password" if offers(russh::MethodKind::Password) => {
         let name = tg.password_secret();
+        if let Some(pw) = tg.password_override.clone() {
+            if h.authenticate_password(&tg.user, pw).await?.success() { return Ok(()); }
+            errors.push(t("ssh.password_rejected").into());
+            continue;
+        }
         if let Some((pw, _)) = SECRETS.get().and_then(|s| s.get(&name)) {
             if h.authenticate_password(&tg.user, pw).await?.success() { return Ok(()); }
             errors.push(t("ssh.saved_password_rejected").into());
@@ -392,8 +418,11 @@ async fn authenticate(h: &mut client::Handle<Handler>, tg: &SshTarget, prompts: 
             errors.push(t("ssh.password_rejected").into());
         }
     }
+    _ => {}
+    }
+    }
     // 4. keyboard-interactive (2FA / OTP / PAM): each server prompt goes to the UI, answers are never stored
-    if matches!(mode, "auto" | "password" | "kbd") && offers(russh::MethodKind::KeyboardInteractive) {
+    if (mode == "auto" || order.iter().any(|m| matches!(*m, "password" | "kbd"))) && tg.password_override.is_none() && offers(russh::MethodKind::KeyboardInteractive) {
         use russh::client::KeyboardInteractiveAuthResponse as R;
         let mut r = h.authenticate_keyboard_interactive_start(&tg.user, None::<String>).await?;
         let mut rounds = 0;
@@ -419,6 +448,70 @@ async fn authenticate(h: &mut client::Handle<Handler>, tg: &SshTarget, prompts: 
     }
     if errors.is_empty() { errors.push(t("ssh.no_key").into()); }
     bail!(tf("ssh.auth_failed", &[("err", &errors.join("; "))]))
+}
+
+/// One step of "Test connection": 0 DNS, 1 TCP, 2 SSH handshake + host key, 3 authentication.
+/// `ok: None` = running.
+#[derive(Clone, Debug)]
+pub struct TestStep { pub idx: u8, pub ok: Option<bool>, pub ms: u128, pub detail: String }
+
+/// Diagnose a target step by step (no pooling, no jump/proxy shortcuts: the first hop is tested
+/// directly). Each step is bounded by `secs`. Host-key trust and auth prompts go through `prompts`.
+pub async fn test_connection(tg: &SshTarget, prompts: &Prompts, secs: u64, tx: flume::Sender<TestStep>) {
+    use std::time::Instant;
+    let send = |idx: u8, ok: Option<bool>, ms: u128, detail: String| { let _ = tx.send(TestStep { idx, ok, ms, detail }); };
+    let lim = Duration::from_secs(secs.max(1));
+    let to = |what: &str| tf("ssh.test_timeout", &[("what", &what), ("secs", &secs)]);
+    // 1. DNS
+    send(0, None, 0, String::new());
+    let t0 = Instant::now();
+    let addrs = match tokio::time::timeout(lim, tokio::net::lookup_host((tg.host.as_str(), tg.port))).await {
+        Err(_) => return send(0, Some(false), t0.elapsed().as_millis(), to("DNS")),
+        Ok(Err(e)) => return send(0, Some(false), t0.elapsed().as_millis(), format!("{e}")),
+        Ok(Ok(a)) => a.collect::<Vec<_>>(),
+    };
+    let Some(addr) = addrs.first().copied() else { return send(0, Some(false), t0.elapsed().as_millis(), t("ssh.test_no_address").into()) };
+    send(0, Some(true), t0.elapsed().as_millis(), addr.ip().to_string());
+    // 2. TCP
+    send(1, None, 0, String::new());
+    let t1 = Instant::now();
+    let tcp = match crate::proxy::for_host(&tg.host) {
+        Ok(Some(p)) => tokio::time::timeout(lim, crate::proxy::connect(&p, &tg.host, tg.port)).await.map(|r| r.map_err(|e| format!("{e:#}"))),
+        _ => tokio::time::timeout(lim, tokio::net::TcpStream::connect(addr)).await.map(|r| r.map_err(|e| match e.kind() {
+            std::io::ErrorKind::ConnectionRefused => t("ssh.test_refused").to_string(),
+            _ => e.to_string(),
+        })),
+    };
+    let tcp = match tcp {
+        Err(_) => return send(1, Some(false), t1.elapsed().as_millis(), to("TCP")),
+        Ok(Err(e)) => return send(1, Some(false), t1.elapsed().as_millis(), e),
+        Ok(Ok(s)) => s,
+    };
+    let _ = tcp.set_nodelay(true);
+    send(1, Some(true), t1.elapsed().as_millis(), format!("{addr}"));
+    // 3. SSH handshake + host key (an unknown key is offered for trust through the normal prompt)
+    send(2, None, 0, String::new());
+    let t2 = Instant::now();
+    let failure = Arc::new(std::sync::Mutex::new(None));
+    let seen: Arc<std::sync::Mutex<Option<String>>> = Default::default();
+    let cfg = Arc::new(client::Config { inactivity_timeout: None, preferred: preferred(tg), ..Default::default() });
+    let handler = Handler { host: tg.host.clone(), port: tg.port, known_hosts: tg.known_hosts.clone(), prompt: prompts.hostkey.clone(), failure: failure.clone(), forwards: Default::default(), seen: seen.clone() };
+    // the host-key prompt may wait for the user: allow it beyond the step limit
+    let mut h = match tokio::time::timeout(Duration::from_secs(120), client::connect_stream(cfg, tcp, handler)).await {
+        Err(_) => return send(2, Some(false), t2.elapsed().as_millis(), to("SSH")),
+        Ok(Err(e)) => return send(2, Some(false), t2.elapsed().as_millis(), failure.lock().unwrap().clone().unwrap_or_else(|| format!("{e}"))),
+        Ok(Ok(h)) => h,
+    };
+    send(2, Some(true), t2.elapsed().as_millis(), seen.lock().unwrap().clone().unwrap_or_default());
+    // 4. authentication
+    send(3, None, 0, String::new());
+    let t3 = Instant::now();
+    match tokio::time::timeout(Duration::from_secs(120), authenticate(&mut h, tg, prompts)).await {
+        Err(_) => send(3, Some(false), t3.elapsed().as_millis(), to("auth")),
+        Ok(Err(e)) => send(3, Some(false), t3.elapsed().as_millis(), format!("{e:#}")),
+        Ok(Ok(())) => send(3, Some(true), t3.elapsed().as_millis(), tg.user.clone()),
+    }
+    let _ = h.disconnect(russh::Disconnect::ByApplication, "", "").await;
 }
 
 /// Connection reuse (PRD: multiplexing): one SSH connection per user@host:port (+jump chain).

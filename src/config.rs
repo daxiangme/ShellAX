@@ -208,8 +208,10 @@ pub struct SessionCfg { pub persistent: String, pub restore_layout: bool, pub co
     /// Default SFTP open mode (PRD 5.21): popup | tab | split | window.
     pub sftp_mode: String,
     /// SFTP split pane follows the neighbouring terminal's cwd (OSC 7 / prompt).
-    pub sftp_follow_cwd: bool }
-impl Default for SessionCfg { fn default() -> Self { Self { persistent: s_off(), restore_layout: t(), confirm_close: t(), auto_reconnect: t(), local_daemon: false, sftp_mode: "popup".into(), sftp_follow_cwd: t() } } }
+    pub sftp_follow_cwd: bool,
+    /// Double-click on a sidebar host asks before opening another tab (PRD 5.24).
+    pub confirm_new_tab: bool }
+impl Default for SessionCfg { fn default() -> Self { Self { confirm_new_tab: t(), persistent: s_off(), restore_layout: t(), confirm_close: t(), auto_reconnect: t(), local_daemon: false, sftp_mode: "popup".into(), sftp_follow_cwd: t() } } }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]

@@ -32,6 +32,8 @@ pub(crate) enum SbModal {
     DeleteHost(String),
     DeleteGroup(String),
     Import { cands: Vec<HostEntry>, checked: Vec<bool>, group: Entity<InputState> },
+    /// Double-click on a sidebar entry: open another tab? (+ "don't ask again")
+    NewTab { spec: Spec, label: String, dont_ask: bool },
 }
 
 /// Dragging a group row.
@@ -151,8 +153,7 @@ impl Root {
         {
             let n = name.clone();
             row = row.on_click(cx.listener(move |this, ev: &gpui::ClickEvent, w, cx| {
-                if ev.click_count() >= 2 { return; }
-                match this.target_for(&n) { Some(t) => this.new_tab(Spec::Ssh(t), w, cx), None => this.toast(tf("sb.cannot_resolve", &[("name", &n)]), cx) }
+                match this.target_for(&n) { Some(t) => this.sb_activate(Spec::Ssh(t), n.clone(), ev.click_count() >= 2, w, cx), None => this.toast(tf("sb.cannot_resolve", &[("name", &n)]), cx) }
             }));
         }
         let n = name.clone();
@@ -278,7 +279,7 @@ impl Root {
         let local_on = ctx.open.iter().any(|(l, on)| l == "local" && *on);
         list = list.child(div().id("host-local").mx_2().px_2().pl(px(22.)).min_h(px(40.)).py(px(4.)).rounded(px(6.)).flex().items_center().gap(px(8.)).cursor_pointer()
             .when(local_sel, |d| d.bg(c(th.accent).opacity(0.16))).when(!local_sel, |d| d.hover(|s| s.bg(c(cur().surface0).opacity(0.7))))
-            .on_click(cx.listener(|this, _, w, cx| this.new_tab(Spec::Local, w, cx)))
+            .on_click(cx.listener(|this, ev: &gpui::ClickEvent, w, cx| this.sb_activate(Spec::Local, t("ui.local_terminal").to_string(), ev.click_count() >= 2, w, cx)))
             .on_mouse_down(gpui::MouseButton::Right, cx.listener(|this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.sb_menu = Some(SbMenu { target: SbTarget::Local, pos: ev.position, sub: SbSub::Main }); cx.notify(); }))
             .child(icon(IconName::Monitor, 15., c(th.info)))
             .child(div().flex_1().min_w_0().flex().flex_col().gap(px(1.)).overflow_hidden()
@@ -466,6 +467,21 @@ impl Root {
                     .child(div().flex().gap_2().justify_end().child(cancel)
                         .child(ui::button("sbm-ok", t("ui.save"), 1).on_click(cx.listener(move |this, _, _w, cx| { let v = i2.read(cx).value().to_string(); this.prompt_ok(k2.clone(), v, cx); cx.notify(); }))));
             }
+            SbModal::NewTab { spec, label, dont_ask } => {
+                let sp = spec.clone();
+                card = card.child(title(IconName::Plus, tf("sb.confirm_new_tab", &[("name", &label)]), c(th.accent)))
+                    .child(div().id("sbm-dontask").flex().items_center().gap_2().cursor_pointer()
+                        .on_click(cx.listener(|this, _, _w, cx| { if let Some(SbModal::NewTab { dont_ask, .. }) = this.sb_modal.as_mut() { *dont_ask = !*dont_ask; } cx.notify(); }))
+                        .child(div().size(px(16.)).rounded(px(4.)).border_1().border_color(c(th.surface2)).flex().items_center().justify_center()
+                            .when(dont_ask, |d| d.bg(c(th.accent)).child(icon(IconName::Check, 11., c(th.base)))))
+                        .child(div().text_size(px(12.)).text_color(c(th.text)).child(t("sb.dont_ask_again"))))
+                    .child(div().flex().gap_2().justify_end().child(cancel)
+                        .child(ui::button("sbm-open", t("sb.open_new_tab"), 1).on_click(cx.listener(move |this, _, w, cx| {
+                            if dont_ask { let _ = config::update(|s| s.session.confirm_new_tab = false); }
+                            this.sb_modal = None;
+                            this.new_tab(sp.clone(), w, cx);
+                        }))));
+            }
             SbModal::DeleteHost(name) => {
                 card = card.child(title(IconName::Trash, tf("sb.delete_host_title", &[("name", &name)]), c(th.error))).child(note(t("sb.delete_host_body").into()))
                     .child(div().flex().gap_2().justify_end().child(cancel)
@@ -524,6 +540,24 @@ pub(crate) struct RowCtx {
 }
 
 impl Root {
+    /// Sidebar click (PRD 5.24): single click focuses the first tab already showing this target
+    /// (opens one if none); double click opens another tab, after a confirmation unless disabled.
+    pub(crate) fn sb_activate(&mut self, spec: Spec, label: String, double: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if double {
+            if config::get().session.confirm_new_tab { self.sb_modal = Some(SbModal::NewTab { spec, label, dont_ask: false }); cx.notify(); }
+            else { self.new_tab(spec, window, cx); }
+            return;
+        }
+        let same = |p: &Entity<crate::termview::TermView>, cx: &Context<Self>| {
+            let v = p.read(cx);
+            v.sftp.is_none() && match (&v.spec, &spec) { (Spec::Local, Spec::Local) => true, (Spec::Ssh(a), Spec::Ssh(b)) => a.label() == b.label(), _ => false }
+        };
+        let hit = self.tabs.iter().enumerate().find_map(|(i, t)| t.layout.leaves().into_iter().find(|p| same(p, cx)).map(|p| (i, p)));
+        match hit {
+            Some((i, p)) => { self.active = i; self.tabs[i].focused = p.clone(); let fh = p.read(cx).focus.clone(); window.focus(&fh, cx); cx.notify(); }
+            None => self.new_tab(spec, window, cx),
+        }
+    }
     /// Persist the sidebar width when it differs from the saved value.
     pub(crate) fn save_sb_width(&mut self) {
         let w = self.sb_width.round();

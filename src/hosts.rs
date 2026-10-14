@@ -34,6 +34,9 @@ pub struct HostEntry {
     /// ProxyJump host (stored; jump connections not implemented yet).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jump: Option<String>,
+    /// OpenSSH certificate file for the "cert" auth method (PRD 5.24).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert: Option<String>,
     /// "config" or "ssh_config"
     #[serde(skip)]
     pub source: &'static str,
@@ -174,6 +177,7 @@ pub fn to_target(e: &HostEntry, known_hosts: &Path) -> SshTarget {
     if let Some(f) = &e.identity_file { keys.push(expand_tilde(f)); }
     for d in ["id_ed25519", "id_ecdsa", "id_rsa"] { let p = home().join(".ssh").join(d); if !keys.contains(&p) { keys.push(p); } }
     SshTarget {
+        cert: e.cert.as_deref().map(expand_tilde),
         host: e.host.clone(),
         port: e.port.unwrap_or(22),
         user: e.user.clone().unwrap_or_else(|| std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_default()),

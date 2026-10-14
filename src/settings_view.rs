@@ -237,6 +237,7 @@ impl SettingsView {
             r(Session, t("sftp.follow_cwd"), t("sftp.follow_cwd.d"), Ctl::Toggle("session.sftp_follow_cwd")),
             r(Session, t("ui.local_daemon"), t("ui.local_daemon.d"), Ctl::Toggle("session.local_daemon")),
             r(Session, t("ui.restore_layout_on_startup"), "", Ctl::Toggle("session.restore_layout")),
+            r(Session, t("sb.confirm_new_tab_setting"), t("sb.confirm_new_tab_desc"), Ctl::Toggle("session.confirm_new_tab")),
             r(Session, t("ui.confirm_before_closing"), t("ui.confirm_closing_a_tab_while"), Ctl::Toggle("session.confirm_close")),
             r(Session, t("ui.auto_reconnect"), "", Ctl::Toggle("session.auto_reconnect")),
 
