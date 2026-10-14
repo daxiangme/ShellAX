@@ -85,7 +85,7 @@ pub fn tag_dots(tags: &[String]) -> AnyElement {
     let ring = c(cur().base);
     let mut d = div().flex().items_center().flex_shrink_0();
     for (i, t) in tags.iter().enumerate() {
-        d = d.child(div().size(px(8.)).rounded_full().bg(c(ssh_term_proto::hosttree::color_rgb(t))).border_1().border_color(ring).when(i > 0, |d| d.ml(px(-2.))));
+        d = d.child(div().size(px(8.)).rounded_full().bg(c(crate::config::get().tags.rgb(t))).border_1().border_color(ring).when(i > 0, |d| d.ml(px(-2.))));
     }
     d.into_any_element()
 }
@@ -99,7 +99,7 @@ pub fn tag_picker(base: &'static str, selected: &[String], names: &[(String, Str
         let sel = selected.iter().any(|t| t == color);
         let tip = name.clone();
         row = row.child(div().id((base, i)).size(px(18.)).rounded_full().cursor_pointer().flex().items_center().justify_center()
-            .bg(c(ssh_term_proto::hosttree::color_rgb(color)))
+            .bg(c(crate::config::get().tags.rgb(color)))
             .border_2().border_color(if sel { c(cur().text).opacity(0.55) } else { gpui::transparent_black() })
             .hover(|d| d.opacity(0.85))
             .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx))

@@ -27,7 +27,8 @@ d!(s_r1, String, "R1".into());
 d!(s_off, String, "off".into());
 d!(s_auditdir, String, "~/.local/share/coossh/audit".into());
 d!(f_size, f32, 13.5);
-d!(f_lh, f32, 1.4);
+d!(f_lh, f32, 1.0);
+d!(f_pad, f32, 8.0);
 d!(f_one, f32, 1.0);
 d!(f_ui, f32, 13.0);
 d!(u_scroll, usize, 10_000);
@@ -92,12 +93,14 @@ pub struct Terminal {
     /// Keyword highlighting on/off and the rules (regex, colour role or #rrggbb, bold).
     pub keyword_highlight: bool,
     pub highlights: Vec<HighlightRule>,
+    /// Space between the pane edge and the text grid, in px (all sides).
+    pub padding: f32,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
 pub struct HighlightRule { pub pattern: String, pub color: String, pub bold: bool }
 fn default_highlights() -> Vec<HighlightRule> { ssh_term_proto::highlight::DEFAULTS.iter().map(|(p, c, b)| HighlightRule { pattern: p.to_string(), color: c.to_string(), bold: *b }).collect() }
-impl Default for Terminal { fn default() -> Self { Self { keyword_highlight: t(), highlights: default_highlights(), shell: String::new(), scrollback: u_scroll(), cursor_style: s_block(), cursor_blink: t(), bell: s_visual(), copy_on_select: false, paste_confirm: t(), mouse_reporting: t(), shell_integration: s_auto(), osc52_write: "ask".into(), osc52_read: false, block_select: "alt".into() } } }
+impl Default for Terminal { fn default() -> Self { Self { padding: f_pad(), keyword_highlight: t(), highlights: default_highlights(), shell: String::new(), scrollback: u_scroll(), cursor_style: s_block(), cursor_blink: t(), bell: s_visual(), copy_on_select: false, paste_confirm: t(), mouse_reporting: t(), shell_integration: s_auto(), osc52_write: "ask".into(), osc52_read: false, block_select: "alt".into() } } }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -232,22 +235,46 @@ impl Default for Recording { fn default() -> Self { Self { redact: true, dir: St
 /// for the permission engine (stricter confirmation, `env:prod` rules).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
-pub struct Tags { pub production: String, pub names: std::collections::BTreeMap<String, String> }
-impl Default for Tags { fn default() -> Self { Self { production: "red".into(), names: Default::default() } } }
+pub struct Tags {
+    pub production: String,
+    pub names: std::collections::BTreeMap<String, String>,
+    /// User-defined tags (id, name, "#rrggbb").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom: Vec<TagDef>,
+    /// Built-in color tags the user deleted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct TagDef { pub id: String, pub name: String, pub color: String }
+impl Default for Tags { fn default() -> Self { Self { production: "red".into(), names: Default::default(), custom: vec![], hidden: vec![] } } }
 impl Tags {
     /// Display name: custom name, else "production" for the production color, else the color name.
-    pub fn name(&self, color: &str) -> String {
-        if let Some(n) = self.names.get(color).filter(|n| !n.trim().is_empty()) { return n.clone(); }
-        if color == self.production { return ssh_term_proto::i18n::t("tag.production").to_string(); }
-        ssh_term_proto::i18n::t(&format!("tag.{color}")).to_string()
+    pub fn name(&self, id: &str) -> String {
+        if let Some(d) = self.custom.iter().find(|d| d.id == id) { return d.name.clone(); }
+        if let Some(n) = self.names.get(id).filter(|n| !n.trim().is_empty()) { return n.clone(); }
+        if id == self.production { return ssh_term_proto::i18n::t("tag.production").to_string(); }
+        ssh_term_proto::i18n::t(&format!("tag.{id}")).to_string()
     }
-    pub fn all(&self) -> Vec<(String, String)> { ssh_term_proto::hosttree::COLORS.iter().map(|c| (c.to_string(), self.name(c))).collect() }
+    /// Dot color of a tag id.
+    pub fn rgb(&self, id: &str) -> u32 {
+        self.custom.iter().find(|d| d.id == id).and_then(|d| ssh_term_proto::hosttree::parse_hex(&d.color)).unwrap_or_else(|| ssh_term_proto::hosttree::color_rgb(id))
+    }
+    /// Defined tags in display order: built-in colors (minus deleted ones), then custom tags.
+    pub fn all(&self) -> Vec<(String, String)> {
+        ssh_term_proto::hosttree::COLORS.iter().filter(|c| !self.hidden.iter().any(|h| h == *c)).map(|c| (c.to_string(), self.name(c)))
+            .chain(self.custom.iter().map(|d| (d.id.clone(), d.name.clone()))).collect()
+    }
 }
 
 /// Sidebar state persisted across runs.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
-pub struct Sidebar { pub collapsed: Vec<String> }
+pub struct Sidebar { pub collapsed: Vec<String>, /** px, 180–480 */ pub width: f32 }
+impl Default for Sidebar { fn default() -> Self { Self { collapsed: vec![], width: SIDEBAR_W } } }
+/// Default sidebar width (double-click on its edge resets to this).
+pub const SIDEBAR_W: f32 = 248.0;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
@@ -294,6 +321,9 @@ impl Settings {
         // PRD 5.23: production flag -> production color tag; groups referenced by hosts exist
         let prod = s.tags.production.clone();
         ssh_term_proto::hosttree::migrate_production(&mut s.hosts, &prod);
+        // font.line_height is now a multiplier of the font's own line metrics (ascent + descent);
+        // the old default 1.4 (a multiplier of the point size) maps to 1.0
+        if (s.font.line_height - 1.4).abs() < 1e-4 { s.font.line_height = 1.0; }
         // built-in themes renamed with the product (AgentShell → coossh)
         for t in [&mut s.appearance.theme, &mut s.appearance.light_theme, &mut s.appearance.dark_theme] {
             if let Some(rest) = t.strip_prefix("AgentShell ") { *t = format!("coossh {rest}"); }

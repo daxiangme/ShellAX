@@ -19,15 +19,15 @@ use crate::theme::{c, cur};
 use crate::ui::{self, icon, IconName};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub enum Cat { General, Appearance, Terminal, Suggest, Ssh, Credentials, Ai, Agents, Permissions, Audit, Session, Keys, Notify, ContextMenu, About }
+pub enum Cat { General, Appearance, Terminal, Suggest, Ssh, Credentials, Ai, Agents, Permissions, Tags, Audit, Session, Keys, Notify, ContextMenu, About }
 
 impl Cat {
-    pub const ALL: [Cat; 15] = [Cat::General, Cat::Appearance, Cat::Terminal, Cat::Suggest, Cat::Ssh, Cat::Credentials, Cat::Ai, Cat::Agents,
-        Cat::Permissions, Cat::Audit, Cat::Session, Cat::Keys, Cat::Notify, Cat::ContextMenu, Cat::About];
+    pub const ALL: [Cat; 16] = [Cat::General, Cat::Appearance, Cat::Terminal, Cat::Suggest, Cat::Ssh, Cat::Credentials, Cat::Ai, Cat::Agents,
+        Cat::Permissions, Cat::Tags, Cat::Audit, Cat::Session, Cat::Keys, Cat::Notify, Cat::ContextMenu, Cat::About];
     pub fn name(self) -> &'static str {
         match self {
             Cat::General => t("ui.general"), Cat::Appearance => t("ui.appearance"), Cat::Terminal => t("ui.terminal"), Cat::Suggest => t("ui.suggestions"), Cat::Ssh => "SSH",
-            Cat::Credentials => t("ui.credentials_keys"), Cat::Ai => "AI", Cat::Agents => t("ui.external_agents"), Cat::Permissions => t("ui.permissions_security"),
+            Cat::Credentials => t("ui.credentials_keys"), Cat::Ai => "AI", Cat::Agents => t("ui.external_agents"), Cat::Permissions => t("ui.permissions_security"), Cat::Tags => t("tag.tags"),
             Cat::Audit => t("ui.audit"), Cat::Session => t("ui.sessions_layout"), Cat::Keys => t("ui.keyboard_shortcuts"), Cat::Notify => t("ui.notifications"), Cat::ContextMenu => t("cm.settings_title"), Cat::About => t("ui.about"),
         }
     }
@@ -35,7 +35,7 @@ impl Cat {
     fn color(self) -> u32 {
         match self {
             Cat::General => 0x8e8e93, Cat::Appearance => 0x5856d6, Cat::Terminal => 0x3a3a3c, Cat::Suggest => 0xffb300, Cat::Ssh => 0x007aff,
-            Cat::Credentials => 0xa2845e, Cat::Ai => 0xaf52de, Cat::Agents => 0x34c759, Cat::Permissions => 0xff3b30, Cat::Audit => 0xff9500,
+            Cat::Credentials => 0xa2845e, Cat::Ai => 0xaf52de, Cat::Agents => 0x34c759, Cat::Permissions => 0xff3b30, Cat::Tags => 0xff9f0a, Cat::Audit => 0xff9500,
             Cat::Session => 0x30b0c7, Cat::Keys => 0x636366, Cat::Notify => 0xff2d55, Cat::ContextMenu => 0x32ade6, Cat::About => 0x0a84ff,
         }
     }
@@ -43,7 +43,7 @@ impl Cat {
         match self {
             Cat::General => IconName::SlidersHorizontal, Cat::Appearance => IconName::Palette, Cat::Terminal => IconName::SquareTerminal,
             Cat::Suggest => IconName::Lightbulb, Cat::Ssh => IconName::Server, Cat::Credentials => IconName::KeyRound, Cat::Ai => IconName::Sparkles,
-            Cat::Agents => IconName::Bot, Cat::Permissions => IconName::ShieldCheck, Cat::Audit => IconName::ScrollText, Cat::Session => IconName::Layers,
+            Cat::Agents => IconName::Bot, Cat::Permissions => IconName::ShieldCheck, Cat::Tags => IconName::Tag, Cat::Audit => IconName::ScrollText, Cat::Session => IconName::Layers,
             Cat::Keys => IconName::Keyboard, Cat::Notify => IconName::Bell, Cat::ContextMenu => IconName::FileText, Cat::About => IconName::Info,
         }
     }
@@ -58,6 +58,7 @@ impl Cat {
             Cat::Ai => t("ui.built_in_ai_bring_your"),
             Cat::Agents => t("ui.detect_claude_code_codex_grok"),
             Cat::Permissions => t("ui.permission_mode_and_rules_for"),
+            Cat::Tags => t("tag.settings_desc"),
             Cat::Audit => t("ui.append_only_jsonl_audit_log"),
             Cat::Session => t("ui.persistent_sessions_layout_restore_and"),
             Cat::Keys => t("ui.app_shortcuts_type_e_g"),
@@ -148,13 +149,6 @@ impl SettingsView {
             r(General, t("ui.interface_language"), t("ui.applies_immediately_follow_system_reads"), Ctl::Choice("general.language", opts(&[("system", t("ui.follow_system")), ("zh-CN", "简体中文"), ("en", "English")]))),
             r(General, t("ui.on_startup"), t("ui.what_to_open_when_the"), Ctl::Choice("general.startup", opts(&[("local", t("ui.local_terminal")), ("restore", t("ui.restore_layout")), ("blank", t("ui.blank"))]))),
             r(General, t("ui.check_for_updates_automatically"), "", Ctl::Toggle("general.check_updates")),
-            r(General, t("tag.red"), t("tag.settings_names_desc"), Ctl::Text("tags.names.red", t("tag.red"))),
-            r(General, t("tag.orange"), "", Ctl::Text("tags.names.orange", t("tag.orange"))),
-            r(General, t("tag.yellow"), "", Ctl::Text("tags.names.yellow", t("tag.yellow"))),
-            r(General, t("tag.green"), "", Ctl::Text("tags.names.green", t("tag.green"))),
-            r(General, t("tag.blue"), "", Ctl::Text("tags.names.blue", t("tag.blue"))),
-            r(General, t("tag.purple"), "", Ctl::Text("tags.names.purple", t("tag.purple"))),
-            r(General, t("tag.grey"), "", Ctl::Text("tags.names.grey", t("tag.grey"))),
             r(General, t("ui.update_channel"), "", Ctl::Choice("general.update_channel", opts(&[("stable", t("ui.stable")), ("beta", t("ui.beta"))]))),
             r(General, t("ui.tray"), t("ui.tray_desc"), Ctl::Toggle("general.tray")),
             r(General, t("ui.config_file"), t("ui.all_settings_are_stored_here"), Ctl::Info(config::config_path().display().to_string())),
@@ -171,6 +165,7 @@ impl SettingsView {
             r(Appearance, t("ui.ui_font_size"), t("ui.sidebar_tabs_and_other_ui"), Ctl::Text("appearance.ui_font_size", "13")),
 
             r(Terminal, t("ui.default_shell"), t("ui.empty_uses_shell_applies_to"), Ctl::Text("terminal.shell", "/bin/zsh")),
+            r(Terminal, t("ui.term_padding"), t("ui.term_padding_desc"), Ctl::Text("terminal.padding", "8")),
             r(Terminal, t("ui.scrollback_lines"), t("ui.applies_to_new_sessions"), Ctl::Text("terminal.scrollback", "10000")),
             r(Terminal, t("ui.cursor_style"), "", Ctl::Choice("terminal.cursor_style", opts(&[("block", t("ui.block")), ("bar", t("ui.bar")), ("underline", t("ui.underline"))]))),
             r(Terminal, t("ui.cursor_blink"), t("ui.stops_blinking_after_10_s"), Ctl::Toggle("terminal.cursor_blink")),
@@ -230,7 +225,7 @@ impl SettingsView {
 
             r(Permissions, t("ui.default_mode"), t("ui.also_switchable_from_the_status"), Ctl::Choice("permissions.mode", opts(&[("ask", t("ui.ask_2")), ("plan", t("ui.plan_read_only")), ("auto", t("ui.auto"))]))),
             r(Permissions, t("ui.max_auto_risk_in_auto"), t("ui.actions_at_or_below_this"), Ctl::Choice("permissions.max_auto_risk", opts(&[("R0", "R0"), ("R1", "R1"), ("R2", "R2")]))),
-            r(Permissions, t("tag.settings_prod"), t("tag.settings_prod_desc"), Ctl::Choice("tags.production", ssh_term_proto::hosttree::COLORS.iter().map(|c| (c.to_string(), t(Box::leak(format!("tag.{c}").into_boxed_str())).to_string())).collect())),
+            r(Tags, t("tag.settings_prod"), t("tag.settings_prod_desc"), Ctl::Choice("tags.production", config::get().tags.all())),
             r(Permissions, t("ui.confirm_writes_on_production_hosts"), t("ui.always_ask_for_r1_actions"), Ctl::Toggle("permissions.prod_confirm")),
             r(Permissions, t("ui.double_confirm_dangerous_commands"), t("ui.r4_actions_need_confirmation_even"), Ctl::Toggle("permissions.dangerous_confirm")),
 
@@ -274,7 +269,22 @@ impl SettingsView {
         self._subs.push(cx.subscribe_in(&e, window, move |this, st, ev: &InputEvent, _w, cx| {
             if !matches!(ev, InputEvent::Change) { return; }
             let v = st.read(cx).value().to_string();
-            if let Some(id) = k.strip_prefix("keys.") {
+            if let Some(rest) = k.strip_prefix("tagdef.") {
+                // tagdef.<name|color>.<id>
+                let (field, id) = rest.split_once('.').map(|(a, b)| (a.to_string(), b.to_string())).unwrap_or_default();
+                let builtin = ssh_term_proto::hosttree::COLORS.contains(&id.as_str());
+                if field == "color" && ssh_term_proto::hosttree::parse_hex(&v).is_none() { this.errors.insert(k.clone(), t("tag.bad_hex").into()); cx.notify(); return; }
+                this.errors.remove(&k);
+                let err = config::update(|s| {
+                    if builtin { if v.trim().is_empty() { s.tags.names.remove(&id); } else { s.tags.names.insert(id.clone(), v.trim().to_string()); } }
+                    else if let Some(d) = s.tags.custom.iter_mut().find(|d| d.id == id) {
+                        if field == "color" { d.color = format!("#{}", v.trim().trim_start_matches('#').to_lowercase()); } else { d.name = v.trim().to_string(); }
+                    }
+                });
+                if let Some(e) = err { this.errors.insert(k.clone(), e); }
+                cx.emit(SettingsEvent::Changed("tags".into()));
+                cx.notify();
+            } else if let Some(id) = k.strip_prefix("keys.") {
                 let id = id.to_string();
                 if !v.trim().is_empty() && !actions::valid_binding(&v) {
                     this.errors.insert(k.clone(), t("ui.must_include_ctrl_alt_cmd").into());
@@ -346,6 +356,66 @@ impl SettingsView {
     fn section_title(t: &str) -> impl IntoElement {
         let th = cur();
         div().pt_5().pb_1().px(px(12.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.subtext)).child(t.to_string())
+    }
+
+/// Tag definitions (PRD 5.23): built-in color tags (rename / delete) and custom tags
+    /// (name + "#rrggbb" color with preset swatches; add / delete). Deleting removes the tag from
+    /// every host and group.
+    fn tags_extra(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let th = cur();
+        let s = config::get();
+        let mut out = div().flex().flex_col().gap(px(6.)).mt_2();
+        for (id, name) in s.tags.all() {
+            let builtin = ssh_term_proto::hosttree::COLORS.contains(&id.as_str());
+            let used = s.hosts.iter().filter(|h| h.tags.contains(&id)).count() + s.groups.iter().filter(|g| g.tags.contains(&id)).count();
+            let name_in = self.input(&format!("tagdef.name.{id}"), &name, if builtin { s.tags.names.get(&id).cloned().unwrap_or_default() } else { name.clone() }, window, cx);
+            let mut row = div().flex().items_center().gap_2().px_3().py(px(6.)).rounded(px(8.)).bg(c(th.surface0).opacity(0.5))
+                .child(div().size(px(14.)).flex_shrink_0().rounded_full().bg(c(s.tags.rgb(&id))))
+                .child(div().w(px(180.)).child(Input::new(&name_in)));
+            if !builtin {
+                let cur_hex = s.tags.custom.iter().find(|d| d.id == id).map(|d| d.color.clone()).unwrap_or_default();
+                let hex_in = self.input(&format!("tagdef.color.{id}"), "#rrggbb", cur_hex, window, cx);
+                row = row.child(div().w(px(96.)).child(Input::new(&hex_in)));
+                // preset swatches: click to set the color
+                for (k, rgb) in [0xff3b30u32, 0xff9500, 0xffcc00, 0x34c759, 0x00c7be, 0x5ac8fa, 0x007aff, 0x5856d6, 0xaf52de, 0xff2d55, 0xa2845e, 0x8e8e93].into_iter().enumerate() {
+                    let idc = id.clone();
+                    row = row.child(div().id(SharedString::from(format!("sw-{id}-{k}"))).size(px(14.)).flex_shrink_0().rounded_full().cursor_pointer().bg(c(rgb)).hover(|d| d.opacity(0.75))
+                        .on_click(cx.listener(move |this, _, _w, cx| {
+                            let hex = format!("#{rgb:06x}");
+                            this.notice = config::update(|s| if let Some(d) = s.tags.custom.iter_mut().find(|d| d.id == idc) { d.color = hex.clone(); });
+                            this.inputs.remove(&format!("tagdef.color.{idc}"));
+                            cx.emit(SettingsEvent::Changed("tags".into())); cx.notify();
+                        })));
+                }
+            }
+            let idd = id.clone();
+            row = row.child(div().flex_1()).child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(tf("tag.used_n", &[("n", &used)])))
+                .when(id != s.tags.production, |r| r.child(ui::button(SharedString::from(format!("tagdel-{id}")), t("sb.delete"), 2).on_click(cx.listener(move |this, _, _w, cx| {
+                    let idd = idd.clone();
+                    this.notice = config::update(|s| {
+                        for h in s.hosts.iter_mut() { h.tags.retain(|x| *x != idd); }
+                        for g in s.groups.iter_mut() { g.tags.retain(|x| *x != idd); }
+                        if ssh_term_proto::hosttree::COLORS.contains(&idd.as_str()) { if !s.tags.hidden.contains(&idd) { s.tags.hidden.push(idd.clone()); } }
+                        else { s.tags.custom.retain(|d| d.id != idd); }
+                    });
+                    cx.emit(SettingsEvent::Changed("tags".into())); cx.notify();
+                }))));
+            out = out.child(row);
+        }
+        let hidden = !s.tags.hidden.is_empty();
+        out.child(div().flex().gap_2().mt_1()
+            .child(ui::button("tag-add", t("tag.add"), 1).on_click(cx.listener(|this, _, _w, cx| {
+                this.notice = config::update(|s| {
+                    let n = (1..).find(|n| !s.tags.custom.iter().any(|d| d.id == format!("tag{n}"))).unwrap_or(1);
+                    s.tags.custom.push(config::TagDef { id: format!("tag{n}"), name: format!("{} {n}", t("tag.new_name")), color: "#5ac8fa".into() });
+                });
+                cx.emit(SettingsEvent::Changed("tags".into())); cx.notify();
+            })))
+            .when(hidden, |d| d.child(ui::button("tag-restore", t("tag.restore_builtin"), 0).on_click(cx.listener(|this, _, _w, cx| {
+                this.notice = config::update(|s| s.tags.hidden.clear());
+                cx.emit(SettingsEvent::Changed("tags".into())); cx.notify();
+            })))))
+            .into_any_element()
     }
 
     fn permissions_extra(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -782,6 +852,7 @@ impl Render for SettingsView {
             if !els.is_empty() { body = body.child(Self::group_card(els)); }
             let extra = match self.cat {
                 Cat::Permissions => Some(self.permissions_extra(window, cx)),
+                Cat::Tags => Some(self.tags_extra(window, cx)),
                 Cat::Credentials => Some(self.credentials_extra(cx)),
                 Cat::Agents => Some(self.agents_extra(cx)),
                 Cat::Keys => Some(self.keys_extra(window, cx)),

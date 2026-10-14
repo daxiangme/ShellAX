@@ -137,3 +137,11 @@
 - 限制：Windows 上的 NC 命中/Snap 只能在真机验证（wine 下 GUI 无法运行）；移动到新窗口的标签会重新启动 shell/重连，不迁移正在运行的进程。
 
 - 第 16 轮补充：改名 coossh（commit 0c42d55）；Windows 包 /workspace/dist-win/coossh-Setup-x64.exe、coossh-portable-x64.zip（含 coossh-cli.exe）。
+
+## 第 17 轮（Windows 反馈 2）
+- 侧边栏空状态卡片换行/按钮堆叠省略；行文字截断。
+- 终端：内边距 terminal.padding（默认 8）；行高 = 字体 ascent+descent × font.line_height（默认 1.0，旧默认 1.4 自动迁移）。
+- Windows 窗口按钮：之前因 decorations 判断为 Server 而不渲染，已修正。
+- 侧边栏可拖右边缘调宽（180–480，保存 sidebar.width，双击重置）。
+- 标签：侧边栏只显示正在使用的标签（带计数）；设置新增“标签”分类：重命名/删除内置色、自定义标签（名称 + #hex + 预设色板）、生产环境标签。
+- 未验证：仅 cargo check，未运行测试/截图。

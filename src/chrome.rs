@@ -47,7 +47,8 @@ pub fn drag_spacer(id: &'static str) -> gpui::Stateful<gpui::Div> {
 /// On Windows they are native hit-test areas (HTMINBUTTON / HTMAXBUTTON / HTCLOSE: Snap Layouts
 /// flyout on maximize); elsewhere they are plain click targets.
 pub fn window_controls(id: &'static str, window: &Window, on_close: impl Fn(&mut Window, &mut gpui::App) + 'static) -> Option<AnyElement> {
-    if style() != Style::Win || !drawn_controls(window) { return None; }
+    // Windows: the frameless window reports server decorations, but the caption buttons are ours to draw
+    if style() != Style::Win || !(cfg!(windows) || drawn_controls(window)) { return None; }
     let th = cur();
     let fg = c(th.text).opacity(if window.is_window_active() { 0.85 } else { 0.45 });
     let maxed = window.is_maximized();

@@ -29,7 +29,6 @@ use ssh_term_proto::term::{Session, Size};
 use crate::theme::{c, cur, term_color, Theme};
 use crate::{config, font_size, line_h};
 
-pub const PAD: f32 = 10.0;
 const SCROLLBAR_W: f32 = 8.0;
 
 // ---------------------------------------------------------------- perf counters (PERF_LOG=1)
@@ -144,12 +143,15 @@ impl Render for GridLayer {
                 let ts = window.text_system();
                 let fid = ts.resolve_font(&mono_font(false, false));
                 let cw = ts.advance(fid, px(font_size()), 'M').map(|a| f32::from(a.width)).unwrap_or(8.0);
+                let mh = f32::from(ts.ascent(fid, px(font_size()))) + f32::from(ts.descent(fid, px(font_size()))).abs();
+                if mh.is_finite() && mh > 0.0 { crate::FONT_METRIC_H.store(mh.to_bits(), Ordering::Relaxed); }
+                let pad = crate::term_pad();
                 let mut s = st.borrow_mut();
                 s.cell_w = cw;
                 s.bounds = bounds;
-                s.origin = bounds.origin + point(px(PAD), px(PAD));
-                let cols = ((f32::from(bounds.size.width) - 2.0 * PAD - SCROLLBAR_W) / cw).floor().max(10.0) as usize;
-                let rows = ((f32::from(bounds.size.height) - 2.0 * PAD) / line_h()).floor().max(3.0) as usize;
+                s.origin = bounds.origin + point(px(pad), px(pad));
+                let cols = ((f32::from(bounds.size.width) - 2.0 * pad - SCROLLBAR_W) / cw).floor().max(10.0) as usize;
+                let rows = ((f32::from(bounds.size.height) - 2.0 * pad) / line_h()).floor().max(3.0) as usize;
                 if let Some(s) = &session { s.resize(Size { cols, rows }); *s.cell_px.lock().unwrap() = (cw * window.scale_factor(), line_h() * window.scale_factor()); }
                 session
             },

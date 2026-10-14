@@ -35,6 +35,11 @@ pub(crate) enum SbModal {
 }
 
 /// Dragging a group row.
+/// Drag payload of the sidebar's right-edge resize handle.
+#[derive(Clone)]
+pub(crate) struct SbResize;
+impl Render for SbResize { fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement { div() } }
+
 #[derive(Clone)]
 pub(crate) struct GroupDrag { pub path: String }
 impl Render for GroupDrag {
@@ -138,7 +143,7 @@ impl Root {
         let mut row = div().id(("host", idx)).group(gid.clone()).mx_2().pr_2().pl(px(8. + 14. * depth as f32 + 14.)).h(px(ROW_H + 4.)).rounded(px(6.)).flex().items_center().gap(px(8.)).cursor_pointer()
             .when(sel, |d| d.bg(c(th.accent).opacity(0.16)))
             .when(!sel, |d| d.hover(|s| s.bg(c(cur().surface0).opacity(0.7))))
-            .child(icon(if prod { IconName::ShieldAlert } else { IconName::Server }, 15., if prod { c(hosttree::color_rgb(&s.tags.production)) } else { c(th.accent) }))
+            .child(icon(if prod { IconName::ShieldAlert } else { IconName::Server }, 15., if prod { c(s.tags.rgb(&s.tags.production)) } else { c(th.accent) }))
             .child(div().flex_1().min_w_0().flex().flex_col().overflow_hidden()
                 .child(div().flex().items_center().gap(px(6.)).child(div().min_w_0().text_size(px(12.5)).text_color(c(th.text)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(h.name.clone())).child(ui::tag_dots(&h.tags)))
                 .child(div().text_size(px(10.5)).text_color(c(th.overlay0)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(detail)));
@@ -243,7 +248,16 @@ impl Root {
             }))
             .child(icon(IconName::Plus, 15., c(th.text)));
         let mac = chrome::style() == chrome::Style::Mac;
-        let mut col = div().w(px(248.)).flex_shrink_0().h_full().flex().flex_col();
+        let mut col = div().id("sidebar").relative().w(px(self.sb_width)).flex_shrink_0().h_full().flex().flex_col()
+            .on_drag_move(cx.listener(|this, ev: &gpui::DragMoveEvent<SbResize>, _w, cx| {
+                let w = f32::from(ev.event.position.x - ev.bounds.left()).clamp(180.0, 480.0);
+                if (w - this.sb_width).abs() >= 1.0 { this.sb_width = w; cx.notify(); }
+            }));
+        // right-edge handle: drag to resize (180–480, saved), double-click resets
+        col = col.child(div().id("sb-resize").absolute().top_0().right(px(-3.)).w(px(6.)).h_full().cursor_col_resize()
+            .hover(|d| d.bg(c(cur().accent).opacity(0.35)))
+            .on_drag(SbResize, |d: &SbResize, _, _, cx| cx.new(|_| d.clone()))
+            .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _w, cx| if ev.click_count() >= 2 { this.sb_width = config::SIDEBAR_W; this.save_sb_width(); cx.notify(); })));
         if mac {
             col = col.child(chrome::drag_region(div().id("sb-titlebar")).h(px(chrome::TITLE_H)).flex_shrink_0().pr_2().flex().items_center().gap_2()
                 .child(self.lights(window, cx)).child(div().flex_1()).child(collapse))
@@ -267,8 +281,8 @@ impl Root {
             .on_mouse_down(gpui::MouseButton::Right, cx.listener(|this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.sb_menu = Some(SbMenu { target: SbTarget::Local, pos: ev.position, sub: SbSub::Main }); cx.notify(); }))
             .child(icon(IconName::Monitor, 15., c(th.info)))
             .child(div().flex_1().min_w_0().flex().flex_col()
-                .child(div().text_size(px(12.5)).text_color(c(th.text)).child(t("ui.local_terminal")))
-                .child(div().text_size(px(10.5)).text_color(c(th.overlay0)).child(sh)))
+                .child(div().text_size(px(12.5)).text_color(c(th.text)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(t("ui.local_terminal")))
+                .child(div().text_size(px(10.5)).text_color(c(th.overlay0)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(sh)))
             .child(div().size(px(6.)).rounded_full().bg(if local_on { c(th.success) } else { c(th.surface2) })));
         if let Some(dt) = self.default_target.clone() {
             let l = dt.label();
@@ -277,18 +291,20 @@ impl Root {
                 .hover(|s| s.bg(c(cur().surface0).opacity(0.7)))
                 .on_click(cx.listener(move |this, _, w, cx| this.new_tab(Spec::Ssh(dt.clone()), w, cx)))
                 .child(icon(IconName::Server, 15., c(th.accent)))
-                .child(div().flex_1().min_w_0().flex().flex_col().child(div().text_size(px(12.5)).text_color(c(th.text)).child(l)).child(div().text_size(px(10.5)).text_color(c(th.overlay0)).child(t("ui.ssh_host_environment_variable"))))
+                .child(div().flex_1().min_w_0().flex().flex_col().overflow_hidden().child(div().text_size(px(12.5)).text_color(c(th.text)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(l)).child(div().text_size(px(10.5)).text_color(c(th.overlay0)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(t("ui.ssh_host_environment_variable"))))
                 .child(div().size(px(6.)).rounded_full().bg(if on { c(th.success) } else { c(th.surface2) })));
         }
 
         list = list.child(self.section_header("sec-conn", t("sb.connections"), cx, true));
         let rows = hosttree::rows(&s.hosts, &s.groups, &s.sidebar.collapsed, &q);
         if s.hosts.is_empty() && s.groups.is_empty() {
-            list = list.child(div().mx_3().my_2().p_3().rounded(px(10.)).bg(c(th.surface0).opacity(0.5)).flex().flex_col().gap_2()
-                .child(div().text_size(px(11.5)).text_color(c(th.subtext)).child(t("sb.empty")))
-                .child(div().flex().gap_2()
-                    .child(ui::button("sb-empty-new", t("sb.new_connection"), 1).on_click(cx.listener(|this, _, w, cx| this.open_host_dialog(None, None, w, cx))))
-                    .child(ui::button("sb-empty-import", t("sb.import"), 0).on_click(cx.listener(|this, _, w, cx| this.open_import(w, cx))))));
+            // text wraps; buttons stack full-width and ellipsize instead of overflowing the sidebar
+            let full = |b: gpui::Stateful<gpui::Div>| b.w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().justify_center();
+            list = list.child(div().mx_3().my_2().p_3().min_w_0().overflow_hidden().rounded(px(10.)).bg(c(th.surface0).opacity(0.5)).flex().flex_col().gap_2()
+                .child(div().w_full().min_w_0().whitespace_normal().text_size(px(11.5)).text_color(c(th.subtext)).child(t("sb.empty")))
+                .child(div().w_full().min_w_0().flex().flex_col().gap(px(6.))
+                    .child(full(ui::button("sb-empty-new", t("sb.new_connection"), 1)).on_click(cx.listener(|this, _, w, cx| this.open_host_dialog(None, None, w, cx))))
+                    .child(full(ui::button("sb-empty-import", t("sb.import"), 0)).on_click(cx.listener(|this, _, w, cx| this.open_import(w, cx))))));
         } else if rows.is_empty() {
             list = list.child(div().px_4().py_3().text_size(px(11.5)).text_color(c(th.overlay0)).child(t("ui.no_matching_hosts")));
         }
@@ -299,18 +315,23 @@ impl Root {
             }
         }
 
-        // Finder "Tags" section: click a color to filter the list
-        list = list.child(self.section_header("sec-tags", t("tag.tags"), cx, false));
-        for (i, (color, name)) in s.tags.all().into_iter().enumerate() {
+        // "Tags" section: only tags in use (with counts); click to filter. Definitions live in Settings.
+        let used: Vec<(String, String, usize)> = s.tags.all().into_iter().map(|(id, name)| {
+            let n = s.hosts.iter().filter(|h| h.tags.contains(&id)).count() + s.groups.iter().filter(|g| g.tags.contains(&id)).count();
+            (id, name, n)
+        }).filter(|(_, _, n)| *n > 0).collect();
+        if !used.is_empty() { list = list.child(self.section_header("sec-tags", t("tag.tags"), cx, false)); }
+        for (i, (color, name, n)) in used.into_iter().enumerate() {
             let on = self.tag_filter.contains(&color);
             let cc = color.clone();
             let is_prod = color == s.tags.production;
             list = list.child(div().id(("tagf", i)).mx_2().px_2().pl(px(22.)).h(px(24.)).rounded(px(6.)).flex().items_center().gap(px(8.)).cursor_pointer()
                 .when(on, |d| d.bg(c(th.accent).opacity(0.16))).when(!on, |d| d.hover(|s| s.bg(c(cur().surface0).opacity(0.7))))
                 .on_click(cx.listener(move |this, _, _w, cx| { if let Some(p) = this.tag_filter.iter().position(|t| *t == cc) { this.tag_filter.remove(p); } else { this.tag_filter.push(cc.clone()); } cx.notify(); }))
-                .child(div().size(px(10.)).rounded_full().bg(c(hosttree::color_rgb(&color))))
-                .child(div().flex_1().text_size(px(12.)).text_color(c(th.text)).child(name))
-                .when(is_prod, |d| d.child(icon(IconName::ShieldAlert, 11., c(th.overlay0)))));
+                .child(div().size(px(10.)).flex_shrink_0().rounded_full().bg(c(s.tags.rgb(&color))))
+                .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(12.)).text_color(c(th.text)).child(name))
+                .when(is_prod, |d| d.child(icon(IconName::ShieldAlert, 11., c(th.overlay0))))
+                .child(div().flex_shrink_0().text_size(px(10.5)).text_color(c(th.overlay0)).child(n.to_string())));
         }
         let _ = searching;
 
@@ -499,4 +520,12 @@ pub(crate) struct RowCtx {
     open: Vec<(String, bool)>,
     selected: Option<String>,
     host_os: std::collections::HashMap<String, String>,
+}
+
+impl Root {
+    /// Persist the sidebar width when it differs from the saved value.
+    pub(crate) fn save_sb_width(&mut self) {
+        let w = self.sb_width.round();
+        if (config::get().sidebar.width - w).abs() >= 1.0 { let _ = config::update(|s| s.sidebar.width = w); }
+    }
 }

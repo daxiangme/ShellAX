@@ -48,7 +48,18 @@ use theme::{c, cur, Appearance, Theme};
 use ui::{icon, IconName};
 
 pub fn font_size() -> f32 { config::get().font.size.clamp(6.0, 48.0) }
-pub fn line_h() -> f32 { let f = config::get(); (f.font.size.clamp(6.0, 48.0) * f.font.line_height.clamp(0.8, 3.0)).round() }
+/// Font line metrics (ascent + descent, px at the current font size), measured by the terminal
+/// view from the real font (DirectWrite / CoreText / FreeType differ); 0 = not measured yet.
+pub static FONT_METRIC_H: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// Terminal cell height: font metrics × font.line_height (1.0 = glyph height).
+pub fn line_h() -> f32 {
+    let f = config::get();
+    let m = f32::from_bits(FONT_METRIC_H.load(std::sync::atomic::Ordering::Relaxed));
+    let base = if m > 0.0 { m } else { f.font.size.clamp(6.0, 48.0) * 1.2 };
+    (base * f.font.line_height.clamp(0.8, 3.0)).round().max(6.0)
+}
+/// Terminal content padding (terminal.padding, px).
+pub fn term_pad() -> f32 { config::get().terminal.padding.clamp(0.0, 40.0) }
 
 /// One shared audit writer (the hash chain needs a single tail cache per process).
 pub(crate) fn audit_log() -> Arc<AuditLog> {
@@ -146,6 +157,8 @@ pub(crate) struct Root {
     sb_modal: Option<sidebar::SbModal>,
     /// Finder tag filter (colors) from the sidebar Tags section.
     tag_filter: Vec<String>,
+    /// live sidebar width (px); saved to sidebar.width when a resize drag ends
+    sb_width: f32,
     /// tab right-click menu (tab index, position)
     tab_menu: Option<(usize, gpui::Point<gpui::Pixels>)>,
     /// inline tab rename (tab index, input)
@@ -1308,7 +1321,7 @@ impl Render for Root {
         }
         let th = cur();
         let s = config::get();
-        if !cx.has_active_drag() { self.drag_div = None; }
+        if !cx.has_active_drag() { self.drag_div = None; self.save_sb_width(); }
         self.probe_os(cx);
         // appearance.opacity: transparent window background, terminal area drawn with alpha
         let op = s.appearance.opacity.clamp(0.5, 1.0);
@@ -1611,7 +1624,7 @@ fn main() {
                     let mut root = Root {
                         rt, default_target, tabs: vec![], active: 0, themes, histories: HashMap::new(),
                         manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], deny_reason: None, policy_port: None, overlay: Overlay::None, sftp_views: HashMap::new(), sftp_current: None, sftp_windows: vec![], drag_div: None, port_view: None, quit_confirm: false, modal: None, quit_ok: false, chat_view: None,
-                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, sb_modal: None, tag_filter: vec![], tab_menu: None, tab_rename: None, closed_tabs: vec![], host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: true, audit, audit_verify: None, audit_filter: Default::default(),
+                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, sb_modal: None, tag_filter: vec![], tab_menu: None, tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: true, audit, audit_verify: None, audit_filter: Default::default(),
                         settings_dirty: vec![], toast: None, toast_seq: 0, _subs: vec![],
                     };
                     crate::ctxmenu_view::init(root.rt.handle().clone(), root.prompts.clone());

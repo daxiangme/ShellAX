@@ -9,6 +9,12 @@ use crate::outline::normalize;
 /// The seven Finder tag colors, in menu order.
 pub const COLORS: [&str; 7] = ["red", "orange", "yellow", "green", "blue", "purple", "grey"];
 
+/// "#rrggbb" / "rrggbb" → 0xrrggbb.
+pub fn parse_hex(s: &str) -> Option<u32> {
+    let h = s.trim().trim_start_matches('#');
+    (h.len() == 6).then(|| u32::from_str_radix(h, 16).ok()).flatten()
+}
+
 pub fn color_rgb(color: &str) -> u32 {
     match color { "red" => 0xff3b30, "orange" => 0xff9500, "yellow" => 0xffcc00, "green" => 0x34c759, "blue" => 0x007aff, "purple" => 0xaf52de, _ => 0x8e8e93 }
 }
@@ -137,7 +143,7 @@ pub fn rename_host(hosts: &mut [HostEntry], name: &str, new: &str) -> bool {
 }
 
 pub fn toggle(tags: &mut Vec<String>, color: &str) {
-    if let Some(i) = tags.iter().position(|t| t == color) { tags.remove(i); } else { tags.push(color.to_string()); tags.sort_by_key(|t| COLORS.iter().position(|c| c == t)); }
+    if let Some(i) = tags.iter().position(|t| t == color) { tags.remove(i); } else { tags.push(color.to_string()); tags.sort_by_key(|t| COLORS.iter().position(|c| c == t).unwrap_or(COLORS.len())); }
 }
 
 /// Host is production: own tag, or any ancestor group carries the production tag (or legacy flag).
