@@ -135,3 +135,5 @@
 - 测试 163 项通过；release / clippy（Linux 与 Windows 目标）0 警告。截图 screenshot-523-*.png（COOSSH_CONTROLS=win，脚本 /tmp/run523.sh + /tmp/shot2.sh 截整窗 1440x860）。
 - PRD 仓库：a975dde（v1.4，备份 PRD-v1.3-final.md）。
 - 限制：Windows 上的 NC 命中/Snap 只能在真机验证（wine 下 GUI 无法运行）；移动到新窗口的标签会重新启动 shell/重连，不迁移正在运行的进程。
+
+- 第 16 轮补充：改名 coossh（commit 0c42d55）；Windows 包 /workspace/dist-win/coossh-Setup-x64.exe、coossh-portable-x64.zip（含 coossh-cli.exe）。
