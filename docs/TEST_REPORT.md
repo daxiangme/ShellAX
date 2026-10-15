@@ -1,4 +1,4 @@
-# TEST_REPORT — coossh 原型对照 PRD v1.2（第 14 轮：5.21 SFTP 显示模式，2026-10-13）
+# TEST_REPORT — ShellAX 原型对照 PRD v1.2（第 14 轮：5.21 SFTP 显示模式，2026-10-13）
 
 标记：**通过** / **失败**（PRD 要求未实现或不达标）/ **未验证**（只因硬件或平台限制无法在本机验证，写明原因）。
 证据：`T:` 自动化测试；`G:` 本轮在 DISPLAY=:2 实测（截图本轮逐张看过）；`P:` 前几轮 GUI 实测（PROGRESS.md 有记录，截图在仓库）；`M:` 手工测量。
@@ -11,7 +11,7 @@
 | release 构建 | `cargo build --release`（`~/.cargo/bin` 工具链） | **通过**，0 警告 |
 | dist 构建 | `cargo build --profile dist`（fat LTO、cgu=1、panic=abort、strip） | **通过**，0 警告；二进制 42.8MB |
 | clippy | `cargo clippy --release --all-targets` | **通过**，0 警告 0 错误 |
-| 全量测试 ×3 | `source testenv/test.env; eval $(ssh-agent -s); ssh-add testenv/client_ed25519; cargo test --release -- --nocapture` | **通过**：3 轮均 152/152（lib 107 含新增 sftp_mode 3 + session_store sftp 1、coossh 8、GUI bin 16、ctxmenu_ssh 1、daemon 1、headless 8、managed_policy 1、sftp_modes_ssh 1（新增）、ssh_features 9），0 失败 0 忽略 |
+| 全量测试 ×3 | `source testenv/test.env; eval $(ssh-agent -s); ssh-add testenv/client_ed25519; cargo test --release -- --nocapture` | **通过**：3 轮均 152/152（lib 107 含新增 sftp_mode 3 + session_store sftp 1、ShellAX 8、GUI bin 16、ctxmenu_ssh 1、daemon 1、headless 8、managed_policy 1、sftp_modes_ssh 1（新增）、ssh_features 9），0 失败 0 忽略 |
 | 跳过检查 | 在 --nocapture 输出里 grep skip | 0 个跳过（sshd 2222 公钥 / 2223 密码+转发 / 2224 keyboard-interactive 都在运行，SSH_AUTH_SOCK 已设） |
 | 外部 Agent hook 端到端 | `tools/e2e_hooks.sh`（真实 Claude Code / Codex / Grok CLI + mock LLM） | **通过** 7/7 |
 | 许可证（第 13 轮） | 右键菜单全部自写（src/ctxmenu.rs、src/ctxmenu_view.rs），无新增依赖；未打开 research/ 下 shell-rs、oxideterm、warp，未读 Zed terminal/terminal_view/editor | 通过 |
@@ -30,7 +30,7 @@
 | US-07 | 一键解释失败命令（脱敏） | 通过 | T: ai::tests::redacts_common_secrets、suggest::tests::osc133_mark_wins；P: 6.2 |
 | US-08 | 内置 AI 执行逐条过策略、审批、审计，结果回传 | 通过 | T: chat_view::tests::plan_steps_and_approvals；P: screenshot-v10-ai-chat-step-approval.png、screenshot-v11-ai-feedback.png |
 | US-09 | prod 主机 R3+ 一律拒绝 | 通过 | T: policy::tests::production_is_stricter、policy_server::tests::production_host_header |
-| US-10 | `coossh-cli exec/hosts/upload/download`，凭据只在 App 内 | 通过 | T: policy_server::tests::remote_ops_go_through_policy；P: screenshot-v10-coossh-upload-approval.png |
+| US-10 | `shellax-cli exec/hosts/upload/download`，凭据只在 App 内 | 通过 | T: policy_server::tests::remote_ops_go_through_policy；P: screenshot-v10-shellax-upload-approval.png |
 | US-11 | 审计按主机/会话/决策过滤，导出 JSONL | 通过 | T: audit::tests::filter_by_host_session_decision；P: screenshot-v10-audit-filter-*.png |
 | US-12 | SFTP 双栏拖拽、断点续传 | 通过 | T: sftp_ops_and_resumable_transfers；P: screenshot-final-sftp.png |
 | US-13 | -L/-R/-D，随 App 启动 | 通过 | T: port_forwards_local_remote_socks；P: screenshot-final-port-forwarding.png |
@@ -80,7 +80,7 @@
 | IME 预编辑 | 未验证 | 代码已实现 EntityInputHandler；本机没有 fcitx/ibus 输入法程序 |
 | 光标闪烁 CPU | 通过 / 未验证 | M: 软件渲染下光标常亮，空闲 0.4% CPU；硬件 GPU 下的闪烁路径没有真 GPU 可测 |
 | 图形协议 Sixel/Kitty（P2） | 通过 | T: graphics::tests::sixel_and_kitty、headless::local_pty_graphics_record_notify、headless::graphics_in_single_chunk_keep_order；G: Sixel（RGB/HLS 调色、重复、换行）与 Kitty（a=T，f=24/32/100 PNG，分块 m=1）在网格中按位置显示并预留行，clear 后清除（screenshot-final-graphics-sixel-kitty.png）。未做：Kitty 的放置/删除命令（a=p/d）、文件/共享内存传输、动画 |
-| 录制回放 asciicast（P2） | 通过 | T: asciicast::tests::record_redact_and_replay（跨读分片的密钥也脱敏、关回显段写“[input hidden]”、空闲压缩）；G: Ctrl+Shift+R 开始/停止（面板右上“● 录制中（已脱敏）”），命令面板“回放录制”列出文件，点开在新标签里用 `coossh-cli play` 按时间回放，DEMO_TOKEN 显示为 [REDACTED]，图片也能回放（screenshot-final-recordings-list.png / -asciicast-playback.png） |
+| 录制回放 asciicast（P2） | 通过 | T: asciicast::tests::record_redact_and_replay（跨读分片的密钥也脱敏、关回显段写“[input hidden]”、空闲压缩）；G: Ctrl+Shift+R 开始/停止（面板右上“● 录制中（已脱敏）”），命令面板“回放录制”列出文件，点开在新标签里用 `shellax-cli play` 按时间回放，DEMO_TOKEN 显示为 [REDACTED]，图片也能回放（screenshot-final-recordings-list.png / -asciicast-playback.png） |
 | 广播输入（P2） | 通过 | T: broadcast::tests::gating；G: Ctrl+Shift+B 对当前标签全部面板广播，面板红框+底部红条“广播输入中 · 同时发送到 N 个面板”，本地与 SSH 面板同时收到 `echo hello-from-broadcast`（screenshot-final-broadcast.png）；含生产主机时先弹确认框（screenshot-final-broadcast-prod-confirm.png），审计 broadcast.start/confirm/stop |
 
 ### 3.3 外部 Agent
@@ -91,7 +91,7 @@
 | 会话恢复 resume | 通过 | P: 5.4（grok `--resume` 参数未在本机核实） |
 | 权限钩子 Claude/Codex/Grok | 通过 | T: hooks::tests::*、policy_server::tests::*；e2e 7/7 |
 | 远端 hook 回传 | 通过 | P: 1.6 |
-| 凭据桥 coossh exec/hosts/upload/download | 通过 | 同 US-10 |
+| 凭据桥 ShellAX exec/hosts/upload/download | 通过 | 同 US-10 |
 | 快速启动 | 通过 | T: config::ai_output_tests::quick_launch_and_new_defaults；P: screenshot-v11-agent-quick-launch*.png；G: Ctrl+Shift+O「快速启动：选目录 + 预设布局」——目录候选（焦点面板 cwd、HOME、快照里的目录、浏览…）+ 预设 单面板/左右/主+两侧/2×2/Agent + 日志 tail -f（screenshot-final-quickstart-dialog.png、-grid4.png：4 个面板 pwd 均为所选目录；-agent-tail.png：左侧 Agent 被识别、右侧 tail -F 最新 app.log）。“浏览…”用系统目录选择门户，本机无 xdg-desktop-portal 未实测 |
 | write_to_pty 权限 | 通过 | T: policy::pty_tests::write_to_pty_modes；P: screenshot-v11-write-to-pty-ask.png |
 
@@ -111,7 +111,7 @@
 | Ask/Plan/Auto、规则 last-match-wins、R0–R4、分段 | 通过 | T: policy::tests::* |
 | 主机 env 标签 | 通过 | T: policy::tests::production_is_stricter |
 | 审批卡（允许一次 / 本会话总是允许 / 拒绝并说明原因）、超时 | 通过 | T: policy_server::tests::approvals_and_timeout / session_allow_and_deny_with_reason；G: screenshot-final-approval-withdraw-before.png（四个按钮） |
-| **调用方断开自动撤销审批卡、不执行、写审计** | 通过 | 1658b6a 已实现。T: policy_server::tests::approval_withdrawn_when_caller_disconnects（exec 与 hook 两路；迟到的“允许”不执行）。G: 在本地面板运行 `coossh-cli exec sshtest-local -- touch /tmp/late_marker_remote` → 弹卡（screenshot-final-approval-withdraw-before.png）→ kill -9 CLI → 卡片 1 秒内消失（screenshot-final-approval-withdraw-after.png）；远端 /tmp/late_marker_remote 不存在；审计 seq 272 `hook.decision … effect=Deny reason="… caller disconnected, approval withdrawn"` |
+| **调用方断开自动撤销审批卡、不执行、写审计** | 通过 | 1658b6a 已实现。T: policy_server::tests::approval_withdrawn_when_caller_disconnects（exec 与 hook 两路；迟到的“允许”不执行）。G: 在本地面板运行 `shellax-cli exec sshtest-local -- touch /tmp/late_marker_remote` → 弹卡（screenshot-final-approval-withdraw-before.png）→ kill -9 CLI → 卡片 1 秒内消失（screenshot-final-approval-withdraw-after.png）；远端 /tmp/late_marker_remote 不存在；审计 seq 272 `hook.decision … effect=Deny reason="… caller disconnected, approval withdrawn"` |
 | 审计 JSONL + 哈希链 + 保留期 + 过滤 | 通过 | T: audit::tests::* |
 | 组织托管策略 | 通过 | 同 US-15 |
 
@@ -121,7 +121,7 @@
 | 布局持久化/恢复 | 通过 | T: session_store::tests::roundtrip |
 | tmux 远端持久 / 本地 daemon | 通过 | 同 US-05 |
 | 断线重连 | 通过 | P: 2.5 |
-| 托盘（Agent 数、显示/新建/退出） | 通过 / 未验证 | T: tray::tests::summary_and_labels；G: 私有 dbus-daemon + examples/sni_watcher，busctl 读到 Title “coossh · 没有运行中的 Agent”、Status Active、菜单 显示窗口/新建本地终端/退出（screenshot-final-tray.png，D-Bus 输出截图）。本机没有桌面面板，图标的真实显示未验证；macOS/Windows 托盘未实现也无平台可测 |
+| 托盘（Agent 数、显示/新建/退出） | 通过 / 未验证 | T: tray::tests::summary_and_labels；G: 私有 dbus-daemon + examples/sni_watcher，busctl 读到 Title “ShellAX · 没有运行中的 Agent”、Status Active、菜单 显示窗口/新建本地终端/退出（screenshot-final-tray.png，D-Bus 输出截图）。本机没有桌面面板，图标的真实显示未验证；macOS/Windows 托盘未实现也无平台可测 |
 | 布局快照 N 份可回滚（P2） | 通过 | T: snapshot::tests::ring_and_roundtrip；G: 保存布局时自动快照（去重，最多 10 份）+ 命令面板“保存布局快照”，“回滚布局快照…”列表点选后先快照当前布局再重建（screenshot-final-layout-snapshots.png → screenshot-final-layout-rollback.png，3 标签回到 2 标签），审计 layout.snapshot/rollback |
 
 ### 3.7 设置全表
@@ -157,9 +157,9 @@
 ## 4b. 本轮另修
 | 项 | 结果 | 证据 |
 |---|---|---|
-| 策略服务审计路径遵守 XDG_DATA_HOME（与 GUI 一致） | 通过 | config::audit_dir：默认目录改为 `$XDG_DATA_HOME/coossh/audit`（未设时仍是 ~/.local/share/coossh/audit），显式配置的目录原样使用；GUI 与 coossh serve/CLI 共用；T: config::audit_dir_tests::default_follows_xdg（GUI bin 与 coossh bin 各跑一次）；G: 隔离环境 XDG_DATA_HOME=/tmp/stp-gui/data 下 coossh exec 的审计写入 /tmp/stp-gui/data/coossh/audit/audit.jsonl |
+| 策略服务审计路径遵守 XDG_DATA_HOME（与 GUI 一致） | 通过 | config::audit_dir：默认目录改为 `$XDG_DATA_HOME/shellax/audit`（未设时仍是 ~/.local/share/shellax/audit），显式配置的目录原样使用；GUI 与 ShellAX serve/CLI 共用；T: config::audit_dir_tests::default_follows_xdg（GUI bin 与 ShellAX bin 各跑一次）；G: 隔离环境 XDG_DATA_HOME=/tmp/stp-gui/data 下 ShellAX exec 的审计写入 /tmp/stp-gui/data/shellax/audit/audit.jsonl |
 | OS 徽章缓存键按主机条目 | 通过 | 缓存键由 user@host:port 改为 SshTarget::pool_key（含跳板链），经不同跳板到同名地址的条目不再串用徽章 |
-| GUI 验证“审批撤销后迟到允许不执行” | 通过 | 测试钩子 `COOSSH_TEST_SLOW_WITHDRAW=1`：调用方断开后卡片仍留在界面。G: `coossh-cli exec prod-db -- touch /tmp/late-allow-proof` 弹卡 → kill CLI → 2.5 秒后点“允许一次” → 提示“该审批已被撤销（调用方已断开），迟到的应答未执行”；审计 seq 72 `withdrawn caller-disconnected`、seq 74 `late-answer-ignored`；ssh 检查远端文件不存在（screenshot-final-late-allow-1-card.png / -2-ignored.png）。另有 T: policy_server::tests::approval_withdrawn_when_caller_disconnects |
+| GUI 验证“审批撤销后迟到允许不执行” | 通过 | 测试钩子 `SHELLAX_TEST_SLOW_WITHDRAW=1`：调用方断开后卡片仍留在界面。G: `shellax-cli exec prod-db -- touch /tmp/late-allow-proof` 弹卡 → kill CLI → 2.5 秒后点“允许一次” → 提示“该审批已被撤销（调用方已断开），迟到的应答未执行”；审计 seq 72 `withdrawn caller-disconnected`、seq 74 `late-answer-ignored`；ssh 检查远端文件不存在（screenshot-final-late-allow-1-card.png / -2-ignored.png）。另有 T: policy_server::tests::approval_withdrawn_when_caller_disconnects |
 
 ## 5. 统计
 第 1–3 节逐行计 86 行：**通过 82**（其中 4 行“通过 / 未验证”：钥匙串真实平台、硬件 GPU 光标闪烁、真实模型服务商、托盘真实面板；1 行“通过（部分）”：界面字号），**失败 0**，**未验证 4**（IME、透明度、空闲内存、跨平台——都是本机硬件/平台限制：没有输入法程序、没有真 GPU、只有 Linux X11）。
@@ -225,7 +225,7 @@
 - 只有 macOS 有真正的毛玻璃（Blurred），Linux/Windows 降级为不透明 mantle 色。
 - Linux 下只有 GNOME 47+（gsettings accent-color）能跟随系统强调色，其他桌面用默认蓝。
 - macOS 原生红绿灯、SF Pro 和毛玻璃只写了代码，未在真机验证（本机是 Linux/X11）。
-- Linux 客户端装饰由 gpui-component Root 外加 20px 透明阴影边，没有合成器时显示为黑边（本机有 picom，所以正常）；`COOSSH_SERVER_DECORATIONS=1` 可改回系统标题栏。
+- Linux 客户端装饰由 gpui-component Root 外加 20px 透明阴影边，没有合成器时显示为黑边（本机有 picom，所以正常）；`SHELLAX_SERVER_DECORATIONS=1` 可改回系统标题栏。
 - e2e_hooks：box 重置后重装的 claude/codex 版本较新（node 20），4 个 deny/grok 子项失败（输出格式变化，grok CLI 未重装）；denied.txt 未被创建，拦截本身仍有效。钩子逻辑这一轮没有改动。
 
 ## 6. 仍存问题（不计失败）

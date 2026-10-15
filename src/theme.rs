@@ -1,5 +1,5 @@
 //! Theme system: UI color tokens + terminal palette, loaded from TOML.
-//! Built-in themes are embedded from `themes/*.toml`; user themes from `~/.config/coossh/themes/*.toml`.
+//! Built-in themes are embedded from `themes/*.toml`; user themes from `~/.config/shellax/themes/*.toml`.
 use std::sync::{Arc, RwLock};
 
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
@@ -151,12 +151,12 @@ fn parse_itermcolors(src: &str) -> anyhow::Result<Vec<(String, u32)>> {
     Ok(out)
 }
 
-/// `~/.config/coossh/themes`
+/// `~/.config/shellax/themes`
 pub fn user_dir() -> Option<std::path::PathBuf> {
     Some(ssh_term_proto::platform::config_dir().join("themes"))
 }
 
-/// Parse any supported theme file (coossh TOML, Alacritty TOML, iTerm2 .itermcolors).
+/// Parse any supported theme file (shellax TOML, Alacritty TOML, iTerm2 .itermcolors).
 pub fn parse_file(p: &std::path::Path) -> anyhow::Result<Theme> {
     let src = std::fs::read_to_string(p)?;
     let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("imported");
@@ -184,8 +184,8 @@ pub const BUILTIN: &[&str] = &[
     include_str!("../themes/dark.toml"),
     include_str!("../themes/catppuccin-mocha.toml"),
     include_str!("../themes/catppuccin-latte.toml"),
-    include_str!("../themes/coossh-midnight.toml"),
-    include_str!("../themes/coossh-daylight.toml"),
+    include_str!("../themes/shellax-midnight.toml"),
+    include_str!("../themes/shellax-daylight.toml"),
 ];
 
 pub fn load_all() -> Vec<Arc<Theme>> {
@@ -243,7 +243,7 @@ fn read_cmd(cmd: &str, args: &[&str]) -> Option<String> {
 pub fn system_accent(dark: bool) -> Option<u32> {
     static RAW: std::sync::OnceLock<(Option<String>, Option<String>)> = std::sync::OnceLock::new();
     let (m, g) = RAW.get_or_init(|| {
-        if std::env::var_os("COOSSH_NO_SYSTEM_ACCENT").is_some() { return (None, None); }
+        if std::env::var_os("SHELLAX_NO_SYSTEM_ACCENT").is_some() { return (None, None); }
         if cfg!(target_os = "macos") { (Some(read_cmd("defaults", &["read", "-g", "AppleAccentColor"]).unwrap_or_else(|| "4".into())), None) }
         else if cfg!(target_os = "linux") { (None, read_cmd("gsettings", &["get", "org.gnome.desktop.interface", "accent-color"])) }
         else { (None, None) }

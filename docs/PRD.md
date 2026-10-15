@@ -1,4 +1,4 @@
-# PRD：带 Agent 能力的原生桌面 SSH 客户端 + 终端（暂名 **coossh**）
+# PRD：带 Agent 能力的原生桌面 SSH 客户端 + 终端（暂名 **ShellAX**）
 
 | 项 | 内容 |
 |---|---|
@@ -77,7 +77,7 @@
 ```mermaid
 sequenceDiagram
     actor Dev as 开发者
-    participant App as coossh
+    participant App as shellax
     participant KC as 系统钥匙串
     participant Srv as 远程服务器
     participant CC as Claude Code(远端)
@@ -108,7 +108,7 @@ sequenceDiagram
 | US-07 | 开发者 | 命令失败后点「解释错误」 | 用最近一个命令块的输出（脱敏后）生成解释和修复建议 | P0 |
 | US-08 | 开发者 | 让内置 AI 执行命令排查问题 | 每条命令经过策略引擎；只读命令在 Auto 模式自动执行，其他需确认；全部写审计 | P0 |
 | US-09 | 运维 | 生产主机上的 AI 不能执行破坏性命令 | 主机打标签 `env=prod` 后，R3 及以上一律拒绝（不可通过 always 放开） | P0 |
-| US-10 | 开发者 | 外部 Agent（Claude Code）能在保存的主机上执行命令，但拿不到密码 | `coossh exec <host> "cmd"`，凭据只在 App 进程内；请求经策略引擎，必要时弹审批卡 | P0 |
+| US-10 | 开发者 | 外部 Agent（Claude Code）能在保存的主机上执行命令，但拿不到密码 | `shellax exec <host> "cmd"`，凭据只在 App 进程内；请求经策略引擎，必要时弹审批卡 | P0 |
 | US-11 | 开发者 | 查看「AI 今天在哪些主机执行了什么」 | 审计面板可按主机/会话/决策过滤，可导出 JSONL | P0 |
 | US-12 | 开发者 | SFTP 双栏拖拽传输，断点续传 | 传输队列；断线重试；与终端共享认证 | P0 |
 | US-13 | 开发者 | 配置本地/远程/动态端口转发 | -L/-R/-D；规则图示；随 App 启动 | P1 |
@@ -168,7 +168,7 @@ sequenceDiagram
 | 增强 UI | 标签/面板标题显示 Agent 图标和状态点；侧栏「Agent 总览」跨主机汇总；blocked 时标签角标 + 声音 + 系统通知；通知点击跳转面板；当前可见面板不弹通知 | P0 |
 | 快捷启动 | 「在此主机启动 Agent」菜单：选 Agent + 目录 + 布局（例如左侧 Agent、右侧 shell 并 `tail -f` 日志） | P1 |
 | 会话恢复 | 记录 Agent 上报的 resume 命令（如 `claude --resume <id>`、`codex resume <id>`、`grok --resume <id>`），进程丢失后在原目录一键恢复 | P1 |
-| 凭据桥（Agent CLI） | `coossh` CLI + Agent Skill：`hosts list / exec / upload / download`，**每个请求都经过权限引擎**（ShellRS 只有全局开关，这里需要重新设计） | P0 |
+| 凭据桥（Agent CLI） | `shellax` CLI + Agent Skill：`hosts list / exec / upload / download`，**每个请求都经过权限引擎**（ShellRS 只有全局开关，这里需要重新设计） | P0 |
 | 外部 Agent 权限钩子 | 为 Claude Code / Codex / Grok Build 安装 `PreToolUse` hook，把工具调用交给本产品策略引擎判定；按各家能力降级（Claude：allow/deny/ask；Codex：deny/改写，ask 由我们弹窗后返回；Grok：deny，ask 需核实），详见 6.9 | P1（v0.3 已核实可行） |
 | Agent 输入注入 | 内置 AI 或其他 Agent 向某个 Agent 面板写入（prompt 互传）属于 `write_to_pty` 权限，默认 ask（参考 Warp `WriteToPtyPermission::{AlwaysAsk, AskOnFirstWrite, AlwaysAllow}`） | P1 |
 
@@ -208,7 +208,7 @@ sequenceDiagram
 | Workspace / Tab / Pane | 三级结构（同 herdr `concepts.mdx`）；一个 workspace 可混合多台主机 | P0 |
 | 布局持久化 | 退出时保存：标签、分屏树、每个面板的主机、cwd、Agent resume 引用；启动时恢复（不自动重跑命令，参考 zellij `start_suspended`，见 `zellij-utils/src/session_serialization.rs`） | P0 |
 | 远端持久会话 | 面板可标记为「持久」：远端进程独立于 App 存活，App 断开时远端缓冲输出，重连后 reattach（参考 Wave Durable Sessions：远端 job manager，`pkg/jobmanager/`、`docs/docs/durable-sessions.mdx`） | P0 |
-| 本地持久会话 | 本地 PTY 由后台 `coosshd` 持有，关闭窗口不杀 Agent（参考 herdr server/client 架构） | P1 |
+| 本地持久会话 | 本地 PTY 由后台 `shellaxd` 持有，关闭窗口不杀 Agent（参考 herdr server/client 架构） | P1 |
 | 多机 | 同一窗口多主机；每台主机独立重连，一台掉线不影响其他（herdr `connecting-machines.mdx`） | P0 |
 | 断线重连 | 指数退避；Grace Period 内透明恢复（OxideTerm README 提到「Grace Period reconnect」） | P0 |
 | 布局快照 | 保留最近 N 份布局快照，可手动回滚（herdr 保留 48 份 `session-snapshots/`） | P2 |
@@ -220,14 +220,14 @@ sequenceDiagram
 | 远程面板，「持久」开启（远端有 sessiond 或 tmux） | ✅ 继续运行，重开 App 自动接回，能看到期间的输出 | Wave durable session；herdr 远端 server |
 | 远程面板，「持久」关闭 | ❌ SSH channel 关闭，远端进程收到 SIGHUP 后退出；关闭前提示「此面板有运行中的 Agent」 | 普通 SSH 语义 |
 | 本地面板，P0 | ❌ 随 App 退出；有运行中的 Agent 时退出前确认；下次启动可用 resume 命令恢复 Agent 对话 | herdr「Native agent session restore」 |
-| 本地面板，P1 启用后台守护 | ✅ 窗口关闭后 `coosshd` 继续持有 PTY；托盘图标显示运行中的 Agent 数 | herdr「detach without stopping work」 |
+| 本地面板，P1 启用后台守护 | ✅ 窗口关闭后 `shellaxd` 继续持有 PTY；托盘图标显示运行中的 Agent 数 | herdr「detach without stopping work」 |
 | 机器重启 | 进程丢失；恢复布局，按 resume 命令恢复 Agent（需用户点击确认，避免自动跑出权限外的动作） | herdr session-state 表格；zellij `start_suspended` |
 
 ---
 
 ### 3.7 设置项全表（v0.7 更新）
 
-设置页为模态窗口：左侧分类可搜索（按名称、说明、配置键匹配），右侧表单。所有设置存放在 `~/.config/coossh/config.toml`（环境变量 `COOSSH_CONFIG` 可覆盖路径），修改后立即整文件写回（先写临时文件再 rename）。v0.5 的顶层键 `theme` / `known_hosts` / `ssh_config` 仍可读取，读取后归入对应分节。API Key 等机密只进系统钥匙串（不可用时进本地加密文件，见 5.15），从不写入 config.toml、日志或审计。
+设置页为模态窗口：左侧分类可搜索（按名称、说明、配置键匹配），右侧表单。所有设置存放在 `~/.config/shellax/config.toml`（环境变量 `SHELLAX_CONFIG` 可覆盖路径），修改后立即整文件写回（先写临时文件再 rename）。v0.5 的顶层键 `theme` / `known_hosts` / `ssh_config` 仍可读取，读取后归入对应分节。API Key 等机密只进系统钥匙串（不可用时进本地加密文件，见 5.15），从不写入 config.toml、日志或审计。
 
 “原型 v8 状态”（v1.0）：所有设置项都已有实际效果，界面上不再有“即将支持”。下表最后一列按 v8 更新。原 v6 状态的含义：**立即生效**＝改完马上影响界面或正在运行的终端；**新会话/新连接生效**＝影响之后打开的标签或 SSH 连接；**仅保存，即将支持**＝界面可改且会写入文件，但目前没有后端实现，界面上带“即将支持”标记。
 
@@ -236,7 +236,7 @@ sequenceDiagram
 | 通用 | 界面语言（跟随系统 / 简体中文 / English） | `general.language` | system | 立即生效（v6：locales/zh-CN.toml、en.toml，缺键回退英文；已打开标签的标题要新开标签才换语言） |
 | 通用 | 启动时 | `general.startup` | local（本地终端 / 恢复布局 / 空白） | 下次启动生效（v8：恢复布局可用） |
 | 通用 | 自动检查更新 / 更新通道 | `general.check_updates / update_channel` | true / stable | 生效（v8：启动后台检查 + “立即检查”，只提示不自动安装；`general.update_url` 可覆盖清单地址） |
-| 通用 | 配置文件路径 | —（COOSSH_CONFIG 可覆盖） | ~/.config/coossh/config.toml | 只读信息或操作 |
+| 通用 | 配置文件路径 | —（SHELLAX_CONFIG 可覆盖） | ~/.config/shellax/config.toml | 只读信息或操作 |
 | 外观 | 主题（含“跟随系统”） | `appearance.theme` | system | 立即生效 |
 | 外观 | 浅色 / 深色主题（跟随系统时） | `appearance.light_theme / dark_theme` | Catppuccin Latte / Mocha | 立即生效 |
 | 外观 | 终端字体 / 回退字体链 | `font.family / font.fallbacks` | 平台默认 | 立即生效 |
@@ -265,23 +265,23 @@ sequenceDiagram
 | AI | 启用内置 AI | `ai.enabled` | true | 立即生效（v6） |
 | AI | 服务商列表（名称、类型 OpenAI 兼容 / Anthropic、Base URL、模型、超时、温度、最大 tokens）、默认服务商 | `[[ai.providers]] id/name/kind/base_url/model/fast_model/preset/timeout_secs/temperature/max_tokens`、`ai.default_provider` | 空 | 立即生效（v6；v7 用真实 OpenRouter 公开接口和本地 mock 验证了模型列表，聊天请求仍只用本地 mock 测过 OpenAI 兼容接口，Anthropic 只有单元测试，没有用真实服务测过） |
 | AI | 服务商模板（OpenAI、Anthropic、OpenRouter、DeepSeek、通义 DashScope、Kimi、智谱、Ollama、LM Studio、自定义），选中后填类型和 Base URL | `[[ai.providers]] preset` | custom | 立即生效（v7） |
-| AI | 模型列表：下拉可搜索 + “刷新模型”，显示加载中/数量/错误；保存 Key 或改 URL 后自动拉取；可手填任意模型名 | 缓存文件 `<data>/coossh/models-cache.json` | — | 立即生效（v7） |
+| AI | 模型列表：下拉可搜索 + “刷新模型”，显示加载中/数量/错误；保存 Key 或改 URL 后自动拉取；可手填任意模型名 | 缓存文件 `<data>/shellax/models-cache.json` | — | 立即生效（v7） |
 | AI | 只显示聊天模型（按 id 启发式过滤 embedding/whisper/tts/图像/审核） | `ai.chat_models_only` | true | 立即生效（v7） |
 | AI | 模型列表缓存时长（小时） | `ai.models_cache_hours` | 24 | 立即生效（v7） |
 | AI | 命令模型（“# …”生成命令用的快/便宜模型，空=同主模型） | `[[ai.providers]] fast_model` | 空 | 立即生效（v7，mock 日志确认请求用了该模型） |
-| AI | API Key（界面只显示后 4 位） | —（系统钥匙串，账户 `ai-provider:<id>`，服务 `coossh`；不可用时 `<数据目录>/coossh/secrets.enc`，权限 0600） | — | 立即生效（v6） |
+| AI | API Key（界面只显示后 4 位） | —（系统钥匙串，账户 `ai-provider:<id>`，服务 `shellax`；不可用时 `<数据目录>/shellax/secrets.enc`，权限 0600） | — | 立即生效（v6） |
 | AI | 测试连接（真实最小请求，显示延迟/错误） | — | — | 可用（v6） |
 | AI | 发送前脱敏 / 上下文范围（不发送 / 最近命令 / 选中 / 当前屏幕）/ 屏幕行数 / 允许发送输出 | `ai.redact / context / context_lines / send_output` | true / screen / 40 / false | 立即生效（v6；关闭“允许发送输出”时，选中和屏幕内容都不发送，只发最近命令） |
 | AI | 自然语言前缀 | `ai.nl_prefix` | "#" | 立即生效（v6） |
 | 外部 Agent | 识别 Claude / Codex / Grok | `agents.detect_claude / detect_codex / detect_grok` | true | 立即生效 |
 | 外部 Agent | 状态变化通知 / 审批超时 / 超时处理 | `agents.notify_state / approval_timeout_secs / on_timeout` | true / 120 / deny | 立即生效（v8） |
 | 外部 Agent | Hook 安装状态（只读检测）/ 一键安装 | — | — | R / S |
-| 权限与安全 | 默认模式 Ask / Plan / Auto | `permissions.mode` | ask | 立即生效（v11：内置 AI、外部 Agent hook、coossh exec/upload/download、主机工具写操作都按此判定） |
+| 权限与安全 | 默认模式 Ask / Plan / Auto | `permissions.mode` | ask | 立即生效（v11：内置 AI、外部 Agent hook、ShellAX exec/upload/download、主机工具写操作都按此判定） |
 | 权限与安全 | Auto 最高自动风险 | `permissions.max_auto_risk` | R1 | 立即生效（测试器 + 内置 AI 执行） |
 | 权限与安全 | 高危命令二次确认 | `permissions.dangerous_confirm` | true | 立即生效（测试器 + 内置 AI 执行） |
 | 权限与安全 | 生产主机写操作确认 | `permissions.prod_confirm` | true | 立即生效（v8：生产主机 Auto 只放行 R0，R2+ 允许规则改为询问） |
-| 权限与安全 | 规则编辑器（allow/ask/deny，最后匹配生效）+ 规则测试器 | `[[permissions.rules]]` | 4 条示例 | 立即生效（v11：内置 AI、外部 Agent hook、coossh CLI、主机工具均已接入；组织策略优先于用户规则） |
-| 审计 | 日志目录 | `audit.dir` | ~/.local/share/coossh/audit | 下次启动生效 |
+| 权限与安全 | 规则编辑器（allow/ask/deny，最后匹配生效）+ 规则测试器 | `[[permissions.rules]]` | 4 条示例 | 立即生效（v11：内置 AI、外部 Agent hook、ShellAX CLI、主机工具均已接入；组织策略优先于用户规则） |
+| 审计 | 日志目录 | `audit.dir` | ~/.local/share/shellax/audit | 下次启动生效 |
 | 审计 | 保留天数 / 记录手动命令 | `audit.retention_days / log_commands` | 90 / false | 立即生效（v8：剪除后用锚点保持哈希链可校验） |
 | 审计 | 查看器 / 校验哈希链 / 导出 | — | — | 只读信息或操作 |
 | 会话与布局 | 持久会话 tmux / 恢复布局 / 关闭确认 / 自动重连 | `session.persistent / restore_layout / confirm_close / auto_reconnect` | off / true / true / true | 新会话生效（v8） |
@@ -299,7 +299,7 @@ sequenceDiagram
 | 外部 Agent | AI 向 Agent 面板输入 | `agents.write_to_pty` | ask | 立即生效（v11：ask / ask_first / allow / deny） |
 | 外部 Agent | 快速启动列表 | `[[agents.quick_launch]] name/command` | Claude Code / Codex / Grok | 立即生效（v11） |
 | AI | 首次发送提示已确认 / 禁止读取输出的主机 / 执行结果回传 | `ai.first_send_ack / no_output_hosts / feed_back_results` | false / 空 / true | 立即生效（v10–v11） |
-| 组织策略 | 托管策略文件（只读，最高优先级） | `/etc/coossh/managed-policy.yaml`（COOSSH_MANAGED_POLICY） | 无 | 启动时加载（v11：解析失败按失败关闭） |
+| 组织策略 | 托管策略文件（只读，最高优先级） | `/etc/shellax/managed-policy.yaml`（SHELLAX_MANAGED_POLICY） | 无 | 启动时加载（v11：解析失败按失败关闭） |
 
 ### 3.8 功能入口（v0.7 更新）
 
@@ -339,7 +339,7 @@ sequenceDiagram
 ### 5.1 总体架构
 ```mermaid
 flowchart TB
-  subgraph UI["GPUI 进程 (coossh)"]
+  subgraph UI["GPUI 进程 (shellax)"]
     WS[Workspace 壳<br/>Tab/Pane/Dock] --> TV[TerminalView<br/>网格渲染/输入编码]
     WS --> HP[主机树/凭据/SFTP/转发 面板]
     WS --> AIP[AI 面板 / 审批卡 / 审计查看器]
@@ -360,12 +360,12 @@ flowchart TB
     STORE[store<br/>SQLite 主机/规则/布局]
     BR[agent-bridge<br/>本地 socket + CLI + hook 端点]
   end
-  subgraph DAEMON["coosshd (P1, 本地后台)"]
+  subgraph DAEMON["shellaxd (P1, 本地后台)"]
     LP[持有本地 PTY / 会话]
   end
   subgraph REMOTE["远端主机"]
     SH[login shell]
-    SD[coossh-sessiond (可选)<br/>或 tmux 适配]
+    SD[shellax-sessiond (可选)<br/>或 tmux 适配]
     EXT[Claude Code / Codex / Grok CLI]
   end
   TV <--> TE
@@ -402,8 +402,8 @@ flowchart TB
 | `cmd-parse` | tree-sitter-bash 拆分复合命令、识别重定向/子 shell/管道、提取「命令前缀」（arity 表） | 〔代码〕`tree-sitter` + `tree-sitter-bash`（MIT）；OpenCode `packages/core/src/shell/parse.ts` 的 `ARITY` 表（MIT，可移植并署名）；〔设计〕Warp `decompose_command` |
 | `audit-log` | 追加写、哈希链、脱敏、查询 | 〔设计〕OxideTerm `crates/oxideterm-audit/`（审计分类与脱敏思路）；**自行实现** |
 | `ai-core` | Provider 适配、SSE 流、工具协议、上下文构建、**脱敏** | 〔代码〕Wave `pkg/aiusechat/`（Apache-2.0，Go，可参考或移植审批状态机，需带 NOTICE）；〔设计〕OxideTerm `context_sanitizer.rs`、Warp `crates/secret_redaction/`：脱敏规则由实现组依据公开的密钥格式规范（如各云厂商 key 前缀文档、gitleaks 规则（许可证待核实））独立编写 |
-| `agent-bridge` | `coossh` CLI ↔ App 的本地 socket（帧协议）；hook 端点；Agent Skill 安装 | 〔设计〕ShellRS `src/cli/`（类型 + 长度帧、socket 0600、由 App 代登录）；〔代码〕herdr socket API 文档与 `docs/next/api/herdr-api.schema.json`（Apache-2.0）可作为协议设计参考；**新增策略检查和审批** |
-| `coossh-sessiond`（远端，可选） | 远端持有 PTY、环形缓冲、reattach；通过 SSH exec channel 走 stdio 协议 | 〔代码〕Wave `pkg/jobmanager/`（Apache-2.0，`cirbuf.go` 环形缓冲、JWT 鉴权）、herdr `src/remote/host.rs`（Apache-2.0，SSH stdio bridge） |
+| `agent-bridge` | `shellax` CLI ↔ App 的本地 socket（帧协议）；hook 端点；Agent Skill 安装 | 〔设计〕ShellRS `src/cli/`（类型 + 长度帧、socket 0600、由 App 代登录）；〔代码〕herdr socket API 文档与 `docs/next/api/herdr-api.schema.json`（Apache-2.0）可作为协议设计参考；**新增策略检查和审批** |
+| `shellax-sessiond`（远端，可选） | 远端持有 PTY、环形缓冲、reattach；通过 SSH exec channel 走 stdio 协议 | 〔代码〕Wave `pkg/jobmanager/`（Apache-2.0，`cirbuf.go` 环形缓冲、JWT 鉴权）、herdr `src/remote/host.rs`（Apache-2.0，SSH stdio bridge） |
 | `app`（GPUI） | 窗口、Dock、动作、面板 | 〔代码〕`gpui`（Apache-2.0）、`gpui-component`（Apache-2.0）；〔设计〕ShellRS `src/workspace/`、`src/app/actions.rs`（「一个命令一个处理器」）；**不得参考 Zed `crates/terminal_view` 的代码（GPL-3.0-or-later）** |
 
 ### 5.3 本地 + SSH 终端数据流（GPUI 中）
@@ -617,7 +617,7 @@ allow-git = []                 # 需要锁定 GPUI git 版本时逐个加入，�
 - **关闭连字**：`FontFeatures` 设 `calt=0, liga=0, dlig=0`（gpui 也提供 `FontFeatures::disable_ligatures()`，但它只关 `calt`）。默认关闭，配置项 `font.ligatures = true` 可开启。原型截图中 `->`、`=>`、`!=` 已按原字符显示。
 - **双宽字符**：以 alacritty 的 cell 标志为准，不自己算宽度：`WIDE_CHAR` 的 cell 在 2 格槽位内居中单独绘制，`WIDE_CHAR_SPACER` 跳过，零宽字符（如 VS16）拼进同一个字形串。其余窄字符整行一次排版，并强制每字一格宽（`force_width`），保证网格对齐。光标落在宽字符上时画 2 格宽。
 - **Nerd Font / Powerline**：私有区（PUA）字符经回退链交给 Symbols Nerd Font Mono 绘制，原型已验证。产品还应**自绘** Powerline 分隔符（U+E0B0–E0B3）和制表符/块元素（U+2500–259F），因为字体自带的这类字形常有缝隙或高度不齐。这是终端的常见做法，自行实现即可。
-- **配置**：`~/.config/coossh/config.toml` 的 `[font] family / fallbacks / size / line_height / ligatures`（原型已实现，另支持环境变量 `TERM_FONT`、`TERM_FONT_SIZE`）。产品需要提供设置界面和字体枚举（GPUI 有 `all_font_names`），并标出哪些是等宽字体。
+- **配置**：`~/.config/shellax/config.toml` 的 `[font] family / fallbacks / size / line_height / ligatures`（原型已实现，另支持环境变量 `TERM_FONT`、`TERM_FONT_SIZE`）。产品需要提供设置界面和字体枚举（GPUI 有 `all_font_names`），并标出哪些是等宽字体。
 
 **各平台默认值（建议）**
 
@@ -654,7 +654,7 @@ selection = "#585b70"
 suggestion = "#6c7086"   # 历史/AI 建议的灰字颜色
 ansi = ["#45475a", "…16 个…"]
 ```
-内置主题打包进二进制；用户主题放 `~/.config/coossh/themes/*.toml`，启动时加载。产品应监听该目录，改动后热重载。
+内置主题打包进二进制；用户主题放 `~/.config/shellax/themes/*.toml`，启动时加载。产品应监听该目录，改动后热重载。
 
 **内置主题（原型已带 4 个）**
 
@@ -662,8 +662,8 @@ ansi = ["#45475a", "…16 个…"]
 |---|---|---|
 | Catppuccin Mocha | 暗 | MIT（https://github.com/catppuccin/catppuccin），发布时署名 |
 | Catppuccin Latte | 亮 | MIT（同上） |
-| coossh Midnight | 暗 | 自有（本项目原创配色） |
-| coossh Daylight | 亮 | 自有（本项目原创配色） |
+| ShellAX Midnight | 暗 | 自有（本项目原创配色） |
+| ShellAX Daylight | 亮 | 自有（本项目原创配色） |
 
 后续可加 One Dark（Atom，MIT）、Solarized（MIT）、Dracula（MIT）、Nord（MIT）、Gruvbox（MIT）；加入前逐个核对仓库 LICENSE 并写入 THIRD_PARTY_NOTICES。
 
@@ -741,7 +741,7 @@ ansi = ["#45475a", "…16 个…"]
 | 鼠标上报 | ✅ | X10 和 SGR 编码，支持按键、拖动、移动、滚轮和修饰键；按住 Shift 走本地选择。实测 htop 点表头排序、点行选中，vim `mouse=a` 点击定位、滚轮滚动 |
 | 自绘框线和 Powerline | ✅ | U+2500–257F、2580–259F、E0B0–E0BF 改为按像素栅格化画矩形，相邻单元格无缝。缺点：圆角暂画成直角，双线交叉处有 1 px 毛刺，斜线（2571–2573）仍用字体 |
 | 建议折行 | ✅ | 灰字到行尾后接着画到下一行 |
-| 历史落盘 | ✅ | `~/.local/share/coossh/history/<主机>.txt`，权限 0600，只追加，加载时去重，超过 1 万行时压缩。敏感命令不落盘 |
+| 历史落盘 | ✅ | `~/.local/share/shellax/history/<主机>.txt`，权限 0600，只追加，加载时去重，超过 1 万行时压缩。敏感命令不落盘 |
 | zsh 支持 | ✅（本地） | 用临时 ZDOTDIR 先加载用户的 `.zshenv`/`.zshrc`，再挂 precmd/preexec 输出 OSC 133，有无界面测试。支持 zsh 扩展历史格式；远端会同时读取 `~/.zsh_history` |
 | 分屏 | ✅ | 二叉树布局；Ctrl+Shift+D 按 zellij 规则自动选方向，标签栏有「左右 / 上下 / 关闭分屏」按钮，Ctrl+Shift+W 关闭。比例拖拽未做 |
 | 主机列表 | ✅ | 合并 `config.toml` 的 `[[hosts]]` 和 `~/.ssh/config`（自写解析器：Host / HostName / User / Port / IdentityFile，通配块作为默认值，忽略 Match / Include） |
@@ -797,7 +797,7 @@ ansi = ["#45475a", "…16 个…"]
 
 ### 5.17 原型 v8：PRD 补齐与整体测试（v1.0）
 
-**完成**（原型仓库 PROGRESS.md 1–8，均有提交）：权限引擎真拦截（tree-sitter-bash 分段风险、生产主机加严、本地策略服务 + `coossh` CLI、Claude Code / Codex / Grok hook 一键安装、界面审批卡与超时、远端 hook 经反向转发回传）；SSH 认证链 agent → 私钥（口令）→ 密码（钥匙串）→ keyboard-interactive（先 none 探测服务器提供的方式，2FA 回答不保存）、生成/导入密钥、ProxyJump 多级、算法偏好、Agent 转发、keepalive / 重连 / 连接复用；SFTP 双栏与断点续传；端口转发 -L/-R/-D；会话持久化（布局恢复、tmux 远端持久、本地 daemon、Agent resume）；内置 AI 对话面板、失败命令解释、AI 灰字建议；桌面通知与提示音、IME 预编辑、分屏拖拽、标题随语言切换、iTerm2 主题导入、更新检查、审计保留期与记录命令；配置写回保留注释（toml_edit）；软件渲染下光标常亮；清除全部“即将支持”。
+**完成**（原型仓库 PROGRESS.md 1–8，均有提交）：权限引擎真拦截（tree-sitter-bash 分段风险、生产主机加严、本地策略服务 + `shellax` CLI、Claude Code / Codex / Grok hook 一键安装、界面审批卡与超时、远端 hook 经反向转发回传）；SSH 认证链 agent → 私钥（口令）→ 密码（钥匙串）→ keyboard-interactive（先 none 探测服务器提供的方式，2FA 回答不保存）、生成/导入密钥、ProxyJump 多级、算法偏好、Agent 转发、keepalive / 重连 / 连接复用；SFTP 双栏与断点续传；端口转发 -L/-R/-D；会话持久化（布局恢复、tmux 远端持久、本地 daemon、Agent resume）；内置 AI 对话面板、失败命令解释、AI 灰字建议；桌面通知与提示音、IME 预编辑、分屏拖拽、标题随语言切换、iTerm2 主题导入、更新检查、审计保留期与记录命令；配置写回保留注释（toml_edit）；软件渲染下光标常亮；清除全部“即将支持”。
 
 **整体测试**（详见原型仓库 `TEST_REPORT.md`）：release 构建与 `cargo clippy --all-targets` 均 0 警告；`cargo test --release` 94 个全部通过、无跳过（本地 sshd 2222 / 2223 / 2224，`testenv/test.env`）；外部 Agent hook 端到端 7/7。逐项对照：通过 55（含部分通过 6）、失败 12、未能验证 7。失败项均为本表之外尚未实现的 PRD 条目，见 9.2 Q19–Q23。
 
@@ -805,12 +805,12 @@ ansi = ["#45475a", "…16 个…"]
 
 ### 5.18 原型第 10–11 轮：P0/P1/P2 补齐与收尾（v1.0 同步）
 
-**完成**：审计按主机/会话/决策过滤；`coossh hosts/exec/upload/download`；内置 AI 逐条审批执行并回传结果；AI 首次发送提示与按主机禁读；HTTP/SOCKS5 出站代理（SSH、AI、更新检查）；审批卡调用方断开自动撤销（不执行、写审计）；关键字高亮；write_to_pty 权限；Agent 快速启动；SFTP 内置编辑（冲突检测）；托盘（StatusNotifierItem）；组织托管策略；ssh:// sftp:// 链接与单实例转交；主机侧工具；主机分组任意嵌套（`a/b/c`）、拖主机进组、OS 徽章；拖标签到面板边缘分屏。
+**完成**：审计按主机/会话/决策过滤；`shellax hosts/exec/upload/download`；内置 AI 逐条审批执行并回传结果；AI 首次发送提示与按主机禁读；HTTP/SOCKS5 出站代理（SSH、AI、更新检查）；审批卡调用方断开自动撤销（不执行、写审计）；关键字高亮；write_to_pty 权限；Agent 快速启动；SFTP 内置编辑（冲突检测）；托盘（StatusNotifierItem）；组织托管策略；ssh:// sftp:// 链接与单实例转交；主机侧工具；主机分组任意嵌套（`a/b/c`）、拖主机进组、OS 徽章；拖标签到面板边缘分屏。
 
 **整体测试**（原型仓库 `TEST_REPORT.md`）：release / dist 构建与 clippy --all-targets 0 警告；`cargo test --release` 123 个连续 3 轮全部通过、无跳过；外部 Agent hook 端到端 7/7。逐项对照 86 行：通过 75、失败 7、未验证 4（IME、透明度、空闲内存、跨平台）。失败项见 Q23。
 
 ### 5.19 原型第 12 轮结论（2026-10-13）
-**完成**：SFTP 目录同步（差异预览、单向/双向较新者胜、删除需开关+二次确认、保留 mtime 使再次同步幂等）；端口转发规则图示；关键字触发通知（正则、限流、跳过命令回显、审计脱敏）；Sixel / Kitty 图形（自写解码，按输出位置显示并预留行）；asciicast v2 录制回放（默认脱敏、按行缓冲防分片泄露、`coossh play`）；广播输入（醒目红框红条、生产主机确认、审计）；布局快照（最近 10 份、回滚前自动快照）；快速启动选目录 + 预设布局（含左 Agent、右 `tail -F` 日志）。另修：审计默认目录遵守 XDG_DATA_HOME（GUI 与策略服务一致）；OS 徽章按主机条目缓存；GUI 实测审批撤销后迟到的“允许”不执行（测试钩子保留卡片，审计 late-answer-ignored）。
+**完成**：SFTP 目录同步（差异预览、单向/双向较新者胜、删除需开关+二次确认、保留 mtime 使再次同步幂等）；端口转发规则图示；关键字触发通知（正则、限流、跳过命令回显、审计脱敏）；Sixel / Kitty 图形（自写解码，按输出位置显示并预留行）；asciicast v2 录制回放（默认脱敏、按行缓冲防分片泄露、`shellax play`）；广播输入（醒目红框红条、生产主机确认、审计）；布局快照（最近 10 份、回滚前自动快照）；快速启动选目录 + 预设布局（含左 Agent、右 `tail -F` 日志）。另修：审计默认目录遵守 XDG_DATA_HOME（GUI 与策略服务一致）；OS 徽章按主机条目缓存；GUI 实测审批撤销后迟到的“允许”不执行（测试钩子保留卡片，审计 late-answer-ignored）。
 
 **整体测试**：release / dist（46.0MB）与 clippy --all-targets 0 警告；`cargo test --release` 135 个连续 3 轮全部通过、无跳过；外部 Agent hook 端到端 7/7。逐项对照 86 行：通过 82、失败 0、未验证 4（IME、透明度、空闲内存、跨平台，均为本机硬件/平台限制）。
 
@@ -914,13 +914,13 @@ tools = ["jq"]                  # 可选：所需工具，缺失则置灰并提�
 
 | 项 | 规格 | 原型实现 / 平台差异 |
 |---|---|---|
-| 标题栏 | 红绿灯按钮放在左上角，标签栏并入标题栏一行；空白处可拖动窗口，双击缩放 | macOS 用原生红绿灯（透明标题栏，`traffic_light_position`）；Linux/Windows 用客户端装饰，自绘 12px 红/黄/绿圆点，悬停时显示符号；四周有 5px 缩放热区。设置 `COOSSH_SERVER_DECORATIONS=1` 可退回系统标题栏 |
+| 标题栏 | 红绿灯按钮放在左上角，标签栏并入标题栏一行；空白处可拖动窗口，双击缩放 | macOS 用原生红绿灯（透明标题栏，`traffic_light_position`）；Linux/Windows 用客户端装饰，自绘 12px 红/黄/绿圆点，悬停时显示符号；四周有 5px 缩放热区。设置 `SHELLAX_SERVER_DECORATIONS=1` 可退回系统标题栏 |
 | 侧边栏 | Finder 源列表风格：灰色小号大写分组标题、圆角选中胶囊、细线图标；左下角工具入口改为图标行加 tooltip（显示名称和快捷键）；宽 240 | macOS 窗口背景为 Blurred，侧边栏半透明（0.72）；其他平台用不透明 mantle 色作为降级 |
 | 标签 | Safari 式扁平标签：激活标签为浅色胶囊加轻阴影，标签之间 1px 淡分隔线，关闭按钮悬停才显示 | — |
 | 分屏分隔线 | 平时 1px 细线，悬停或拖动时变为 3px 强调色；命中区 5px | — |
 | 字体与度量 | UI 用系统字体，回退链为 .SystemUIFont → SF Pro → PingFang SC → Segoe UI → Inter → Cantarell → Noto Sans；终端字体不变；8pt 间距网格，圆角 6（控件）/ 10（卡片、弹层），柔和的分层阴影（暗色主题加深） | 按系统已安装字体选择第一个可用项 |
 | 设置窗口 | 仿 macOS 系统设置：左侧分类配彩色圆角方块图标，右侧为分组卡片，开关为胶囊 Switch | — |
-| 弹层 | 弹窗、右键菜单、命令面板、主机菜单：半透明（0.94），圆角 10，细边框加柔和阴影，160ms 淡入加 6px 上浮 | GPUI div 不支持缩放变换，用淡入加位移代替 scale；`COOSSH_NO_ANIM=1` 可关闭动画 |
+| 弹层 | 弹窗、右键菜单、命令面板、主机菜单：半透明（0.94），圆角 10，细边框加柔和阴影，160ms 淡入加 6px 上浮 | GPUI div 不支持缩放变换，用淡入加位移代替 scale；`SHELLAX_NO_ANIM=1` 可关闭动画 |
 | 强调色 | 跟随系统强调色，默认 macOS 蓝（浅色 #007AFF，深色 #0A84FF） | macOS 读取 `AppleAccentColor`；Linux 读取 GNOME `accent-color`（GNOME 47+）；其他情况用默认蓝；仅对 macOS 主题生效 |
 | 主题 | 新增内置主题 `macOS Light` / `macOS Dark`，终端配色接近 Terminal.app；默认浅色/深色主题改为这两个，并跟随系统外观；原有主题全部保留 | 主题为原创 TOML，无第三方来源 |
 
@@ -941,15 +941,15 @@ tools = ["jq"]                  # 可选：所需工具，缺失则置灰并提�
 | 连接右键菜单 | 连接、在新标签页打开、在右侧/下方分屏打开、打开 SFTP、编辑、重命名、复制、移动到分组（子菜单）、标签（勾选）、删除（确认） | 复制命名为“x copy”“x copy 2” |
 | 分组右键菜单 | 在此新建连接、新建子分组、重命名、标签、全部连接、删除（确认，可选“仅删除分组，保留内容”或“删除分组及其内容”） | 保留内容时子项上移一级 |
 | 空白处右键 | 新建分组、新建连接、导入 | — |
-| 窗口控件 | 标题栏上的按钮作用于窗口：Windows/Linux 在右侧显示最小化、最大化/还原、关闭（Windows 字形，关闭悬停为红色 #C42B1C）；macOS 保持左侧红绿灯 | Windows 上按钮区域通过 GPUI `window_control_area`（Min/Max/Close）交给系统 `WM_NCHITTEST`，因而支持 Snap Layouts 悬停；`COOSSH_CONTROLS=win|mac` 可强制样式（截图、测试用） |
+| 窗口控件 | 标题栏上的按钮作用于窗口：Windows/Linux 在右侧显示最小化、最大化/还原、关闭（Windows 字形，关闭悬停为红色 #C42B1C）；macOS 保持左侧红绿灯 | Windows 上按钮区域通过 GPUI `window_control_area`（Min/Max/Close）交给系统 `WM_NCHITTEST`，因而支持 Snap Layouts 悬停；`SHELLAX_CONTROLS=win|mac` 可强制样式（截图、测试用） |
 | 标题栏空白 | 侧边栏折叠按钮、搜索、“+” 并入标题栏同一行，去掉 Windows 上侧边栏顶部的空白条 | — |
 | 拖动与缩放 | 标题栏空白处拖动窗口，双击最大化/还原；四边和四角可拖动改变大小；Windows Snap（拖到边缘、Win+方向键）可用 | Windows：空白处标为 `Drag`（HTCAPTION），边框由 GPUI Windows 平台在无边框窗口上返回 HTLEFT/HTTOP… 等；Linux：客户端装饰，边缘 5px 调用 `start_window_resize`；只有空白 spacer 标为 Drag，避免盖住标签和按钮 |
 | 窗格控件 | 分屏（左右/上下）和关闭窗格从标题栏移到每个窗格右上角的小工具条，鼠标悬停该窗格时显示，作用于该窗格 | — |
-| 标签页右键菜单 | 重命名（就地编辑，Enter 确认、Esc/失焦取消；双击标签也可）、复制标签页、向右/向下分屏、移动到新窗口、关闭、关闭其他、关闭右侧、重新打开关闭的标签页 | 自定义名称保存在布局快照（`names`），恢复后保留；最近关闭的 10 个标签页可重新打开（重新连接/新 shell，目录相同）；“移动到新窗口”启动一个新的 coossh 进程，按单标签布局文件（`COOSSH_LAYOUT_FILE`）恢复，该进程不另起权限服务、托盘和更新检查，外部 Agent 钩子仍走主窗口的权限服务 |
+| 标签页右键菜单 | 重命名（就地编辑，Enter 确认、Esc/失焦取消；双击标签也可）、复制标签页、向右/向下分屏、移动到新窗口、关闭、关闭其他、关闭右侧、重新打开关闭的标签页 | 自定义名称保存在布局快照（`names`），恢复后保留；最近关闭的 10 个标签页可重新打开（重新连接/新 shell，目录相同）；“移动到新窗口”启动一个新的 ShellAX 进程，按单标签布局文件（`SHELLAX_LAYOUT_FILE`）恢复，该进程不另起权限服务、托盘和更新检查，外部 Agent 钩子仍走主窗口的权限服务 |
 | Shell 名称 | 标签标题和侧边栏显示实际 shell（如 `pwsh`、`zsh`），不再写死 `bash` | 取 `terminal.shell` 或系统默认 shell 的文件名并去掉 `.exe` |
 | 图标字体回退 | 内置 Symbols Nerd Font Mono（Nerd Fonts v3.4.0 Symbols Only，MIT），启动时注册，作为终端回退字体；Windows 默认回退链补充 Segoe UI Symbol、Segoe Fluent Icons、Segoe MDL2 Assets | 已登记到 `THIRD_PARTY_NOTICES.md`；字体随二进制分发（约 2.5 MB） |
 
-验收：release、clippy 0 警告，测试全部通过；Linux 上以 `COOSSH_CONTROLS=win` 截图 `screenshot-523-{sidebar,plus-menu,sidebar-menu,tab-menu,pane-header,window-controls}.png`；Windows x64 交叉编译 0 警告并重新生成安装包、便携 zip 与 SHA256SUMS。
+验收：release、clippy 0 警告，测试全部通过；Linux 上以 `SHELLAX_CONTROLS=win` 截图 `screenshot-523-{sidebar,plus-menu,sidebar-menu,tab-menu,pane-header,window-controls}.png`；Windows x64 交叉编译 0 警告并重新生成安装包、便携 zip 与 SHA256SUMS。
 
 ## 6. 权限系统设计
 
@@ -967,7 +967,7 @@ tools = ["jq"]                  # 可选：所需工具，缺失则置灰并提�
 | 主体（principal） | 说明 | 可管控程度 |
 |---|---|---|
 | `builtin_ai` | 内置 AI 的工具调用 | **完全管控**（所有动作都经过引擎） |
-| `bridge:<agent>` | 外部 Agent 通过 `coossh` CLI / MCP 发起的 exec/upload/download/hosts | **完全管控** |
+| `bridge:<agent>` | 外部 Agent 通过 `shellax` CLI / MCP 发起的 exec/upload/download/hosts | **完全管控** |
 | `hook:<agent>` | 外部 Agent 内部工具调用经 hook 交给引擎判定（例如 Claude Code PreToolUse） | **协作管控**（依赖 Agent 遵守 hook 结果） |
 | `pty:<agent>` | 外部 Agent 在自己 PTY 中直接执行的命令 | **不可拦截**：只能识别、通知、审计（基于 OSC 133 推断），由 Agent 自身权限体系负责。产品文案必须明确说明这一点 |
 
@@ -1040,7 +1040,7 @@ decide(req, ctx):
 - **`allow` 规则不能把 R3/R4 自动放行**：最多降为「普通确认」（防止一条 `rm *: allow` 误开大口子）。只有 `allow_unattended = true` 并且主机 env ≠ prod 时才允许 R3 自动执行（P2）。
 - 「本会话总是允许」生成的规则按**命令前缀**保存（OpenCode 用 `ARITY` 表推导前缀，例如 `git status*`、`docker compose logs*`），作用域默认是「本会话 + 本主机」，不会写成全局。
 
-**用户配置示例（`~/.config/coossh/policy.toml`）**
+**用户配置示例（`~/.config/shellax/policy.toml`）**
 ```toml
 schema_version = 1
 
@@ -1105,7 +1105,7 @@ extra_rules = [
   { action = "exec", command = ["npm *", "cargo *", "pytest*", "make *"], effect = "allow" },
 ]
 
-# ---------- 外部 Agent 通过 coossh CLI ----------
+# ---------- 外部 Agent 通过 shellax CLI ----------
 [bridge]
 enabled = true
 allowed_agents = ["claude", "codex", "grok", "opencode"]
@@ -1120,7 +1120,7 @@ builtin_ai = "ask_on_first_write"   # always_ask | ask_on_first_write | always_a
 bridge = "always_ask"
 ```
 
-**组织托管策略（只读，最高优先级）`/etc/coossh/managed-policy.yaml`（P2）**
+**组织托管策略（只读，最高优先级）`/etc/shellax/managed-policy.yaml`（P2）**
 ```yaml
 schema_version: 1
 locked: true                 # 用户不可修改/覆盖
@@ -1216,7 +1216,7 @@ stateDiagram-v2
 ### 6.8 凭据与 Agent 隔离（安全）
 ```mermaid
 flowchart LR
-  AG[外部 Agent<br/>Claude Code 等] -->|coossh exec host-id 'cmd'| CLI[coossh CLI]
+  AG[外部 Agent<br/>Claude Code 等] -->|shellax exec host-id 'cmd'| CLI[shellax CLI]
   CLI -->|unix socket 0600 / named pipe| BR[agent-bridge]
   BR --> POL[policy-engine]
   POL -->|ask| CARD[审批卡]
@@ -1243,7 +1243,7 @@ flowchart LR
 **结论**：
 1. 三者都只能做到「协作管控」（6.2 的 `hook:<agent>`）：判定要靠 Agent 进程自己执行 hook 并遵守结果；用户可以改配置、关闭 hook（Claude `disableAllHooks`，但无法关闭托管 hook）或用 YOLO 类模式。在 Agent 内部做强制，只能靠各自的托管策略文件（Claude managed settings、Codex `requirements.toml`、Grok `requirements.toml`），这需要机器管理员权限，v1 不做。
 2. 能力排序：Claude Code（allow/deny/ask + http hook + 失败即拒绝选项）> Grok Build（deny 稳定，ask 有但 fail-open）> Codex（deny + 改写，ask 不支持）。
-3. 实现建议：统一一个 `coossh hook` 小程序（或本地 http 端点），把三家的输入映射到我们的 `{principal: hook:<agent>, action: exec, resource: cmd:…}`；返回时按各家能力降级：要 ask 而对方不支持时，在我们的 UI 里阻塞弹窗，再返回 allow/deny。Claude 一律设 `onFailure: "block"`；Grok/Codex 设足够长的 `timeout`。
+3. 实现建议：统一一个 `shellax hook` 小程序（或本地 http 端点），把三家的输入映射到我们的 `{principal: hook:<agent>, action: exec, resource: cmd:…}`；返回时按各家能力降级：要 ask 而对方不支持时，在我们的 UI 里阻塞弹窗，再返回 allow/deny。Claude 一律设 `onFailure: "block"`；Grok/Codex 设足够长的 `timeout`。
 4. 远端主机上的 Agent：hook 跑在远端，要回到本地策略引擎，需要通过 sessiond / 反向转发的本地 socket，或 OSC 往返协议（待设计）；**这一路径本次未验证**。
 5. 没装 hook 的 Agent（或其他 Agent）仍是 `pty:<agent>`：不可拦截，只能识别、通知、审计。
 
@@ -1251,7 +1251,7 @@ flowchart LR
 
 ### 7.1 对比矩阵
 
-| 维度 | **coossh（本产品）** | Warp | Wave | herdr | 纯终端 + tmux | ShellRS | OxideTerm |
+| 维度 | **ShellAX（本产品）** | Warp | Wave | herdr | 纯终端 + tmux | ShellRS | OxideTerm |
 |---|---|---|---|---|---|---|---|
 | 形态 | GPUI 原生 GUI | 自研 Rust UI（warpui） | Electron + Go | TUI（ratatui），跑在任意终端里 | 任意终端 | GPUI 原生 | GPUI 原生 |
 | SSH 实现 | russh 内建 | 系统 ssh + ControlMaster + remote server（`crates/remote_server/src/ssh.rs`） | Go x/crypto/ssh（`pkg/remote/sshclient.go`，skeema/knownhosts） | 系统 ssh（`src/remote/attach.rs`） | 系统 ssh | russh 0.63 | russh 0.63 |
@@ -1295,7 +1295,7 @@ flowchart LR
 
 ```mermaid
 gantt
-    title coossh 路线图 v0.2（路线 B 净室重写，单位：周）
+    title shellax 路线图 v0.2（路线 B 净室重写，单位：周）
     dateFormat  YYYY-MM-DD
     axisFormat  %m/%d
     section 净室与合规
@@ -1318,7 +1318,7 @@ gantt
     缓冲                                   :buf, after m1z, 2w
     section M2 Beta (P1)
     远端 sessiond(参考 Wave jobmanager)     :m2a, after buf, 4w
-    本地后台 coosshd                   :m2b, after buf, 4w
+    本地后台 shellaxd                   :m2b, after buf, 4w
     端口转发/ProxyJump 多跳/代理            :m2c, after buf, 3w
     Claude Code PreToolUse hook 接入        :m2d, after buf, 2w
     Agent resume/快捷启动布局               :m2e, after buf, 2w
@@ -1387,7 +1387,7 @@ gantt
 | Q15 | 远端 shell 集成（OSC 133）是否自动注入 | 建议默认不注入，首次连接询问；未注入时用按键+回显兜底。见 5.12 | 产品 + 安全 |
 | Q10 | AI 命令建议（inline 灰字）是否把命令历史发往云端模型 | 默认只用本地历史做补全；调用模型需要用户开启 | 产品 + 隐私 |
 | Q16 | 光标闪烁默认值 | ✅ v1.0：软件渲染器（wgpu 报告 is_software_emulated）下光标常亮，实测输入后 CPU 0.4%（闪烁时约 23%）；硬件 GPU 保持“聚焦且 10 s 内有输入才闪、只重绘光标层”，待真机复测 | 产品 |
-| Q19 | ~~凭据桥 `coossh exec/hosts/upload/download`（US-10）~~ | **已关闭（第 10 轮）**：复用策略服务 + App 连接池，全部过策略引擎与审计；调用方断开时撤销审批卡、不执行（第 11 轮） | 架构 |
+| Q19 | ~~凭据桥 `shellax exec/hosts/upload/download`（US-10）~~ | **已关闭（第 10 轮）**：复用策略服务 + App 连接池，全部过策略引擎与审计；调用方断开时撤销审批卡、不执行（第 11 轮） | 架构 |
 | Q20 | ~~内置 AI Agentic 执行逐条审批、审批卡“本会话总是允许 / 拒绝并说明原因”~~ | **已关闭（第 10–11 轮）**：逐条审批、执行结果（退出码 + 脱敏输出）回传模型 | 产品 + 架构 |
 | Q21 | ~~终端搜索 / 矩形选择 / URL 识别 / OSC 52 / 审计过滤 / AI 首次发送提示与按主机禁读~~ | **已关闭（第 9–10 轮）** | 产品 |
 | Q22 | 透明度、空闲内存在软件渲染机上不可验证；~~包体积~~ | 包体积已关闭：dist profile（LTO + strip）45MB、gzip 18MB。透明度与内存仍需真 GPU 机器复测 | 工程 |

@@ -13,9 +13,9 @@ use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use rand::RngCore;
 
-pub const SERVICE: &str = "coossh";
-/// Keyring service name used before the rename to coossh.
-const LEGACY_SERVICE: &str = "agentshell";
+pub const SERVICE: &str = "shellax";
+/// Keyring service names used before the rename to ShellAX (newest first).
+const LEGACY_SERVICES: [&str; 2] = ["coossh", "agentshell"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Location { Keychain, File(PathBuf) }
@@ -44,9 +44,9 @@ fn write_private(path: &Path, data: &[u8]) -> Result<()> {
 
 impl SecretStore {
     /// `dir`: where the fallback files live. Keychain use can be disabled with
-    /// COOSSH_NO_KEYRING=1 (tests, headless machines).
+    /// SHELLAX_NO_KEYRING=1 (tests, headless machines).
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into(), use_keyring: std::env::var("COOSSH_NO_KEYRING").is_err() }
+        Self { dir: dir.into(), use_keyring: std::env::var("SHELLAX_NO_KEYRING").is_err() }
     }
     pub fn file_only(dir: impl Into<PathBuf>) -> Self { Self { dir: dir.into(), use_keyring: false } }
     pub fn file_path(&self) -> PathBuf { self.dir.join("secrets.enc") }
@@ -94,8 +94,8 @@ impl SecretStore {
     }
     fn keyring_get(&self, name: &str) -> Option<String> {
         if let Some(v) = keyring::Entry::new(SERVICE, name).ok().and_then(|e| e.get_password().ok()) { return Some(v); }
-        // pre-rename entry ("agentshell" service): copy it over once
-        let v = keyring::Entry::new(LEGACY_SERVICE, name).ok()?.get_password().ok()?;
+        // pre-rename entry ("coossh" / "agentshell" service): copy it over once
+        let v = LEGACY_SERVICES.iter().find_map(|s| keyring::Entry::new(s, name).ok()?.get_password().ok())?;
         let _ = self.keyring_set(name, &v);
         Some(v)
     }
@@ -109,7 +109,7 @@ impl SecretStore {
                 Err(e) => why = Some(format!("{e:#}")),
             }
         } else {
-            why = Some("keychain disabled (COOSSH_NO_KEYRING)".into());
+            why = Some("keychain disabled (SHELLAX_NO_KEYRING)".into());
         }
         self.file_set(name, secret)?;
         Ok((Location::File(self.file_path()), why))

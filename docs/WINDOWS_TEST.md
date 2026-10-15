@@ -1,4 +1,4 @@
-# coossh Windows x64 测试说明（0.1.0 预览版）
+# ShellAX Windows x64 测试说明（0.1.0 预览版）
 
 这个版本是在 Linux 上交叉编译的，目标为 x86_64-pc-windows-msvc，渲染用 DirectX 11 + DirectWrite。没有在真实的 Windows 机器上运行过，请按下面的清单测试，并把问题反馈回来。
 
@@ -8,12 +8,12 @@
 - 不需要安装 VC++ 运行库，C 运行库已静态链接。
 
 ## 安装（二选一）
-1. 安装包 `coossh-Setup-x64.exe`
-   - 双击运行。只装给当前用户，**不需要管理员权限**，默认装到 `%LOCALAPPDATA%\Programs\coossh`。
-   - 安装后会创建开始菜单项“coossh”、桌面快捷方式，以及开始菜单里的“Uninstall coossh”。
+1. 安装包 `ShellAX-Setup-x64.exe`
+   - 双击运行。只装给当前用户，**不需要管理员权限**，默认装到 `%LOCALAPPDATA%\Programs\ShellAX`。
+   - 安装后会创建开始菜单项“ShellAX”、桌面快捷方式，以及开始菜单里的“Uninstall ShellAX”。
    - 卸载：可以在“设置 → 应用 → 已安装的应用”里卸载，也可以用开始菜单里的卸载项。卸载**不会删除**你的配置和数据（见下文）。
-2. 便携版 `coossh-portable-x64.zip`
-   - 解压到任意目录，双击 `coossh.exe` 即可。配置和数据的位置与安装版相同。
+2. 便携版 `ShellAX-portable-x64.zip`
+   - 解压到任意目录，双击 `shellax.exe` 即可。配置和数据的位置与安装版相同。
 
 ## SmartScreen / 杀毒软件提示
 安装包和 exe 都**没有代码签名**，第一次运行时 Windows SmartScreen 可能会提示“Windows 已保护你的电脑”。点 **“更多信息” → “仍要运行”** 即可。浏览器下载时也可能提示“不常下载”，选“保留”。如果杀毒软件误报，请告诉我软件名称和报毒名称。
@@ -21,13 +21,13 @@
 ## 配置与日志位置
 | 内容 | 路径 |
 |---|---|
-| 配置文件 | `%APPDATA%\coossh\config.toml`（第一次在设置里改动后才会生成） |
-| 自定义主题 / 右键菜单 | `%APPDATA%\coossh\themes\`，`%APPDATA%\coossh\context_menu.toml` |
-| 运行日志 | `%LOCALAPPDATA%\coossh\logs\coossh.log`（上一次运行的日志是 `coossh.old.log`，崩溃信息也写在这里） |
-| 审计日志、历史、会话快照、加密凭据 | `%LOCALAPPDATA%\coossh\` |
+| 配置文件 | `%APPDATA%\ShellAX\config.toml`（第一次在设置里改动后才会生成） |
+| 自定义主题 / 右键菜单 | `%APPDATA%\ShellAX\themes\`，`%APPDATA%\ShellAX\context_menu.toml` |
+| 运行日志 | `%LOCALAPPDATA%\shellax\logs\shellax.log`（上一次运行的日志是 `shellax.old.log`，崩溃信息也写在这里） |
+| 审计日志、历史、会话快照、加密凭据 | `%LOCALAPPDATA%\shellax\` |
 | SSH 配置 / 密钥 / known_hosts | `%USERPROFILE%\.ssh\` |
 
-**反馈问题时请附上 `coossh.log`。** 在资源管理器地址栏输入 `%LOCALAPPDATA%\coossh\logs` 就能打开这个目录。
+**反馈问题时请附上 `shellax.log`。** 在资源管理器地址栏输入 `%LOCALAPPDATA%\shellax\logs` 就能打开这个目录。
 
 ## 验证清单
 请逐项填写“通过 / 不通过 / 现象”：
@@ -44,7 +44,7 @@
 - [ ] **AI 配置**：设置 → AI 里填写服务地址和 API Key，保存后重启程序 Key 还在（存在 Windows 凭据管理器里）；能拉取模型列表；AI 对话和自然语言转命令能用
 - [ ] **空闲内存 / CPU**：打开 1 个本地标签和 1 个 SSH 标签后空闲 1 分钟，在任务管理器里看内存（PRD 目标是 80 MB 以下；Linux 软件渲染下实测 RSS 约 169 MB，大部分是软件渲染器占用，真实 GPU 下应该更低）和 CPU（空闲时应接近 0%）
 - [ ] **通知**：长命令结束或 Agent 等待确认时，有 Windows 通知弹出
-- [ ] **卸载**：卸载后开始菜单项、桌面快捷方式和安装目录都被删除；`%APPDATA%\coossh` 保留
+- [ ] **卸载**：卸载后开始菜单项、桌面快捷方式和安装目录都被删除；`%APPDATA%\ShellAX` 保留
 
 ## 5.23 新增验证项（本版本）
 - [ ] 首次启动侧边栏只有“本地终端”，不再自动列出 ~/.ssh/config 主机；“+ → 从 ~/.ssh/config 导入…”可勾选导入。

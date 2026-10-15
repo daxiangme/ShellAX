@@ -11,7 +11,7 @@ fn managed_policy_overrides_user_settings() {
     std::fs::create_dir_all(&dir).unwrap();
     let p = dir.join("managed-policy.yaml");
     std::fs::write(&p, YAML).unwrap();
-    std::env::set_var("COOSSH_MANAGED_POLICY", &p);
+    std::env::set_var("SHELLAX_MANAGED_POLICY", &p);
     let m = managed::load().unwrap();
     assert!(m.error.is_none());
     // user allows everything (Auto, max R4, explicit allow rule) — the org policy still wins
@@ -27,7 +27,7 @@ fn managed_policy_overrides_user_settings() {
     let (e, _) = policy::decide_host(Mode::Ask, Risk::R1, &allow_all, "ai", "exec", "systemctl restart nginx", true, false, "prod-web");
     assert_eq!(e, Effect::Deny);
     assert_eq!(policy::decide_host(Mode::Ask, Risk::R1, &[], "ai", "exec", "ls", true, false, "prod-web").0, Effect::Allow);
-    // through the local policy service (what hooks and coossh CLI use)
+    // through the local policy service (what hooks and shellax CLI use)
     let audit = Arc::new(AuditLog::new(dir.join("audit.jsonl")));
     let ctx = PolicyCtx { mode: Mode::Auto, max_auto: Risk::R4, rules: allow_all, ..Default::default() };
     let s = policy_server::start("127.0.0.1:0", None, Arc::new(move || ctx.clone()), None, audit, None).unwrap();

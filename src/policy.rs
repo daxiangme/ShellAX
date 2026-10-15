@@ -287,7 +287,7 @@ pub fn decide_ctx(mode: Mode, max_auto: Risk, rules: &[Rule], principal: &str, a
 }
 
 /// [`decide_ctx`] plus the host name, for organization host rules. The managed policy
-/// (`/etc/coossh/managed-policy.yaml`) is applied first and cannot be loosened by user rules.
+/// (`/etc/shellax/managed-policy.yaml`) is applied first and cannot be loosened by user rules.
 #[allow(clippy::too_many_arguments)]
 pub fn decide_host(mode: Mode, max_auto: Risk, rules: &[Rule], principal: &str, action: &str, command: &str, dangerous_confirm: bool, prod: bool, host: &str) -> (Effect, String) {
     let Some(m) = crate::managed::get() else { return decide_user(mode, max_auto, rules, principal, action, command, dangerous_confirm, prod) };

@@ -6,8 +6,8 @@ use serde::Deserialize;
 use std::time::Duration;
 
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
-/// `{channel}` is replaced by `stable` / `beta`. Overridable with general.update_url / COOSSH_UPDATE_URL.
-pub const DEFAULT_URL: &str = "https://updates.coossh.dev/{channel}.json";
+/// `{channel}` is replaced by `stable` / `beta`. Overridable with general.update_url / SHELLAX_UPDATE_URL.
+pub const DEFAULT_URL: &str = "https://updates.shellax.dev/{channel}.json";
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct Manifest {
@@ -43,7 +43,7 @@ pub fn url_for(template: &str, channel: &str) -> String {
 /// Ok(Some(manifest)) when a newer version exists.
 pub fn check(url: &str) -> anyhow::Result<Option<Manifest>> {
     let agent = crate::proxy::ureq_builder(url, ureq::AgentBuilder::new().timeout(Duration::from_secs(10)))?.build();
-    let m: Manifest = agent.get(url).set("User-Agent", &format!("coossh/{CURRENT}")).call()?.into_json()?;
+    let m: Manifest = agent.get(url).set("User-Agent", &format!("shellax/{CURRENT}")).call()?.into_json()?;
     Ok(is_newer(&m.version, CURRENT).then_some(m))
 }
 
@@ -59,7 +59,7 @@ mod tests {
         assert!(!is_newer("0.1.0-beta.1", "0.1.0"));
         assert!(is_newer("0.1.0", "0.1.0-beta.2"));
         assert!(is_newer("0.1.0-beta.2", "0.1.0-beta.1"));
-        assert_eq!(url_for(DEFAULT_URL, "beta"), "https://updates.coossh.dev/beta.json");
+        assert_eq!(url_for(DEFAULT_URL, "beta"), "https://updates.shellax.dev/beta.json");
         assert_eq!(url_for("x/{channel}", "weird"), "x/stable");
     }
 }

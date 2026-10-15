@@ -1,15 +1,15 @@
-//! `coossh-cli`: talks to the local policy service of a running coossh (or runs one
+//! `shellax-cli`: talks to the local policy service of a running shellax (or runs one
 //! headless with `serve`), acts as the command hook for Claude Code / Codex / Grok Build, and
 //! installs those hooks.
 //!
-//!   coossh-cli status
-//!   coossh-cli check [--host H] [--principal P] -- <command…>     exit 0 allow / 1 ask / 2 deny
-//!   coossh-cli hook <claude|codex|grok> [PreToolUse|PermissionRequest]   (stdin → stdout)
-//!   coossh-cli install <claude|codex|grok|all> [--uninstall] [--dry-run] [--home DIR]
-//!   coossh-cli serve [--bind 127.0.0.1:0]
-//!   coossh-cli hosts [--json]
-//!   coossh-cli exec <host> [--timeout S] -- <command…>          exit = remote exit code (126 denied)
-//!   coossh-cli upload <host> <local> <remote> · download <host> <remote> <local>
+//!   shellax-cli status
+//!   shellax-cli check [--host H] [--principal P] -- <command…>     exit 0 allow / 1 ask / 2 deny
+//!   shellax-cli hook <claude|codex|grok> [PreToolUse|PermissionRequest]   (stdin → stdout)
+//!   shellax-cli install <claude|codex|grok|all> [--uninstall] [--dry-run] [--home DIR]
+//!   shellax-cli serve [--bind 127.0.0.1:0]
+//!   shellax-cli hosts [--json]
+//!   shellax-cli exec <host> [--timeout S] -- <command…>          exit = remote exit code (126 denied)
+//!   shellax-cli upload <host> <local> <remote> · download <host> <remote> <local>
 #[allow(dead_code)]
 #[path = "../config.rs"]
 mod config;
@@ -26,12 +26,12 @@ use ssh_term_proto::policy_server as ps;
 fn data_dir() -> PathBuf {
     std::env::var_os("XDG_DATA_HOME").map(Into::into)
         .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share"))
-        .join("coossh")
+        .join("shellax")
 }
 fn home() -> PathBuf { PathBuf::from(std::env::var("HOME").unwrap_or_default()) }
 
 fn usage() -> ! {
-    eprintln!("usage:\n  coossh-cli status\n  coossh-cli check [--host H] [--principal P] -- <command…>\n  coossh-cli hook <claude|codex|grok> [event]\n  coossh-cli install <claude|codex|grok|all> [--uninstall] [--dry-run] [--home DIR]\n  coossh-cli serve [--bind ADDR]\n  coossh-cli hosts [--json]\n  coossh-cli exec <host> [--timeout S] -- <command…>\n  coossh-cli upload <host> <local> <remote>\n  coossh download <host> <remote> <local>\n  coossh-cli play <file.cast> [--speed N] [--idle S]");
+    eprintln!("usage:\n  shellax-cli status\n  shellax-cli check [--host H] [--principal P] -- <command…>\n  shellax-cli hook <claude|codex|grok> [event]\n  shellax-cli install <claude|codex|grok|all> [--uninstall] [--dry-run] [--home DIR]\n  shellax-cli serve [--bind ADDR]\n  shellax-cli hosts [--json]\n  shellax-cli exec <host> [--timeout S] -- <command…>\n  shellax-cli upload <host> <local> <remote>\n  shellax download <host> <remote> <local>\n  shellax-cli play <file.cast> [--speed N] [--idle S]");
     std::process::exit(64)
 }
 
@@ -59,7 +59,7 @@ fn main() {
         "hook" => hook(args, &settings),
         "install" => install(args, &settings),
         #[cfg(unix)]
-        "daemon" => { let sock = args.first().map(PathBuf::from).unwrap_or_else(|| ssh_term_proto::daemon::socket_path(&data_dir())); if let Err(e) = ssh_term_proto::daemon::serve(&sock) { eprintln!("coossh-cli daemon: {e:#}"); std::process::exit(1) } }
+        "daemon" => { let sock = args.first().map(PathBuf::from).unwrap_or_else(|| ssh_term_proto::daemon::socket_path(&data_dir())); if let Err(e) = ssh_term_proto::daemon::serve(&sock) { eprintln!("shellax-cli daemon: {e:#}"); std::process::exit(1) } }
         "serve" => serve(args, settings),
         "hosts" | "exec" | "upload" | "download" => remote(&cmd, args),
         "play" => std::process::exit(play(args)),
@@ -84,7 +84,7 @@ fn status(s: &config::Settings) {
 }
 
 fn check(mut args: Vec<String>, s: &config::Settings) {
-    let host = opt(&mut args, "--host").or_else(|| std::env::var("COOSSH_HOST").ok())
+    let host = opt(&mut args, "--host").or_else(|| std::env::var("SHELLAX_HOST").ok())
         .or_else(|| ps::read_endpoint(&data_dir()).map(|e| e.host).filter(|h| !h.is_empty()));
     let principal = opt(&mut args, "--principal").unwrap_or_else(|| "cli".into());
     if args.first().is_some_and(|a| a == "--") { args.remove(0); }
@@ -119,21 +119,21 @@ fn hook(mut args: Vec<String>, _s: &config::Settings) {
     if agent == Agent::Claude && std::env::var_os("GROK_HOOK_EVENT").is_some() && hooks::installed(Agent::Grok, &home()) { std::process::exit(0); }
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
-    let res = ps::read_endpoint(&data_dir()).ok_or_else(|| anyhow::anyhow!("coossh policy service is not running"))
+    let res = ps::read_endpoint(&data_dir()).ok_or_else(|| anyhow::anyhow!("shellax policy service is not running"))
         .and_then(|ep| {
-            // on a remote host the endpoint file (written by coossh over SSH) names the host
-            let host = std::env::var("COOSSH_HOST").ok().filter(|h| !h.is_empty()).or_else(|| (!ep.host.is_empty()).then(|| ep.host.clone()));
+            // on a remote host the endpoint file (written by shellax over SSH) names the host
+            let host = std::env::var("SHELLAX_HOST").ok().filter(|h| !h.is_empty()).or_else(|| (!ep.host.is_empty()).then(|| ep.host.clone()));
             ps::post(&ep.url, &format!("/v1/hook/{}/{event}", agent.id()), &ep.token, host.as_deref(), &input, Duration::from_secs(3600))
         });
     match res {
         Ok((200, body, exit)) => { print!("{body}"); std::process::exit(exit.unwrap_or(0)); }
         other => {
             let why = match other { Ok((code, b, _)) => format!("policy service answered {code}: {b}"), Err(e) => e.to_string() };
-            if std::env::var("COOSSH_FAIL_OPEN").is_ok_and(|v| v == "1") { eprintln!("coossh-cli: {why} (fail-open)"); std::process::exit(0); }
+            if std::env::var("SHELLAX_FAIL_OPEN").is_ok_and(|v| v == "1") { eprintln!("shellax-cli: {why} (fail-open)"); std::process::exit(0); }
             // fail closed
             let (out, code) = hooks::render(agent, &event, Effect::Deny, &format!("{why}; failing closed"));
             print!("{out}");
-            eprintln!("coossh-cli: {why}; failing closed");
+            eprintln!("shellax-cli: {why}; failing closed");
             std::process::exit(if code == 0 { 2 } else { code });
         }
     }
@@ -145,7 +145,7 @@ fn install(mut args: Vec<String>, s: &config::Settings) {
     let home = opt(&mut args, "--home").map(PathBuf::from).unwrap_or_else(home);
     let which = args.first().cloned().unwrap_or_else(|| usage());
     let agents: Vec<Agent> = if which == "all" { Agent::ALL.to_vec() } else { vec![Agent::parse(&which).unwrap_or_else(|| usage())] };
-    let cli = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "coossh-cli".into());
+    let cli = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "shellax-cli".into());
     let timeout = s.agents.approval_timeout_secs + 15;
     let mut failed = false;
     for a in agents {
@@ -170,16 +170,16 @@ fn serve(mut args: Vec<String>, s: config::Settings) {
     // re-read config.toml on every request so edits apply without a restart
     let ctx: ps::CtxFn = Arc::new(|| config::Settings::load().0.policy_ctx());
     match ps::start(&bind, None, ctx, None, audit, Some(ps::endpoint_path(&data_dir()))) {
-        Ok(srv) => { println!("coossh-cli policy service on 127.0.0.1:{} (headless: \"ask\" is passed back to the agent)", srv.port); loop { std::thread::park(); } }
+        Ok(srv) => { println!("shellax-cli policy service on 127.0.0.1:{} (headless: \"ask\" is passed back to the agent)", srv.port); loop { std::thread::park(); } }
         Err(e) => { eprintln!("serve: {e}"); std::process::exit(1) }
     }
 }
 
 /// US-10: remote operations through the running App (credentials never leave it).
 fn remote(cmd: &str, mut args: Vec<String>) {
-    let Some(ep) = ps::read_endpoint(&data_dir()) else { eprintln!("coossh-cli: coossh is not running (no policy endpoint)"); std::process::exit(3) };
-    let principal = opt(&mut args, "--principal").or_else(|| std::env::var("COOSSH_PRINCIPAL").ok()).unwrap_or_else(|| "cli".into());
-    let session = std::env::var("COOSSH_SESSION").unwrap_or_default();
+    let Some(ep) = ps::read_endpoint(&data_dir()) else { eprintln!("shellax-cli: shellax is not running (no policy endpoint)"); std::process::exit(3) };
+    let principal = opt(&mut args, "--principal").or_else(|| std::env::var("SHELLAX_PRINCIPAL").ok()).unwrap_or_else(|| "cli".into());
+    let session = std::env::var("SHELLAX_SESSION").unwrap_or_default();
     let json_out = flag(&mut args, "--json");
     let timeout: u64 = opt(&mut args, "--timeout").and_then(|t| t.parse().ok()).unwrap_or(600);
     let abs = |p: &str| std::fs::canonicalize(p).or_else(|_| std::env::current_dir().map(|d| d.join(p))).map(|p| p.display().to_string()).unwrap_or_else(|_| p.to_string());
@@ -200,11 +200,11 @@ fn remote(cmd: &str, mut args: Vec<String>) {
     let wait = Duration::from_secs(timeout + 300);
     let (status, b) = match ps::post(&ep.url, &format!("/v1/{cmd}"), &ep.token, None, &body.to_string(), wait) {
         Ok((s, b, _)) => (s, b),
-        Err(e) => { eprintln!("coossh-cli: {e:#}"); std::process::exit(3) }
+        Err(e) => { eprintln!("shellax-cli: {e:#}"); std::process::exit(3) }
     };
     let v: serde_json::Value = serde_json::from_str(&b).unwrap_or_default();
     if json_out || status != 200 && v.get("error").is_none() { println!("{b}"); }
-    if let Some(e) = v["error"].as_str() { eprintln!("coossh-cli: {e}"); std::process::exit(if status == 502 { 4 } else { 3 }) }
+    if let Some(e) = v["error"].as_str() { eprintln!("shellax-cli: {e}"); std::process::exit(if status == 502 { 4 } else { 3 }) }
     if cmd == "hosts" {
         if !json_out { for h in v["hosts"].as_array().cloned().unwrap_or_default() {
             println!("{}\t{}@{}:{}{}", h["name"].as_str().unwrap_or(""), h["user"].as_str().unwrap_or(""), h["host"].as_str().unwrap_or(""), h["port"], if h["production"].as_bool() == Some(true) { "\tproduction" } else { "" });
@@ -213,7 +213,7 @@ fn remote(cmd: &str, mut args: Vec<String>) {
     }
     let d = v["decision"].as_str().unwrap_or("");
     if d != "allow" {
-        eprintln!("coossh-cli: {d} ({}) {}", v["risk"].as_str().unwrap_or("?"), v["reason"].as_str().unwrap_or(""));
+        eprintln!("shellax-cli: {d} ({}) {}", v["risk"].as_str().unwrap_or("?"), v["reason"].as_str().unwrap_or(""));
         std::process::exit(126)
     }
     if json_out { return; }

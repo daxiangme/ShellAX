@@ -66,7 +66,7 @@ impl Plan {
     pub fn report(&mut self) -> Option<String> {
         if !self.done() || self.running || self.reported || self.steps.iter().all(|s| s.result.is_none() && !matches!(s.state, StepState::Denied(_) | StepState::Skipped)) { return None; }
         self.reported = true;
-        let mut m = String::from("Results of the commands from your previous reply (output redacted by coossh):\n");
+        let mut m = String::from("Results of the commands from your previous reply (output redacted by shellax):\n");
         for s in &self.steps {
             match (&s.state, &s.result) {
                 (_, Some(r)) => {

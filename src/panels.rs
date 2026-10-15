@@ -63,7 +63,7 @@ impl Root {
             .child(ui::button("audit-export", t("ui.export"), 0).on_click(cx.listener(|this, _, _w, cx| {
                 let src = config::get().audit_path();
                 let dst = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
-                    .join(format!("coossh-audit-{}.jsonl", chrono::Local::now().format("%Y%m%d-%H%M%S")));
+                    .join(format!("shellax-audit-{}.jsonl", chrono::Local::now().format("%Y%m%d-%H%M%S")));
                 this.toast(match std::fs::copy(&src, &dst) { Ok(_) => tf("panels.exported", &[("path", &dst.display())]), Err(e) => tf("panels.export_failed", &[("e", &e)]) }, cx);
             })));
         // filter chips: decision / host / session (PRD 6.x audit filtering)

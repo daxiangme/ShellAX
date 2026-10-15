@@ -1,4 +1,4 @@
-//! Host list: entries from ~/.config/coossh/config.toml `[[hosts]]` plus concrete `Host`
+//! Host list: entries from ~/.config/shellax/config.toml `[[hosts]]` plus concrete `Host`
 //! blocks in ~/.ssh/config. Original code written from the ssh_config(5) man page
 //! (supports Host, HostName, User, Port, IdentityFile, Include is ignored; wildcard patterns
 //! are not listed but their options apply as defaults, first-obtained-value-wins).

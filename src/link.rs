@@ -1,4 +1,4 @@
-//! `ssh://` / `sftp://` links (PRD 3.1 P2 "堡垒机拉起"): `coossh-cli ssh://user@host:2222`,
+//! `ssh://` / `sftp://` links (PRD 3.1 P2 "堡垒机拉起"): `shellax-cli ssh://user@host:2222`,
 //! `sftp://user@host/var/log`, and Xshell-style `-url ssh://…`. Passwords in URLs are never
 //! used (dropped and reported); host keys are verified as for any other connection.
 

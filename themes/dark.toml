@@ -1,4 +1,4 @@
-# Dark — original coossh theme. UI tokens follow system dark-mode colors; terminal
+# Dark — original ShellAX theme. UI tokens follow system dark-mode colors; terminal
 # palette approximates Terminal.app's dark profiles (blue lifted for contrast on dark background).
 name = "Dark"
 appearance = "dark"

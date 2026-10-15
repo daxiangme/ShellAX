@@ -12,12 +12,12 @@ pub struct AppTray { pub agents: usize, pub waiting: usize, pub zh: bool, pub tx
 impl AppTray {
     pub fn summary(&self) -> String {
         match (self.zh, self.agents, self.waiting) {
-            (true, 0, _) => "coossh · 没有运行中的 Agent".into(),
-            (true, n, 0) => format!("coossh · {n} 个 Agent 运行中"),
-            (true, n, w) => format!("coossh · {n} 个 Agent 运行中（{w} 个等待输入）"),
-            (false, 0, _) => "coossh · no agents running".into(),
-            (false, n, 0) => format!("coossh · {n} agent{} running", if n == 1 { "" } else { "s" }),
-            (false, n, w) => format!("coossh · {n} agent{} running ({w} waiting for input)", if n == 1 { "" } else { "s" }),
+            (true, 0, _) => "ShellAX · 没有运行中的 Agent".into(),
+            (true, n, 0) => format!("ShellAX · {n} 个 Agent 运行中"),
+            (true, n, w) => format!("ShellAX · {n} 个 Agent 运行中（{w} 个等待输入）"),
+            (false, 0, _) => "ShellAX · no agents running".into(),
+            (false, n, 0) => format!("ShellAX · {n} agent{} running", if n == 1 { "" } else { "s" }),
+            (false, n, w) => format!("ShellAX · {n} agent{} running ({w} waiting for input)", if n == 1 { "" } else { "s" }),
         }
     }
     pub fn labels(&self) -> [&'static str; 3] {
@@ -27,7 +27,7 @@ impl AppTray {
 
 #[cfg(target_os = "linux")]
 impl ksni::Tray for AppTray {
-    fn id(&self) -> String { "coossh".into() }
+    fn id(&self) -> String { "shellax".into() }
     fn title(&self) -> String { self.summary() }
     fn icon_name(&self) -> String { "utilities-terminal".into() }
     fn status(&self) -> ksni::Status { if self.waiting > 0 { ksni::Status::NeedsAttention } else { ksni::Status::Active } }
@@ -67,9 +67,9 @@ mod tests {
         let mut t = AppTray { agents: 0, waiting: 0, zh: true, tx };
         assert!(t.summary().contains("没有"));
         t.agents = 2; t.waiting = 1;
-        assert_eq!(t.summary(), "coossh · 2 个 Agent 运行中（1 个等待输入）");
+        assert_eq!(t.summary(), "ShellAX · 2 个 Agent 运行中（1 个等待输入）");
         t.zh = false; t.waiting = 0; t.agents = 1;
-        assert_eq!(t.summary(), "coossh · 1 agent running");
+        assert_eq!(t.summary(), "ShellAX · 1 agent running");
         assert_eq!(t.labels()[2], "Quit");
     }
 }

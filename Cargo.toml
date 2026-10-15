@@ -4,15 +4,15 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 license = "LicenseRef-Proprietary"
-default-run = "coossh"
+default-run = "shellax"
 
 [[bin]]
-name = "coossh"
+name = "shellax"
 path = "src/main.rs"
 
 [[bin]]
-name = "coossh-cli"
-path = "src/bin/coossh-cli.rs"
+name = "shellax-cli"
+path = "src/bin/shellax-cli.rs"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = "0.3"
@@ -76,7 +76,7 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
 
 # Smaller/faster debug builds: line tables only for our crate, no debuginfo for deps
-# (full debuginfo made target/debug/coossh.exe ~900 MB on Windows).
+# (full debuginfo made target/debug/shellax.exe ~900 MB on Windows).
 [profile.dev]
 debug = "line-tables-only"
 

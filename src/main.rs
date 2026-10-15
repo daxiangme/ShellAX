@@ -1,5 +1,5 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
-//! coossh prototype v5 UI: sidebar (host search / groups / function area), tabs with split
+//! shellax prototype v5 UI: sidebar (host search / groups / function area), tabs with split
 //! panes, settings page, command palette, host dialog, tool panels, status bar.
 mod actions;
 mod chrome;
@@ -97,17 +97,17 @@ fn migrate_key_field_passwords() {
 }
 
 /// Layout file of this window: layout.json, or the file a "move tab to new window" child was
-/// started with (COOSSH_LAYOUT_FILE, PRD 5.23).
+/// started with (SHELLAX_LAYOUT_FILE, PRD 5.23).
 pub(crate) fn layout_file() -> std::path::PathBuf {
-    std::env::var_os("COOSSH_LAYOUT_FILE").map(Into::into).unwrap_or_else(|| data_dir().join("layout.json"))
+    std::env::var_os("SHELLAX_LAYOUT_FILE").map(Into::into).unwrap_or_else(|| data_dir().join("layout.json"))
 }
 /// A secondary window process (moved tab): no policy service / tray / update check of its own.
-pub(crate) fn secondary() -> bool { std::env::var_os("COOSSH_LAYOUT_FILE").is_some() }
+pub(crate) fn secondary() -> bool { std::env::var_os("SHELLAX_LAYOUT_FILE").is_some() }
 
 pub(crate) fn data_dir() -> std::path::PathBuf {
     std::env::var_os("XDG_DATA_HOME").map(Into::into)
         .unwrap_or_else(|| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share"))
-        .join("coossh")
+        .join("shellax")
 }
 
 /// Newest `*.log` directly in `dir` or in `dir/logs` (quick start "Agent + tail -f").
@@ -338,7 +338,7 @@ impl Root {
                 if config::get().session.local_daemon {
                     let id = pi.daemon_id.clone().unwrap_or_else(ssh_term_proto::session_store::uuid_like);
                     let sock = ssh_term_proto::daemon::socket_path(&data_dir());
-                    let exe = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join(format!("coossh-cli{}", std::env::consts::EXE_SUFFIX)))).unwrap_or_else(|| "coossh-cli".into());
+                    let exe = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join(format!("shellax-cli{}", std::env::consts::EXE_SUFFIX)))).unwrap_or_else(|| "shellax-cli".into());
                     match ssh_term_proto::daemon::ensure(&sock, &exe).and_then(|_| ssh_term_proto::daemon::attach(&sock, &id, init, &shell, pi.cwd.as_deref().unwrap_or(""))) {
                         Ok(sess) => {
                             let title = format!("{title} · {}", t("main.daemon_tag"));
@@ -717,10 +717,10 @@ impl Root {
         let mut v: Vec<_> = std::fs::read_dir(Self::recordings_dir()).map(|d| d.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "cast")).collect()).unwrap_or_default();
         v.sort(); v.reverse(); v.truncate(12); v
     }
-    /// Replay in a new tab via `coossh-cli play` (real terminal timing, idle capped at 2s).
+    /// Replay in a new tab via `shellax-cli play` (real terminal timing, idle capped at 2s).
     fn play_recording(&mut self, path: std::path::PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         self.modal = None;
-        let bin = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join(format!("coossh-cli{}", std::env::consts::EXE_SUFFIX)))).filter(|p| p.exists()).map(|p| p.display().to_string()).unwrap_or_else(|| "coossh-cli".into());
+        let bin = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join(format!("shellax-cli{}", std::env::consts::EXE_SUFFIX)))).filter(|p| p.exists()).map(|p| p.display().to_string()).unwrap_or_else(|| "shellax-cli".into());
         self.new_tab(Spec::Local, window, cx);
         let Some(pane) = self.tabs.get(self.active).map(|t| t.focused.clone()) else { return };
         self.log("record.play", format!("file={}", path.display()));
@@ -1063,7 +1063,7 @@ impl Root {
         self.log("notify", body);
         let body = body.to_string();
         std::thread::spawn(move || {
-            if let Err(e) = notify_rust::Notification::new().appname("coossh").summary("coossh").body(&body).show() { eprintln!("notification: {e}"); }
+            if let Err(e) = notify_rust::Notification::new().appname("ShellAX").summary("ShellAX").body(&body).show() { eprintln!("notification: {e}"); }
         });
     }
 
@@ -1605,7 +1605,7 @@ fn main() {
     if !links.is_empty() {
         if let Some(ep) = ssh_term_proto::policy_server::read_endpoint(&data_dir()).filter(|e| e.host.is_empty()) {
             let ok = links.iter().all(|u| matches!(ssh_term_proto::policy_server::post(&ep.url, "/v1/open", &ep.token, None, &serde_json::json!({"url": u}).to_string(), std::time::Duration::from_secs(5)), Ok((200, _, _))));
-            if ok { eprintln!("opened in the running coossh"); return; }
+            if ok { eprintln!("opened in the running ShellAX"); return; }
         }
     }
     if std::env::var("PERF_LOG").is_ok() {
@@ -1635,7 +1635,7 @@ fn main() {
         }
         let bounds = Bounds::centered(None, size(px(1440.), px(860.)), cx);
         cx.open_window(
-            chrome::window_options(bounds, Some("coossh".into())),
+            chrome::window_options(bounds, Some("ShellAX".into())),
             move |window, cx| {
                 // no transparent shadow inset around client-drawn windows (no compositor alpha on X11)
                 if !chrome::NATIVE_LIGHTS { window.set_client_inset(px(0.)); }
@@ -1669,7 +1669,7 @@ fn main() {
                     // audit retention (audit.retention_days)
                     match root.audit.prune(ssh_term_proto::managed::get().and_then(|m| m.retention_floor()).map_or(config::get().audit.retention_days, |f| config::get().audit.retention_days.max(f))) { Ok(0) => {}, Ok(n) => eprintln!("audit: pruned {n} records"), Err(e) => eprintln!("audit prune: {e}") }
                     // update check (general.check_updates); quiet on network errors
-                    if !secondary() && config::get().general.check_updates && std::env::var_os("COOSSH_NO_UPDATE_CHECK").is_none() {
+                    if !secondary() && config::get().general.check_updates && std::env::var_os("SHELLAX_NO_UPDATE_CHECK").is_none() {
                         let url = config::get().general.manifest_url();
                         cx.spawn(async move |this, cx| {
                             let r = cx.background_executor().spawn(async move { ssh_term_proto::update::check(&url) }).await;
@@ -1714,15 +1714,15 @@ fn main() {
                         cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
                         if this.update(cx, |r, cx| if !r.approvals.is_empty() {
                             let now = std::time::Instant::now();
-                            // COOSSH_TEST_SLOW_WITHDRAW: test hook that keeps a withdrawn card on screen so a late "allow" can be clicked
-                            let slow = std::env::var_os("COOSSH_TEST_SLOW_WITHDRAW").is_some();
+                            // SHELLAX_TEST_SLOW_WITHDRAW: test hook that keeps a withdrawn card on screen so a late "allow" can be clicked
+                            let slow = std::env::var_os("SHELLAX_TEST_SLOW_WITHDRAW").is_some();
                             r.approvals.retain(|a| a.deadline > now && (slow || !a.reply.is_disconnected()));
                             cx.notify();
                         }).is_err() { break; }
                     }).detach();
                     // system tray: running-agent count + show / new terminal / quit (Linux SNI)
                     #[cfg(target_os = "linux")]
-                    if !secondary() && config::get().general.tray && std::env::var("COOSSH_NO_TRAY").is_err() {
+                    if !secondary() && config::get().general.tray && std::env::var("SHELLAX_NO_TRAY").is_err() {
                         let (ttx, trx) = flume::unbounded::<ssh_term_proto::tray::TrayCmd>();
                         let zh = matches!(ssh_term_proto::i18n::current(), ssh_term_proto::i18n::Lang::ZhCn);
                         let trt = root.rt.handle().clone();
@@ -1756,7 +1756,7 @@ fn main() {
                     }
                     if let Some(e) = load_err.clone() { root.toast(e, cx); }
                     let st = config::get();
-                    let want_restore = secondary() || ((st.general.startup == "restore" || (st.session.restore_layout && st.general.startup != "blank")) && std::env::var("COOSSH_NO_RESTORE").is_err());
+                    let want_restore = secondary() || ((st.general.startup == "restore" || (st.session.restore_layout && st.general.startup != "blank")) && std::env::var("SHELLAX_NO_RESTORE").is_err());
                     let restored = want_restore && root.restore_layout(window, cx);
                     // keep layout.json fresh (crash-safe) and save on close
                     cx.spawn(async move |this, cx| loop {

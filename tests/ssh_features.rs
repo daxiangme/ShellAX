@@ -114,8 +114,8 @@ fn proxyjump_and_remote_forward() {
     let (_, out) = rt.block_on(c.exec(&cmd, Duration::from_secs(5))).unwrap();
     assert_eq!(String::from_utf8_lossy(&out), "pong:hi");
     // write_file (used for the remote policy endpoint) is private
-    rt.block_on(c.write_file("/tmp/coossh-test-ep/ep.json", b"{\"x\":1}")).unwrap();
-    let (_, out) = rt.block_on(c.exec("stat -c %a /tmp/coossh-test-ep/ep.json; cat /tmp/coossh-test-ep/ep.json; rm -r /tmp/coossh-test-ep", Duration::from_secs(5))).unwrap();
+    rt.block_on(c.write_file("/tmp/shellax-test-ep/ep.json", b"{\"x\":1}")).unwrap();
+    let (_, out) = rt.block_on(c.exec("stat -c %a /tmp/shellax-test-ep/ep.json; cat /tmp/shellax-test-ep/ep.json; rm -r /tmp/shellax-test-ep", Duration::from_secs(5))).unwrap();
     assert_eq!(String::from_utf8_lossy(&out), "600\n{\"x\":1}");
 }
 

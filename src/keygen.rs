@@ -65,13 +65,13 @@ mod tests {
     fn generate_import_and_load() {
         let dir = std::env::temp_dir().join(format!("as-keygen-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let p = free_path(&dir, "coossh_ed25519");
-        let (_, public, fp) = generate(&p, "test@coossh", Some("pw")).unwrap();
+        let p = free_path(&dir, "shellax_ed25519");
+        let (_, public, fp) = generate(&p, "test@shellax", Some("pw")).unwrap();
         assert!(public.starts_with("ssh-ed25519 ") && fp.starts_with("SHA256:"));
         #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600); }
         assert!(matches!(russh::keys::load_secret_key(&p, None), Err(russh::keys::Error::KeyIsEncrypted)));
         assert!(russh::keys::load_secret_key(&p, Some("pw")).is_ok());
-        assert_eq!(free_path(&dir, "coossh_ed25519").file_name().unwrap(), "coossh_ed25519_2");
+        assert_eq!(free_path(&dir, "shellax_ed25519").file_name().unwrap(), "shellax_ed25519_2");
         let (q, fp2) = import(&p, &dir.join("imp")).unwrap();
         assert_eq!(fp, fp2);
         assert!(q.exists() && pub_path(&q).exists());

@@ -1,4 +1,4 @@
-//! Settings: `~/.config/coossh/config.toml` (override path with COOSSH_CONFIG).
+//! Settings: `~/.config/shellax/config.toml` (override path with SHELLAX_CONFIG).
 //! Every key is optional; missing keys take the defaults below. The settings page edits
 //! a copy and writes the whole file back (comments in a hand-edited file are not kept).
 //! Generic access by dotted path ("terminal.copy_on_select") goes through toml::Value.
@@ -25,7 +25,7 @@ d!(s_screen, String, "screen".into());
 d!(s_deny, String, "deny".into());
 d!(s_r1, String, "R1".into());
 d!(s_off, String, "off".into());
-d!(s_auditdir, String, "~/.local/share/coossh/audit".into());
+d!(s_auditdir, String, "~/.local/share/shellax/audit".into());
 d!(f_size, f32, 13.5);
 d!(f_lh, f32, 1.0);
 d!(f_pad, f32, 8.0);
@@ -47,9 +47,9 @@ pub struct General { pub language: String, pub startup: String, pub check_update
     pub tray: bool }
 impl Default for General { fn default() -> Self { Self { language: s_system(), startup: s_restore(), check_updates: t(), update_channel: s_stable(), update_url: String::new(), tray: t() } } }
 impl General {
-    /// Manifest URL for the selected channel (COOSSH_UPDATE_URL > general.update_url > built-in).
+    /// Manifest URL for the selected channel (SHELLAX_UPDATE_URL > general.update_url > built-in).
     pub fn manifest_url(&self) -> String {
-        let tpl = std::env::var("COOSSH_UPDATE_URL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| if self.update_url.is_empty() { ssh_term_proto::update::DEFAULT_URL.into() } else { self.update_url.clone() });
+        let tpl = std::env::var("SHELLAX_UPDATE_URL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| if self.update_url.is_empty() { ssh_term_proto::update::DEFAULT_URL.into() } else { self.update_url.clone() });
         ssh_term_proto::update::url_for(&tpl, &self.update_channel)
     }
 }
@@ -309,7 +309,7 @@ pub struct Settings {
 }
 
 pub fn config_path() -> PathBuf {
-    if let Ok(p) = std::env::var("COOSSH_CONFIG") { return p.into(); }
+    if let Ok(p) = std::env::var("SHELLAX_CONFIG") { return p.into(); }
     ssh_term_proto::platform::config_dir().join("config.toml")
 }
 
@@ -326,9 +326,9 @@ impl Settings {
         // font.line_height is now a multiplier of the font's own line metrics (ascent + descent);
         // the old default 1.4 (a multiplier of the point size) maps to 1.0
         if (s.font.line_height - 1.4).abs() < 1e-4 { s.font.line_height = 1.0; }
-        // built-in themes renamed with the product (AgentShell → coossh)
+        // built-in themes renamed with the product (AgentShell → shellax)
         for t in [&mut s.appearance.theme, &mut s.appearance.light_theme, &mut s.appearance.dark_theme] {
-            if let Some(rest) = t.strip_prefix("AgentShell ") { *t = format!("coossh {rest}"); }
+            for old in ["AgentShell ", "coossh "] { if let Some(rest) = t.strip_prefix(old) { *t = format!("ShellAX {rest}"); } }
             if let Some(rest) = t.strip_prefix("macOS ") { *t = rest.to_string(); }
         }
         ssh_term_proto::hosttree::ensure_groups(&s.hosts, &mut s.groups);
@@ -346,8 +346,8 @@ impl Settings {
         let fresh = tidy_floats(&toml::to_string_pretty(self)?);
         // keep the user's comments, key order and formatting: merge into the existing document
         let body = match std::fs::read_to_string(&p) {
-            Ok(old) => merge_preserving(&old, &fresh).unwrap_or_else(|_| format!("# coossh settings — written by the settings page\n{fresh}")),
-            Err(_) => format!("# coossh settings — written by the settings page\n{fresh}"),
+            Ok(old) => merge_preserving(&old, &fresh).unwrap_or_else(|_| format!("# ShellAX settings — written by the settings page\n{fresh}")),
+            Err(_) => format!("# ShellAX settings — written by the settings page\n{fresh}"),
         };
         let tmp = p.with_extension("toml.tmp");
         std::fs::write(&tmp, body)?;
@@ -399,7 +399,7 @@ impl Settings {
     /// Hosts of ~/.ssh/config (for import; they are no longer listed automatically).
     pub fn ssh_config_hosts(&self) -> Vec<HostEntry> {
         use ssh_term_proto::hosts::{expand_tilde, load_ssh_config};
-        let path = std::env::var("COOSSH_SSH_CONFIG").unwrap_or_else(|_| self.ssh.ssh_config.clone());
+        let path = std::env::var("SHELLAX_SSH_CONFIG").unwrap_or_else(|_| self.ssh.ssh_config.clone());
         load_ssh_config(&expand_tilde(&path))
     }
     /// Hosts for connection resolution (jump hosts, agents broker): config.toml entries first,
@@ -409,7 +409,7 @@ impl Settings {
         use ssh_term_proto::hosts::{expand_tilde, load_ssh_config};
         let mut hosts: Vec<HostEntry> = self.hosts.clone();
         for h in &mut hosts { h.production = self.host_is_production(h); }
-        let path = std::env::var("COOSSH_SSH_CONFIG").unwrap_or_else(|_| self.ssh.ssh_config.clone());
+        let path = std::env::var("SHELLAX_SSH_CONFIG").unwrap_or_else(|_| self.ssh.ssh_config.clone());
         if self.ssh.read_ssh_config {
             for h in load_ssh_config(&expand_tilde(&path)) { if !hosts.iter().any(|x| x.name == h.name) { hosts.push(h); } }
         }
@@ -420,7 +420,7 @@ impl Settings {
         hosts
     }
     pub fn known_hosts_path(&self) -> PathBuf {
-        ssh_term_proto::hosts::expand_tilde(&std::env::var("COOSSH_KNOWN_HOSTS").unwrap_or_else(|_| self.ssh.known_hosts.clone()))
+        ssh_term_proto::hosts::expand_tilde(&std::env::var("SHELLAX_KNOWN_HOSTS").unwrap_or_else(|_| self.ssh.known_hosts.clone()))
     }
     pub fn ssh_opts(&self) -> ssh_term_proto::hosts::SshOpts {
         ssh_term_proto::hosts::SshOpts {
@@ -429,7 +429,7 @@ impl Settings {
             no_agent: !self.credentials.use_ssh_agent, extra_keys: self.credentials.extra_keys.clone(),
         }
     }
-    /// Audit log path. The default directory follows `$XDG_DATA_HOME/coossh/audit`
+    /// Audit log path. The default directory follows `$XDG_DATA_HOME/shellax/audit`
     /// (same base as the GUI's data dir); an explicitly configured dir is used as is.
     pub fn audit_path(&self) -> PathBuf { audit_dir(&self.audit.dir).join("audit.jsonl") }
 }
@@ -689,7 +689,7 @@ mod tests {
 /// Resolve the audit dir: the built-in default honours XDG_DATA_HOME.
 pub fn audit_dir(dir: &str) -> PathBuf {
     if dir.is_empty() || dir == s_auditdir() {
-        if let Some(x) = std::env::var_os("XDG_DATA_HOME").filter(|x| !x.is_empty()) { return PathBuf::from(x).join("coossh/audit"); }
+        if let Some(x) = std::env::var_os("XDG_DATA_HOME").filter(|x| !x.is_empty()) { return PathBuf::from(x).join("shellax/audit"); }
     }
     ssh_term_proto::hosts::expand_tilde(dir)
 }
@@ -698,7 +698,7 @@ mod audit_dir_tests {
     #[test]
     fn default_follows_xdg() {
         std::env::set_var("XDG_DATA_HOME", "/tmp/xdgx");
-        assert_eq!(super::audit_dir(&super::s_auditdir()), std::path::PathBuf::from("/tmp/xdgx/coossh/audit"));
+        assert_eq!(super::audit_dir(&super::s_auditdir()), std::path::PathBuf::from("/tmp/xdgx/shellax/audit"));
         assert_eq!(super::audit_dir("/var/aud"), std::path::PathBuf::from("/var/aud"));
     }
 }

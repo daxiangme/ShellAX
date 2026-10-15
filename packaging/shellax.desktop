@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name=coossh
+Name=ShellAX
 Comment=SSH / Agent terminal
-Exec=coossh-app %u
+Exec=shellax-app %u
 Icon=utilities-terminal
 Terminal=false
 Categories=System;TerminalEmulator;Network;

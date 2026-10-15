@@ -130,7 +130,7 @@ impl Record {
             return match e.to_ascii_lowercase().as_str() { "allow" => Some("allow"), "ask" => Some("ask"), "deny" => Some("deny"), _ => None };
         }
         match self.kind.as_str() {
-            "hook.approval" | "coossh.approval" => {
+            "hook.approval" | "shellax.approval" => {
                 let d = &self.detail;
                 if d.contains(" deny") || d.contains("timeout") { Some("deny") } else if d.contains(" allow") || d.starts_with("session-rule") { Some("allow") } else { None }
             }

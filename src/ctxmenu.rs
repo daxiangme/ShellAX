@@ -380,10 +380,10 @@ pub fn validate(it: &CustomItem) -> Result<(), String> {
     Ok(())
 }
 
-/// context_menu.toml next to config.toml (COOSSH_CONFIG's directory, else ~/.config/coossh).
+/// context_menu.toml next to config.toml (SHELLAX_CONFIG's directory, else ~/.config/shellax).
 pub fn custom_path() -> PathBuf {
-    if let Ok(p) = std::env::var("COOSSH_CONTEXT_MENU") { return p.into(); }
-    let cfg = std::env::var("COOSSH_CONFIG").map(PathBuf::from).unwrap_or_else(|_| crate::platform::config_dir().join("config.toml"));
+    if let Ok(p) = std::env::var("SHELLAX_CONTEXT_MENU") { return p.into(); }
+    let cfg = std::env::var("SHELLAX_CONFIG").map(PathBuf::from).unwrap_or_else(|_| crate::platform::config_dir().join("config.toml"));
     cfg.parent().unwrap_or(Path::new(".")).join("context_menu.toml")
 }
 type Loaded = (Option<SystemTime>, Arc<Vec<CustomItem>>, Arc<Vec<String>>);
@@ -399,7 +399,7 @@ pub fn load_custom() -> (Arc<Vec<CustomItem>>, Arc<Vec<String>>) {
     *g = Some((path, (mtime, items.clone(), errs.clone())));
     (items, errs)
 }
-pub const CUSTOM_EXAMPLE: &str = r#"# coossh 右键菜单自定义项 / custom context-menu items (hot-reloaded)
+pub const CUSTOM_EXAMPLE: &str = r#"# shellax 右键菜单自定义项 / custom context-menu items (hot-reloaded)
 # 占位符 placeholders: {path} {name} {dir} {stem} {ext} {host} (auto shell-quoted)
 # types: archive dir text script executable log file url ip selection
 

@@ -312,14 +312,14 @@ fn hot_reload_by_mtime() {
     let dir = std::env::temp_dir().join(format!("cm-hot-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let f = dir.join("context_menu.toml");
-    std::env::set_var("COOSSH_CONTEXT_MENU", &f);
+    std::env::set_var("SHELLAX_CONTEXT_MENU", &f);
     assert!(load_custom().0.is_empty());
     std::fs::write(&f, CUSTOM_EXAMPLE).unwrap();
     assert_eq!(load_custom().0.len(), 1);
     std::thread::sleep(std::time::Duration::from_millis(1100));
     std::fs::write(&f, format!("{CUSTOM_EXAMPLE}\n[[item]]\nlabel = \"b\"\ncommand = \"echo {{name}}\"\n")).unwrap();
     assert_eq!(load_custom().0.len(), 2);
-    std::env::remove_var("COOSSH_CONTEXT_MENU");
+    std::env::remove_var("SHELLAX_CONTEXT_MENU");
     let _ = std::fs::remove_dir_all(dir);
 }
 

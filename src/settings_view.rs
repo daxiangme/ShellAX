@@ -228,7 +228,7 @@ impl SettingsView {
             r(Permissions, t("ui.confirm_writes_on_production_hosts"), t("ui.always_ask_for_r1_actions"), Ctl::Toggle("permissions.prod_confirm")),
             r(Permissions, t("ui.double_confirm_dangerous_commands"), t("ui.r4_actions_need_confirmation_even"), Ctl::Toggle("permissions.dangerous_confirm")),
 
-            r(Audit, t("ui.log_directory"), "", Ctl::Text("audit.dir", "~/.local/share/coossh/audit")),
+            r(Audit, t("ui.log_directory"), "", Ctl::Text("audit.dir", "~/.local/share/shellax/audit")),
             r(Audit, t("ui.retention_days"), "", Ctl::Text("audit.retention_days", "90")),
             r(Audit, t("ui.log_manually_typed_commands"), t("ui.by_default_only_connections_permissions"), Ctl::Toggle("audit.log_commands")),
 
@@ -550,8 +550,8 @@ impl SettingsView {
                 .child(div().w(px(260.)).child(Input::new(&self.key_pass)))
                 .child(ui::button("key-gen", t("ui.generate_ed25519"), 1).on_click(cx.listener(move |this, _, window, cx| {
                     let pass = this.key_pass.read(cx).value().to_string();
-                    let path = ssh_term_proto::keygen::free_path(&d1, "coossh_ed25519");
-                    let comment = format!("{}@coossh", std::env::var("USER").unwrap_or_default());
+                    let path = ssh_term_proto::keygen::free_path(&d1, "shellax_ed25519");
+                    let comment = format!("{}@shellax", std::env::var("USER").unwrap_or_default());
                     this.notice = Some(match ssh_term_proto::keygen::generate(&path, &comment, Some(&pass)) {
                         Ok((p, _, fp)) => { let _ = crate::audit_log().append("ssh.keygen", "user", &format!("{} {fp} encrypted={}", p.display(), !pass.is_empty())); tf("settings.key_generated", &[("path", &p.display()), ("fp", &fp)]) }
                         Err(e) => tf("settings.key_failed", &[("e", &e)]),
@@ -595,7 +595,7 @@ impl SettingsView {
                     .child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(path.display().to_string())))
                 .child(if ok { ui::tag(t("ui.hook_installed"), c(th.success)).into_any_element() } else { ui::tag(t("ui.hook_not_installed"), c(th.overlay1)).into_any_element() })
                 .child(ui::button(("hook-install", i), if ok { t("ui.uninstall") } else { t("ui.install") }, if ok { 0 } else { 1 }).on_click(cx.listener(move |this, _, _w, cx| {
-                    let cli = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(format!("coossh-cli{}", std::env::consts::EXE_SUFFIX)))).filter(|p| p.exists()).map(|p| p.display().to_string()).unwrap_or_else(|| "coossh-cli".into());
+                    let cli = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(format!("shellax-cli{}", std::env::consts::EXE_SUFFIX)))).filter(|p| p.exists()).map(|p| p.display().to_string()).unwrap_or_else(|| "shellax-cli".into());
                     let timeout = config::get().agents.approval_timeout_secs + 15;
                     this.notice = Some(match hooks::install(agent, &h2, &cli, timeout, ok, false) {
                         Ok(r) => {
@@ -770,7 +770,7 @@ impl SettingsView {
         div().flex().flex_col()
             .child(div().flex().items_center().gap_3().py_3()
                 .child(div().size(px(40.)).rounded_lg().bg(c(th.accent).opacity(0.15)).flex().items_center().justify_center().child(icon(IconName::SquareTerminal, 22., c(th.accent))))
-                .child(div().flex().flex_col().child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child("coossh"))
+                .child(div().flex().flex_col().child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child("shellax"))
                     .child(div().text_size(px(11.5)).text_color(c(th.overlay1)).child(tf("settings.version", &[("v", &env!("CARGO_PKG_VERSION"))])))))
             .child(Self::section_title(t("ui.quick_start")))
             .child(div().text_size(px(12.)).text_color(c(th.subtext)).flex().flex_col().gap_1()

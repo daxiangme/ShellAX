@@ -4,9 +4,9 @@
 //! `auto_direction` is derived from zellij `zellij-server/src/panes/tiled_panes/tiled_pane_grid.rs`
 //! (`TiledPaneGrid::split_pane` and `DEFAULT_CURSOR_HEIGHT_WIDTH_RATIO`),
 //! https://github.com/zellij-org/zellij (commit a6c3dba), Copyright (c) 2020 Zellij contributors, MIT License.
-//! See THIRD_PARTY_NOTICES.md. Modifications (coossh, 2026-10-13): reduced to a pure function
+//! See THIRD_PARTY_NOTICES.md. Modifications (shellax, 2026-10-13): reduced to a pure function
 //! over (rows, cols); minimum sizes taken from zellij's hard-coded 10*2 rows / 30*2 cols.
-//! The binary tree itself (split/remove/leaves) is original coossh code.
+//! The binary tree itself (split/remove/leaves) is original shellax code.
 
 /// Horizontal = new pane below (stacked top/bottom), Vertical = new pane to the right.
 /// (zellij naming: the divider line is horizontal / vertical.)

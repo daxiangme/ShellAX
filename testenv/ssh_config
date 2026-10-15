@@ -1,4 +1,4 @@
-# Test ssh_config for the prototype (COOSSH_SSH_CONFIG points here)
+# Test ssh_config for the prototype (SHELLAX_SSH_CONFIG points here)
 Host sshtest-local
   HostName 127.0.0.1
   Port 2222
