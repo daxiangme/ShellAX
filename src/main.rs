@@ -3,6 +3,7 @@
 //! panes, settings page, command palette, host dialog, tool panels, status bar.
 mod actions;
 mod chrome;
+mod filekind;
 mod sidebar;
 mod tabs_ui;
 mod config;
@@ -14,6 +15,7 @@ mod sftp_view;
 mod port_view;
 mod host_tools_view;
 mod chat_view;
+mod library;
 mod termview;
 mod theme;
 mod ui;
@@ -44,7 +46,7 @@ use host_dialog::{HostDialog, HostEvent};
 use palette::{Item, Palette, PaletteEvent};
 use settings_view::{Cat, SettingsEvent, SettingsView};
 use termview::{Spec, TermView};
-use theme::{c, cur, Appearance, Theme};
+use theme::{c, cur, Appearance, Scheme, Theme};
 use ui::{icon, IconName};
 
 pub fn font_size() -> f32 { config::get().font.size.clamp(6.0, 48.0) }
@@ -151,7 +153,11 @@ enum Modal { Broadcast(Vec<String>), Snapshots, Recordings, QuickStart { dir: St
 
 struct Tab { layout: Node<Entity<TermView>>, focused: Entity<TermView>, /** custom name (PRD 5.23) */ name: Option<String> }
 
-pub(crate) enum Overlay { None, Settings(Entity<SettingsView>), Palette(Entity<Palette>), Host(Entity<HostDialog>), Audit, Sftp, Port, Ai, Chat, HostTools(Entity<host_tools_view::HostToolsView>) }
+pub(crate) enum Overlay { None, Settings(Entity<SettingsView>), Palette(Entity<Palette>), Host(Entity<HostDialog>), Audit, Sftp, Port, HostTools(Entity<host_tools_view::HostToolsView>) }
+
+/// Which right-hand card is open. AI, saved commands and history share one slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SideDock { None, Ai, Snippets, History }
 
 pub(crate) struct Root {
     rt: Arc<tokio::runtime::Runtime>,
@@ -159,6 +165,7 @@ pub(crate) struct Root {
     tabs: Vec<Tab>,
     active: usize,
     themes: Vec<Arc<Theme>>,
+    schemes: Vec<Arc<Scheme>>,
     histories: HashMap<String, Arc<Mutex<History>>>,
     manifests: Arc<Vec<Manifest>>,
     prompts: ssh::Prompts,
@@ -177,13 +184,27 @@ pub(crate) struct Root {
     ui_size_seen: f32,
     /// Sidebar context / "+" menu and its dialogs (PRD 5.23).
     sb_menu: Option<sidebar::SbMenu>,
+    /// When the sidebar menu opened, so the opening click does not immediately dismiss it.
+    sb_menu_at: std::time::Instant,
     sb_modal: Option<sidebar::SbModal>,
     /// Finder tag filter (colors) from the sidebar Tags section.
     tag_filter: Vec<String>,
     /// live sidebar width (px); saved to sidebar.width when a resize drag ends
     sb_width: f32,
+    /// Right-hand card: AI, saved commands, or history. Only one is open.
+    dock: SideDock,
+    lib_search: Entity<InputState>,
+    lib_group: String,
+    lib_hist_all: bool,
+    lib_editor: Option<library::LibEditor>,
+    lib_vars: Option<library::LibVars>,
+    lib_confirm: Option<library::LibConfirm>,
+    lib_notice: String,
+    /// live AI dock width (px); saved to sidebar.ai_width when a resize drag ends
+    ai_width: f32,
     /// tab right-click menu (tab index, position)
     tab_menu: Option<(usize, gpui::Point<gpui::Pixels>)>,
+    tab_menu_at: std::time::Instant,
     /// inline tab rename (tab index, input)
     tab_rename: Option<(usize, Entity<InputState>)>,
     /// recently closed tabs, newest last
@@ -251,9 +272,29 @@ impl Root {
     fn history_for(&mut self, key: &str) -> Arc<Mutex<History>> {
         if !config::get().suggest.local_history { return Arc::new(Mutex::new(History::new())); }
         self.histories.entry(key.to_string()).or_insert_with(|| {
-            let fname: String = key.chars().map(|c| if c.is_ascii_alphanumeric() || "@.-_".contains(c) { c } else { '_' }).collect();
-            Arc::new(Mutex::new(History::open(data_dir().join("history").join(format!("{fname}.txt")))))
+            Arc::new(Mutex::new(History::open(ssh_term_proto::suggest::history_path(&data_dir(), key))))
         }).clone()
+    }
+
+    pub(crate) fn dock_is(&self, a: actions::Action) -> bool {
+        matches!((self.dock, a), (SideDock::Ai, actions::Action::OpenAi) | (SideDock::Snippets, actions::Action::OpenSnippets) | (SideDock::History, actions::Action::OpenHistory))
+    }
+
+    fn toggle_dock(&mut self, which: SideDock, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dock == which {
+            self.dock = SideDock::None;
+            chat_view::set_dock_open(false);
+            self.focus_active(window, cx);
+            cx.notify();
+            return;
+        }
+        self.dock = which;
+        if which == SideDock::Ai {
+            self.open_chat(window, cx);
+        } else {
+            chat_view::set_dock_open(false);
+            cx.notify();
+        }
     }
     fn open_pane(&mut self, spec: Spec, window: &mut Window, cx: &mut Context<Self>) -> Entity<TermView> {
         self.open_pane_with(spec, PaneInit::default(), window, cx)
@@ -311,6 +352,13 @@ impl Root {
                     let chat = this.open_chat(w, cx);
                     let text = text.clone();
                     chat.update(cx, |c, cx| c.explain_text(text, cx));
+                    return;
+                }
+                termview::TermEvent::CtxUseAi => {
+                    let chat = this.open_chat(w, cx);
+                    let src = pane.downgrade();
+                    chat.update(cx, |c, cx| { c.use_terminal(src); cx.notify(); });
+                    this.toast(t("cm.ai_context_set").to_string(), cx);
                     return;
                 }
                 termview::TermEvent::Explain => {}
@@ -390,20 +438,20 @@ impl Root {
             None => {
                 let v = cx.new(|cx| chat_view::ChatView::new(window, cx));
                 self._subs.push(cx.subscribe_in(&v, window, |this, _, ev: &chat_view::ChatEvent, w, cx| match ev {
-                    chat_view::ChatEvent::Close => this.close_overlay(w, cx),
+                    chat_view::ChatEvent::Close => { this.dock = SideDock::None; chat_view::set_dock_open(false); this.focus_active(w, cx); cx.notify(); }
                     chat_view::ChatEvent::Insert(cmd) => {
                         // AI output is only inserted, never executed (the user presses Enter)
                         if let Some(p) = this.tabs.get(this.active).map(|t| t.focused.clone()) { let cmd = cmd.clone(); p.update(cx, |t, cx| t.ai_insert_text(cmd, cx)); }
                         this.log("ai.chat.insert", cmd);
-                        this.close_overlay(w, cx);
                     }
                 }));
                 self.chat_view = Some(v.clone());
                 v
             }
         };
-        v.update(cx, |c, cx| { if src.is_some() { c.source = src; } c.focus(window, cx); });
-        self.overlay = Overlay::Chat;
+        v.update(cx, |c, cx| { c.docked = true; if src.is_some() { c.source = src; } c.focus(window, cx); });
+        self.dock = SideDock::Ai;
+        chat_view::set_dock_open(true);
         cx.notify();
         v
     }
@@ -458,6 +506,7 @@ impl Root {
         match ev {
             sftp_view::SftpEvent::Close => self.close_overlay(w, cx),
             sftp_view::SftpEvent::Move(m) => self.move_sftp(v.clone(), *m, w, cx),
+            sftp_view::SftpEvent::Pane(act) => self.sftp_pane_act(v, *act, w, cx),
             sftp_view::SftpEvent::Insert { remote, command } => {
                 let target = remote.then(|| v.read(cx).target.clone());
                 if v.read(cx).mode == SftpMode::Popup { self.close_overlay(w, cx); }
@@ -471,6 +520,22 @@ impl Root {
                 self.new_tab(spec, w, cx);
                 if let Some(p) = self.tabs.get(self.active).map(|t| t.focused.clone()) { Self::insert_when_ready(p, format!("cd -- {}", ssh_term_proto::ctxmenu::quote_path(dir)), cx); }
             }
+        }
+    }
+    /// Split or close the terminal pane that is showing this SFTP view.
+    fn sftp_pane_act(&mut self, v: &Entity<sftp_view::SftpView>, act: sftp_view::DirAction, window: &mut Window, cx: &mut Context<Self>) {
+        let found = self.tabs.iter().enumerate().find_map(|(ti, t)| {
+            t.layout.leaves().into_iter().find(|p| p.read(cx).sftp.as_ref() == Some(v)).map(|p| (ti, p))
+        });
+        let Some((ti, p)) = found else { return };
+        self.active = ti;
+        self.tabs[ti].focused = p.clone();
+        let fh = p.read(cx).focus.clone();
+        window.focus(&fh, cx);
+        match act {
+            sftp_view::DirAction::Right => self.split(Some(Dir::Vertical), window, cx),
+            sftp_view::DirAction::Down => self.split(Some(Dir::Horizontal), window, cx),
+            sftp_view::DirAction::Close => self.close_pane(window, cx),
         }
     }
     /// The session for a host (PRD 5.20): focused pane if it matches, else any pane on that host
@@ -1019,11 +1084,18 @@ impl Root {
             by_name(&s.appearance.theme).unwrap_or(0)
         }
     }
+    /// Terminal colors follow the active UI theme. Switching Daylight / Midnight / Catppuccin
+    /// switches the palette with it; there is no separate scheme selection.
+    fn resolve_scheme(&self, _window: &Window, ui: &Theme) -> Arc<Scheme> {
+        Arc::new(ui.to_scheme())
+    }
     fn apply_theme(&self, window: &Window, cx: &mut App) {
         let mut th = self.themes[self.theme_index(window)].clone();
         // macOS themes: accent follows the system accent color (default macOS blue)
         if theme::is_macos_theme(&th) { if let Some(a) = theme::system_accent(th.appearance == Appearance::Dark) { let mut t = (*th).clone(); t.accent = a; th = Arc::new(t); } }
+        let sc = self.resolve_scheme(window, &th);
         theme::set_current(th.clone());
+        theme::set_scheme(sc);
         sync_component_theme(&th, cx);
     }
     fn cycle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1119,11 +1191,17 @@ impl Root {
     }
     pub(crate) fn open_settings(&mut self, cat: Cat, window: &mut Window, cx: &mut Context<Self>) {
         let names = self.themes.iter().map(|t| (t.name.clone(), t.appearance == Appearance::Dark)).collect();
-        let v = cx.new(|cx| SettingsView::new(cat, names, window, cx));
+        let schemes = self.schemes.iter().map(|s| (s.name.clone(), s.appearance == Appearance::Dark)).collect();
+        let v = cx.new(|cx| SettingsView::new(cat, names, schemes, window, cx));
         self._subs.push(cx.subscribe_in(&v, window, |this, _, ev: &SettingsEvent, window, cx| match ev {
             SettingsEvent::Close => this.close_overlay(window, cx),
             SettingsEvent::OpenAudit => { this.close_overlay(window, cx); this.overlay = Overlay::Audit; }
-            SettingsEvent::ThemesChanged => { this.themes = theme::load_all(); cx.notify(); }
+            SettingsEvent::ThemesChanged => {
+                this.themes = theme::load_all();
+                this.schemes = theme::load_schemes(&this.themes);
+                this.apply_theme(window, cx);
+                cx.notify();
+            }
             SettingsEvent::Changed(path) => {
                 this.settings_dirty.push(path.clone());
                 if path == "suggest.clear_history" { for h in this.histories.values() { h.lock().unwrap().clear(); } }
@@ -1199,7 +1277,9 @@ impl Root {
                 self.overlay = Overlay::HostTools(v);
             }
             Action::OpenPortForward => { let tg = self.ssh_target_for_tools(cx); let pv = self.port_view(window, cx); pv.update(cx, |v, _| if v.target.is_none() || tg.is_some() { v.target = tg }); self.overlay = Overlay::Port; }
-            Action::OpenAi => self.overlay = Overlay::Ai,
+            Action::OpenAi => self.toggle_dock(SideDock::Ai, window, cx),
+            Action::OpenSnippets => self.toggle_dock(SideDock::Snippets, window, cx),
+            Action::OpenHistory => self.toggle_dock(SideDock::History, window, cx),
             Action::LaunchAgent1 => self.launch_agent(0, window, cx),
             Action::LaunchAgent2 => self.launch_agent(1, window, cx),
             Action::LaunchAgent3 => self.launch_agent(2, window, cx),
@@ -1275,12 +1355,42 @@ pub(crate) fn sync_component_theme(th: &Theme, cx: &mut App) {
 }
 
 impl Root {
+    /// Current directory of the focused terminal, as a clickable path. Sits in the
+    /// card's bottom corner band so the rounded edge stays covered.
+    fn cwd_bar(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let th = cur();
+        let pane = self.focused_pane(window, cx);
+        if !config::get().terminal.show_cwd { return None; }
+        let cwd = pane.as_ref().and_then(|p| p.read(cx).shell_cwd()).filter(|p| !p.is_empty());
+        let crumbs = cwd.as_deref().map(termview::cwd_crumbs).unwrap_or_default();
+        if crumbs.is_empty() { return None; }
+        let mut row = div().id("cwd-bar").h(px(26.)).flex_shrink_0().px_2().flex().items_center().gap(px(2.)).overflow_x_scroll()
+            .bg(c(th.mantle)).rounded_bl(px(12.)).rounded_br(px(12.));
+        let last = crumbs.len().saturating_sub(1);
+        for (i, (label, path)) in crumbs.into_iter().enumerate() {
+            if i > 0 { row = row.child(icon(IconName::ChevronRight, 11., c(th.overlay0))); }
+            let pane = pane.clone();
+            let here = i == last;
+            row = row.child(div().id(("cwd", i)).h(px(20.)).px_1().flex_shrink_0().rounded(px(4.)).flex().items_center().gap(px(3.)).cursor_pointer()
+                .hover(|d| d.bg(c(cur().surface0)))
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(move |_, _, cx| {
+                    let Some(pane) = pane.clone() else { return };
+                    let path = path.clone();
+                    pane.update(cx, |v, cx| v.cd_to(&path, cx));
+                })
+                .child(icon(IconName::Folder, 12., c(th.overlay1)))
+                .child(div().text_size(px(12.)).text_color(if here { c(th.text) } else { c(th.subtext) }).whitespace_nowrap().child(label)));
+        }
+        Some(row.into_any_element())
+    }
+
     fn render_node(&self, tab: usize, node: &Node<Entity<TermView>>, path: Vec<bool>, th: &Theme, cx: &mut Context<Self>) -> AnyElement {
         match node {
             Node::Leaf(p) => {
                 let pg = SharedString::from(format!("pane-g-{}", p.entity_id()));
                 let mut d = div().relative().group(pg.clone()).flex_1().size_full().flex().overflow_hidden().child(p.clone());
-                if !cx.has_active_drag() { d = d.child(self.pane_header(p, pg, cx)); }
+                if !cx.has_active_drag() && p.read(cx).sftp.is_none() { d = d.child(self.pane_header(p, pg, cx)); }
                 if cx.has_active_drag() && self.tabs.len() > 1 {
                     // drop zones for a dragged tab: left/right quarter, top/bottom half of the middle (PRD US-03)
                     for (i, edge) in [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom].into_iter().enumerate() {
@@ -1313,7 +1423,7 @@ impl Root {
                 let dragging = cx.has_active_drag() && self.drag_div.as_ref().is_some_and(|(t, p)| *t == tab && *p == path);
                 let line = div().bg(if dragging { c(th.accent) } else { c(th.surface1) }).group_hover(dg.clone(), |s| s.bg(c(cur().accent).opacity(0.8)));
                 let line = if vertical { line.h_full().w(px(if dragging { 3. } else { 1. })).group_hover(dg.clone(), |s| s.w(px(3.))) } else { line.w_full().h(px(if dragging { 3. } else { 1. })).group_hover(dg.clone(), |s| s.h(px(3.))) };
-                let divider = div().id(SharedString::from(format!("{id}-div"))).group(dg).flex_shrink_0().flex().items_center().justify_center().bg(c(th.bg)).child(line)
+                let divider = div().id(SharedString::from(format!("{id}-div"))).group(dg).flex_shrink_0().flex().items_center().justify_center().bg(c(theme::scheme().bg)).child(line)
                     .on_drag(drag, |d: &DividerDrag, _, _, cx| cx.new(|_| d.clone()));
                 let divider = if vertical { divider.w(px(5.)).h_full().cursor_col_resize() } else { divider.h(px(5.)).w_full().cursor_row_resize() };
                 let me_path = path.clone();
@@ -1345,7 +1455,7 @@ impl Render for Root {
         }
         let th = cur();
         let s = config::get();
-        if !cx.has_active_drag() { self.drag_div = None; self.save_sb_width(); }
+        if !cx.has_active_drag() { self.drag_div = None; self.save_sb_width(); self.save_ai_width(); }
         self.probe_os(cx);
         // appearance.opacity: transparent window background, terminal area drawn with alpha
         let op = s.appearance.opacity.clamp(0.5, 1.0);
@@ -1354,13 +1464,38 @@ impl Render for Root {
         let ui = s.appearance.ui_font_size.clamp(10., 20.);
         if self.ui_size_seen != ui { self.ui_size_seen = ui; gpui_component::Theme::global_mut(cx).font_size = px(ui); }
 
-        // title bar row = tab row (PRD 5.22): drag moves the window, double-click zooms
-        let mut tabbar = chrome::drag_region(div().id("titlebar")).h(px(chrome::TITLE_H)).flex_shrink_0().pl_2().pr_2().flex().items_center().gap(px(2.)).bg(c(th.crust)).border_b_1().border_color(c(th.surface1).opacity(0.6));
-        if !self.sidebar_visible {
-            tabbar = tabbar.child(self.lights(window, cx));
-            tabbar = tabbar.child(div().id("sb-show").size(px(28.)).rounded(px(6.)).flex().items_center().justify_center().cursor_pointer().hover(|d| d.bg(c(cur().surface0)))
-                .on_click(cx.listener(|this, _, _w, cx| { this.sidebar_visible = true; cx.notify(); })).child(icon(IconName::Layers, 14., c(th.overlay1))));
+        // Top row is the window chrome. Tabs are the row under it.
+        let mac = chrome::style() == chrome::Style::Mac;
+        let mut chrome_row = chrome::drag_region(div().id("chrome-bar")).h(px(chrome::TITLE_H)).flex_shrink_0().flex().items_center().gap_2()
+            .bg(c(th.crust));
+        if mac {
+            chrome_row = chrome_row.child(self.lights(window, cx));
+        } else {
+            chrome_row = chrome_row.pl_3();
         }
+        chrome_row = chrome_row.child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child("ShellAX"))
+            .child(chrome::drag_spacer("chrome-spacer"))
+            .child(div().id("chrome-local").h(px(24.)).px_2().rounded(px(6.)).flex().items_center().gap_1().cursor_pointer()
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .hover(|d| d.bg(c(cur().surface0)))
+                .tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(t("ui.local_terminal")).build(w, cx))
+                .on_click(cx.listener(|this, _, w, cx| this.new_tab(Spec::Local, w, cx)))
+                .child(icon(IconName::SquareTerminal, 14., c(th.overlay1)))
+                .child(div().text_size(px(12.)).text_color(c(th.text)).child(t("ui.local_terminal"))));
+        let me = cx.entity().downgrade();
+        if let Some(wc) = chrome::window_controls("winctl", window, move |w, cx| { let _ = me.update(cx, |r, cx| if r.should_close(w, cx) { w.remove_window(); cx.quit(); }); }) {
+            chrome_row = chrome_row.pr_0().child(wc);
+        } else {
+            chrome_row = chrome_row.pr_2();
+        }
+
+        let mut tabbar = div().id("tabbar").h(px(30.)).flex_shrink_0().pl(px(4.)).pr_2().flex().items_center().gap(px(2.)).bg(c(th.base)).border_b_1().border_color(c(th.surface0)).rounded_tl(px(12.)).rounded_tr(px(12.)).overflow_hidden();
+        tabbar = tabbar.child(div().id("sb-collapse").size(px(24.)).flex_shrink_0().rounded(px(6.)).flex().items_center().justify_center().cursor_pointer()
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .hover(|d| d.bg(c(cur().surface0)))
+            .tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(t("ui.show_hide_sidebar")).build(w, cx))
+            .on_click(cx.listener(|this, _, _w, cx| { this.sidebar_visible = !this.sidebar_visible; cx.notify(); }))
+            .child(icon(IconName::PanelLeft, 14., c(th.overlay1))));
         for (i, t) in self.tabs.iter().enumerate() {
             let active = i == self.active;
             let panes = t.layout.leaves();
@@ -1375,17 +1510,30 @@ impl Render for Root {
                 tabbar = tabbar.child(div().w(px(1.)).h(px(16.)).flex_shrink_0().bg(c(th.surface2).opacity(0.5)));
             }
             let tg = SharedString::from(format!("tab-g-{i}"));
-            let mut tabel = div().id(("tab", i)).group(tg.clone()).h(px(28.)).min_w(px(120.)).max_w(px(260.)).pl(px(12.)).pr(px(4.)).rounded(px(6.)).flex().items_center().gap(px(6.)).cursor_pointer()
+            let mut tabel = div().id(("tab", i)).group(tg.clone()).h(px(24.)).min_w(px(120.)).max_w(px(260.)).pl(px(12.)).pr(px(4.)).rounded(px(6.)).flex().items_center().gap(px(6.)).cursor_pointer()
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .when(active, |d| d.bg(c(th.base).opacity(if th.appearance == Appearance::Dark { 0.55 } else { 0.95 })).shadow(chrome::soft_shadow(false)))
+                .when(active, |d| d.bg(c(th.surface0)))
                 .when(!active, |d| d.hover(|s| s.bg(c(cur().surface0).opacity(0.6))))
                 .on_click(cx.listener({ let title = title.to_string(); move |this, ev: &gpui::ClickEvent, w, cx| {
                     this.active = i;
                     if ev.click_count() >= 2 { this.start_rename(i, title.clone(), w, cx); } else { this.focus_active(w, cx); }
                     cx.notify();
                 } }))
-                .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.tab_menu = Some((i, ev.position)); cx.notify(); }))
-                .child(if panes[0].read(cx).sftp.is_some() { icon(IconName::FolderSync, 12., if active { c(th.accent) } else { c(th.overlay1) }).into_any_element() } else { div().size(px(6.)).rounded_full().bg(if active { c(th.accent) } else { c(th.surface2) }).into_any_element() })
+                .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.tab_menu_at = std::time::Instant::now(); this.tab_menu = Some((i, ev.position)); cx.notify(); }))
+                .on_mouse_down(gpui::MouseButton::Middle, |_, _, cx| cx.stop_propagation())
+                .on_mouse_up(gpui::MouseButton::Middle, cx.listener(move |this, _, w, cx| {
+                    cx.stop_propagation();
+                    this.close_tab(i, w, cx);
+                }))
+                .child({
+                    let sftp_tab = panes[0].read(cx).sftp.is_some();
+                    if sftp_tab {
+                        icon(IconName::FolderSync, 12., if active { c(th.accent) } else { c(th.overlay1) }).into_any_element()
+                    } else {
+                        let col = panes[0].read(cx).status(&th).1;
+                        div().size(px(7.)).flex_shrink_0().rounded_full().bg(col).into_any_element()
+                    }
+                })
                 .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.)).text_color(if active { c(th.text) } else { c(th.subtext) }).when(active, |d| d.font_weight(FontWeight::MEDIUM))
                     .child(match &self.tab_rename { Some((j, inp)) if *j == i => gpui_component::Sizable::with_size(gpui_component::input::Input::new(inp).appearance(false), gpui_component::Size::XSmall).into_any_element(), _ => title.clone().into_any_element() }));
             if let Some((name, st)) = agent {
@@ -1413,21 +1561,24 @@ impl Render for Root {
                 .on_click(cx.listener(|this, _, w, cx| this.new_tab(Spec::Local, w, cx)))
                 .child(icon(IconName::Plus, 15., c(th.overlay1))),
         ).child(chrome::drag_spacer("title-spacer"));
-        let me = cx.entity().downgrade();
-        if let Some(wc) = chrome::window_controls("winctl", window, move |w, cx| { let _ = me.update(cx, |r, cx| if r.should_close(w, cx) { w.remove_window(); cx.quit(); }); }) {
-            tabbar = tabbar.pr_0().child(wc);
-        }
 
-        let panes = match self.tabs.get(self.active) {
-            Some(tab) => div().flex_1().flex().overflow_hidden().child(self.render_node(self.active, &tab.layout, vec![], &th, cx)),
-            None => div().flex_1().flex().flex_col().items_center().justify_center().gap_3().bg(c(th.base))
+        let workspace = match self.tabs.get(self.active) {
+            Some(tab) => self.render_node(self.active, &tab.layout, vec![], &th, cx),
+            None => div().flex_1().size_full().flex().flex_col().items_center().justify_center().gap_3().bg(c(th.base))
                 .child(icon(IconName::SquareTerminal, 36., c(th.overlay0)))
                 .child(div().text_size(px(13.)).text_color(c(th.subtext)).child(t("ui.no_open_terminals")))
                 .child(div().flex().gap_2()
                     .child(ui::button("empty-local", t("ui.open_local_terminal"), 1).on_click(cx.listener(|this, _, w, cx| this.new_tab(Spec::Local, w, cx))))
                     .child(ui::button("empty-palette", t("ui.command_palette"), 0).on_click(cx.listener(|this, _, w, cx| this.open_palette(w, cx))))
-                    .when(!self.closed_tabs.is_empty(), |d| d.child(ui::button("empty-reopen", t("tab.reopen"), 0).on_click(cx.listener(|this, _, w, cx| this.reopen_closed(w, cx)))))),
+                    .when(!self.closed_tabs.is_empty(), |d| d.child(ui::button("empty-reopen", t("tab.reopen"), 0).on_click(cx.listener(|this, _, w, cx| this.reopen_closed(w, cx))))))
+                .into_any_element(),
         };
+        let cwd_bar = self.cwd_bar(window, cx);
+        let center = div().id("center").flex_1().min_w_0().min_h_0().flex().flex_col().rounded(px(12.)).overflow_hidden().bg(c(theme::scheme().bg))
+            .when(cwd_bar.is_none(), |d| d.pb(px(12.)))
+            .child(tabbar)
+            .child(div().flex_1().min_h_0().overflow_hidden().flex().flex_col().child(workspace))
+            .children(cwd_bar);
 
         let (status, scolor, dims, title, hist) = match self.focused_pane(window, cx) {
             Some(p) => {
@@ -1444,7 +1595,7 @@ impl Render for Root {
         let mode = org.as_ref().map_or(s.permissions.mode, |m| m.clamp_mode(s.permissions.mode));
         let mode_col = match mode { Mode::Ask => c(th.accent), Mode::Plan => c(th.info), Mode::Auto => c(th.warning) };
         let sb_btn = |id: &'static str| div().id(id).px_2().h(px(20.)).rounded_md().flex().items_center().gap_1().cursor_pointer().hover(|s| s.bg(c(cur().surface0)));
-        let statusbar = div().h(px(26.)).px_3().flex().items_center().gap_3().bg(c(th.crust)).border_t_1().border_color(c(th.surface0))
+        let statusbar = div().h(px(26.)).px_3().flex().items_center().gap_3().bg(c(th.crust))
             .text_size(px(11.)).text_color(c(th.subtext))
             .child(div().flex().items_center().gap_2().child(div().size(px(7.)).rounded_full().bg(scolor)).child(status))
             .child(title)
@@ -1458,8 +1609,29 @@ impl Render for Root {
                 .child(icon(IconName::Shield, 12., mode_col)).child(tf("main.perm_status", &[("mode", &mode.label())]))
                 .when(org.is_some(), |d| d.child(div().pl_1().child(t("main.org_badge")))));
 
-        let mut root = div().size_full().relative().flex().flex_row().bg(c(th.crust).opacity(if chrome::NATIVE_LIGHTS { 0. } else { op })).font_family(theme::ui_font()).text_size(px(s.appearance.ui_font_size.clamp(10., 20.))).text_color(c(th.text))
+        let left = if self.sidebar_visible { px(4.) } else { px(8.) };
+        let mut content = div().flex_1().min_w_0().h_full().flex().flex_row().gap(px(4.));
+        if self.sidebar_visible { content = content.child(self.sidebar(window, cx)); }
+        content = content.child(center);
+        content = match self.dock {
+            SideDock::Ai => content.child(self.ai_dock(cx)),
+            SideDock::Snippets | SideDock::History => content.child(self.library_dock(window, cx)),
+            SideDock::None => content,
+        };
+        let body = div().flex_1().min_h_0().w_full().flex().flex_row().items_stretch().pl(left).pr(px(4.)).pb(px(2.)).gap(px(4.))
+            .child(content)
+            .child(self.tool_rail(cx));
+        let mut root = div().size_full().relative().flex().flex_col().bg(c(th.crust).opacity(if chrome::NATIVE_LIGHTS { 0. } else { op })).font_family(theme::ui_font()).text_size(px(s.appearance.ui_font_size.clamp(10., 20.))).text_color(c(th.text))
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, w, cx| {
+                let k = &ev.keystroke;
+                let bare_tab = k.key == "tab" && !k.modifiers.control && !k.modifiers.alt && !k.modifiers.platform;
+                if bare_tab {
+                    if let Some(p) = this.tabs.get(this.active).and_then(|t| t.layout.leaves().into_iter().find(|p| p.read(cx).focus.is_focused(w) && p.read(cx).sftp.is_none())) {
+                        p.update(cx, |v, cx| v.on_key(ev, w, cx));
+                        cx.stop_propagation();
+                        return;
+                    }
+                }
                 if ev.keystroke.key == "escape" && !matches!(this.overlay, Overlay::None | Overlay::Palette(_)) {
                     this.close_overlay(w, cx);
                     cx.stop_propagation();
@@ -1468,8 +1640,7 @@ impl Render for Root {
                 let ks = actions::keystroke_str(&ev.keystroke);
                 if let Some(a) = actions::find(&ks) { this.run(a, w, cx); cx.stop_propagation(); }
             }));
-        if self.sidebar_visible { root = root.child(self.sidebar(window, cx)); }
-        root = root.child(div().flex_1().min_w_0().h_full().flex().flex_col().bg(c(th.crust).opacity(op)).child(tabbar).child(panes).child(statusbar));
+        root = root.child(chrome_row).child(body).child(statusbar);
         if let Some(e) = chrome::resize_edges(window) { root = root.child(e); }
 
         let host_menu = self.sb_menu.clone().map(|m| self.sb_menu_el(m, cx));
@@ -1482,8 +1653,6 @@ impl Render for Root {
             Overlay::Sftp => Some(self.sftp_panel(cx)),
             Overlay::Port => Some(self.port_panel(cx)),
             Overlay::HostTools(v) => Some(ui::modal(v.clone()).into_any_element()),
-            Overlay::Ai => Some(self.ai_panel(cx)),
-            Overlay::Chat => self.chat_view.clone().map(|v| ui::modal(v).into_any_element()),
         };
         if let Some(o) = overlay { root = root.child(o); }
         if let Some(m) = host_menu { root = root.child(m); }
@@ -1620,6 +1789,7 @@ fn main() {
     }
     let rt = Arc::new(tokio::runtime::Builder::new_multi_thread().enable_all().worker_threads(2).build().unwrap());
     let themes = theme::load_all();
+    let schemes = theme::load_schemes(&themes);
     let default_target = if std::env::var("NO_SSH").is_ok() { None } else { env_target(&config::get().known_hosts_path()) };
     gpui_platform::application().with_assets(gpui_kit_assets::AllAssets).run(move |cx: &mut App| {
         gpui_component::init(cx);
@@ -1645,17 +1815,19 @@ fn main() {
                     let _ = ssh::SECRETS.set(secret_store());
                     migrate_key_field_passwords();
                     let host_search = cx.new(|cx| InputState::new(window, cx).placeholder(t("ui.search_hosts")));
+                    let lib_search = cx.new(|cx| InputState::new(window, cx).placeholder(t("lib.search")));
                     let audit = audit_log();
                     let mut root = Root {
-                        rt, default_target, tabs: vec![], active: 0, themes, histories: HashMap::new(),
+                        rt, default_target, tabs: vec![], active: 0, themes, schemes, histories: HashMap::new(),
                         manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], deny_reason: None, policy_port: None, overlay: Overlay::None, sftp_views: HashMap::new(), sftp_current: None, sftp_windows: vec![], drag_div: None, port_view: None, quit_confirm: false, modal: None, quit_ok: false, chat_view: None,
-                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, sb_modal: None, tag_filter: vec![], tab_menu: None, tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: true, audit, audit_verify: None, audit_filter: Default::default(),
+                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, sb_menu_at: std::time::Instant::now(), sb_modal: None, tag_filter: vec![], tab_menu: None, tab_menu_at: std::time::Instant::now(), tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), dock: SideDock::None, lib_search: lib_search.clone(), lib_group: String::new(), lib_hist_all: false, lib_editor: None, lib_vars: None, lib_confirm: None, lib_notice: String::new(), ai_width: { let w = config::get().sidebar.ai_width; if (280.0..=560.0).contains(&w) { w } else { config::AI_DOCK_W } }, host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: true, audit, audit_verify: None, audit_filter: Default::default(),
                         settings_dirty: vec![], toast: None, toast_seq: 0, _subs: vec![],
                     };
                     crate::ctxmenu_view::init(root.rt.handle().clone(), root.prompts.clone());
                     root.apply_theme(window, cx);
                     root._subs.push(cx.observe_window_appearance(window, |this: &mut Root, w, cx| { this.apply_theme(w, cx); this.refresh_all(cx); }));
                     root._subs.push(cx.subscribe_in(&host_search, window, |_, _, ev: &InputEvent, _, cx| if matches!(ev, InputEvent::Change) { cx.notify() }));
+                    root._subs.push(cx.subscribe_in(&lib_search, window, |_, _, ev: &InputEvent, _, cx| if matches!(ev, InputEvent::Change) { cx.notify() }));
                     cx.spawn(async move |this, cx| {
                         while let Ok(p) = au_rx.recv_async().await {
                             if this.update(cx, |r, cx| { r.auth_pending.push(p); cx.notify(); }).is_err() { break; }
@@ -1776,6 +1948,20 @@ fn main() {
                         root.tabs.push(Tab { layout, focused: l, name: None });
                         window.focus(&fh, cx);
                     }
+                    let weak = cx.entity().downgrade();
+                    root._subs.push(cx.intercept_keystrokes(move |ev, window, cx| {
+                        let k = &ev.keystroke;
+                        if k.key != "tab" || k.modifiers.control || k.modifiers.alt || k.modifiers.platform { return; }
+                        let Some(ent) = weak.upgrade() else { return; };
+                        let shift = k.modifiers.shift;
+                        let _ = ent.update(cx, |this, cx| {
+                            if !matches!(this.overlay, Overlay::None) || this.sb_modal.is_some() { return; }
+                            let Some(p) = this.tabs.get(this.active).and_then(|t| t.layout.leaves().into_iter().find(|p| p.read(cx).focus.is_focused(window) && p.read(cx).sftp.is_none())) else { return; };
+                            p.update(cx, |v, cx| v.inject_tab(shift, window, cx));
+                            window.prevent_default();
+                            cx.stop_propagation();
+                        });
+                    }));
                     root
                 });
                 cx.new(|cx| gpui_component::Root::new(view, window, cx))

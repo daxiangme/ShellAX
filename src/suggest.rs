@@ -10,11 +10,43 @@
 /// Maximum entries kept per history.
 pub const MAX_HISTORY: usize = 5000;
 
+/// One recorded command. `ts` is unix seconds; missing on lines written before timestamps existed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistItem {
+    pub cmd: String,
+    pub ts: Option<i64>,
+}
+
 #[derive(Default, Debug, Clone)]
 pub struct History {
-    entries: Vec<String>,
+    entries: Vec<HistItem>,
     /// Our own history file (append-only, one command per line, mode 0600). None = memory only.
     path: Option<std::path::PathBuf>,
+}
+
+/// File name stem for a history key. `@.-_` are kept so `user@host:22` stays readable.
+pub fn history_stem(key: &str) -> String {
+    key.chars().map(|c| if c.is_ascii_alphanumeric() || "@.-_".contains(c) { c } else { '_' }).collect()
+}
+
+/// `{data_dir}/history/{sanitized key}.txt`.
+pub fn history_path(dir: &std::path::Path, key: &str) -> std::path::PathBuf {
+    dir.join("history").join(format!("{}.txt", history_stem(key)))
+}
+
+/// `1700000000\tcmd` is a timestamped line. Anything else, including a command that happens to
+/// contain a tab, stays a legacy command — unless the prefix is a plausible unix second.
+pub fn parse_hist_line(line: &str) -> (Option<i64>, &str) {
+    if let Some((a, b)) = line.split_once('\t') {
+        if let Ok(n) = a.parse::<i64>() {
+            if (1_000_000_000..10_000_000_000).contains(&n) { return (Some(n), b); }
+        }
+    }
+    (None, line)
+}
+
+fn now_ts() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
 /// Strip zsh EXTENDED_HISTORY prefix ": <epoch>:<duration>;".
@@ -35,12 +67,15 @@ impl History {
     pub fn open(path: impl Into<std::path::PathBuf>) -> Self {
         let path = path.into();
         let mut h = Self::default();
+        h.path = Some(path.clone());
         if let Ok(body) = std::fs::read_to_string(&path) {
-            for l in body.lines() { h.insert(l); }
+            for l in body.lines() {
+                let (ts, cmd) = parse_hist_line(l);
+                h.insert_item(cmd, ts);
+            }
             // compact when the file grew far past the cap
-            if body.lines().count() > MAX_HISTORY * 2 { let _ = std::fs::write(&path, h.entries.join("\n") + "\n"); }
+            if body.lines().count() > MAX_HISTORY * 2 { h.rewrite(); }
         }
-        h.path = Some(path);
         h
     }
 
@@ -58,7 +93,8 @@ impl History {
 
     /// Record a command typed in this app (persisted when a file is attached). Returns false if filtered out.
     pub fn add(&mut self, cmd: &str) -> bool {
-        let ok = self.insert(cmd);
+        let ts = now_ts();
+        let ok = self.insert_item(cmd, Some(ts));
         if ok {
             if let Some(p) = &self.path {
                 use std::io::Write;
@@ -66,22 +102,57 @@ impl History {
                 o.create(true).append(true);
                 #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; o.mode(0o600); }
                 if let Some(dir) = p.parent() { let _ = std::fs::create_dir_all(dir); }
-                if let Ok(mut f) = o.open(p) { let _ = writeln!(f, "{}", cmd.trim_end()); }
+                if let Ok(mut f) = o.open(p) {
+                    let stored = self.entries.last().map(|e| e.cmd.as_str()).unwrap_or("");
+                    let _ = writeln!(f, "{ts}\t{stored}");
+                }
             }
         }
         ok
     }
 
-    fn insert(&mut self, cmd: &str) -> bool {
+    fn insert_item(&mut self, cmd: &str, ts: Option<i64>) -> bool {
         // Leading space = user asked not to record (bash HISTCONTROL=ignorespace convention).
         if cmd.starts_with(' ') { return false; }
         let cmd = cmd.trim_end();
         if cmd.trim().is_empty() || cmd.len() > 1000 || is_sensitive(cmd) { return false; }
-        self.entries.retain(|e| e != cmd);
-        self.entries.push(cmd.to_string());
+        self.entries.retain(|e| e.cmd != cmd);
+        self.entries.push(HistItem { cmd: cmd.to_string(), ts });
         if self.entries.len() > MAX_HISTORY { self.entries.remove(0); }
         true
     }
+
+    fn insert(&mut self, cmd: &str) -> bool { self.insert_item(cmd, None) }
+
+    fn serialized(&self) -> String {
+        let mut s = String::new();
+        for e in &self.entries {
+            if let Some(ts) = e.ts {
+                s.push_str(&ts.to_string());
+                s.push('\t');
+            }
+            s.push_str(&e.cmd);
+            s.push('\n');
+        }
+        s
+    }
+
+    fn rewrite(&self) {
+        let Some(p) = &self.path else { return };
+        if let Some(dir) = p.parent() { let _ = std::fs::create_dir_all(dir); }
+        let _ = std::fs::write(p, self.serialized());
+    }
+
+    /// Drop one command and rewrite the file.
+    pub fn remove(&mut self, cmd: &str) -> bool {
+        let n = self.entries.len();
+        self.entries.retain(|e| e.cmd != cmd);
+        let changed = self.entries.len() != n;
+        if changed { self.rewrite(); }
+        changed
+    }
+
+    pub fn items(&self) -> &[HistItem] { &self.entries }
 
     /// Forget everything (and truncate the persisted file).
     pub fn clear(&mut self) {
@@ -96,8 +167,8 @@ impl History {
     pub fn suggest(&self, input: &str) -> Option<String> {
         if input.trim().is_empty() { return None; }
         self.entries.iter().rev()
-            .find(|e| e.len() > input.len() && e.starts_with(input))
-            .map(|e| e[input.len()..].to_string())
+            .find(|e| e.cmd.len() > input.len() && e.cmd.starts_with(input))
+            .map(|e| e.cmd[input.len()..].to_string())
     }
 }
 
@@ -265,6 +336,26 @@ mod tests {
         h.extend_from_bash_history("#1700000000\nls\ncd /tmp\n");
         assert_eq!(h.len(), 2);
         assert_eq!(h.suggest("cd").as_deref(), Some(" /tmp"));
+    }
+
+    #[test]
+    fn timestamped_lines_round_trip_and_do_not_leak_into_suggestions() {
+        let p = std::env::temp_dir().join(format!("as-hist-ts-{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        std::fs::write(&p, "git status\n1700000000\tls -la\n").unwrap();
+        let h = History::open(&p);
+        assert_eq!(h.len(), 2);
+        assert!(h.items().iter().any(|e| e.cmd == "git status" && e.ts.is_none()));
+        assert!(h.items().iter().any(|e| e.cmd == "ls -la" && e.ts == Some(1_700_000_000)));
+        assert_eq!(h.suggest("ls").as_deref(), Some(" -la"));
+        assert!(h.suggest("170").is_none(), "the timestamp is not part of the command");
+        let mut w = History::open(&p);
+        assert!(w.add("pwd"));
+        let body = std::fs::read_to_string(&p).unwrap();
+        assert!(body.lines().any(|l| l.ends_with("\tpwd") || l.contains("\tpwd")));
+        assert!(w.remove("pwd"));
+        assert!(!std::fs::read_to_string(&p).unwrap().contains("pwd"));
+        let _ = std::fs::remove_file(&p);
     }
 
     #[test]

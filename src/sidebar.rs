@@ -14,18 +14,36 @@ use crate::termview::Spec;
 use crate::theme::{c, cur};
 use crate::ui::{self, icon, IconName};
 use crate::{chrome, config, HostDrag, Root};
+
+fn action_tip(label: &str, binding: &str) -> String {
+    if binding.is_empty() { return label.to_string(); }
+    let keys = binding.split('-').map(|p| if p.len() == 1 { p.to_uppercase() } else {
+        let mut c = p.chars();
+        c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+    }).collect::<Vec<_>>().join("+");
+    format!("{label}  ({keys})")
+}
+
+/// Command that enters `path`. Windows local shells are PowerShell; SSH shells are POSIX.
+fn cd_command(path: &str, local_windows: bool) -> String {
+    if local_windows {
+        format!("Set-Location -LiteralPath '{}'", path.replace('\'', "''"))
+    } else {
+        format!("cd -- '{}'", path.replace('\'', "'\\''"))
+    }
+}
 use ssh_term_proto::layout::Dir;
 
 /// What a sidebar context menu is about.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum SbTarget { Host(String), Group(String), Local, Empty }
+pub(crate) enum SbTarget { Host(String), Group(String), Local, Place(usize), Empty }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum SbSub { Main, Move }
 #[derive(Clone)]
 pub(crate) struct SbMenu { pub target: SbTarget, pub pos: gpui::Point<gpui::Pixels>, pub sub: SbSub }
 
 #[derive(Clone)]
-pub(crate) enum PromptKind { NewGroup(String), RenameHost(String), RenameGroup(String) }
+pub(crate) enum PromptKind { NewGroup(String), RenameHost(String), RenameGroup(String), SavePlace { path: String, host: String, group: String }, PlacePath { host: String, group: String }, RenamePlace(usize) }
 #[derive(Clone)]
 pub(crate) enum SbModal {
     Prompt { kind: PromptKind, input: Entity<InputState> },
@@ -42,6 +60,11 @@ pub(crate) enum SbModal {
 pub(crate) struct SbResize;
 impl Render for SbResize { fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement { div() } }
 
+/// Drag payload of the AI dock's left-edge resize handle.
+#[derive(Clone)]
+pub(crate) struct AiResize;
+impl Render for AiResize { fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement { div() } }
+
 #[derive(Clone)]
 pub(crate) struct GroupDrag { pub path: String }
 impl Render for GroupDrag {
@@ -55,6 +78,10 @@ impl Render for GroupDrag {
 const ROW_H: f32 = 30.;
 
 impl Root {
+    fn show_sb_menu(&mut self, menu: SbMenu) {
+        self.sb_menu_at = std::time::Instant::now();
+        self.sb_menu = Some(menu);
+    }
     fn sb_save(&mut self, what: &str, detail: String, f: impl FnOnce(&mut config::Settings), cx: &mut Context<Self>) {
         let r = config::update(|s| { f(s); hosttree::ensure_groups(&s.hosts, &mut s.groups); });
         if let Some(e) = r { self.toast(e, cx); }
@@ -80,13 +107,70 @@ impl Root {
         window.focus(&fh, cx);
         cx.notify();
     }
+    fn place_host(&self, spec: &Spec) -> String {
+        match spec {
+            Spec::Local => String::new(),
+            Spec::Ssh(t) => self.host_targets().into_iter().find(|(_, x)| x.host == t.host && x.user == t.user && x.port == t.port).map(|(h, _)| h.name).unwrap_or_else(|| t.label()),
+        }
+    }
+    fn menu_group(&self, target: &SbTarget) -> String {
+        let s = config::get();
+        match target {
+            SbTarget::Group(p) => p.clone(),
+            SbTarget::Host(n) => s.hosts.iter().find(|h| &h.name == n).and_then(|h| h.group.clone()).unwrap_or_default(),
+            SbTarget::Place(i) => s.places.get(*i).map(|p| p.group.clone()).unwrap_or_default(),
+            _ => String::new(),
+        }
+    }
+    fn add_place(&mut self, group: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.prompt(PromptKind::PlacePath { host: String::new(), group }, String::new(), window, cx);
+    }
+    fn save_current_place(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pane) = self.tabs.get(self.active).and_then(|t| t.layout.leaves().into_iter().find(|p| p.read(cx).focus.is_focused(window))).or_else(|| self.focused_pane(window, cx)) else {
+            self.toast(t("place.need_terminal").into(), cx);
+            return;
+        };
+        let view = pane.read(cx);
+        if view.sftp.is_some() { self.toast(t("place.need_terminal").into(), cx); return; }
+        let host = self.place_host(&view.spec);
+        let group = if host.is_empty() { String::new() } else { config::get().hosts.iter().find(|h| h.name == host).and_then(|h| h.group.clone()).unwrap_or_default() };
+        match view.shell_cwd().filter(|p| !p.is_empty()) {
+            Some(path) => {
+                let name = path.rsplit(['/', '\\']).next().unwrap_or(&path).to_string();
+                self.prompt(PromptKind::SavePlace { path, host, group }, name, window, cx);
+            }
+            None => self.prompt(PromptKind::PlacePath { host, group }, String::new(), window, cx),
+        }
+    }
+    fn open_place(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(place) = config::get().places.get(index).cloned() else { return };
+        let spec = if place.host.is_empty() {
+            Spec::Local
+        } else if let Some(t) = self.target_for(&place.host) {
+            Spec::Ssh(t)
+        } else if self.default_target.as_ref().is_some_and(|t| t.label() == place.host) {
+            Spec::Ssh(self.default_target.clone().unwrap())
+        } else {
+            self.toast(tf("place.missing_host", &[("name", &place.host)]), cx);
+            return;
+        };
+        let local_win = place.host.is_empty() && cfg!(windows);
+        let pane = self.open_pane(spec, window, cx);
+        pane.update(cx, |v, cx| v.queue_cd(cd_command(&place.path, local_win), cx));
+        let fh = pane.read(cx).focus.clone();
+        self.tabs.push(crate::Tab { layout: ssh_term_proto::layout::Node::Leaf(pane.clone()), focused: pane, name: Some(place.name) });
+        self.active = self.tabs.len() - 1;
+        self.overlay = crate::Overlay::None;
+        window.focus(&fh, cx);
+        cx.notify();
+    }
     fn prompt(&mut self, kind: PromptKind, value: String, window: &mut Window, cx: &mut Context<Self>) {
         let input = cx.new(|cx| InputState::new(window, cx).default_value(value));
         input.update(cx, |s, cx| s.focus(window, cx));
         self.sb_modal = Some(SbModal::Prompt { kind, input });
         cx.notify();
     }
-    fn prompt_ok(&mut self, kind: PromptKind, val: String, cx: &mut Context<Self>) {
+    fn prompt_ok(&mut self, kind: PromptKind, val: String, window: &mut Window, cx: &mut Context<Self>) {
         let val = val.trim().to_string();
         if val.is_empty() { return; }
         match kind {
@@ -110,6 +194,17 @@ impl Root {
                     }
                 }, cx);
                 if !ok { self.toast(tf("sb.group_exists", &[("name", &val)]), cx); }
+            }
+            PromptKind::PlacePath { host, group } => {
+                let name = val.rsplit(['/', '\\']).next().unwrap_or(&val).to_string();
+                self.prompt(PromptKind::SavePlace { path: val, host, group }, name, window, cx);
+                return;
+            }
+            PromptKind::SavePlace { path, host, group } => {
+                self.sb_save("places.save", format!("name={val:?} path={path:?} host={host:?} group={group:?}"), |s| s.places.push(config::Place { name: val.clone(), path, host, group }), cx);
+            }
+            PromptKind::RenamePlace(i) => {
+                self.sb_save("places.rename", format!("i={i} name={val:?}"), |s| { if let Some(p) = s.places.get_mut(i) { p.name = val.clone(); } }, cx);
             }
         }
         self.sb_modal = None;
@@ -142,11 +237,12 @@ impl Root {
         let detail = match os { Some(o) => format!("{label} · {}", ssh_term_proto::outline::badge(&o).1), None => label.clone() };
         let gid = SharedString::from(format!("hr-g-{idx}"));
         let name = h.name.clone();
-        let mut row = div().id(("host", idx)).group(gid.clone()).mx_2().pr_2().pl(px(8. + 14. * depth as f32 + 14.)).min_h(px(40.)).py(px(4.)).rounded(px(6.)).flex().items_center().gap(px(8.)).cursor_pointer()
+        let mut row = div().id(("host", idx)).group(gid.clone()).mx(px(4.)).pr(px(4.)).pl(px(6. + 10. * depth as f32 + 12.)).min_h(px(34.)).py(px(3.)).rounded(px(6.)).flex().items_center().gap(px(6.)).cursor_pointer()
             .when(sel, |d| d.bg(c(th.accent).opacity(0.16)))
             .when(!sel, |d| d.hover(|s| s.bg(c(cur().surface0).opacity(0.7))))
             // Finder style: only the first tag shows — it tints the icon and adds a dot before the name
             .child(icon(if prod { IconName::ShieldAlert } else { IconName::Server }, 15., match h.tags.first() { Some(t0) => c(s.tags.rgb(t0)), None if prod => c(s.tags.rgb(&s.tags.production)), None => c(th.accent) }))
+            .child(div().size(px(6.)).flex_shrink_0().rounded_full().bg(if online { c(th.success) } else { c(th.surface2) }))
             .child(div().flex_1().min_w_0().flex().flex_col().gap(px(1.)).overflow_hidden()
                 .child(div().flex().items_center().gap(px(5.)).children(ui::tag_dot(h.tags.first())).child(div().min_w_0().text_size(px(12.5)).line_height(px(17.)).text_color(c(th.text)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(h.name.clone())))
                 .child(div().text_size(px(10.5)).line_height(px(14.)).text_color(c(th.overlay0)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(detail)));
@@ -157,7 +253,7 @@ impl Root {
             }));
         }
         let n = name.clone();
-        row = row.on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.sb_menu = Some(SbMenu { target: SbTarget::Host(n.clone()), pos: ev.position, sub: SbSub::Main }); cx.notify(); }));
+        row = row.on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.show_sb_menu(SbMenu { target: SbTarget::Host(n.clone()), pos: ev.position, sub: SbSub::Main }); cx.notify(); }));
         // drag to reorder / move; dropping another host here places it before this one
         let d = HostDrag { name: name.clone() };
         row = row.on_drag(d, |d: &HostDrag, _, _, cx| cx.new(|_| d.clone()));
@@ -173,19 +269,32 @@ impl Root {
             .group_hover(gid, |s| s.visible()).hover(|s| s.bg(c(cur().surface1)))
             .on_click(cx.listener(move |this, _, w, cx| { cx.stop_propagation(); this.open_host_dialog(Some(edit.clone()), None, w, cx); }))
             .child(icon(IconName::Pencil, 12., c(th.overlay1))));
-        row.child(div().size(px(6.)).rounded_full().bg(if online { c(th.success) } else { c(th.surface2) })).into_any_element()
+        row.into_any_element()
+    }
+
+    fn place_row(&self, idx: usize, p: &config::Place, depth: usize, cx: &mut Context<Self>) -> AnyElement {
+        let th = cur();
+        let sub = if p.host.is_empty() { p.path.clone() } else { format!("{} · {}", p.host, p.path) };
+        div().id(("place", idx)).mx(px(4.)).pr(px(4.)).pl(px(6. + 10. * depth as f32 + 12.)).min_h(px(34.)).py(px(3.)).rounded(px(6.)).flex().items_center().gap(px(6.)).cursor_pointer()
+            .hover(|d| d.bg(c(cur().surface0).opacity(0.7)))
+            .on_click(cx.listener(move |this, _, w, cx| this.open_place(idx, w, cx)))
+            .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.show_sb_menu(SbMenu { target: SbTarget::Place(idx), pos: ev.position, sub: SbSub::Main }); cx.notify(); }))
+            .child(icon(IconName::Folder, 15., c(th.warning)))
+            .child(div().flex_1().min_w_0().flex().flex_col().gap(px(1.)).overflow_hidden()
+                .child(div().text_size(px(12.5)).line_height(px(17.)).text_color(c(th.text)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(p.name.clone()))
+                .child(div().text_size(px(10.5)).line_height(px(14.)).text_color(c(th.overlay0)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(sub)))
+            .into_any_element()
     }
 
     fn sb_group_row(&self, path: &str, name: &str, depth: usize, count: usize, collapsed: bool, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
         let s = config::get();
         let tags = s.groups.iter().find(|g| g.path == path).map(|g| g.tags.clone()).unwrap_or_default();
-        let hg = SharedString::from(format!("grp-g-{path}"));
         let (p1, p2, p3, p4) = (path.to_string(), path.to_string(), path.to_string(), path.to_string());
-        div().id(SharedString::from(format!("grp-{path}"))).group(hg.clone()).mx_2().pr_2().pl(px(8. + 14. * depth as f32)).h(px(ROW_H)).flex().items_center().gap(px(6.)).cursor_pointer().rounded(px(6.))
+        div().id(SharedString::from(format!("grp-{path}"))).mx(px(4.)).pr(px(4.)).pl(px(6. + 10. * depth as f32)).h(px(ROW_H)).flex().items_center().gap(px(4.)).cursor_pointer().rounded(px(6.))
             .hover(|s| s.bg(c(cur().surface0).opacity(0.5)))
             .on_click(cx.listener(move |this, _, _w, cx| this.toggle_collapsed(&p1, cx)))
-            .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.sb_menu = Some(SbMenu { target: SbTarget::Group(p2.clone()), pos: ev.position, sub: SbSub::Main }); cx.notify(); }))
+            .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.show_sb_menu(SbMenu { target: SbTarget::Group(p2.clone()), pos: ev.position, sub: SbSub::Main }); cx.notify(); }))
             .on_drag(GroupDrag { path: path.to_string() }, |d: &GroupDrag, _, _, cx| cx.new(|_| d.clone()))
             .drag_over::<HostDrag>(|st, _, _, _| st.bg(c(cur().accent).opacity(0.22)))
             .drag_over::<GroupDrag>(|st, _, _, _| st.bg(c(cur().accent).opacity(0.22)))
@@ -200,14 +309,15 @@ impl Root {
             .children(ui::tag_dot(tags.first()))
             .child(div().min_w_0().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(name.to_string()))
             .child(div().flex_1())
-            .child(div().invisible().group_hover(hg, |s| s.visible()).text_size(px(10.5)).text_color(c(th.overlay0)).child(count.to_string()))
+            .child(div().text_size(px(10.5)).text_color(c(th.overlay0)).child(count.to_string()))
             .into_any_element()
     }
 
     fn section_header(&self, id: &'static str, label: &str, cx: &mut Context<Self>, top_drop: bool) -> AnyElement {
         let th = cur();
-        let mut d = div().id(id).mx_2().mt(px(12.)).px_2().h(px(20.)).rounded(px(6.)).flex().items_center()
-            .child(div().text_size(px(10.5)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.overlay1)).child(label.to_uppercase()));
+        let top = if id == "sec-local" { px(2.) } else { px(8.) };
+        let mut d = div().id(id).mx(px(4.)).mt(top).px(px(6.)).h(px(18.)).rounded(px(6.)).flex().items_center()
+            .child(div().text_size(px(11.)).font_weight(FontWeight::MEDIUM).text_color(c(th.overlay1)).child(label.to_string()));
         if top_drop {
             // dropping on the section header moves to the top level
             d = d.drag_over::<HostDrag>(|st, _, _, _| st.bg(c(cur().accent).opacity(0.22)))
@@ -219,7 +329,7 @@ impl Root {
     }
 
     // --------------------------------------------------------------- sidebar
-    pub(crate) fn sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn sidebar(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
         let s = config::get();
         let selected = self.tabs.get(self.active).map(|t| match &t.focused.read(cx).spec { Spec::Local => "local".to_string(), Spec::Ssh(t) => t.label() });
@@ -235,69 +345,59 @@ impl Root {
 
         // ---- title row (PRD 5.23): macOS = traffic lights + collapse; Windows/Linux = collapse,
         // search and "+" share the title row, so there is no blank strip above the list
-        let collapse = div().id("sb-collapse").size(px(28.)).flex_shrink_0().rounded(px(6.)).on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()).flex().items_center().justify_center().cursor_pointer().hover(|d| d.bg(c(cur().surface0)))
-            .tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(t("ui.show_hide_sidebar")).build(w, cx))
-            .on_click(cx.listener(|this, _, _w, cx| { this.sidebar_visible = false; cx.notify(); })).child(icon(IconName::PanelLeft, 15., c(th.overlay1)));
         let search_box = div().flex_1().min_w_0().child(Input::new(&self.host_search).prefix(icon(IconName::Search, 13., c(th.overlay1))).cleanable(true));
-        let plus = div().id("new-host").size(px(28.)).flex_shrink_0().rounded(px(6.)).flex().items_center().justify_center().cursor_pointer()
+        let plus = div().id("new-host").size(px(24.)).flex_shrink_0().rounded(px(6.)).flex().items_center().justify_center().cursor_pointer()
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .hover(|d| d.bg(c(cur().surface0)))
             .tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(t("sb.add")).build(w, cx))
             .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _w, cx| {
                 let p = ev.position();
-                this.sb_menu = Some(SbMenu { target: SbTarget::Empty, pos: gpui::point(p.x, p.y + px(14.)), sub: SbSub::Main });
+                this.show_sb_menu(SbMenu { target: SbTarget::Empty, pos: gpui::point(p.x, p.y + px(14.)), sub: SbSub::Main });
                 cx.notify();
             }))
             .child(icon(IconName::Plus, 15., c(th.text)));
-        let mac = chrome::style() == chrome::Style::Mac;
         let mut col = div().id("sidebar").relative().w(px(self.sb_width)).flex_shrink_0().h_full().flex().flex_col()
             .on_drag_move(cx.listener(|this, ev: &gpui::DragMoveEvent<SbResize>, _w, cx| {
-                let w = f32::from(ev.event.position.x - ev.bounds.left()).clamp(180.0, 480.0);
+                let w = (f32::from(ev.event.position.x - ev.bounds.left()) - 2.0).clamp(180.0, 480.0);
                 if (w - this.sb_width).abs() >= 1.0 { this.sb_width = w; cx.notify(); }
             }));
-        // right-edge handle: drag to resize (180–480, saved), double-click resets
-        col = col.child(div().id("sb-resize").absolute().top_0().right(px(-3.)).w(px(6.)).h_full().cursor_col_resize()
+        // The 4px gap to the right of the sidebar is the resize hit area.
+        col = col.child(div().id("sb-resize").absolute().top_0().right(px(-4.)).w(px(4.)).h_full().cursor_col_resize()
             .hover(|d| d.bg(c(cur().accent).opacity(0.35)))
             .on_drag(SbResize, |d: &SbResize, _, _, cx| cx.new(|_| d.clone()))
             .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _w, cx| if ev.click_count() >= 2 { this.sb_width = config::SIDEBAR_W; this.save_sb_width(); cx.notify(); })));
-        if mac {
-            col = col.child(chrome::drag_region(div().id("sb-titlebar")).h(px(chrome::TITLE_H)).flex_shrink_0().pr_2().flex().items_center().gap_2()
-                .child(self.lights(window, cx)).child(div().flex_1()).child(collapse))
-                .child(div().px_3().pb_2().flex().items_center().gap_2().child(search_box).child(plus));
-        } else {
-            col = col.child(chrome::drag_region(div().id("sb-titlebar")).h(px(chrome::TITLE_H)).flex_shrink_0().pl_2().pr_2().flex().items_center().gap(px(6.))
-                .child(collapse).child(search_box).child(plus));
-        }
+        col = col.child(div().px(px(4.)).pb(px(2.)).flex().items_center().gap(px(4.)).child(search_box).child(plus));
 
         // ---- list
         let mut list = div().id("host-list").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().pb_2()
-            .on_mouse_down(gpui::MouseButton::Right, cx.listener(|this, ev: &gpui::MouseDownEvent, _, cx| { this.sb_menu = Some(SbMenu { target: SbTarget::Empty, pos: ev.position, sub: SbSub::Main }); cx.notify(); }));
+            .on_mouse_down(gpui::MouseButton::Right, cx.listener(|this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.show_sb_menu(SbMenu { target: SbTarget::Empty, pos: ev.position, sub: SbSub::Main }); cx.notify(); }));
         // pinned: local terminal (+ $SSH_HOST target in dev setups)
         list = list.child(self.section_header("sec-local", t("sb.local"), cx, false));
         let sh = crate::shell_display_name();
         let local_sel = ctx.selected.as_deref() == Some("local");
         let local_on = ctx.open.iter().any(|(l, on)| l == "local" && *on);
-        list = list.child(div().id("host-local").mx_2().px_2().pl(px(22.)).min_h(px(40.)).py(px(4.)).rounded(px(6.)).flex().items_center().gap(px(8.)).cursor_pointer()
+        list = list.child(div().id("host-local").mx(px(4.)).pr(px(4.)).pl(px(6.)).min_h(px(34.)).py(px(3.)).rounded(px(6.)).flex().items_center().gap(px(6.)).cursor_pointer()
             .when(local_sel, |d| d.bg(c(th.accent).opacity(0.16))).when(!local_sel, |d| d.hover(|s| s.bg(c(cur().surface0).opacity(0.7))))
             .on_click(cx.listener(|this, ev: &gpui::ClickEvent, w, cx| this.sb_activate(Spec::Local, t("ui.local_terminal").to_string(), ev.click_count() >= 2, w, cx)))
-            .on_mouse_down(gpui::MouseButton::Right, cx.listener(|this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.sb_menu = Some(SbMenu { target: SbTarget::Local, pos: ev.position, sub: SbSub::Main }); cx.notify(); }))
+            .on_mouse_down(gpui::MouseButton::Right, cx.listener(|this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.show_sb_menu(SbMenu { target: SbTarget::Local, pos: ev.position, sub: SbSub::Main }); cx.notify(); }))
             .child(icon(IconName::Monitor, 15., c(th.info)))
+            .child(div().size(px(6.)).flex_shrink_0().rounded_full().bg(if local_on { c(th.success) } else { c(th.surface2) }))
             .child(div().flex_1().min_w_0().flex().flex_col().gap(px(1.)).overflow_hidden()
                 .child(div().text_size(px(12.5)).line_height(px(17.)).text_color(c(th.text)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(t("ui.local_terminal")))
-                .child(div().text_size(px(10.5)).line_height(px(14.)).text_color(c(th.overlay0)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(sh)))
-            .child(div().size(px(6.)).rounded_full().bg(if local_on { c(th.success) } else { c(th.surface2) })));
+                .child(div().text_size(px(10.5)).line_height(px(14.)).text_color(c(th.overlay0)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(sh))));
         if let Some(dt) = self.default_target.clone() {
             let l = dt.label();
             let on = ctx.open.iter().any(|(x, o)| *x == l && *o);
-            list = list.child(div().id("host-env").mx_2().px_2().pl(px(22.)).min_h(px(40.)).py(px(4.)).rounded(px(6.)).flex().items_center().gap(px(8.)).cursor_pointer()
+            list = list.child(div().id("host-env").mx(px(4.)).pr(px(4.)).pl(px(6.)).min_h(px(34.)).py(px(3.)).rounded(px(6.)).flex().items_center().gap(px(6.)).cursor_pointer()
                 .hover(|s| s.bg(c(cur().surface0).opacity(0.7)))
                 .on_click(cx.listener(move |this, _, w, cx| this.new_tab(Spec::Ssh(dt.clone()), w, cx)))
                 .child(icon(IconName::Server, 15., c(th.accent)))
-                .child(div().flex_1().min_w_0().flex().flex_col().gap(px(1.)).overflow_hidden().child(div().text_size(px(12.5)).line_height(px(17.)).text_color(c(th.text)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(l)).child(div().text_size(px(10.5)).line_height(px(14.)).text_color(c(th.overlay0)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(t("ui.ssh_host_environment_variable"))))
-                .child(div().size(px(6.)).rounded_full().bg(if on { c(th.success) } else { c(th.surface2) })));
+                .child(div().size(px(6.)).flex_shrink_0().rounded_full().bg(if on { c(th.success) } else { c(th.surface2) }))
+                .child(div().flex_1().min_w_0().flex().flex_col().gap(px(1.)).overflow_hidden().child(div().text_size(px(12.5)).line_height(px(17.)).text_color(c(th.text)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(l)).child(div().text_size(px(10.5)).line_height(px(14.)).text_color(c(th.overlay0)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(t("ui.ssh_host_environment_variable")))));
         }
 
         list = list.child(self.section_header("sec-conn", t("sb.connections"), cx, true));
+        let places = s.places.clone();
         let rows = hosttree::rows(&s.hosts, &s.groups, &s.sidebar.collapsed, &q);
         if s.hosts.is_empty() && s.groups.is_empty() {
             // text wraps; buttons stack full-width and ellipsize instead of overflowing the sidebar
@@ -310,9 +410,20 @@ impl Root {
         } else if rows.is_empty() {
             list = list.child(div().px_4().py_3().text_size(px(11.5)).text_color(c(th.overlay0)).child(t("ui.no_matching_hosts")));
         }
+        for (i, p) in places.iter().enumerate().filter(|(_, p)| p.group.is_empty()) {
+            list = list.child(self.place_row(i, p, 0, cx));
+        }
         for r in rows {
             match r {
-                Row::Group { path, name, depth, count, collapsed } => list = list.child(self.sb_group_row(&path, &name, depth, count, collapsed, cx)),
+                Row::Group { path, name, depth, count, collapsed } => {
+                    let extra = places.iter().filter(|p| p.group == path).count();
+                    list = list.child(self.sb_group_row(&path, &name, depth, count + extra, collapsed, cx));
+                    if !collapsed {
+                        for (i, p) in places.iter().enumerate().filter(|(_, p)| p.group == path) {
+                            list = list.child(self.place_row(i, p, depth + 1, cx));
+                        }
+                    }
+                }
                 Row::Host { index, depth } => { let h = s.hosts[index].clone(); list = list.child(self.sb_host_row(index, &h, depth, &ctx, cx)); }
             }
         }
@@ -327,7 +438,7 @@ impl Root {
             let on = self.tag_filter.contains(&color);
             let cc = color.clone();
             let is_prod = color == s.tags.production;
-            list = list.child(div().id(("tagf", i)).mx_2().px_2().pl(px(22.)).h(px(24.)).rounded(px(6.)).flex().items_center().gap(px(8.)).cursor_pointer()
+            list = list.child(div().id(("tagf", i)).mx(px(4.)).pr(px(4.)).pl(px(6.)).h(px(24.)).rounded(px(6.)).flex().items_center().gap(px(6.)).cursor_pointer()
                 .when(on, |d| d.bg(c(th.accent).opacity(0.16))).when(!on, |d| d.hover(|s| s.bg(c(cur().surface0).opacity(0.7))))
                 .on_click(cx.listener(move |this, _, _w, cx| { if let Some(p) = this.tag_filter.iter().position(|t| *t == cc) { this.tag_filter.remove(p); } else { this.tag_filter.push(cc.clone()); } cx.notify(); }))
                 .child(div().size(px(10.)).flex_shrink_0().rounded_full().bg(c(s.tags.rgb(&color))))
@@ -336,32 +447,44 @@ impl Root {
                 .child(div().flex_shrink_0().text_size(px(10.5)).text_color(c(th.overlay0)).child(n.to_string())));
         }
         let _ = searching;
+        let vib = if chrome::NATIVE_LIGHTS { 0.72 } else { 1.0 };
+        col.bg(c(th.crust).opacity(vib)).child(list)
+    }
 
-        // ---- function area (bottom-left): icon row with tooltips (label + shortcut)
-        let items: [(Action, &str, IconName); 8] = [
+    /// Session tools sit beside the terminal, not in the host list.
+    pub(crate) fn tool_rail(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let th = cur();
+        let items: [(Action, &str, IconName); 10] = [
+            (Action::OpenSettings, t("ui.settings"), IconName::Settings),
             (Action::OpenSftp, t("ui.sftp_files"), IconName::FolderSync),
             (Action::OpenPortForward, t("ui.port_forwarding"), IconName::ArrowLeftRight),
             (Action::OpenHostTools, t("hosttools.title"), IconName::ChartPie),
+            (Action::OpenSnippets, t("lib.snippets"), IconName::Code),
+            (Action::OpenHistory, t("lib.history"), IconName::Clock),
             (Action::OpenAi, "AI / Agent", IconName::Bot),
             (Action::OpenAudit, t("ui.audit_log"), IconName::ScrollText),
             (Action::CommandPalette, t("ui.command_palette"), IconName::Command),
-            (Action::OpenSettings, t("ui.settings"), IconName::Settings),
             (Action::OpenAbout, t("ui.help_about"), IconName::CircleQuestionMark),
         ];
         let n_agents = self.tabs.iter().flat_map(|t| t.layout.leaves()).filter(|p| p.read(cx).agent.is_some()).count();
-        let mut tools = div().px_2().py(px(8.)).flex().items_center().justify_between().border_t_1().border_color(c(th.surface1).opacity(0.5));
+        let save_tip = t("place.save").to_string();
+        let mut rail = div().id("tool-rail").w(px(28.)).flex_shrink_0().h_full().flex().flex_col().items_center().py(px(4.)).gap_1();
+        rail = rail.child(div().id("rail-save").size(px(28.)).rounded(px(6.)).flex().items_center().justify_center().cursor_pointer()
+            .hover(|d| d.bg(c(cur().surface0)))
+            .on_click(cx.listener(|this, _, w, cx| this.save_current_place(w, cx)))
+            .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(save_tip.clone()).build(w, cx))
+            .child(icon(IconName::FolderPlus, 15., c(th.accent))));
         for (i, (a, label, ic)) in items.into_iter().enumerate() {
-            let b = a.binding();
-            let tip = if b.is_empty() { label.to_string() } else { format!("{label}  ({})", b.split('-').map(|p| if p.len() == 1 { p.to_uppercase() } else { let mut c = p.chars(); c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default() }).collect::<Vec<_>>().join("+")) };
-            tools = tools.child(div().id(("tool", i)).relative().size(px(26.)).rounded(px(6.)).flex().items_center().justify_center().cursor_pointer()
+            let tip = action_tip(label, &a.binding());
+            rail = rail.child(div().id(("rail", i)).relative().size(px(28.)).rounded(px(6.)).flex().items_center().justify_center().cursor_pointer()
                 .hover(|d| d.bg(c(cur().surface0)))
                 .on_click(cx.listener(move |this, _, w, cx| this.run(a, w, cx)))
                 .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
-                .child(icon(ic, 15., c(th.overlay1)))
+                .when(self.dock_is(a), |d| d.bg(c(th.accent).opacity(0.16)))
+                .child(icon(ic, 15., if self.dock_is(a) { c(th.accent) } else { c(th.overlay1) }))
                 .when(a == Action::OpenAi && n_agents > 0, |d| d.child(div().absolute().top(px(2.)).right(px(2.)).size(px(6.)).rounded_full().bg(c(th.accent)))));
         }
-        let vib = if chrome::NATIVE_LIGHTS { 0.72 } else { 1.0 };
-        col.bg(c(th.mantle).opacity(vib)).border_r_1().border_color(c(th.surface1).opacity(0.6)).child(list).child(tools)
+        rail
     }
 
     // ------------------------------------------------------------ context menu
@@ -369,8 +492,12 @@ impl Root {
         let th = cur();
         let s = config::get();
         let close = |this: &mut Root| this.sb_menu = None;
-        let mut list = ui::popover().id("sb-menu").occlude().min_w(px(220.)).max_h(px(560.)).overflow_y_scroll().p(px(5.)).flex().flex_col()
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| { this.sb_menu = None; cx.notify(); }));
+        let mut list = ui::popover().id("sb-menu").occlude().min_w(px(240.)).max_h(px(560.)).overflow_y_scroll().p(px(5.)).flex().flex_col()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                if this.sb_menu_at.elapsed() < std::time::Duration::from_millis(250) { return; }
+                this.sb_menu = None;
+                cx.notify();
+            }));
         let mut n = 0usize;
         let mut id = || { n += 1; ("sbm", n) };
         macro_rules! item { ($ic:expr, $label:expr, $f:expr) => {{ let f = $f; ui::menu_item(id(), $ic, $label, true, false).on_click(cx.listener(move |this, _, w, cx| { close(this); f(this, w, cx); cx.notify(); })) }} }
@@ -405,7 +532,7 @@ impl Root {
                     .child(item!(Some(IconName::TextCursorInput), t("sb.rename"), move |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.prompt(PromptKind::RenameHost(r.clone()), r.clone(), w, cx)))
                     .child(item!(Some(IconName::CopyPlus), t("sb.duplicate"), move |this: &mut Root, _w: &mut Window, cx: &mut Context<Root>| { let n = du.clone(); this.sb_save("hosts.duplicate", format!("host={n}"), |s| { hosttree::duplicate_host(&mut s.hosts, &n); }, cx); }))
                     .child(ui::menu_item(id(), Some(IconName::FolderInput), t("sb.move_to"), true, false).child(div().flex_1()).child(icon(IconName::ChevronRight, 11., c(th.overlay1)))
-                        .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _w, cx| { this.sb_menu = Some(SbMenu { target: SbTarget::Host(mv.clone()), pos: ev.position(), sub: SbSub::Move }); cx.notify(); })));
+                        .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _w, cx| { this.show_sb_menu(SbMenu { target: SbTarget::Host(mv.clone()), pos: ev.position(), sub: SbSub::Move }); cx.notify(); })));
                 if let Some(h) = h {
                     let hn = h.name.clone();
                     list = list.child(div().px(px(10.)).py(px(6.)).flex().items_center().gap_2().child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(t("tag.tags")))
@@ -440,13 +567,39 @@ impl Root {
                     .child(item!(Some(IconName::Columns2), t("sb.open_split_right"), |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.split_with(Spec::Local, Dir::Vertical, w, cx)))
                     .child(item!(Some(IconName::Rows2), t("sb.open_split_down"), |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.split_with(Spec::Local, Dir::Horizontal, w, cx)));
             }
-            (SbTarget::Empty, _) => {
-                list = list
-                    .child(item!(Some(IconName::FolderPlus), t("sb.new_group"), |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.prompt(PromptKind::NewGroup(String::new()), String::new(), w, cx)))
-                    .child(item!(Some(IconName::SquarePlus), t("sb.new_connection"), |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.open_host_dialog(None, None, w, cx)))
-                    .child(ui::menu_sep())
-                    .child(item!(Some(IconName::Import), t("sb.import"), |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.open_import(w, cx)));
+            (SbTarget::Place(i), SbSub::Move) => {
+                list = list.child(div().px(px(10.)).py(px(4.)).text_size(px(10.5)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.overlay1)).child(t("sb.move_to").to_uppercase()));
+                let cur_g = s.places.get(*i).map(|p| p.group.clone()).unwrap_or_default();
+                let mut dests: Vec<(String, String)> = vec![(String::new(), t("sb.top_level").to_string())];
+                for g in &s.groups { dests.push((g.path.clone(), format!("{}{}", "    ".repeat(g.path.matches('/').count()), hosttree::leaf_of(&g.path)))); }
+                for (path, label) in dests {
+                    let (i2, p2) = (*i, path.clone());
+                    let here = path == cur_g;
+                    list = list.child(ui::menu_item(id(), Some(if path.is_empty() { IconName::Layers } else { IconName::Folder }), label, !here, false)
+                        .when(!here, |d| d.on_click(cx.listener(move |this, _, _w, cx| { close(this); let (idx, g) = (i2, p2.clone()); this.sb_save("places.move", format!("i={idx} group={g:?}"), |s| { if let Some(p) = s.places.get_mut(idx) { p.group = g; } }, cx); }))));
+                }
             }
+            (SbTarget::Place(i), _) => {
+                let (i1, i2, mv) = (*i, *i, *i);
+                let name = s.places.get(*i).map(|p| p.name.clone()).unwrap_or_default();
+                list = list
+                    .child(item!(Some(IconName::TextCursorInput), t("sb.rename"), move |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.prompt(PromptKind::RenamePlace(i1), name.clone(), w, cx)))
+                    .child(danger!(Some(IconName::Trash), t("place.delete"), move |this: &mut Root, _w: &mut Window, cx: &mut Context<Root>| { this.sb_save("places.delete", format!("i={i2}"), |s| { if i2 < s.places.len() { s.places.remove(i2); } }, cx); }))
+                    .child(ui::menu_item(id(), Some(IconName::FolderInput), t("sb.move_to"), true, false).child(div().flex_1()).child(icon(IconName::ChevronRight, 11., c(th.overlay1)))
+                        .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _w, cx| { this.show_sb_menu(SbMenu { target: SbTarget::Place(mv), pos: ev.position(), sub: SbSub::Move }); cx.notify(); })));
+            }
+            (SbTarget::Empty, _) => {
+                list = list.child(item!(Some(IconName::Import), t("sb.import"), |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.open_import(w, cx)));
+            }
+        }
+        if !matches!((&m.target, m.sub), (SbTarget::Host(_), SbSub::Move) | (SbTarget::Place(_), SbSub::Move)) {
+            let group = self.menu_group(&m.target);
+            let (g1, g2, g3) = (group.clone(), group.clone(), group);
+            if !matches!(m.target, SbTarget::Empty) { list = list.child(ui::menu_sep()); }
+            list = list
+                .child(item!(Some(IconName::FolderPlus), t("sb.new_group"), move |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.prompt(PromptKind::NewGroup(g1.clone()), String::new(), w, cx)))
+                .child(item!(Some(IconName::SquarePlus), t("sb.new_connection"), move |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.open_host_dialog(None, (!g2.is_empty()).then(|| g2.clone()), w, cx)))
+                .child(item!(Some(IconName::FolderPlus), t("place.add"), move |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.add_place(g3.clone(), w, cx)));
         }
         gpui::deferred(gpui::anchored().position(m.pos).snap_to_window_with_margin(px(8.)).child(chrome::pop_in("sb-menu-pop", list))).with_priority(3).into_any_element()
     }
@@ -460,12 +613,18 @@ impl Root {
         let mut card = ui::card(480.).p_5().gap_3();
         match m {
             SbModal::Prompt { kind, input } => {
-                let head = match &kind { PromptKind::NewGroup(p) if p.is_empty() => t("sb.new_group").to_string(), PromptKind::NewGroup(p) => tf("sb.new_subgroup_in", &[("g", &hosttree::leaf_of(p))]), PromptKind::RenameHost(_) | PromptKind::RenameGroup(_) => t("sb.rename").to_string() };
+                let head = match &kind {
+                    PromptKind::NewGroup(p) if p.is_empty() => t("sb.new_group").to_string(),
+                    PromptKind::NewGroup(p) => tf("sb.new_subgroup_in", &[("g", &hosttree::leaf_of(p))]),
+                    PromptKind::RenameHost(_) | PromptKind::RenameGroup(_) | PromptKind::RenamePlace(_) => t("sb.rename").to_string(),
+                    PromptKind::SavePlace { .. } => t("place.name_title").to_string(),
+                    PromptKind::PlacePath { .. } => t("place.path_title").to_string(),
+                };
                 let (k1, i1, k2, i2) = (kind.clone(), input.clone(), kind, input.clone());
                 card = card.child(title(IconName::TextCursorInput, head, c(th.accent)))
-                    .child(div().on_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, _w, cx| if ev.keystroke.key == "enter" { let v = i1.read(cx).value().to_string(); this.prompt_ok(k1.clone(), v, cx); cx.notify(); })).child(Input::new(&input)))
+                    .child(div().on_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, w, cx| if ev.keystroke.key == "enter" { let v = i1.read(cx).value().to_string(); this.prompt_ok(k1.clone(), v, w, cx); cx.notify(); })).child(Input::new(&input)))
                     .child(div().flex().gap_2().justify_end().child(cancel)
-                        .child(ui::button("sbm-ok", t("ui.save"), 1).on_click(cx.listener(move |this, _, _w, cx| { let v = i2.read(cx).value().to_string(); this.prompt_ok(k2.clone(), v, cx); cx.notify(); }))));
+                        .child(ui::button("sbm-ok", t("ui.save"), 1).on_click(cx.listener(move |this, _, w, cx| { let v = i2.read(cx).value().to_string(); this.prompt_ok(k2.clone(), v, w, cx); cx.notify(); }))));
             }
             SbModal::NewTab { spec, label, dont_ask } => {
                 let sp = spec.clone();
@@ -562,5 +721,10 @@ impl Root {
     pub(crate) fn save_sb_width(&mut self) {
         let w = self.sb_width.round();
         if (config::get().sidebar.width - w).abs() >= 1.0 { let _ = config::update(|s| s.sidebar.width = w); }
+    }
+    /// Persist the AI dock width when it differs from the saved value.
+    pub(crate) fn save_ai_width(&mut self) {
+        let w = self.ai_width.round();
+        if (config::get().sidebar.ai_width - w).abs() >= 1.0 { let _ = config::update(|s| s.sidebar.ai_width = w); }
     }
 }

@@ -186,9 +186,14 @@ pub fn chat(p: &Provider, key: &str, system: &str, user: &str, max_tokens: Optio
 }
 
 /// System prompt for the free-form assistant panel.
-pub const CHAT_SYSTEM_PROMPT: &str = "You are the shellax terminal assistant. Answer concisely. When you propose shell commands put each in a fenced code block; never claim you ran anything. Terminal context, if given, is already redacted.";
+pub const CHAT_SYSTEM_PROMPT: &str = "You are the shellax terminal assistant. Reply in plain sentences. Do not use bold, headings, or numbered lists. \
+Never claim you ran anything. Terminal context, if given, is already redacted. \
+Shell commands go in fenced code blocks: one command per block, no leading $, no comments, no extra lines. \
+If the user only wants an explanation, include no code block. \
+If the user wants one action, include exactly one code block. \
+If the user wants several checks, write one short sentence before each code block.";
 /// System prompt for "explain this failure".
-pub const EXPLAIN_SYSTEM_PROMPT: &str = "You explain why a shell command failed. Given the command, its exit status and the (redacted) tail of the terminal output, explain the most likely cause in 2-5 sentences and suggest a fix command in a fenced code block. Do not run anything.";
+pub const EXPLAIN_SYSTEM_PROMPT: &str = "You explain why a shell command failed. Given the command, its exit status and the (redacted) tail of the terminal output, explain the most likely cause in 2-5 plain sentences and suggest exactly one fix command in its own fenced code block. No bold, no extra commands. Do not run anything.";
 
 /// Prompt for "explain this failed command".
 pub fn build_explain_prompt(cmd: &str, code: i32, host: &str, output_tail: &str) -> String {

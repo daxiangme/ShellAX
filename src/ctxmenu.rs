@@ -417,7 +417,7 @@ tools = ["jq"]
 pub struct FileObj { pub path: String, pub is_dir: bool, pub mode: u32 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Target { Files(Vec<FileObj>), Url(String), HostPort { host: String, port: Option<u16> }, Selection(String) }
+pub enum Target { Files(Vec<FileObj>), Url(String), HostPort { host: String, port: Option<u16> }, Selection(String), Blank { paste: Option<String> } }
 
 /// Where the menu was opened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -437,6 +437,8 @@ pub enum Act {
     Search(String),
     AiExplain(String),
     PasteInput(String),
+    /// Point the open AI assistant at the terminal that opened this menu.
+    UseAiContext,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -627,6 +629,12 @@ pub fn build(target: &Target, ctx: &Ctx) -> Menu {
             b.push("ai_explain", t("cm.ai_explain").into(), Act::AiExplain(s.clone()), &[]);
             b.push("paste_input", t("cm.paste_input").into(), Act::PasteInput(s.clone()), &[]);
         }
+        Target::Blank { paste } => {
+            header = t("cm.blank").to_string();
+            if let Some(s) = paste {
+                b.push("paste_input", t("cm.paste").into(), Act::PasteInput(s.clone()), &[]);
+            }
+        }
     }
     custom_items(&mut b, target);
     Menu { header, items: b.items }
@@ -662,6 +670,7 @@ pub fn custom_matches(it: &CustomItem, target: &Target, host: &str) -> bool {
         Target::Url(_) => one(&["url"], None),
         Target::HostPort { .. } => one(&["ip"], None),
         Target::Selection(_) => one(&["selection"], None),
+        Target::Blank { .. } => false,
     }
 }
 fn custom_items(b: &mut B, target: &Target) {
@@ -669,7 +678,13 @@ fn custom_items(b: &mut B, target: &Target) {
     let mut first = true;
     for (i, it) in ctx.custom.iter().enumerate() {
         if !custom_matches(it, target, ctx.host) { continue; }
-        let paths: Vec<String> = match target { Target::Files(fs) => fs.iter().map(|f| f.path.clone()).collect(), Target::Url(u) => vec![u.clone()], Target::HostPort { host, .. } => vec![host.clone()], Target::Selection(s) => vec![s.clone()] };
+        let paths: Vec<String> = match target {
+            Target::Files(fs) => fs.iter().map(|f| f.path.clone()).collect(),
+            Target::Url(u) => vec![u.clone()],
+            Target::HostPort { host, .. } => vec![host.clone()],
+            Target::Selection(s) => vec![s.clone()],
+            Target::Blank { .. } => vec![],
+        };
         let Ok(cmd) = expand(&it.command, &vars_for(&paths, ctx.host)) else { continue };
         if first { b.sep(); first = false; }
         let label = if ctx.lang_en { it.label_en.clone().unwrap_or_else(|| it.label.clone()) } else { it.label.clone() };

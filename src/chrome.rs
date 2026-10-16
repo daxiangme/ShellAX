@@ -8,13 +8,13 @@ use crate::theme::{c, cur, Appearance};
 pub const NATIVE_LIGHTS: bool = cfg!(target_os = "macos");
 /// Width reserved at the left of the title row for the traffic lights.
 pub const LIGHTS_W: f32 = 76.;
-/// Title bar / tab row height (8pt grid).
-pub const TITLE_H: f32 = 40.;
+/// Title bar height. Window buttons stretch to this row.
+pub const TITLE_H: f32 = 32.;
 
 pub fn window_options(bounds: Bounds<Pixels>, title: Option<String>) -> WindowOptions {
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        titlebar: Some(gpui::TitlebarOptions { title: title.map(Into::into), appears_transparent: true, traffic_light_position: Some(gpui::point(px(14.), px(13.))) }),
+        titlebar: Some(gpui::TitlebarOptions { title: title.map(Into::into), appears_transparent: true, traffic_light_position: Some(gpui::point(px(14.), px(10.))) }),
         window_decorations: Some(if std::env::var_os("SHELLAX_SERVER_DECORATIONS").is_some() { WindowDecorations::Server } else { WindowDecorations::Client }),
         window_background: if cfg!(target_os = "macos") { gpui::WindowBackgroundAppearance::Blurred } else { gpui::WindowBackgroundAppearance::Opaque },
         ..Default::default()

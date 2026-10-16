@@ -1,6 +1,6 @@
-# ShellAX Windows x64 测试说明（0.1.0 预览版）
+# ShellAX Windows x64 测试说明（0.1.1 预览版）
 
-这个版本是在 Linux 上交叉编译的，目标为 x86_64-pc-windows-msvc，渲染用 DirectX 11 + DirectWrite。没有在真实的 Windows 机器上运行过，请按下面的清单测试，并把问题反馈回来。
+这个 0.1.1 预览版在 Windows 上原生编译（x86_64-pc-windows-gnu），渲染用 DirectX 11 + DirectWrite。请按下面的清单测试，并把问题反馈回来。
 
 ## 系统要求
 - Windows 10 1903 及以上，或 Windows 11，64 位。程序依赖系统自带的 icuuc.dll，1903 之前的 Windows 10 没有这个文件。

@@ -26,7 +26,7 @@ pub fn button(id: impl Into<ElementId>, label: impl Into<SharedString>, kind: u8
 /// Segmented choice control. Returns the row; each option gets an id `(base, index)`.
 pub fn segmented(base: &'static str, options: &[(String, String)], selected: &str, on: impl Fn(String, &mut gpui::Window, &mut gpui::App) + 'static + Clone) -> impl IntoElement {
     let th = cur();
-    let mut row = div().flex().items_center().p(px(2.)).gap(px(2.)).rounded_md().bg(c(th.mantle)).border_1().border_color(c(th.surface0));
+    let mut row = div().w_full().flex().flex_wrap().items_center().p(px(2.)).gap(px(2.)).rounded_md().bg(c(th.mantle)).border_1().border_color(c(th.surface0));
     for (i, (val, label)) in options.iter().enumerate() {
         let active = val == selected;
         let v = val.clone();
@@ -72,7 +72,7 @@ pub fn modal(card: impl IntoElement + 'static) -> Div {
 /// Translucent popover surface (menus, palette): radius 10, hairline border, soft layered shadow.
 pub fn popover() -> Div {
     let th = cur();
-    div().rounded(px(10.)).bg(c(th.base).opacity(0.94)).border_1().border_color(c(th.surface2).opacity(0.45)).shadow(crate::chrome::soft_shadow(true))
+    div().rounded(px(10.)).bg(c(th.base)).border_1().border_color(c(th.surface2).opacity(0.45)).shadow(crate::chrome::soft_shadow(true))
 }
 
 pub fn card(w: f32) -> Div {
@@ -133,10 +133,10 @@ pub fn tag_chips(base: &'static str, selected: &[String], names: &[(String, Stri
 pub fn menu_item(id: impl Into<ElementId>, ic: Option<IconName>, label: impl Into<SharedString>, enabled: bool, danger: bool) -> Stateful<Div> {
     let th = cur();
     let col = if !enabled { c(th.overlay0) } else if danger { c(th.error) } else { c(th.text) };
-    div().id(id).h(px(26.)).px(px(10.)).rounded(px(6.)).flex().items_center().gap_2().text_size(px(12.)).text_color(col)
+    div().id(id).h(px(28.)).min_w(px(200.)).px(px(10.)).rounded(px(6.)).flex().items_center().gap_2().text_size(px(12.5)).text_color(col)
         .when(enabled, |d| d.cursor_pointer().hover(|d| d.bg(c(cur().accent)).text_color(gpui::white())))
         .child(match ic { Some(i) => icon(i, 13., if danger { c(th.error) } else { c(th.overlay1) }).into_any_element(), None => div().w(px(13.)).into_any_element() })
-        .child(label.into())
+        .child(div().flex_1().whitespace_nowrap().child(label.into()))
 }
 
 pub fn menu_sep() -> Div { div().mx(px(8.)).my(px(4.)).h(px(1.)).bg(c(cur().surface1).opacity(0.6)) }

@@ -66,9 +66,58 @@ impl Theme {
         })
     }
 
-    /// Import an Alacritty color scheme (TOML `[colors.primary]`, `[colors.normal]`, `[colors.bright]`).
-    /// UI tokens are derived from the terminal colors.
-    pub fn from_alacritty_toml(name: &str, src: &str) -> anyhow::Result<Theme> {
+    /// Terminal palette carried by this UI theme, under the same name.
+    pub fn to_scheme(&self) -> Scheme {
+        Scheme {
+            name: self.name.clone(), appearance: self.appearance,
+            fg: self.fg, bg: self.bg, cursor: self.cursor, cursor_text: self.cursor_text,
+            selection: self.selection, selection_fg: None, suggestion: self.suggestion, ansi: self.ansi,
+        }
+    }
+}
+
+/// Terminal content palette. Independent of the UI theme: foreground, background, cursor,
+/// selection and the 16 ANSI colors. Indexed 16–255 and truecolor are not themed.
+#[derive(Clone, Debug)]
+pub struct Scheme {
+    pub name: String,
+    pub appearance: Appearance,
+    pub fg: u32, pub bg: u32, pub cursor: u32, pub cursor_text: u32,
+    pub selection: u32, pub selection_fg: Option<u32>, pub suggestion: u32,
+    pub ansi: [u32; 16],
+}
+
+#[derive(Deserialize)]
+struct SchemeFile {
+    name: String,
+    #[serde(default)]
+    appearance: Option<Appearance>,
+    foreground: String, background: String, cursor: String, cursor_text: String,
+    selection: String,
+    #[serde(default)] selection_foreground: Option<String>,
+    #[serde(default)] suggestion: Option<String>,
+    ansi: Vec<String>,
+}
+
+impl Scheme {
+    pub fn from_toml(src: &str) -> anyhow::Result<Scheme> {
+        let f: SchemeFile = toml::from_str(src)?;
+        anyhow::ensure!(f.ansi.len() == 16, "ansi needs 16 colors");
+        let mut ansi = [0u32; 16];
+        for (i, s) in f.ansi.iter().enumerate() { ansi[i] = parse_hex(s)?; }
+        let fg = parse_hex(&f.foreground)?;
+        let bg = parse_hex(&f.background)?;
+        Ok(Self::finish(
+            f.name, fg, bg, Some(parse_hex(&f.cursor)?), Some(parse_hex(&f.cursor_text)?),
+            Some(parse_hex(&f.selection)?),
+            f.selection_foreground.as_deref().map(parse_hex).transpose()?,
+            f.suggestion.as_deref().map(parse_hex).transpose()?,
+            ansi, f.appearance,
+        ))
+    }
+
+    /// Alacritty `[colors]` only. Does not build UI colors.
+    pub fn from_alacritty(name: &str, src: &str) -> anyhow::Result<Scheme> {
         let v: toml::Value = toml::from_str(src)?;
         let colors = v.get("colors").ok_or_else(|| anyhow::anyhow!("no [colors]"))?;
         let get = |sec: &str, key: &str| -> anyhow::Result<u32> {
@@ -76,43 +125,33 @@ impl Theme {
                 .ok_or_else(|| anyhow::anyhow!("missing colors.{sec}.{key}"))?;
             parse_hex(s)
         };
+        let opt = |sec: &str, key: &str| get(sec, key).ok();
         let names = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"];
         let mut ansi = [0u32; 16];
         for (i, n) in names.iter().enumerate() { ansi[i] = get("normal", n)?; ansi[i + 8] = get("bright", n)?; }
-        let fg = get("primary", "foreground")?;
-        let bg = get("primary", "background")?;
-        Ok(Self::derive(name, fg, bg, ansi, get("cursor", "cursor").ok(), get("cursor", "text").ok(), get("selection", "background").ok()))
+        let label = v.get("name").and_then(|x| x.as_str()).unwrap_or(name).to_string();
+        Ok(Self::finish(label, get("primary", "foreground")?, get("primary", "background")?,
+            opt("cursor", "cursor"), opt("cursor", "text"), opt("selection", "background"), opt("selection", "text"), None, ansi, None))
     }
 
-    /// Import an iTerm2 `.itermcolors` file (XML plist of `<key>Ansi 0 Color</key><dict>…Red Component…</dict>`).
-    pub fn from_itermcolors(name: &str, src: &str) -> anyhow::Result<Theme> {
+    /// iTerm2 `.itermcolors`. Does not build UI colors.
+    pub fn from_itermcolors(name: &str, src: &str) -> anyhow::Result<Scheme> {
         let colors = parse_itermcolors(src)?;
         let get = |k: &str| colors.iter().find(|(n, _)| n == k).map(|(_, c)| *c);
         let mut ansi = [0u32; 16];
         for (i, a) in ansi.iter_mut().enumerate() { *a = get(&format!("Ansi {i} Color")).ok_or_else(|| anyhow::anyhow!("missing Ansi {i} Color"))?; }
         let fg = get("Foreground Color").ok_or_else(|| anyhow::anyhow!("missing Foreground Color"))?;
         let bg = get("Background Color").ok_or_else(|| anyhow::anyhow!("missing Background Color"))?;
-        Ok(Self::derive(name, fg, bg, ansi, get("Cursor Color"), get("Cursor Text Color"), get("Selection Color")))
+        Ok(Self::finish(name.into(), fg, bg, get("Cursor Color"), get("Cursor Text Color"), get("Selection Color"), get("Selected Text Color"), None, ansi, None))
     }
 
-    /// UI tokens derived from a terminal palette (used by the Alacritty / iTerm2 importers).
-    fn derive(name: &str, fg: u32, bg: u32, ansi: [u32; 16], cursor: Option<u32>, cursor_text: Option<u32>, selection: Option<u32>) -> Theme {
-        let light = luma(bg) > 0.5;
-        let mix = |a: u32, b: u32, t: f32| -> u32 {
-            let ch = |s: u32| -> [f32; 3] { [((s >> 16) & 255) as f32, ((s >> 8) & 255) as f32, (s & 255) as f32] };
-            let (x, y) = (ch(a), ch(b));
-            let m: Vec<u32> = (0..3).map(|i| (x[i] + (y[i] - x[i]) * t).round() as u32).collect();
-            (m[0] << 16) | (m[1] << 8) | m[2]
-        };
-        Theme {
-            name: name.into(), appearance: if light { Appearance::Light } else { Appearance::Dark },
-            crust: mix(bg, if light { 0xffffff } else { 0 }, 0.35), mantle: mix(bg, if light { 0xffffff } else { 0 }, 0.18), base: bg,
-            surface0: mix(bg, fg, 0.12), surface1: mix(bg, fg, 0.2), surface2: mix(bg, fg, 0.3),
-            overlay0: mix(bg, fg, 0.45), overlay1: mix(bg, fg, 0.55), text: fg, subtext: mix(bg, fg, 0.75),
-            accent: ansi[4], success: ansi[2], error: ansi[1], warning: ansi[3], info: ansi[6],
-            fg, bg, cursor: cursor.unwrap_or(fg), cursor_text: cursor_text.unwrap_or(bg),
-            selection: selection.unwrap_or(mix(bg, fg, 0.3)), suggestion: mix(bg, fg, 0.45),
-            ansi,
+    fn finish(name: String, fg: u32, bg: u32, cursor: Option<u32>, cursor_text: Option<u32>, selection: Option<u32>, selection_fg: Option<u32>, suggestion: Option<u32>, ansi: [u32; 16], appearance: Option<Appearance>) -> Scheme {
+        let appearance = appearance.unwrap_or(if luma(bg) > 0.5 { Appearance::Light } else { Appearance::Dark });
+        Scheme {
+            name, appearance, fg, bg,
+            cursor: cursor.unwrap_or(fg), cursor_text: cursor_text.unwrap_or(bg),
+            selection: selection.unwrap_or_else(|| mix(bg, fg, 0.3)), selection_fg,
+            suggestion: suggestion.unwrap_or_else(|| mix(bg, fg, 0.45)), ansi,
         }
     }
 }
@@ -151,32 +190,61 @@ fn parse_itermcolors(src: &str) -> anyhow::Result<Vec<(String, u32)>> {
     Ok(out)
 }
 
-/// `~/.config/shellax/themes`
+/// `~/.config/shellax/themes` — full ShellAX UI themes only.
 pub fn user_dir() -> Option<std::path::PathBuf> {
     Some(ssh_term_proto::platform::config_dir().join("themes"))
 }
 
-/// Parse any supported theme file (shellax TOML, Alacritty TOML, iTerm2 .itermcolors).
-pub fn parse_file(p: &std::path::Path) -> anyhow::Result<Theme> {
-    let src = std::fs::read_to_string(p)?;
-    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("imported");
-    match p.extension().and_then(|x| x.to_str()) {
-        Some("itermcolors") => Theme::from_itermcolors(stem, &src),
-        _ => Theme::from_toml(&src).or_else(|_| Theme::from_alacritty_toml(stem, &src)),
-    }
+/// `~/.config/shellax/schemes` — terminal color schemes (no UI colors).
+pub fn scheme_dir() -> Option<std::path::PathBuf> {
+    Some(ssh_term_proto::platform::config_dir().join("schemes"))
 }
 
-/// Validate and copy a theme file into the user theme dir. Returns (dest, theme name).
-pub fn import_file(src: &std::path::Path, dir: &std::path::Path) -> anyhow::Result<(std::path::PathBuf, String, bool)> {
-    let th = parse_file(src)?;
-    std::fs::create_dir_all(dir)?;
-    let dest = dir.join(src.file_name().ok_or_else(|| anyhow::anyhow!("no file name"))?);
+/// What `import_file` stored.
+pub enum Imported {
+    Theme { dest: std::path::PathBuf, name: String, dark: bool },
+    Scheme { dest: std::path::PathBuf, name: String, dark: bool },
+}
+
+/// Copy a file into the theme dir or the scheme dir.
+/// A ShellAX theme (has `[ui]`) stays a UI theme. iTerm2, Alacritty and scheme TOML become a color scheme only.
+pub fn import_file(src: &std::path::Path) -> anyhow::Result<Imported> {
+    let text = std::fs::read_to_string(src)?;
+    let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("imported");
+    let file_name = src.file_name().ok_or_else(|| anyhow::anyhow!("no file name"))?;
+    let ext = src.extension().and_then(|x| x.to_str());
+    if ext == Some("itermcolors") {
+        let scheme = Scheme::from_itermcolors(stem, &text)?;
+        return Ok(store_scheme(src, file_name, scheme)?);
+    }
+    if let Ok(th) = Theme::from_toml(&text) {
+        let dir = user_dir().ok_or_else(|| anyhow::anyhow!("no config dir"))?;
+        std::fs::create_dir_all(&dir)?;
+        let dest = dir.join(file_name);
+        std::fs::copy(src, &dest)?;
+        return Ok(Imported::Theme { name: th.name, dark: th.appearance == Appearance::Dark, dest });
+    }
+    let scheme = Scheme::from_toml(&text).or_else(|_| Scheme::from_alacritty(stem, &text))?;
+    Ok(store_scheme(src, file_name, scheme)?)
+}
+
+fn store_scheme(src: &std::path::Path, file_name: &std::ffi::OsStr, scheme: Scheme) -> anyhow::Result<Imported> {
+    let dir = scheme_dir().ok_or_else(|| anyhow::anyhow!("no config dir"))?;
+    std::fs::create_dir_all(&dir)?;
+    let dest = dir.join(file_name);
     std::fs::copy(src, &dest)?;
-    Ok((dest, th.name, th.appearance == Appearance::Dark))
+    Ok(Imported::Scheme { name: scheme.name, dark: scheme.appearance == Appearance::Dark, dest })
 }
 
 fn luma(c: u32) -> f32 {
     (0.2126 * ((c >> 16) & 255) as f32 + 0.7152 * ((c >> 8) & 255) as f32 + 0.0722 * (c & 255) as f32) / 255.0
+}
+
+fn mix(a: u32, b: u32, t: f32) -> u32 {
+    let ch = |s: u32| -> [f32; 3] { [((s >> 16) & 255) as f32, ((s >> 8) & 255) as f32, (s & 255) as f32] };
+    let (x, y) = (ch(a), ch(b));
+    let m: Vec<u32> = (0..3).map(|i| (x[i] + (y[i] - x[i]) * t).round().clamp(0.0, 255.0) as u32).collect();
+    (m[0] << 16) | (m[1] << 8) | m[2]
 }
 
 pub const BUILTIN: &[&str] = &[
@@ -188,14 +256,36 @@ pub const BUILTIN: &[&str] = &[
     include_str!("../themes/shellax-daylight.toml"),
 ];
 
+pub const BUILTIN_SCHEMES: &[&str] = &[
+    include_str!("../schemes/campbell.toml"),
+    include_str!("../schemes/one-half-dark.toml"),
+    include_str!("../schemes/one-half-light.toml"),
+    include_str!("../schemes/dracula.toml"),
+    include_str!("../schemes/nord.toml"),
+    include_str!("../schemes/gruvbox-dark.toml"),
+    include_str!("../schemes/gruvbox-light.toml"),
+    include_str!("../schemes/tokyo-night.toml"),
+    include_str!("../schemes/solarized-dark.toml"),
+    include_str!("../schemes/solarized-light.toml"),
+];
+
 pub fn load_all() -> Vec<Arc<Theme>> {
     let mut v: Vec<Arc<Theme>> = BUILTIN.iter().map(|s| Arc::new(Theme::from_toml(s).expect("builtin theme"))).collect();
     if let Some(dir) = user_dir() {
         if let Ok(rd) = std::fs::read_dir(dir) {
             for e in rd.flatten() {
                 let p = e.path();
-                if matches!(p.extension().and_then(|x| x.to_str()), Some("toml" | "itermcolors")) {
-                    match parse_file(&p) { Ok(t) => v.push(Arc::new(t)), Err(e) => eprintln!("theme {}: {e:#}", p.display()) }
+                if p.extension().and_then(|x| x.to_str()) != Some("toml") { continue; }
+                let src = match std::fs::read_to_string(&p) { Ok(s) => s, Err(e) => { eprintln!("theme {}: {e:#}", p.display()); continue; } };
+                match Theme::from_toml(&src) {
+                    Ok(t) => v.push(Arc::new(t)),
+                    // Alacritty and scheme files left in the theme dir are loaded as color schemes, not UI themes.
+                    Err(e) => {
+                        let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("imported");
+                        if Scheme::from_toml(&src).is_err() && Scheme::from_alacritty(stem, &src).is_err() {
+                            eprintln!("theme {}: {e:#}", p.display());
+                        }
+                    }
                 }
             }
         }
@@ -203,10 +293,52 @@ pub fn load_all() -> Vec<Arc<Theme>> {
     v
 }
 
+fn upsert_scheme(v: &mut Vec<Arc<Scheme>>, s: Scheme) {
+    if let Some(i) = v.iter().position(|e| e.name.eq_ignore_ascii_case(&s.name)) { v[i] = Arc::new(s); } else { v.push(Arc::new(s)); }
+}
+
+fn parse_scheme_src(stem: &str, ext: Option<&str>, src: &str) -> anyhow::Result<Scheme> {
+    if ext == Some("itermcolors") { return Scheme::from_itermcolors(stem, src); }
+    Scheme::from_toml(src).or_else(|_| Scheme::from_alacritty(stem, src))
+}
+
+/// Theme palettes first (so each UI theme can be selected as a scheme), then the built-in
+/// catalog, then user files. A later file with the same name replaces the earlier one.
+pub fn load_schemes(themes: &[Arc<Theme>]) -> Vec<Arc<Scheme>> {
+    let mut v: Vec<Arc<Scheme>> = themes.iter().map(|t| Arc::new(t.to_scheme())).collect();
+    for src in BUILTIN_SCHEMES {
+        match Scheme::from_toml(src) { Ok(s) => upsert_scheme(&mut v, s), Err(e) => eprintln!("scheme: {e:#}") }
+    }
+    let scan = |dir: std::path::PathBuf, only_non_themes: bool, v: &mut Vec<Arc<Scheme>>| {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            let ext = p.extension().and_then(|x| x.to_str());
+            if !matches!(ext, Some("toml" | "itermcolors")) { continue; }
+            let Ok(src) = std::fs::read_to_string(&p) else { continue };
+            if only_non_themes && ext == Some("toml") && Theme::from_toml(&src).is_ok() { continue; }
+            let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("imported");
+            match parse_scheme_src(stem, ext, &src) {
+                Ok(s) => upsert_scheme(v, s),
+                Err(e) => eprintln!("scheme {}: {e:#}", p.display()),
+            }
+        }
+    };
+    if let Some(dir) = user_dir() { scan(dir, true, &mut v); }
+    if let Some(dir) = scheme_dir() { scan(dir, false, &mut v); }
+    v
+}
+
 static CURRENT: RwLock<Option<Arc<Theme>>> = RwLock::new(None);
 pub fn set_current(t: Arc<Theme>) { *CURRENT.write().unwrap() = Some(t); }
 pub fn cur() -> Arc<Theme> {
     CURRENT.read().unwrap().clone().unwrap_or_else(|| Arc::new(Theme::from_toml(BUILTIN[0]).unwrap()))
+}
+
+static SCHEME: RwLock<Option<Arc<Scheme>>> = RwLock::new(None);
+pub fn set_scheme(s: Arc<Scheme>) { *SCHEME.write().unwrap() = Some(s); }
+pub fn scheme() -> Arc<Scheme> {
+    SCHEME.read().unwrap().clone().unwrap_or_else(|| Arc::new(cur().to_scheme()))
 }
 
 pub fn c(hex: u32) -> Hsla { rgb(hex).into() }
@@ -271,7 +403,7 @@ static UI_FONT: RwLock<Option<gpui::SharedString>> = RwLock::new(None);
 pub fn set_ui_font(f: String) { *UI_FONT.write().unwrap() = Some(f.into()); }
 pub fn ui_font() -> gpui::SharedString { UI_FONT.read().unwrap().clone().unwrap_or_else(|| "Inter".into()) }
 
-fn xterm256(t: &Theme, i: u8) -> u32 {
+fn xterm256(t: &Scheme, i: u8) -> u32 {
     match i {
         0..=15 => t.ansi[i as usize],
         16..=231 => {
@@ -283,7 +415,7 @@ fn xterm256(t: &Theme, i: u8) -> u32 {
     }
 }
 
-pub fn term_color(t: &Theme, col: Color, is_fg: bool) -> Hsla {
+pub fn term_color(t: &Scheme, col: Color, is_fg: bool) -> Hsla {
     match col {
         Color::Spec(x) => c(((x.r as u32) << 16) | ((x.g as u32) << 8) | x.b as u32),
         Color::Indexed(i) => c(xterm256(t, i)),
@@ -373,10 +505,25 @@ magenta="#c678dd"
 cyan="#56b6c2"
 white="#ffffff"
 "##;
-        let t = Theme::from_alacritty_toml("x", src).unwrap();
+        let t = Scheme::from_alacritty("x", src).unwrap();
         assert_eq!(t.bg, 0x282c34);
         assert_eq!(t.ansi[9], 0xe06c75);
         assert_eq!(t.appearance, Appearance::Dark);
+    }
+    #[test]
+    fn catalog_and_theme_palettes() {
+        let themes: Vec<Arc<Theme>> = BUILTIN.iter().map(|s| Arc::new(Theme::from_toml(s).unwrap())).collect();
+        assert!(themes.iter().any(|t| t.name == "Catppuccin Latte"));
+        for src in BUILTIN_SCHEMES {
+            let s = Scheme::from_toml(src).unwrap();
+            let want = if luma(s.bg) > 0.5 { Appearance::Light } else { Appearance::Dark };
+            assert_eq!(s.appearance, want, "{}", s.name);
+        }
+        let nord = Scheme::from_toml(include_str!("../schemes/nord.toml")).unwrap();
+        assert_eq!((nord.bg, nord.fg, nord.ansi[1]), (0x2e3440, 0xd8dee9, 0xbf616a));
+        let campbell = Scheme::from_toml(include_str!("../schemes/campbell.toml")).unwrap();
+        assert_eq!(campbell.selection_fg, Some(0x0c0c0c));
+        assert!(themes.iter().any(|t| t.to_scheme().name == "ShellAX Daylight"));
     }
 }
 
@@ -394,10 +541,10 @@ mod iterm_tests {
         body += &entry("Foreground Color", 1.0, 1.0, 1.0);
         body += &entry("Cursor Color", 1.0, 0.0, 0.0);
         let src = format!("<?xml version=\"1.0\"?>\n<plist version=\"1.0\">\n<dict>\n{body}</dict>\n</plist>\n");
-        let t = Theme::from_itermcolors("x", &src).unwrap();
+        let t = Scheme::from_itermcolors("x", &src).unwrap();
         assert_eq!(t.bg, 0x000000); assert_eq!(t.fg, 0xffffff); assert_eq!(t.cursor, 0xff0000);
         assert_eq!(t.ansi[0], 0x0000ff); assert_eq!(t.ansi[15], 0xff00ff);
         assert_eq!(t.appearance, Appearance::Dark);
-        assert!(Theme::from_itermcolors("x", "<plist><dict></dict></plist>").is_err());
+        assert!(Scheme::from_itermcolors("x", "<plist><dict></dict></plist>").is_err());
     }
 }

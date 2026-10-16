@@ -1,0 +1,12 @@
+# One Half Dark — https://github.com/sonph/onehalf (MIT)
+name = "One Half Dark"
+appearance = "dark"
+foreground = "#dcdfe4"
+background = "#282c34"
+cursor = "#dcdfe4"
+cursor_text = "#282c34"
+selection = "#474e5d"
+ansi = [
+    "#282c34", "#e06c75", "#98c379", "#e5c07b", "#61afef", "#c678dd", "#56b6c2", "#dcdfe4",
+    "#5a6374", "#e06c75", "#98c379", "#e5c07b", "#61afef", "#c678dd", "#56b6c2", "#dcdfe4",
+]

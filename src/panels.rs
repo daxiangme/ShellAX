@@ -2,7 +2,6 @@
 //! AI / Agent overview. SFTP and port forwarding live in sftp_view.rs / port_view.rs.
 use ssh_term_proto::i18n::{t, tf};
 use gpui::{div, prelude::*, px, AnyElement, Context, FontWeight, SharedString};
-use ssh_term_proto::agent::AgentState;
 use ssh_term_proto::audit;
 
 use crate::config;
@@ -101,47 +100,56 @@ impl Root {
         match self.port_view.clone() { Some(v) => ui::modal(v).into_any_element(), None => div().into_any_element() }
     }
 
-    pub(crate) fn ai_panel(&mut self, cx: &mut Context<Root>) -> AnyElement {
+    /// Shared right-hand card: same width, radius, resize handle and title row as the AI assistant.
+    pub(crate) fn dock_frame(&mut self, dock_id: &'static str, title: SharedString, ic: IconName, body: impl IntoElement, cx: &mut Context<Root>) -> AnyElement {
+        let th = cur();
+        let close_id = SharedString::from(format!("{dock_id}-close"));
+        let resize_id = SharedString::from(format!("{dock_id}-resize"));
+        let mut dock = div().id(dock_id).relative().w(px(self.ai_width)).h_full().flex_shrink_0().flex().flex_col().min_h_0()
+            .rounded(px(12.)).overflow_hidden().bg(c(th.base))
+            .on_drag_move(cx.listener(|this, ev: &gpui::DragMoveEvent<crate::sidebar::AiResize>, _w, cx| {
+                let w = f32::from(ev.bounds.right() - ev.event.position.x).clamp(280.0, 560.0);
+                if (w - this.ai_width).abs() >= 1.0 { this.ai_width = w; cx.notify(); }
+            }));
+        dock = dock.child(div().id(resize_id).absolute().top_0().left_0().w(px(6.)).h_full().cursor_col_resize()
+            .hover(|d| d.bg(c(cur().accent).opacity(0.35)))
+            .on_drag(crate::sidebar::AiResize, |d: &crate::sidebar::AiResize, _, _, cx| cx.new(|_| d.clone()))
+            .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _w, cx| if ev.click_count() >= 2 { this.ai_width = config::AI_DOCK_W; this.save_ai_width(); cx.notify(); })));
+        dock = dock.child(div().h(px(40.)).px_3().flex_shrink_0().flex().items_center().gap_2().border_b_1().border_color(c(th.surface0))
+            .child(icon(ic, 15., c(th.accent)))
+            .child(div().flex_1().min_w_0().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(title))
+            .child(div().id(close_id).size(px(28.)).rounded_md().flex().items_center().justify_center().cursor_pointer()
+                .hover(|d| d.bg(c(cur().surface0)))
+                .on_click(cx.listener(|this, _, w, cx| { this.dock = crate::SideDock::None; crate::chat_view::set_dock_open(false); this.focus_active(w, cx); cx.notify(); }))
+                .child(icon(IconName::X, 16., c(th.overlay1)))));
+        dock.child(body).into_any_element()
+    }
+
+    /// Right-hand AI tool window: conversation fills the column, terminal stays visible.
+    pub(crate) fn ai_dock(&mut self, cx: &mut Context<Root>) -> AnyElement {
         let th = cur();
         let s = config::get();
-        let mut agents = div().flex().flex_col().rounded_lg().border_1().border_color(c(th.surface0));
-        let mut n = 0;
+        let mut strip = div().px_3().py(px(6.)).flex().flex_wrap().items_center().gap_1().border_b_1().border_color(c(th.surface0));
+        let mut n = 0usize;
         for (ti, tab) in self.tabs.iter().enumerate() {
             for p in tab.layout.leaves() {
                 let v = p.read(cx);
                 if let Some((name, st)) = v.agent_label() {
                     let col = crate::state_color(st, &th);
-                    agents = agents.child(div().flex().items_center().gap_3().px_3().py(px(8.)).when(n > 0, |d| d.border_t_1().border_color(c(th.surface0)))
-                        .child(icon(IconName::Bot, 15., col))
-                        .child(div().flex_1().flex().flex_col().child(div().text_size(px(12.5)).text_color(c(th.text)).child(name))
-                            .child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(tf("panels.tab_n", &[("n", &(ti + 1)), ("title", &v.title)]))))
-                        .child(ui::tag(st.label(), col)));
+                    strip = strip.child(ui::tag(format!("{name} · {}", tf("panels.tab_n", &[("n", &(ti + 1)), ("title", &v.title)])), col));
                     n += 1;
-                    let _ = AgentState::Idle;
                 }
             }
         }
-        if n == 0 { agents = agents.child(div().p_3().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ui.no_running_claude_code_codex"))); }
-        let mut launch = div().flex().flex_wrap().items_center().gap_2().child(div().text_size(px(12.)).text_color(c(th.subtext)).child(t("ui.launch_agent_title")));
-        for (k, q) in s.agents.quick_launch.iter().enumerate().take(9) {
-            launch = launch.child(ui::button(("ql", k), tf("ui.launch_agent_btn", &[("name", &q.name)]), 0).on_click(cx.listener(move |this, _, w, cx| { this.overlay = Overlay::None; this.launch_agent(k, w, cx); })));
+        if n == 0 { strip = strip.child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(t("ui.no_running_claude_code_codex"))); }
+        for (k, q) in s.agents.quick_launch.iter().enumerate().take(6) {
+            if q.command.trim().is_empty() { continue; }
+            strip = strip.child(ui::button(("aidock-ql", k), q.name.clone(), 0).h(px(22.)).px_2().text_size(px(11.))
+                .on_click(cx.listener(move |this, _, w, cx| this.launch_agent(k, w, cx))));
         }
-        let ai = div().p_3().rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.surface0)).flex().flex_col().gap_2()
-            .child(div().flex().items_center().gap_2().child(icon(IconName::Sparkles, 15., c(th.accent)))
-                .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("ui.built_in_ai_assistant")))
-                .child(div().flex_1())
-                .child(ui::button("ai-chat-open", t("chat.open"), 1).on_click(cx.listener(|this, _, w, cx| { this.open_chat(w, cx); }))))
-            .child(div().text_size(px(12.)).text_color(c(th.subtext)).child(tf("panels.ai_summary", &[("provider", &s.ai.default_provider().map(|p| p.name.clone()).unwrap_or_else(|| t("ai.none").into())), ("model", &s.ai.default_provider().map(|p| p.model.clone()).unwrap_or_default()), ("redact", &if s.ai.redact { t("ui.on") } else { t("ui.off_2") }), ("mode", &s.permissions.mode.label())])))
-            .child(div().h(px(64.)).px_3().rounded_md().border_1().border_color(c(th.surface1)).flex().items_center().text_size(px(12.)).text_color(c(th.overlay0))
-                .child(t("ui.in_a_terminal_type_what")));
-        let body = div().flex_1().min_h_0().p_4().flex().flex_col().gap_3()
-            .child(ai)
-            .child(div().pt_2().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.subtext)).child(t("ui.external_agents_live_detection")))
-            .child(agents)
-            .child(launch)
-            .child(div().flex().gap_2().child(ui::button("ai-settings", t("ui.ai_settings"), 0).on_click(cx.listener(|this, _, w, cx| this.open_settings(crate::settings_view::Cat::Ai, w, cx))))
-                .child(ui::button("perm-settings", t("ui.permission_rules"), 0).on_click(cx.listener(|this, _, w, cx| this.open_settings(crate::settings_view::Cat::Permissions, w, cx)))));
-        ui::modal(panel_shell("AI / Agent", IconName::Bot, t("ui.agent_state_is_detected_live"), cx).child(body)).into_any_element()
+        let mut body = div().flex_1().min_h_0().flex().flex_col().child(strip);
+        if let Some(v) = self.chat_view.clone() { body = body.child(div().flex_1().min_h_0().child(v)); }
+        self.dock_frame("ai-dock", t("ui.built_in_ai_assistant").into(), IconName::Sparkles, body, cx)
     }
 }
 

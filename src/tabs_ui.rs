@@ -107,7 +107,11 @@ impl Root {
     pub(crate) fn tab_menu_el(&self, i: usize, pos: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) -> AnyElement {
         let n = self.tabs.len();
         let mut list = ui::popover().id("tab-menu").occlude().min_w(px(220.)).p(px(5.)).flex().flex_col()
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| { this.tab_menu = None; cx.notify(); }));
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                if this.tab_menu_at.elapsed() < std::time::Duration::from_millis(250) { return; }
+                this.tab_menu = None;
+                cx.notify();
+            }));
         let mut k = 0usize;
         let mut id = || { k += 1; ("tabm", k) };
         macro_rules! item { ($ic:expr, $label:expr, $en:expr, $f:expr) => {{ let f = $f; let el = ui::menu_item(id(), Some($ic), $label, $en, false); if $en { el.on_click(cx.listener(move |this, _, w, cx| { this.tab_menu = None; f(this, w, cx); cx.notify(); })) } else { el } }} }
@@ -141,9 +145,9 @@ impl Root {
             let fh = p.read(cx).focus.clone(); w.focus(&fh, cx);
         };
         let (a, b, d) = (p.clone(), p.clone(), p.clone());
-        div().absolute().top(px(4.)).right(px(10.)).flex().items_center().gap(px(2.)).p(px(2.)).rounded(px(7.))
+        div().absolute().top(px(4.)).right(px(8.)).w(px(74.)).h(px(26.)).flex().items_center().justify_end().gap(px(2.)).rounded(px(7.))
+            .invisible().group_hover(group.clone(), |s| s.visible()).hover(|s| s.visible())
             .bg(c(th.mantle).opacity(0.92)).border_1().border_color(c(th.surface1).opacity(0.7)).shadow(chrome::soft_shadow(false))
-            .occlude().invisible().group_hover(group, |s| s.visible())
             .child(btn(0, IconName::Columns2, t("ui.split_left_right")).on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, _, w, cx| { cx.stop_propagation(); focus(this, &a, w, cx); this.split(Some(Dir::Vertical), w, cx); cx.notify(); })))
             .child(btn(1, IconName::Rows2, t("ui.split_top_bottom")).on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, _, w, cx| { cx.stop_propagation(); focus(this, &b, w, cx); this.split(Some(Dir::Horizontal), w, cx); cx.notify(); })))
             .child(btn(2, IconName::X, t("ui.close_pane")).on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, _, w, cx| { cx.stop_propagation(); focus(this, &d, w, cx); this.close_pane(w, cx); cx.notify(); })))

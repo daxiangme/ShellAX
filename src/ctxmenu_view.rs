@@ -47,6 +47,7 @@ pub struct MenuState {
     pub host_key: String,
     pub note: Option<String>,
     pub errors: usize,
+    pub opened: std::time::Instant,
 }
 
 pub fn build(target: Target, place: ctxmenu::Place, host: &str, host_key: String, pos: Point<Pixels>, note: Option<String>) -> MenuState {
@@ -54,12 +55,14 @@ pub fn build(target: Target, place: ctxmenu::Place, host: &str, host_key: String
     let (custom, errs) = ctxmenu::load_custom();
     let lang_en = ssh_term_proto::i18n::current() == ssh_term_proto::i18n::Lang::En;
     let menu = ctxmenu::build(&target, &ctxmenu::Ctx { host, place, tools: tools.as_ref(), custom: &custom, lang_en });
-    MenuState { menu, pos, target, host_key, note, errors: errs.len() }
+    MenuState { menu, pos, target, host_key, note, errors: errs.len(), opened: std::time::Instant::now() }
 }
 impl MenuState {
     /// Rebuild after a tool probe finished (same target and place).
     pub fn rebuilt(&self, place: ctxmenu::Place, host: &str) -> MenuState {
-        build(self.target.clone(), place, host, self.host_key.clone(), self.pos, self.note.clone())
+        let mut next = build(self.target.clone(), place, host, self.host_key.clone(), self.pos, self.note.clone());
+        next.opened = self.opened;
+        next
     }
 }
 
@@ -76,11 +79,11 @@ pub fn render<V: 'static>(st: &MenuState, cx: &mut Context<V>, pick: fn(&mut V, 
         let enabled = it.enabled();
         let mut row = div().id(("ctxmenu-item", i)).px(px(10.)).py(px(4.)).flex().flex_col().gap(px(1.)).rounded(px(6.)).mx(px(5.))
             .child(div().flex().items_center().gap_2().text_size(px(12.5)).text_color(if enabled { c(th.text) } else { c(th.overlay0) })
-                .child(div().flex_1().child(it.label.clone()))
+                .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().child(it.label.clone()))
                 .children(it.custom.then(|| div().px_1().rounded_sm().text_size(px(10.)).text_color(c(th.accent)).border_1().border_color(c(th.accent).opacity(0.5)).child("custom")))
                 .children((it.unknown && probing).then(|| div().text_size(px(10.)).text_color(c(th.overlay0)).child(t("cm.probing")))));
         if let Some(p) = it.preview() {
-            row = row.child(div().text_size(px(11.)).font_family(mono.clone()).text_color(if enabled { c(th.accent) } else { c(th.overlay0) }).overflow_hidden().child(format!("$ {p}")));
+            row = row.child(div().text_size(px(11.)).font_family(mono.clone()).text_color(if enabled { c(th.accent) } else { c(th.overlay0) }).whitespace_nowrap().overflow_hidden().text_ellipsis().child(format!("$ {p}")));
         }
         if !enabled {
             let tool = it.missing.join(", ");
@@ -90,13 +93,18 @@ pub fn render<V: 'static>(st: &MenuState, cx: &mut Context<V>, pick: fn(&mut V, 
         }
         list = list.child(row);
     }
-    let menu = crate::ui::popover().id("ctxmenu").occlude().w(px(520.)).flex().flex_col().overflow_hidden()
-        .on_mouse_down_out(cx.listener(move |v, _, _, cx| close(v, cx)))
+    let opened = st.opened;
+    let has_insert = st.menu.items.iter().any(|i| matches!(i.act, ssh_term_proto::ctxmenu::Act::Insert(_)));
+    let menu = crate::ui::popover().id("ctxmenu").occlude().w(px(280.)).flex().flex_col().overflow_hidden()
+        .on_mouse_down_out(cx.listener(move |v, _, _, cx| {
+            if opened.elapsed() < Duration::from_millis(250) { return; }
+            close(v, cx);
+        }))
         .child(div().px_3().pt_2().pb_1().flex().flex_col().gap(px(2.)).border_b_1().border_color(c(th.surface0))
-            .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(st.menu.header.clone()))
+            .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(st.menu.header.clone()))
             .children(st.note.clone().map(|n| div().text_size(px(11.)).text_color(c(th.warning)).child(n)))
             .children((st.errors > 0).then(|| div().text_size(px(11.)).text_color(c(th.error)).child(tf("cm.custom_errors", &[("n", &st.errors)])))))
         .child(list)
-        .child(div().px_3().py_1().border_t_1().border_color(c(th.surface1).opacity(0.5)).text_size(px(10.5)).text_color(c(th.overlay1)).child(t("cm.insert_hint")));
+        .when(has_insert, |d| d.child(div().px_3().py_1().border_t_1().border_color(c(th.surface1).opacity(0.5)).text_size(px(10.5)).text_color(c(th.overlay1)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(t("cm.insert_hint"))));
     deferred(anchored().position(st.pos).snap_to_window_with_margin(px(8.)).child(crate::chrome::pop_in("ctxmenu-pop", menu))).with_priority(10).into_any_element()
 }

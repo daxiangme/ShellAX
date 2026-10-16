@@ -83,6 +83,7 @@ pub struct SettingsView {
     inputs: HashMap<String, Entity<InputState>>,
     errors: HashMap<String, String>,
     theme_names: Vec<(String, bool)>,
+    scheme_names: Vec<(String, bool)>,
     // rule editor
     new_rule: [Entity<InputState>; 4],
     new_effect: Effect,
@@ -113,7 +114,7 @@ pub struct SettingsView {
 impl EventEmitter<SettingsEvent> for SettingsView {}
 
 impl SettingsView {
-    pub fn new(cat: Cat, theme_names: Vec<(String, bool)>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(cat: Cat, theme_names: Vec<(String, bool)>, scheme_names: Vec<(String, bool)>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder(t("ui.search_settings")));
         let mk = |ph: &str, v: &str, window: &mut Window, cx: &mut Context<Self>| { let (ph, v) = (ph.to_string(), v.to_string()); cx.new(|cx| InputState::new(window, cx).placeholder(ph).default_value(v)) };
         let new_rule = [mk(t("ui.rule_id_e_g_allow"), "", window, cx), mk(t("ui.principal_ai_claude"), "*", window, cx), mk(t("ui.command_glob_e_g_make"), "", window, cx), mk(t("ui.reason_optional"), "", window, cx)];
@@ -126,7 +127,7 @@ impl SettingsView {
         let key_pass = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder(t("ui.key_passphrase_optional")));
         let key_import = cx.new(|cx| InputState::new(window, cx).placeholder(t("ui.key_import_path")));
         let theme_import = cx.new(|cx| InputState::new(window, cx).placeholder(t("ui.theme_import_path")));
-        let mut me = Self { cm_editor: None, cm_note: None, key_pass, key_import, theme_import, cat, search, inputs: HashMap::new(), errors: HashMap::new(), theme_names, new_rule, new_effect: Effect::Allow, tester, notice: None,
+        let mut me = Self { cm_editor: None, cm_note: None, key_pass, key_import, theme_import, cat, search, inputs: HashMap::new(), errors: HashMap::new(), theme_names, scheme_names, new_rule, new_effect: Effect::Allow, tester, notice: None,
             ai_sel: config::get().ai.default_provider().map(|p| p.id.clone()), ai_key, ai_keys: HashMap::new(), ai_note: None, ai_test: HashMap::new(), ai_testing: None, lang_seen: ssh_term_proto::i18n::current() as u8,
             ai_models: HashMap::new(), ai_dropdown: None, ai_model_search, ai_url_gen: 0, _subs: subs };
         if let Some(id) = me.ai_sel.clone() { me.load_models(&id, false, cx); }
@@ -166,6 +167,7 @@ impl SettingsView {
 
             r(Terminal, t("ui.default_shell"), t("ui.empty_uses_shell_applies_to"), Ctl::Text("terminal.shell", "/bin/zsh")),
             r(Terminal, t("ui.term_padding"), t("ui.term_padding_desc"), Ctl::Text("terminal.padding", "8")),
+            r(Terminal, t("ui.show_cwd"), t("ui.show_cwd_desc"), Ctl::Toggle("terminal.show_cwd")),
             r(Terminal, t("ui.scrollback_lines"), t("ui.applies_to_new_sessions"), Ctl::Text("terminal.scrollback", "10000")),
             r(Terminal, t("ui.cursor_style"), "", Ctl::Choice("terminal.cursor_style", opts(&[("block", t("ui.block")), ("bar", t("ui.bar")), ("underline", t("ui.underline"))]))),
             r(Terminal, t("ui.cursor_blink"), t("ui.stops_blinking_after_10_s"), Ctl::Toggle("terminal.cursor_blink")),
@@ -332,12 +334,12 @@ impl SettingsView {
         let ctl = self.control(&row.ctl, window, cx);
         let path = match &row.ctl { Ctl::Toggle(p) | Ctl::Choice(p, _) | Ctl::Text(p, _) => Some(*p), _ => None };
         let err = path.and_then(|p| self.errors.get(p).cloned());
-        let mut left = div().flex_1().flex().flex_col().gap(px(2.)).min_w_0()
-            .child(div().flex().items_center().gap_2().text_size(px(13.)).text_color(c(th.text)).child(row.label));
-        if !row.desc.is_empty() { left = left.child(div().text_size(px(11.5)).text_color(c(th.overlay1)).child(row.desc)); }
-        if let Some(e) = err { left = left.child(div().text_size(px(11.5)).text_color(c(th.error)).child(e)); }
-        div().id(("row", idx)).px(px(12.)).py(px(8.)).min_h(px(40.)).flex().items_center().gap_4()
-            .child(left).child(div().flex_shrink_0().child(ctl)).into_any_element()
+        let mut left = div().w(px(168.)).flex_shrink_0().flex().flex_col().gap(px(2.))
+            .child(div().flex().items_center().gap_2().text_size(px(13.)).text_color(c(th.text)).whitespace_normal().child(row.label));
+        if !row.desc.is_empty() { left = left.child(div().text_size(px(11.5)).text_color(c(th.overlay1)).whitespace_normal().child(row.desc)); }
+        if let Some(e) = err { left = left.child(div().text_size(px(11.5)).text_color(c(th.error)).whitespace_normal().child(e)); }
+        div().id(("row", idx)).px(px(12.)).py(px(8.)).min_h(px(40.)).flex().items_start().gap_4()
+            .child(left).child(div().flex_1().min_w_0().child(ctl)).into_any_element()
     }
     /// Grouped inset card (System Settings): rows separated by inset hairlines.
     fn group_card(rows: Vec<AnyElement>) -> gpui::Div {
@@ -658,6 +660,20 @@ impl SettingsView {
             .into_any_element()
     }
 
+    fn scheme_preview(&self) -> AnyElement {
+        let sc = crate::theme::scheme();
+        let mut dots = div().flex().items_center().gap(px(3.));
+        for (i, col) in sc.ansi.iter().enumerate() {
+            dots = dots.child(div().id(("scheme-dot", i)).size(px(12.)).rounded_full().bg(c(*col)));
+        }
+        div().mb_2().p(px(10.)).rounded(px(8.)).bg(c(sc.bg)).flex().items_center().gap_3().overflow_hidden()
+            .child(div().text_size(px(12.5)).font_weight(FontWeight::SEMIBOLD).text_color(c(sc.fg)).child(t("ui.scheme_preview")))
+            .child(div().text_size(px(12.5)).text_color(c(sc.fg)).child(crate::theme::display_name(&sc.name)))
+            .child(div().flex_1())
+            .child(dots)
+            .into_any_element()
+    }
+
     fn appearance_extra(&self, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
         div().flex().flex_col().child(Self::section_title(t("ui.theme_import")))
@@ -666,13 +682,19 @@ impl SettingsView {
                 .child(div().flex_1().child(Input::new(&self.theme_import)))
                 .child(ui::button("theme-import", t("ui.import"), 0).on_click(cx.listener(move |this, _, window, cx| {
                     let src = ssh_term_proto::hosts::expand_tilde(this.theme_import.read(cx).value().trim());
-                    let Some(dir) = crate::theme::user_dir() else { return };
-                    this.notice = Some(match crate::theme::import_file(&src, &dir) {
-                        Ok((p, name, dark)) => {
-                            let _ = crate::audit_log().append("theme.import", "user", &format!("{} -> {}", src.display(), p.display()));
+                    this.notice = Some(match crate::theme::import_file(&src) {
+                        Ok(crate::theme::Imported::Theme { dest, name, dark }) => {
+                            let _ = crate::audit_log().append("theme.import", "user", &format!("{} -> {}", src.display(), dest.display()));
                             if !this.theme_names.iter().any(|n| n.0 == name) { this.theme_names.push((name.clone(), dark)); }
                             cx.emit(SettingsEvent::ThemesChanged);
-                            tf("settings.theme_imported", &[("name", &name), ("path", &p.display())])
+                            tf("settings.theme_imported", &[("name", &name), ("path", &dest.display())])
+                        }
+                        Ok(crate::theme::Imported::Scheme { dest, name, dark }) => {
+                            let _ = crate::audit_log().append("scheme.import", "user", &format!("{} -> {}", src.display(), dest.display()));
+                            if let Some(n) = this.scheme_names.iter_mut().find(|n| n.0.eq_ignore_ascii_case(&name)) { n.1 = dark; }
+                            else { this.scheme_names.push((name.clone(), dark)); }
+                            cx.emit(SettingsEvent::ThemesChanged);
+                            tf("settings.scheme_imported", &[("name", &name), ("path", &dest.display())])
                         }
                         Err(e) => tf("settings.theme_import_failed", &[("e", &format!("{e:#}"))]),
                     });
@@ -826,11 +848,13 @@ impl Render for SettingsView {
             self.ai_key.update(cx, |s, cx| s.set_placeholder(t("ai.key_placeholder"), window, cx));
         }
         let th = cur();
+        // One opaque surface for the card and both columns, so the rounded corners match the body.
+        let sheet = if th.appearance == crate::theme::Appearance::Dark { c(th.base) } else { c(th.mantle) };
         let query = self.search.read(cx).value().to_string().to_lowercase();
         let rows = self.rows();
 
         // ---- left: search + categories
-        let mut nav = div().id("settings-nav").w(px(224.)).flex_shrink_0().h_full().overflow_y_scroll().flex().flex_col().gap(px(1.)).p(px(10.)).bg(c(th.mantle)).border_r_1().border_color(c(th.surface1).opacity(0.6))
+        let mut nav = div().id("settings-nav").w(px(224.)).flex_shrink_0().h_full().overflow_y_scroll().flex().flex_col().gap(px(1.)).p(px(10.)).bg(sheet).border_r_1().border_color(c(th.surface1).opacity(0.6))
             .child(div().pb_2().child(Input::new(&self.search).prefix(icon(IconName::Search, 14., c(th.overlay1))).cleanable(true)));
         for (i, cat) in Cat::ALL.iter().copied().enumerate() {
             let active = query.is_empty() && cat == self.cat;
@@ -848,6 +872,7 @@ impl Render for SettingsView {
             body = body.child(div().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(self.cat.name()))
                 .child(div().pt_1().pb_2().text_size(px(12.)).text_color(c(th.overlay1)).child(self.cat.desc()));
             let cur_cat = self.cat;
+            if cur_cat == Cat::Appearance { body = body.child(self.scheme_preview()); }
             let els: Vec<AnyElement> = rows.iter().enumerate().filter(|(_, r)| r.cat == cur_cat).map(|(i, row)| self.row_el(row, i, window, cx)).collect();
             if !els.is_empty() { body = body.child(Self::group_card(els)); }
             let extra = match self.cat {
@@ -891,11 +916,11 @@ impl Render for SettingsView {
             .child(div().id("settings-close").size(px(28.)).rounded_md().flex().items_center().justify_center().cursor_pointer()
                 .hover(|d| d.bg(c(cur().surface0))).on_click(cx.listener(|_, _, _w, cx| cx.emit(SettingsEvent::Close)))
                 .child(icon(IconName::X, 16., c(th.overlay1))));
-        ui::card(1120.).h(px(740.))
+        ui::card(1120.).h(px(740.)).bg(sheet)
             .child(header)
-            .child(div().flex_1().min_h_0().flex().flex_row()
+            .child(div().flex_1().min_h_0().flex().flex_row().bg(sheet)
                 .child(nav)
-                .child(div().id("settings-scroll").flex_1().min_w_0().h_full().overflow_y_scroll().px_6().py_4().bg(if th.appearance == crate::theme::Appearance::Dark { c(th.base) } else { c(th.mantle).opacity(0.6) }).child(body.w_full())))
+                .child(div().id("settings-scroll").flex_1().min_w_0().h_full().overflow_y_scroll().px_6().py_4().bg(sheet).child(body.w_full())))
     }
 }
 

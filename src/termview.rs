@@ -26,7 +26,7 @@ use ssh_term_proto::ssh::SshTarget;
 use ssh_term_proto::suggest::{History, InputTracker, Key};
 use ssh_term_proto::term::{Session, Size};
 
-use crate::theme::{c, cur, term_color, Theme};
+use crate::theme::{c, cur, scheme, term_color, Scheme, Theme};
 use crate::{config, font_size, line_h};
 
 const SCROLLBAR_W: f32 = 8.0;
@@ -138,6 +138,7 @@ impl Render for GridLayer {
         let cache = self.cache.clone();
         let images = self.images.clone();
         let th = cur();
+        let sc = scheme();
         canvas(
             move |bounds, window, _cx| {
                 let ts = window.text_system();
@@ -159,7 +160,7 @@ impl Render for GridLayer {
                 GRID_PAINTS.fetch_add(1, Ordering::Relaxed);
                 let lh = line_h();
                 // appearance.opacity: the grid background carries the window alpha
-                let base = c(th.bg).opacity(config::get().appearance.opacity.clamp(0.5, 1.0));
+                let base = c(sc.bg).opacity(config::get().appearance.opacity.clamp(0.5, 1.0));
                 window.paint_quad(fill(bounds, base));
                 let Some(s) = session else { return };
                 let st = st2.borrow();
@@ -167,7 +168,7 @@ impl Render for GridLayer {
                 drop(st);
                 let mut term = s.term.lock().unwrap();
                 let (ncols, nrows, offset, history) = { let g = term.grid(); (g.columns(), g.screen_lines(), g.display_offset(), g.history_size()) };
-                let key = CacheKey { cols: ncols, rows: nrows, theme: th.name.clone().into(), cw: cw.to_bits(), gen: config::generation(), offset, sel, block, hover };
+                let key = CacheKey { cols: ncols, rows: nrows, theme: format!("{}+{}", th.name, sc.name).into(), cw: cw.to_bits(), gen: config::generation(), offset, sel, block, hover };
                 let mut cache = cache.borrow_mut();
                 let full = cache.0.as_ref() != Some(&key) || offset != 0;
                 let mut dirty = vec![full; nrows];
@@ -184,7 +185,7 @@ impl Render for GridLayer {
                 for (l, &d) in dirty.iter().enumerate().take(nrows) {
                     if d || cache.1[l].is_none() {
                         let line = l as i32 - offset as i32;
-                        cache.1[l] = Some(build_row(g, line, ncols, &th, sel, block, hover, cw, window));
+                        cache.1[l] = Some(build_row(g, line, ncols, &th, &sc, sel, block, hover, cw, window));
                         ROWS_BUILT.fetch_add(1, Ordering::Relaxed);
                     }
                 }
@@ -283,10 +284,10 @@ fn hl_color(th: &Theme, col: ssh_term_proto::highlight::Color) -> Hsla {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_row(g: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::Cell>, line: i32, ncols: usize, th: &Theme,
+fn build_row(g: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::Cell>, line: i32, ncols: usize, th: &Theme, sc: &Scheme,
              sel: Option<(BPoint, BPoint)>, block: bool, hover: Option<(i32, usize, usize)>, cw: f32, window: &mut Window) -> RowPaint {
     let row = &g[Line(line)];
-    let base = c(th.bg);
+    let base = c(sc.bg);
     let mut text = String::new();
     let mut runs: Vec<TextRun> = Vec::new();
     let mut last_style: Option<Style> = None;
@@ -305,14 +306,17 @@ fn build_row(g: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::
         let mut bg = base;
         if col < ncols {
             let cell = &row[Column(col)];
-            let mut fg = term_color(th, cell.fg, true);
-            bg = term_color(th, cell.bg, false);
+            let mut fg = term_color(sc, cell.fg, true);
+            bg = term_color(sc, cell.bg, false);
             if cell.flags.contains(Flags::DIM) { fg = fg.opacity(0.65); }
             if cell.flags.contains(Flags::INVERSE) { std::mem::swap(&mut fg, &mut bg); }
-            if in_sel(sel, block, (line, col)) { bg = c(th.selection); }
+            if in_sel(sel, block, (line, col)) {
+                bg = c(sc.selection);
+                if let Some(sf) = sc.selection_fg { fg = c(sf); }
+            }
             let link = cell.hyperlink().is_some();
             let hovered = hover.is_some_and(|(l, a, b)| l == line && col >= a && col < b);
-            let ucolor = cell.underline_color().map(|u| term_color(th, u, true)).unwrap_or(fg);
+            let ucolor = cell.underline_color().map(|u| term_color(sc, u, true)).unwrap_or(fg);
             let underline = if cell.flags.intersects(Flags::ALL_UNDERLINES) || hovered {
                 Some(UnderlineStyle { thickness: px(if cell.flags.contains(Flags::DOUBLE_UNDERLINE) { 2. } else { 1. }), color: Some(ucolor), wavy: cell.flags.contains(Flags::UNDERCURL) })
             } else if link {
@@ -359,6 +363,7 @@ impl Render for CursorLayer {
         let session = self.session.clone();
         let st = self.st.clone();
         let th = cur();
+        let sc = scheme();
         canvas(|_, _, _| {}, move |_bounds, _, window, cx| {
             CURSOR_PAINTS.fetch_add(1, Ordering::Relaxed);
             let Some(s) = session else { return };
@@ -374,8 +379,8 @@ impl Render for CursorLayer {
                 let x = origin.x + px(cursor.column.0 as f32 * cw);
                 let y = origin.y + px(cursor.line.0.max(0) as f32 * lh);
                 let cells: usize = pe.chars().map(|c| if (c as u32) < 0x1100 { 1 } else { 2 }).sum();
-                window.paint_quad(fill(Bounds::new(point(x, y), size(px(cells as f32 * cw), px(lh))), c(th.bg)));
-                let sh = window.text_system().shape_line(pe.clone().into(), px(font_size()), &[plain_run(pe.len(), c(th.text))], None);
+                window.paint_quad(fill(Bounds::new(point(x, y), size(px(cells as f32 * cw), px(lh))), c(sc.bg)));
+                let sh = window.text_system().shape_line(pe.clone().into(), px(font_size()), &[plain_run(pe.len(), c(sc.fg))], None);
                 let _ = sh.paint(point(x, y), px(lh), TextAlign::Left, None, window, cx);
                 window.paint_quad(fill(Bounds::new(point(x, y + px(lh - 2.)), size(px(cells as f32 * cw), px(1.5))), c(th.accent)));
                 return;
@@ -394,7 +399,7 @@ impl Render for CursorLayer {
                 if row < nrows && !chunk.is_empty() { pieces.push((row, chunk_start, chunk)); }
                 for (r, start, text) in pieces {
                     if text.is_empty() { continue; }
-                    let sh = window.text_system().shape_line(text.clone().into(), px(font_size()), &[plain_run(text.len(), c(th.suggestion))], Some(px(cw)));
+                    let sh = window.text_system().shape_line(text.clone().into(), px(font_size()), &[plain_run(text.len(), c(sc.suggestion))], Some(px(cw)));
                     let _ = sh.paint(point(origin.x + px(start as f32 * cw), origin.y + px(r as f32 * lh)), px(lh), TextAlign::Left, None, window, cx);
                 }
             }
@@ -409,14 +414,14 @@ impl Render for CursorLayer {
                 if st.blink_on {
                     let bar = if style == "bar" { Bounds::new(b.origin, size(px(2.), b.size.height)) }
                               else { Bounds::new(point(x, y + px(lh - 3.)), size(px(w), px(2.))) };
-                    window.paint_quad(fill(bar, c(th.cursor)));
+                    window.paint_quad(fill(bar, c(sc.cursor)));
                 }
             } else if st.focused {
                 if st.blink_on {
-                    window.paint_quad(fill(b, c(th.cursor)));
+                    window.paint_quad(fill(b, c(sc.cursor)));
                     let ch = if cell.c != ' ' && cell.c != '\0' { Some(cell.c) } else { st.suggestion.as_ref().and_then(|s| s.chars().next()) };
                     if let Some(ch) = ch {
-                        let sh = window.text_system().shape_line(ch.to_string().into(), px(font_size()), &[plain_run(ch.len_utf8(), c(th.cursor_text))], Some(px(w)));
+                        let sh = window.text_system().shape_line(ch.to_string().into(), px(font_size()), &[plain_run(ch.len_utf8(), c(sc.cursor_text))], Some(px(w)));
                         let _ = sh.paint(point(x, y), px(lh), TextAlign::Left, None, window, cx);
                     }
                 }
@@ -457,6 +462,8 @@ pub struct TermView {
     last_detect: Instant,
     detect_scheduled: bool,
     pub pending_paste: Option<String>,
+    /// `cd` line to send once the shell is connected (saved directory).
+    pending_cd: Option<String>,
     pub ai: Option<AiCard>,
     /// Local pane held by the keep-alive daemon (id there).
     pub daemon_id: Option<String>,
@@ -517,7 +524,7 @@ pub struct SearchBar { pub query: String, pub cur: Option<(BPoint, BPoint)>, pub
 #[derive(Clone, Debug, PartialEq)]
 pub struct StepOutput { pub cmd: String, pub exit: Option<i32>, pub output: String, pub withheld: bool }
 
-pub enum TermEvent { Keyword(String, String), Explain, Agent(String, AgentState), LongDone(String, u64, i32), Audit(&'static str, String), CtxEditor(String), CtxCdTab(String), CtxAiExplain(String) }
+pub enum TermEvent { Keyword(String, String), Explain, Agent(String, AgentState), LongDone(String, u64, i32), Audit(&'static str, String), CtxEditor(String), CtxCdTab(String), CtxAiExplain(String), CtxUseAi }
 
 /// IME support (PRD 3.3: IME must work for agents too). Committed text goes to the PTY like typing;
 /// composition text is only drawn (never sent) until the IME commits it.
@@ -607,7 +614,7 @@ impl TermView {
             selecting: false, scroll_drag: false, history, tracker: InputTracker::new(),
             last_activity: Instant::now(), blink_running: false, software_gpu: std::env::var("SHELLAX_FORCE_BLINK").ok().map(|_| false), last_mouse_cell: None, mouse_down_btn: None,
             manifests, last_command: None, agent: None, agent_seen: Instant::now(), last_detect: Instant::now() - Duration::from_secs(5),
-            detect_scheduled: false, pending_paste: None, ai: None, daemon_id: None, resume_offer: None, clip_ask: None, pty_ask: None, pty_write_ok: false, search: None, last_agent: None, failed: None, exit_seen: 0, ai_inline_seq: 0, ai_inline: None, bell_until: None, cmd_started: None, ai_capture: None, ctx_menu: None, ctx_pending: None, ctx_confirm: None, ctx_denied: None, sftp: None, _subs: subs,
+            detect_scheduled: false, pending_paste: None, pending_cd: None, ai: None, daemon_id: None, resume_offer: None, clip_ask: None, pty_ask: None, pty_write_ok: false, search: None, last_agent: None, failed: None, exit_seen: 0, ai_inline_seq: 0, ai_inline: None, bell_until: None, cmd_started: None, ai_capture: None, ctx_menu: None, ctx_pending: None, ctx_confirm: None, ctx_denied: None, sftp: None, _subs: subs,
         }
     }
 
@@ -683,6 +690,7 @@ impl TermView {
 
     /// Called (coalesced) when the backend produced output.
     fn on_output(&mut self, cx: &mut Context<Self>) {
+        self.try_flush_cd();
         if let Some(s) = &self.session {
             if let Some(seed) = s.history_seed.lock().unwrap().take() { if config::get().suggest.remote_history { self.history.lock().unwrap().extend_from_bash_history(&seed); } }
             if s.exited.load(Ordering::Acquire) || s.conn_error.lock().unwrap().is_some() { cx.notify(); }
@@ -951,10 +959,24 @@ impl TermView {
     }
 
     // ---------------- keyboard
-    fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(s) = self.session.clone() else { return };
+    /// Tab / Shift+Tab stay in the terminal: completion, or accept a suggestion when one is showing.
+    pub fn inject_tab(&mut self, shift: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let ev = KeyDownEvent {
+            keystroke: gpui::Keystroke {
+                key: "tab".into(),
+                key_char: None,
+                modifiers: gpui::Modifiers { shift, ..Default::default() },
+            },
+            is_held: false,
+            prefer_character_input: false,
+        };
+        self.on_key(&ev, window, cx);
+    }
+    pub(crate) fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let k = &ev.keystroke;
         let m = &k.modifiers;
+        let bare_tab = k.key == "tab" && !m.control && !m.alt && !m.platform;
+        let Some(s) = self.session.clone() else { if bare_tab { cx.stop_propagation(); } return; };
         self.kick_blink(window, cx);
         if self.ai.is_some() && !m.control && !m.alt && !m.platform {
             match k.key.as_str() {
@@ -998,7 +1020,7 @@ impl TermView {
             }
         }
         let app_cursor = self.mode().contains(TermMode::APP_CURSOR);
-        let Some(bytes) = key_to_bytes(k, app_cursor) else { return };
+        let Some(bytes) = key_to_bytes(k, app_cursor) else { if bare_tab { cx.stop_propagation(); } return; };
         match k.key.as_str() {
             "enter" if plain && self.nl_request().is_some() => {
                 let req = self.nl_request().unwrap_or_default();
@@ -1163,6 +1185,35 @@ impl TermView {
         let (t, n) = ssh_term_proto::ai::build_context(&inp, &opts);
         (t, n, match &self.spec { Spec::Local => "local".to_string(), Spec::Ssh(t) => t.label() })
     }
+    /// What the chat composer will actually attach. Screen scope sends the recent terminal
+    /// text even when `ai.send_output` is off. Hosts in `no_output_hosts` still get only the
+    /// last command. The `#` command card keeps using `ai_context`.
+    pub fn chat_context(&self) -> (String, usize, String, &'static str) {
+        let cfg = config::get();
+        let host = match &self.spec { Spec::Local => "local".to_string(), Spec::Ssh(t) => t.label() };
+        let scope = ssh_term_proto::ai::Scope::from_id(&cfg.ai.context);
+        let blocked = self.output_blocked_for_host();
+        let screen = self.screen_lines();
+        let sel = self.selection_text();
+        let inp = ssh_term_proto::ai::ContextInput { selection: sel.as_deref(), last_command: self.last_command.as_deref(), screen: &screen };
+        let lines = cfg.ai.context_lines as usize;
+        let redact = cfg.ai.redact;
+        let pack = |scope, send_output| {
+            let opts = ssh_term_proto::ai::ContextOpts { scope, lines, send_output, redact };
+            ssh_term_proto::ai::build_context(&inp, &opts)
+        };
+        if matches!(scope, ssh_term_proto::ai::Scope::Screen) && !blocked {
+            let (t, n) = pack(ssh_term_proto::ai::Scope::Screen, true);
+            if !t.trim().is_empty() { return (t, n, host, "screen"); }
+        }
+        if matches!(scope, ssh_term_proto::ai::Scope::Selection) && !blocked && self.ai_output_allowed() {
+            let (t, n) = pack(ssh_term_proto::ai::Scope::Selection, true);
+            if !t.trim().is_empty() { return (t, n, host, "selection"); }
+        }
+        if matches!(scope, ssh_term_proto::ai::Scope::None) { return (String::new(), 0, host, "none"); }
+        let (t, n) = pack(ssh_term_proto::ai::Scope::Command, false);
+        if t.trim().is_empty() { (String::new(), 0, host, "none") } else { (t, n, host, "command") }
+    }
     /// For "explain failure": command, exit code, redacted output tail (200 lines, always redacted).
     pub fn failure_context(&self) -> Option<(String, i32, String, String)> {
         let (cmd, code) = self.failed.clone()?;
@@ -1182,15 +1233,8 @@ impl TermView {
         if !cfg.ai.first_send_ack { self.ai = Some(AiCard::Consent { request }); cx.notify(); return; }
         let key = crate::secret_store().get(&provider.secret_name()).map(|x| x.0).unwrap_or_default();
         provider.model = provider.command_model().to_string(); // fast model for command generation if set
-        // context, honouring scope / send_output / redaction settings
-        let screen = self.screen_lines();
-        let sel = self.selection_text();
-        let inp = ssh_term_proto::ai::ContextInput { selection: sel.as_deref(), last_command: self.last_command.as_deref(), screen: &screen };
-        let opts = ssh_term_proto::ai::ContextOpts {
-            scope: ssh_term_proto::ai::Scope::from_id(&cfg.ai.context), lines: cfg.ai.context_lines as usize,
-            send_output: self.ai_output_allowed(), redact: cfg.ai.redact,
-        };
-        let (ctx_text, mut n_red) = ssh_term_proto::ai::build_context(&inp, &opts);
+        // `#` requests still honour send_output. Chat uses chat_context and can send the screen anyway.
+        let (ctx_text, mut n_red, _host) = self.ai_context();
         let (req_sent, n2) = if cfg.ai.redact { ssh_term_proto::ai::redact(&request) } else { (request.clone(), 0) };
         n_red += n2;
         let shell = match &self.spec { Spec::Local => { let s = crate::config::get().terminal.shell.clone(); if s.is_empty() { ssh_term_proto::local::default_shell_path() } else { s } } Spec::Ssh(_) => "remote POSIX shell".into() };
@@ -1449,6 +1493,25 @@ impl TermView {
     // ---------------- right-click context menu (PRD 5.20)
     fn ssh_target(&self) -> Option<SshTarget> { match &self.spec { Spec::Ssh(t) => Some(t.clone()), Spec::Local => None } }
     fn ctx_place(&self) -> ssh_term_proto::ctxmenu::Place { ssh_term_proto::ctxmenu::Place::Terminal { remote: matches!(self.spec, Spec::Ssh(_)) } }
+    /// Run `cmd` (no newline) once the shell is connected. Retries until then.
+    pub fn queue_cd(&mut self, cmd: String, cx: &mut Context<Self>) {
+        self.pending_cd = Some(cmd);
+        cx.spawn(async move |this, cx| {
+            for _ in 0..24 {
+                cx.background_executor().timer(Duration::from_millis(250)).await;
+                let done = this.update(cx, |v, _| v.try_flush_cd()).unwrap_or(true);
+                if done { return; }
+            }
+        }).detach();
+    }
+    /// true when there is nothing left to send.
+    fn try_flush_cd(&mut self) -> bool {
+        if self.pending_cd.is_none() { return true; }
+        let Some(s) = self.session.clone() else { return true; };
+        if !s.connected.load(Ordering::Acquire) || s.exited.load(Ordering::Acquire) { return s.exited.load(Ordering::Acquire); }
+        if let Some(cmd) = self.pending_cd.take() { s.write(format!("{cmd}\r").into_bytes()); }
+        true
+    }
     /// Shell cwd: OSC 7 → local /proc probe → `user@host:dir$` prompt on the cursor line.
     pub fn shell_cwd(&self) -> Option<String> {
         let s = self.session.as_ref()?;
@@ -1457,6 +1520,25 @@ impl TermView {
         let t = s.term.lock().unwrap();
         let g = t.grid();
         ssh_term_proto::ctxmenu::prompt_cwd(&row_chars(g, g.cursor.point.line.0))
+    }
+    /// Enter `path` in this shell. Clears a half-typed line first.
+    pub fn cd_to(&mut self, path: &str, cx: &mut Context<Self>) {
+        let cmd = cd_command_for(path);
+        let Some(s) = self.session.clone() else { return };
+        if !s.connected.load(Ordering::Acquire) || s.exited.load(Ordering::Acquire) {
+            self.queue_cd(cmd, cx);
+            return;
+        }
+        let mut bytes = ssh_term_proto::ctxmenu::insert_bytes(&cmd);
+        bytes.push(b'\r');
+        s.write(bytes);
+        self.tracker.key(Key::KillLine);
+        self.tracker.key(Key::Text(&cmd));
+        self.tracker.key(Key::Enter);
+        self.last_command = Some(cmd.clone());
+        let _ = crate::audit_log().append("cwd.cd", "user", &cmd);
+        self.scroll_to_bottom(cx);
+        cx.notify();
     }
     /// Text of a screen row with wide-char spacers removed, and the char index of `col`.
     fn line_at(&self, (row, col): (usize, usize)) -> Option<(String, usize)> {
@@ -1481,28 +1563,40 @@ impl TermView {
         let sel = self.selection_text().filter(|s| !s.trim().is_empty());
         let mut note = None;
         let target = if let Some(sel) = sel { Target::Selection(sel) } else {
-            let Some((line, ci)) = self.line_at(cell) else { return };
-            match detect_at(&line, ci).map(|d| d.found) {
-                Some(Found::Url(u)) => Target::Url(u),
-                Some(Found::HostPort { host, port }) => Target::HostPort { host, port },
-                Some(Found::Path { path, .. }) => {
-                    let cwd = self.shell_cwd();
-                    let home = matches!(self.spec, Spec::Local).then(|| std::env::var("HOME").ok()).flatten();
-                    let (p, ok) = resolve(&path, cwd.as_deref(), home.as_deref());
-                    if !ok { note = Some(t("cm.cwd_unknown").to_string()); }
-                    let is_dir = path.ends_with('/');
-                    let p = if p.len() > 1 { p.trim_end_matches('/').to_string() } else { p };
-                    Target::Files(vec![FileObj { path: p, is_dir, mode: 0 }])
-                }
-                None => {
-                    // nothing recognised: offer paste of the clipboard (no newline)
-                    let Some(clip) = cx.read_from_clipboard().and_then(|i| i.text()).filter(|t| !t.is_empty()) else { return };
-                    Target::Selection(clip)
-                }
+            let mut blank = || {
+                let paste = cx.read_from_clipboard().and_then(|i| i.text()).filter(|t| !t.trim().is_empty());
+                if paste.is_none() { note = Some(t("cm.clipboard_empty").to_string()); }
+                Target::Blank { paste }
+            };
+            match self.line_at(cell) {
+                None => blank(),
+                Some((line, ci)) => match detect_at(&line, ci).map(|d| d.found) {
+                    Some(Found::Url(u)) => Target::Url(u),
+                    Some(Found::HostPort { host, port }) => Target::HostPort { host, port },
+                    Some(Found::Path { path, .. }) => {
+                        let cwd = self.shell_cwd();
+                        let home = matches!(self.spec, Spec::Local).then(|| std::env::var("USERPROFILE").ok().or_else(|| std::env::var("HOME").ok())).flatten();
+                        let (p, ok) = resolve(&path, cwd.as_deref(), home.as_deref());
+                        if !ok { note = Some(t("cm.cwd_unknown").to_string()); }
+                        let is_dir = path.ends_with('/');
+                        let p = if p.len() > 1 { p.trim_end_matches('/').to_string() } else { p };
+                        Target::Files(vec![FileObj { path: p, is_dir, mode: 0 }])
+                    }
+                    None => blank(),
+                },
             }
         };
         let key = crate::ctxmenu_view::host_key(self.ssh_target().as_ref());
         self.ctx_menu = Some(crate::ctxmenu_view::build(target, self.ctx_place(), &self.audit_host(), key, pos, note));
+        if crate::chat_view::dock_open() {
+            if let Some(m) = &mut self.ctx_menu {
+                let group = m.menu.items.last().map(|i| i.group.saturating_add(1)).unwrap_or(0);
+                m.menu.items.push(ssh_term_proto::ctxmenu::MenuItem {
+                    id: "ai_context".into(), label: t("cm.use_ai_context").into(), act: ssh_term_proto::ctxmenu::Act::UseAiContext,
+                    missing: vec![], hint: None, unknown: false, custom: false, group,
+                });
+            }
+        }
         if let Some(rx) = crate::ctxmenu_view::ensure_probe(self.ssh_target()) {
             cx.spawn(async move |this, cx| {
                 let _ = rx.recv_async().await;
@@ -1527,11 +1621,71 @@ impl TermView {
             Act::PasteInput(text) => {
                 if let Some(s) = self.session.clone() { let one = text.replace(['\r', '\n'], " "); s.write(one.clone().into_bytes()); self.tracker.key(Key::Text(&one)); }
             }
+            Act::UseAiContext => cx.emit(TermEvent::CtxUseAi),
             Act::Download(_) | Act::Upload(_) => {}
         }
         cx.notify();
     }
     fn ctx_close(&mut self, cx: &mut Context<Self>) { if self.ctx_menu.take().is_some() { cx.notify(); } }
+    pub fn ready(&self) -> bool { self.session.is_some() }
+    /// Multi-line insert is only safe when the shell will not execute the pasted newlines.
+    pub fn can_paste_block(&self) -> bool { self.ready() && self.mode().contains(TermMode::BRACKETED_PASTE) }
+
+    /// Permission verdict for a saved script. Any deny stops the whole script; any ask waits for the panel.
+    pub fn gate_script(&self, lines: &[String]) -> ScriptGate {
+        let cfg = config::get();
+        let max = match cfg.permissions.max_auto_risk.as_str() { "R0" => Risk::R0, "R2" => Risk::R2, _ => Risk::R1 };
+        let prod = cfg.permissions.prod_confirm && matches!(&self.spec, Spec::Ssh(t) if t.production);
+        let mut asks = vec![];
+        for line in lines {
+            let (eff, why) = policy::decide_host(cfg.permissions.mode, max, &cfg.permissions.rules, "user:snippet", "exec", line, cfg.permissions.dangerous_confirm, prod, &self.audit_host());
+            let risk = policy::classify(line);
+            let _ = crate::audit_log().append("snippet.decision", "policy", &format!("host={} risk={} effect={eff:?} command={:?} reason={why:?}", self.audit_host(), risk.label(), ssh_term_proto::ai::redact(line).0));
+            match eff {
+                Effect::Deny => return ScriptGate::Deny { line: line.clone(), why },
+                Effect::Ask => asks.push(format!("{line} — {why}")),
+                Effect::Allow => {}
+            }
+        }
+        if asks.is_empty() { ScriptGate::Allow } else { ScriptGate::Ask(asks) }
+    }
+
+    /// Clear the prompt, then send each line with Enter. Caller has already passed the permission gate.
+    pub fn run_script_lines(&mut self, lines: &[String], cx: &mut Context<Self>) {
+        let Some(s) = self.session.clone() else { return };
+        let mut bytes = vec![0x15];
+        for line in lines {
+            let one = line.replace(['\r', '\n'], " ");
+            bytes.extend(one.as_bytes());
+            bytes.push(b'\r');
+            self.history.lock().unwrap().add(&one);
+            if config::get().audit.log_commands { let _ = crate::audit_log().append("command", "user", &ssh_term_proto::ai::redact(&one).0); }
+            let _ = crate::audit_log().append("snippet.exec", "user", &format!("host={} command={:?}", self.audit_host(), ssh_term_proto::ai::redact(&one).0));
+            self.tracker.key(Key::KillLine);
+            self.tracker.key(Key::Text(&one));
+            self.tracker.key(Key::Enter);
+            if self.agent.is_none() { self.cmd_started = Some((Instant::now(), one.clone())); self.last_command = Some(one); }
+        }
+        s.write(bytes);
+        self.scroll_to_bottom(cx);
+        cx.notify();
+    }
+
+    /// Insert a multi-line body without executing it. False when bracketed paste is off or there is no session.
+    pub fn insert_block(&mut self, body: &str, cx: &mut Context<Self>) -> bool {
+        if !self.can_paste_block() { return false; }
+        let Some(s) = self.session.clone() else { return false; };
+        let mut bytes = vec![0x15];
+        bytes.extend(paste_bytes(body, true));
+        s.write(bytes);
+        self.tracker.key(Key::KillLine);
+        self.tracker.key(Key::Other);
+        cx.emit(TermEvent::Audit("snippet.insert", format!("host={} chars={}", self.audit_host(), body.chars().count())));
+        self.scroll_to_bottom(cx);
+        cx.notify();
+        true
+    }
+
     /// Put a command on the input line without running it (Ctrl+U clears what was typed first).
     pub fn insert_command(&mut self, cmd: &str, cx: &mut Context<Self>) {
         let Some(s) = self.session.clone() else { return };
@@ -1669,6 +1823,13 @@ impl TermView {
     }
 }
 
+/// Result of judging every line of a saved script before anything is written to the terminal.
+pub enum ScriptGate {
+    Allow,
+    Ask(Vec<String>),
+    Deny { line: String, why: String },
+}
+
 /// Bytes to send for a paste. Bracketed paste wraps the text and strips any embedded
 /// ESC so pasted content can't terminate the bracket early; otherwise newlines become CR.
 pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
@@ -1681,6 +1842,46 @@ pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
 
 /// xterm mouse encoding. `button`: 0/1/2 = L/M/R, 3 = release (X10), 64/65 = wheel, +32 = motion,
 /// modifiers already added. Rows/cols are 0-based screen cells.
+fn is_windows_path(path: &str) -> bool {
+    let b = path.as_bytes();
+    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+}
+
+/// `(label, path)` from the root down to `path`, so a breadcrumb can cd to any prefix.
+pub(crate) fn cwd_crumbs(path: &str) -> Vec<(String, String)> {
+    let path = path.trim();
+    if path.is_empty() { return vec![]; }
+    if is_windows_path(path) {
+        let parts: Vec<&str> = path.trim_end_matches(['\\', '/']).split(['\\', '/']).filter(|s| !s.is_empty()).collect();
+        let mut acc = String::new();
+        let mut out = Vec::with_capacity(parts.len());
+        for (i, part) in parts.into_iter().enumerate() {
+            if i == 0 { acc = format!("{part}\\"); }
+            else {
+                if !acc.ends_with('\\') { acc.push('\\'); }
+                acc.push_str(part);
+            }
+            out.push((part.to_string(), acc.clone()));
+        }
+        return out;
+    }
+    let abs = path.starts_with('/');
+    let parts: Vec<&str> = path.trim_end_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+    let mut out = Vec::new();
+    let mut acc = String::new();
+    if abs { out.push(("/".into(), "/".into())); acc = "/".into(); }
+    for part in parts {
+        acc = if acc == "/" { format!("/{part}") } else if acc.is_empty() { part.to_string() } else { format!("{acc}/{part}") };
+        out.push((part.to_string(), acc.clone()));
+    }
+    out
+}
+
+fn cd_command_for(path: &str) -> String {
+    if is_windows_path(path) { format!("Set-Location -LiteralPath '{}'", path.replace('\'', "''")) }
+    else { format!("cd -- {}", ssh_term_proto::ctxmenu::quote_path(path)) }
+}
+
 pub fn encode_mouse(button: u8, pressed: bool, row: usize, col: usize, sgr: bool) -> Vec<u8> {
     if sgr {
         format!("\x1b[<{};{};{}{}", button, col + 1, row + 1, if pressed { 'M' } else { 'm' }).into_bytes()
@@ -1742,10 +1943,8 @@ fn fanout(s: &Arc<Session>, bytes: Vec<u8>) {
 impl Render for TermView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
-        let focused = self.st.borrow().focused;
         if let Some(v) = self.sftp.clone() {
-            return div().track_focus(&self.focus).flex_1().size_full().flex().flex_col().overflow_hidden()
-                .border_t_2().border_color(if focused { c(th.accent) } else { c(th.bg) }).child(v);
+            return div().track_focus(&self.focus).flex_1().size_full().flex().flex_col().overflow_hidden().child(v);
         }
         let mut body = div().flex_1().size_full().relative()
             .child(self.grid.clone().cached(StyleRefinement::default().size_full()))
@@ -1846,23 +2045,29 @@ impl Render for TermView {
         if self.bell_until.is_some_and(|t| t > Instant::now()) {
             body = body.child(div().absolute().top_0().left_0().size_full().border_2().border_color(c(th.warning)).bg(c(th.warning).opacity(0.06)));
         }
-        let (status, scolor) = self.status(&th);
-        let mut header = div().h(px(26.)).px_3().flex().items_center().gap_2().bg(c(th.mantle)).text_size(px(11.5))
-            .text_color(if focused { c(th.text) } else { c(th.overlay1) })
-            .child(div().size(px(7.)).rounded_full().bg(scolor))
-            .child(self.shown_title())
-            .child(div().text_color(c(th.overlay0)).child(status));
+        let mut extras = div().h(px(26.)).px_3().flex().items_center().gap_2().bg(c(th.mantle)).text_size(px(11.5));
+        let mut has_extra = false;
         if let Some((name, st)) = self.agent_label() {
+            has_extra = true;
             let col = match st { AgentState::Working => c(th.warning), AgentState::Blocked => c(th.error), AgentState::Idle => c(th.success), _ => c(th.overlay1) };
-            header = header.child(div().px_2().rounded_md().bg(col.opacity(0.18)).text_color(col).child(format!("{name} · {}", st.label())));
+            extras = extras.child(div().px_2().rounded_md().bg(col.opacity(0.18)).text_color(col).child(format!("{name} · {}", st.label())));
         }
         if let Some((cmd, code)) = self.failed.clone() {
-            header = header.child(div().flex_1()).child(div().id("explain-fail").px_2().rounded_md().cursor_pointer().bg(c(th.error).opacity(0.15)).text_color(c(th.error))
+            has_extra = true;
+            extras = extras.child(div().flex_1()).child(div().id("explain-fail").px_2().rounded_md().cursor_pointer().bg(c(th.error).opacity(0.15)).text_color(c(th.error))
                 .child(tf("ai.explain_btn", &[("code", &code)]))
                 .on_click(cx.listener(move |_v, _, _w, cx| { let _ = &cmd; cx.emit(TermEvent::Explain); })));
         }
         div()
             .track_focus(&self.focus)
+            .capture_key_down(cx.listener(|v, ev: &KeyDownEvent, w, cx| {
+                let k = &ev.keystroke;
+                if k.key == "tab" && !k.modifiers.control && !k.modifiers.alt && !k.modifiers.platform {
+                    v.on_key(ev, w, cx);
+                    w.prevent_default();
+                    cx.stop_propagation();
+                }
+            }))
             .on_key_down(cx.listener(Self::on_key))
             .on_mouse_down(MouseButton::Left, cx.listener(|v, ev, w, cx| v.on_mouse_down(MouseButton::Left, ev, w, cx)))
             .on_mouse_down(MouseButton::Middle, cx.listener(|v, ev, w, cx| v.on_mouse_down(MouseButton::Middle, ev, w, cx)))
@@ -1872,9 +2077,8 @@ impl Render for TermView {
             .on_mouse_up(MouseButton::Right, cx.listener(|v, ev, w, cx| v.on_mouse_up(MouseButton::Right, ev, w, cx)))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
-            .flex_1().size_full().flex().flex_col().bg(c(th.bg).opacity(config::get().appearance.opacity.clamp(0.5, 1.0))).overflow_hidden()
-            .border_t_2().border_color(if focused { c(th.accent) } else { c(th.bg) })
-            .child(header)
+            .flex_1().size_full().flex().flex_col().bg(c(scheme().bg).opacity(config::get().appearance.opacity.clamp(0.5, 1.0))).overflow_hidden()
+            .when(has_extra, |d| d.child(extras))
             .child(body)
     }
 }
@@ -1908,5 +2112,12 @@ mod tests {
         assert_eq!(encode_mouse(0, true, 0, 0, false), vec![0x1b, b'[', b'M', 32, 33, 33]);
         assert_eq!(encode_mouse(0, false, 0, 0, false)[3], 35);
         assert_eq!(encode_mouse(64, true, 1, 1, true), b"\x1b[<64;2;2M");
+    }
+    #[test]
+    fn crumbs_keep_each_prefix() {
+        assert_eq!(cwd_crumbs("/var/log"), vec![("/".into(), "/".into()), ("var".into(), "/var".into()), ("log".into(), "/var/log".into())]);
+        assert_eq!(cwd_crumbs("D:\\a\\b"), vec![("D:".into(), "D:\\".into()), ("a".into(), "D:\\a".into()), ("b".into(), "D:\\a\\b".into())]);
+        assert_eq!(cd_command_for("/var/log"), "cd -- /var/log");
+        assert_eq!(cd_command_for(r"D:\a b"), "Set-Location -LiteralPath 'D:\\a b'");
     }
 }

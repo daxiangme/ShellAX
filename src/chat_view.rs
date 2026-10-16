@@ -1,9 +1,8 @@
 //! Built-in AI chat panel: streamed multi-turn conversation; each user turn can carry the
 //! focused terminal's context (scope/redaction per AI settings). "Explain failure" starts here too.
-use gpui::{div, prelude::*, px, Context, Entity, FontWeight, SharedString, WeakEntity, Window};
-use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::switch::Switch;
-use gpui_component::Sizable;
+use gpui::{div, prelude::*, px, relative, Animation, AnimationExt, Context, Entity, FontWeight, ScrollHandle, SharedString, WeakEntity, Window};
+use gpui_component::input::{InputEvent, Textarea, TextareaState};
+use gpui_component::text::{SelectionFormat, TextView};
 use ssh_term_proto::i18n::{t, tf};
 use ssh_term_proto::policy::Effect;
 
@@ -13,6 +12,10 @@ use crate::theme::{c, cur};
 use crate::ui::{self, icon, IconName};
 
 pub enum ChatEvent { Close, Insert(String) }
+
+static DOCK_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn set_dock_open(open: bool) { DOCK_OPEN.store(open, std::sync::atomic::Ordering::Relaxed); }
+pub fn dock_open() -> bool { DOCK_OPEN.load(std::sync::atomic::Ordering::Relaxed) }
 impl gpui::EventEmitter<ChatEvent> for ChatView {}
 
 #[derive(Clone)]
@@ -87,13 +90,68 @@ impl Plan {
 
 fn crate_redact(s: &str) -> String { ssh_term_proto::ai::redact(s).0 }
 
+fn command_line(line: &str) -> Option<String> {
+    let l = line.trim().trim_start_matches("$ ").trim();
+    if l.is_empty() || l.starts_with('#') { None } else { Some(l.to_string()) }
+}
+
 /// Every command line in every fenced code block of a reply (comments and blanks skipped).
 pub fn code_commands(s: &str) -> Vec<String> {
     let mut out = vec![]; let mut in_code = false;
     for line in s.lines() {
         if line.trim_start().starts_with("```") { in_code = !in_code; continue; }
-        let l = line.trim().trim_start_matches("$ ").trim();
-        if in_code && !l.is_empty() && !l.starts_with('#') { out.push(l.to_string()); }
+        if in_code { if let Some(l) = command_line(line) { out.push(l); } }
+    }
+    out
+}
+
+/// One command per fence, so each command can carry its own insert control.
+/// While `streaming`, an unclosed fence stays plain text until its closing marker arrives.
+pub fn split_command_fences(src: &str, streaming: bool) -> String {
+    let mut out = String::new();
+    let mut in_code = false;
+    let mut buf = String::new();
+    let mut lang = String::new();
+    for line in src.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            if in_code {
+                let cmds: Vec<String> = buf.lines().filter_map(command_line).collect();
+                if cmds.is_empty() {
+                    out.push_str("```");
+                    out.push_str(&lang);
+                    out.push('\n');
+                    out.push_str(&buf);
+                    if !buf.ends_with('\n') && !buf.is_empty() { out.push('\n'); }
+                    out.push_str("```\n");
+                } else {
+                    for c in cmds {
+                        out.push_str("```sh\n");
+                        out.push_str(&c);
+                        out.push_str("\n```\n");
+                    }
+                }
+                buf.clear();
+                lang.clear();
+                in_code = false;
+            } else {
+                in_code = true;
+                lang = trimmed.trim_start_matches('`').trim().to_string();
+            }
+            continue;
+        }
+        if in_code { buf.push_str(line); buf.push('\n'); }
+        else { out.push_str(line); out.push('\n'); }
+    }
+    if in_code {
+        if streaming {
+            out.push_str(&buf);
+        } else {
+            out.push_str("```");
+            out.push_str(&lang);
+            out.push('\n');
+            out.push_str(&buf);
+        }
     }
     out
 }
@@ -105,21 +163,32 @@ enum Pending { Ask(String), Explain(String, i32, String, String) }
 pub struct ChatView {
     pub msgs: Vec<Msg>,
     pending: Option<Pending>,
-    input: Entity<InputState>,
+    input: Entity<TextareaState>,
     pub source: Option<WeakEntity<TermView>>,
     with_context: bool,
+    /// Fills the right-hand dock instead of a fixed-size dialog.
+    pub docked: bool,
     busy: bool,
+    /// Bumped on each request so a finished stream cannot clear a newer one.
+    turn: u64,
+    scroll: ScrollHandle,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     _subs: Vec<gpui::Subscription>,
 }
 
 impl ChatView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder(t("chat.placeholder")));
-        let subs = vec![cx.subscribe_in(&input, window, |v, _, ev: &InputEvent, w, cx| if matches!(ev, InputEvent::PressEnter { .. }) { v.send(w, cx) })];
-        Self { msgs: vec![], pending: None, input, source: None, with_context: true, busy: false, stop: Default::default(), _subs: subs }
+        let input = cx.new(|cx| TextareaState::new(window, cx).placeholder(t("chat.placeholder")).auto_grow(1, 6).submit_on_enter(true));
+        let subs = vec![cx.subscribe_in(&input, window, |v, _, ev: &InputEvent, w, cx| match ev {
+            InputEvent::PressEnter { shift: false, .. } => v.send(w, cx),
+            InputEvent::Change => cx.notify(),
+            _ => {}
+        })];
+        Self { msgs: vec![], pending: None, input, source: None, with_context: true, docked: false, busy: false, turn: 0, scroll: ScrollHandle::new(), stop: Default::default(), _subs: subs }
     }
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) { self.input.update(cx, |s, cx| s.focus(window, cx)); }
+    /// Attach later questions to this terminal. Turns context on if it was off.
+    pub fn use_terminal(&mut self, src: WeakEntity<TermView>) { self.source = Some(src); self.with_context = true; }
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let q = self.input.read(cx).value().trim().to_string();
@@ -131,7 +200,7 @@ impl ChatView {
         let cfg = config::get();
         if cfg.ai.enabled && !cfg.ai.first_send_ack { self.pending = Some(Pending::Ask(q)); cx.notify(); return; }
         let (ctx, n_red, host) = match (self.with_context, self.source.as_ref().and_then(|w| w.upgrade())) {
-            (true, Some(tv)) => tv.read(cx).ai_context(),
+            (true, Some(tv)) => { let (t, n, h, _) = tv.read(cx).chat_context(); (t, n, h) }
             _ => (String::new(), 0, String::new()),
         };
         let (q_sent, n2) = if cfg.ai.redact { ssh_term_proto::ai::redact(&q) } else { (q.clone(), 0) };
@@ -220,8 +289,11 @@ impl ChatView {
         hist.push(("user".into(), last_content.clone()));
         let _ = crate::audit_log().append("ai.chat", "user", &format!("provider={} model={} turns={} chars={}", provider.name, provider.model, hist.len(), last_content.chars().count()));
         self.msgs.push(Msg { role: "assistant", text: String::new(), note: Some(format!("{} · {}", provider.name, provider.model)), plan: None });
+        self.turn += 1;
+        let turn = self.turn;
         self.busy = true;
         self.stop.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.scroll.scroll_to_bottom();
         let stop = self.stop.clone();
         let (tx, rx) = flume::unbounded::<Result<String, String>>();
         std::thread::spawn(move || {
@@ -229,16 +301,104 @@ impl ChatView {
             if let Err(e) = r { let _ = tx.send(Err(format!("{e:#}"))); }
         });
         cx.spawn(async move |this, cx| {
-            while let Ok(m) = rx.recv_async().await {
-                if this.update(cx, |v, cx| {
-                    if let Some(last) = v.msgs.last_mut() { match m { Ok(d) => last.text.push_str(&d), Err(e) => { last.text = tf("chat.error", &[("e", &e)]); } } }
-                    cx.notify();
-                }).is_err() { return; }
+            let mut buf = String::new();
+            let mut failed = false;
+            loop {
+                if buf.is_empty() {
+                    match rx.recv_async().await {
+                        Ok(Ok(d)) => buf.push_str(&d),
+                        Ok(Err(e)) => {
+                            let _ = this.update(cx, |v, cx| {
+                                if v.turn == turn { if let Some(last) = v.msgs.last_mut() { last.text = tf("chat.error", &[("e", &e)]); } v.busy = false; }
+                                cx.notify();
+                            });
+                            return;
+                        }
+                        Err(_) => break,
+                    }
+                }
+                loop {
+                    match rx.try_recv() {
+                        Ok(Ok(d)) => buf.push_str(&d),
+                        Ok(Err(e)) => {
+                            let _ = this.update(cx, |v, cx| {
+                                if v.turn == turn { if let Some(last) = v.msgs.last_mut() { last.text = tf("chat.error", &[("e", &e)]); } v.busy = false; }
+                                cx.notify();
+                            });
+                            return;
+                        }
+                        Err(flume::TryRecvError::Empty) => break,
+                        Err(flume::TryRecvError::Disconnected) => { failed = true; break; }
+                    }
+                }
+                cx.background_executor().timer(std::time::Duration::from_millis(50)).await;
+                loop {
+                    match rx.try_recv() {
+                        Ok(Ok(d)) => buf.push_str(&d),
+                        Ok(Err(e)) => {
+                            buf.clear();
+                            let _ = this.update(cx, |v, cx| {
+                                if v.turn == turn { if let Some(last) = v.msgs.last_mut() { last.text = tf("chat.error", &[("e", &e)]); } v.busy = false; }
+                                cx.notify();
+                            });
+                            return;
+                        }
+                        Err(flume::TryRecvError::Empty) => break,
+                        Err(flume::TryRecvError::Disconnected) => { failed = true; break; }
+                    }
+                }
+                if !buf.is_empty() {
+                    let chunk = std::mem::take(&mut buf);
+                    if this.update(cx, |v, cx| {
+                        if v.turn != turn { return; }
+                        let follow = {
+                            let off = v.scroll.offset().y;
+                            let max = v.scroll.max_offset().y;
+                            max == px(0.) || (off - max).abs() < px(80.)
+                        };
+                        if let Some(last) = v.msgs.last_mut() { last.text.push_str(&chunk); }
+                        if follow { v.scroll.scroll_to_bottom(); }
+                        cx.notify();
+                    }).is_err() { return; }
+                }
+                if failed { break; }
             }
-            let _ = this.update(cx, |v, cx| { v.busy = false; let _ = crate::audit_log().append("ai.chat.response", "ai", &format!("chars={}", v.msgs.last().map(|m| m.text.chars().count()).unwrap_or(0))); cx.notify(); });
+            let _ = this.update(cx, |v, cx| {
+                if v.turn == turn {
+                    v.busy = false;
+                    v.scroll.scroll_to_bottom();
+                    let _ = crate::audit_log().append("ai.chat.response", "ai", &format!("chars={}", v.msgs.last().map(|m| m.text.chars().count()).unwrap_or(0)));
+                }
+                cx.notify();
+            });
         }).detach();
         cx.notify();
     }
+}
+
+fn typing_dots() -> gpui::AnyElement {
+    let th = cur();
+    let mut row = div().flex().items_center().gap(px(5.)).h(px(18.));
+    for i in 0..3usize {
+        row = row.child(div().size(px(6.)).rounded_full().bg(c(th.overlay1)).with_animation(
+            ("chat-dot", i),
+            Animation::new(std::time::Duration::from_millis(900)).repeat().with_easing(move |t| {
+                let t = (t + i as f32 * 0.18).fract();
+                (t * std::f32::consts::PI).sin()
+            }),
+            |d, t| d.opacity(0.25 + 0.75 * t).mt(px((1.0 - t) * 3.)),
+        ));
+    }
+    row.into_any_element()
+}
+
+fn stream_caret() -> gpui::AnyElement {
+    let th = cur();
+    div().w(px(2.)).h(px(14.)).rounded_full().bg(c(th.accent)).with_animation(
+        "chat-caret",
+        Animation::new(std::time::Duration::from_millis(800)).repeat().with_easing(|t| if t < 0.55 { 1. } else { 0.15 }),
+        |d, t| d.opacity(t),
+    ).into_any_element()
 }
 
 impl ChatView {
@@ -275,8 +435,9 @@ impl ChatView {
     }
 }
 
-/// First fenced code block of a reply (for "Insert into terminal").
-pub fn first_code_block(s: &str) -> Option<String> {
+/// First line of the first fenced block. Kept for the parser tests.
+#[cfg(test)]
+fn first_code_block(s: &str) -> Option<String> {
     let a = s.find("```")?;
     let rest = &s[a + 3..];
     let rest = rest.split_once('\n').map(|x| x.1).unwrap_or(rest);
@@ -288,34 +449,60 @@ pub fn first_code_block(s: &str) -> Option<String> {
 impl Render for ChatView {
     fn render(&mut self, _w: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
-        let mono = SharedString::from(config::get().font.family.clone());
-        let mut list = div().id("chat-list").flex_1().min_h_0().overflow_y_scroll().p_4().flex().flex_col().gap_3();
+        let mut list = div().id("chat-list").track_scroll(&self.scroll).flex_1().min_h_0().overflow_y_scroll().p_4().flex().flex_col().gap_3();
         if self.msgs.is_empty() { list = list.child(div().text_size(px(12.5)).text_color(c(th.overlay1)).child(t("chat.empty"))); }
         let n = self.msgs.len();
+        let view = cx.entity();
         for (i, m) in self.msgs.iter().enumerate() {
             let user = m.role == "user";
-            let mut body = div().flex().flex_col().gap_1();
-            // render fenced code blocks in mono
-            let mut in_code = false;
-            for line in m.text.lines() {
-                if line.trim_start().starts_with("```") { in_code = !in_code; continue; }
-                body = body.child(if in_code { div().px_2().py(px(1.)).bg(c(th.crust)).rounded_sm().font_family(mono.clone()).text_size(px(12.)).child(line.to_string()) } else { div().child(line.to_string()) });
-            }
-            if m.text.is_empty() { body = body.child(div().text_color(c(th.overlay1)).child("…")); }
-            let code = (!user).then(|| first_code_block(&m.text)).flatten();
+            let cmds = if user { Vec::new() } else { code_commands(&m.text) };
             let streaming = self.busy && i + 1 == n;
+            let waiting = streaming && m.text.is_empty();
             let plan_el = (!user && !streaming).then(|| self.plan_el(i, m, cx)).flatten();
-            list = list.child(div().flex().when(user, |d| d.justify_end()).child(
-                div().max_w(px(640.)).p_3().rounded_lg().text_size(px(12.5)).text_color(c(th.text))
-                    .bg(if user { c(th.accent).opacity(0.14) } else { c(th.mantle) }).border_1().border_color(c(th.surface0))
+            let body = if waiting {
+                typing_dots()
+            } else if m.text.is_empty() {
+                div().text_color(c(th.overlay1)).child("…").into_any_element()
+            } else if user {
+                div().whitespace_normal().child(m.text.clone()).into_any_element()
+            } else {
+                let shown = split_command_fences(&m.text, streaming);
+                let view = view.clone();
+                TextView::markdown(("chat-ai", i), shown)
+                    .selectable(true)
+                    .stream_fade(streaming)
+                    .selection_format(SelectionFormat::Plain)
+                    .code_block_actions(move |block, _, _| {
+                        let cmds: Vec<String> = block.code().lines().filter_map(command_line).collect();
+                        let cmd = (cmds.len() == 1).then(|| cmds.into_iter().next().unwrap());
+                        let view = view.clone();
+                        div().when_some(cmd, |d, cmd| d.child(
+                            div().id("ins").size(px(22.)).rounded(px(6.)).flex().items_center().justify_center().cursor_pointer()
+                                .hover(|d| d.bg(c(cur().surface0)))
+                                .on_click(move |_, _, cx| { let cmd = cmd.clone(); let _ = view.update(cx, |_, cx| cx.emit(ChatEvent::Insert(cmd))); })
+                                .child(icon(IconName::SquareTerminal, 13., c(cur().overlay1))),
+                        )).into_any_element()
+                    })
+                    .into_any_element()
+            };
+            let one = cmds.len() == 1;
+            let only = cmds.first().cloned();
+            let mut bubble = div().max_w(relative(if user { 0.72 } else { 0.92 })).p_3().rounded(px(18.)).text_size(px(12.5)).text_color(c(th.text))
+                .bg(if user { c(th.accent).opacity(0.14) } else { c(th.mantle) }).border_1().border_color(c(th.surface0));
+            if !user { bubble = bubble.w_full(); }
+            list = list.child(div().w_full().flex().when(user, |d| d.justify_end()).child(bubble
                     .child(body)
-                    .when_some(m.note.clone(), |d, note| d.child(div().pt_1().text_size(px(10.5)).text_color(c(th.overlay0)).child(note)))
-                    .when_some(code.filter(|_| !(self.busy && i + 1 == n)), |d, code| d.child(div().pt_2().flex().gap_2()
-                        .child(ui::button(("chat-ins", i), t("chat.insert"), 0).h(px(22.)).on_click(cx.listener(move |_, _, _, cx| cx.emit(ChatEvent::Insert(code.clone())))))
-                        .when(m.plan.is_none(), |d| d.child(ui::button(("chat-plan", i), t("chat.run_steps"), 1).h(px(22.)).on_click(cx.listener(move |v, _, _, cx| v.start_plan(i, cx)))))))
+                    .when(streaming && !m.text.is_empty(), |d| d.child(div().pt_1().child(stream_caret())))
+                    .when(!waiting, |d| d.when_some(m.note.clone(), |d, note| d.child(div().pt_1().text_size(px(10.5)).text_color(c(th.overlay0)).child(note))))
+                    .when(one && !streaming, |d| d.child(div().pt_2().flex().gap_2()
+                        .child(ui::button(("chat-ins", i), t("chat.insert"), 0).h(px(22.)).on_click(cx.listener({
+                            let only = only.clone().unwrap_or_default();
+                            move |_, _, _, cx| cx.emit(ChatEvent::Insert(only.clone()))
+                        })))))
+                    .when(cmds.len() > 1 && m.plan.is_none() && !streaming, |d| d.child(div().pt_2()
+                        .child(ui::button(("chat-plan", i), t("chat.run_steps"), 1).h(px(22.)).on_click(cx.listener(move |v, _, _, cx| v.start_plan(i, cx))))))
                     .when_some(plan_el, |d, p| d.child(p))));
         }
-        let src = self.source.as_ref().and_then(|w| w.upgrade()).map(|v| v.read(cx).title.to_string()).unwrap_or_else(|| t("chat.no_terminal").into());
         let consent = self.pending.is_some().then(|| {
             let text = self.source.as_ref().and_then(|w| w.upgrade()).map(|v| v.read(cx).ai_consent_text()).unwrap_or_default();
             div().mx_3().mb_2().p_3().rounded_lg().border_1().border_color(c(th.warning)).bg(c(th.warning).opacity(0.08)).flex().flex_col().gap_2().text_size(px(12.))
@@ -328,25 +515,62 @@ impl Render for ChatView {
                         match v.pending.take() { Some(Pending::Ask(q)) => v.send_text(q, cx), Some(Pending::Explain(a, b, c2, d)) => v.explain(a, b, c2, d, cx), None => {} }
                     }))))
         });
-        let bar = div().p_3().border_t_1().border_color(c(th.surface0)).flex().flex_col().gap_2()
-            .child(div().flex().items_center().gap_3().text_size(px(11.5)).text_color(c(th.overlay1))
-                .child(Switch::new("chat-ctx").small().checked(self.with_context).label(tf("chat.with_ctx", &[("t", &src), ("scope", &config::get().ai.context)])).on_click(cx.listener(|v, on: &bool, _, cx| { v.with_context = *on; cx.notify() })))
+        let ctx_on = self.with_context;
+        let attached = self.source.as_ref().and_then(|w| w.upgrade()).map(|v| v.read(cx).chat_context());
+        let ctx_label: SharedString = if !ctx_on {
+            t("chat.ctx_off").into()
+        } else {
+            match attached.as_ref().map(|(_, _, host, kind)| (*kind, host.as_str())) {
+                Some(("screen", host)) => tf("chat.ctx_screen", &[("t", &host)]).into(),
+                Some(("selection", host)) => tf("chat.ctx_selection", &[("t", &host)]).into(),
+                Some(("command", host)) => tf("chat.ctx_command", &[("t", &host)]).into(),
+                _ => t("chat.ctx_empty").into(),
+            }
+        };
+        let has_text = !self.input.read(cx).value().trim().is_empty();
+        let can_send = has_text && !self.busy;
+        let send_bg = if self.busy || can_send { c(th.accent) } else { c(th.surface1) };
+        let send_fg = if self.busy || can_send { gpui::white() } else { c(th.overlay0) };
+        let composer = div().mx_3().mb_3().rounded(px(22.)).border_1().border_color(c(th.surface1)).bg(c(th.mantle)).flex().flex_col()
+            .child(div().px_3().pt_2().flex().items_center().gap_2().min_w_0()
+                .child(div().id("chat-ctx").h(px(24.)).max_w(px(240.)).px_2().rounded_full().flex().items_center().cursor_pointer()
+                    .bg(if ctx_on { c(th.surface0) } else { gpui::transparent_black() })
+                    .border_1().border_color(c(th.surface1))
+                    .on_click(cx.listener(|v, _, _, cx| { v.with_context = !v.with_context; cx.notify(); }))
+                    .child(div().text_size(px(11.)).text_color(if ctx_on { c(th.text) } else { c(th.overlay1) }).whitespace_nowrap().overflow_hidden().text_ellipsis().child(ctx_label)))
                 .child(div().flex_1())
-                .child(if config::get().ai.redact { t("chat.redact_on") } else { t("chat.redact_off") }))
-            .child(div().flex().gap_2().child(div().flex_1().child(Input::new(&self.input)))
-                .child(if self.busy { ui::button("chat-stop", t("chat.stop"), 2).on_click(cx.listener(|v, _, _, cx| { v.stop.store(true, std::sync::atomic::Ordering::Relaxed); cx.notify() })) }
-                    else { ui::button("chat-send", t("chat.send"), 1).on_click(cx.listener(|v, _, w, cx| v.send(w, cx))) })
-                .child(ui::button("chat-clear", t("chat.clear"), 3).on_click(cx.listener(|v, _, _, cx| { if !v.busy { v.msgs.clear(); } cx.notify() }))));
-        ui::card(900.).h(px(680.))
-            .child(div().h(px(48.)).px_5().flex().items_center().gap_2().border_b_1().border_color(c(th.surface0))
-                .child(icon(IconName::Sparkles, 16., c(th.accent)))
-                .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("ui.built_in_ai_assistant")))
-                .child(div().pl_2().text_size(px(11.)).text_color(c(th.overlay0)).child(t("chat.subtitle")))
+                .child(div().text_size(px(11.)).text_color(c(th.overlay0)).whitespace_nowrap().child(if config::get().ai.redact { t("chat.redact_on") } else { t("chat.redact_off") })))
+            .child(Textarea::new(&self.input).appearance(false).bordered(false))
+            .child(div().px_2().pb_2().flex().items_center().gap_2()
+                .when(!self.msgs.is_empty(), |d| d.child(div().id("chat-clear").h(px(28.)).px_2().rounded_full().flex().items_center().cursor_pointer()
+                    .text_size(px(12.)).text_color(c(th.overlay1))
+                    .hover(|d| d.bg(c(cur().surface0)).text_color(c(cur().text)))
+                    .on_click(cx.listener(|v, _, _, cx| { if !v.busy { v.msgs.clear(); } cx.notify(); }))
+                    .child(t("chat.clear"))))
                 .child(div().flex_1())
-                .child(div().id("chat-close").size(px(28.)).rounded_md().flex().items_center().justify_center().cursor_pointer()
-                    .hover(|d| d.bg(c(cur().surface0))).on_click(cx.listener(|_, _, _, cx| cx.emit(ChatEvent::Close)))
-                    .child(icon(IconName::X, 16., c(th.overlay1)))))
-            .child(list).children(consent).child(bar)
+                .child(div().id("chat-send").size(px(32.)).rounded_full().flex().items_center().justify_center()
+                    .bg(send_bg)
+                    .when(self.busy || can_send, |d| d.cursor_pointer())
+                    .on_click(cx.listener(|v, _, w, cx| {
+                        if v.busy { v.stop.store(true, std::sync::atomic::Ordering::Relaxed); v.busy = false; cx.notify(); }
+                        else { v.send(w, cx); }
+                    }))
+                    .child(icon(if self.busy { IconName::Square } else { IconName::ArrowUp }, 15., send_fg))));
+        let column = div().flex_1().min_h_0().flex().flex_col().child(list).children(consent).child(composer);
+        if self.docked {
+            column.size_full()
+        } else {
+            ui::card(900.).h(px(680.))
+                .child(div().h(px(48.)).px_5().flex().items_center().gap_2().border_b_1().border_color(c(th.surface0))
+                    .child(icon(IconName::Sparkles, 16., c(th.accent)))
+                    .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("ui.built_in_ai_assistant")))
+                    .child(div().pl_2().text_size(px(11.)).text_color(c(th.overlay0)).child(t("chat.subtitle")))
+                    .child(div().flex_1())
+                    .child(div().id("chat-close").size(px(28.)).rounded_md().flex().items_center().justify_center().cursor_pointer()
+                        .hover(|d| d.bg(c(cur().surface0))).on_click(cx.listener(|_, _, _, cx| cx.emit(ChatEvent::Close)))
+                        .child(icon(IconName::X, 16., c(th.overlay1)))))
+                .child(column)
+        }
     }
 }
 
@@ -356,6 +580,13 @@ mod tests {
     fn code_block() {
         assert_eq!(super::first_code_block("x\n```bash\nls -la\n```\n"), Some("ls -la".into()));
         assert_eq!(super::first_code_block("none"), None);
+        let src = "看状态：\n```bash\ntop\nhtop\n```\n然后\n```\nuptime\n```\n";
+        assert_eq!(super::code_commands(src), vec!["top", "htop", "uptime"]);
+        let shown = super::split_command_fences(src, false);
+        assert!(!super::split_command_fences("```sh\ntop", true).contains("```"));
+        assert_eq!(shown.matches("```").count(), 6);
+        assert!(shown.contains("```sh\ntop\n```") && shown.contains("```sh\nuptime\n```"));
+        assert!(!super::split_command_fences("只有说明，没有命令。", false).contains("```"));
     }
     #[test]
     fn plan_steps_and_approvals() {

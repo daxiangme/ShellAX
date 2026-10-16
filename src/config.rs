@@ -56,8 +56,21 @@ impl General {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
-pub struct Appearance { pub theme: String, pub light_theme: String, pub dark_theme: String, pub opacity: f32, pub ui_font_size: f32 }
-impl Default for Appearance { fn default() -> Self { Self { theme: s_system(), light_theme: "Light".into(), dark_theme: "Dark".into(), opacity: f_one(), ui_font_size: f_ui() } } }
+pub struct Appearance {
+    pub theme: String, pub light_theme: String, pub dark_theme: String,
+    /// Kept so older config files still parse. Terminal colors follow the active UI theme.
+    pub scheme: String, pub light_scheme: String, pub dark_scheme: String,
+    pub opacity: f32, pub ui_font_size: f32,
+}
+impl Default for Appearance {
+    fn default() -> Self {
+        Self {
+            theme: s_system(), light_theme: "ShellAX Daylight".into(), dark_theme: "ShellAX Midnight".into(),
+            scheme: s_system(), light_scheme: "Catppuccin Latte".into(), dark_scheme: "Catppuccin Mocha".into(),
+            opacity: f_one(), ui_font_size: f_ui(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -95,12 +108,14 @@ pub struct Terminal {
     pub highlights: Vec<HighlightRule>,
     /// Space between the pane edge and the text grid, in px (all sides).
     pub padding: f32,
+    /// Clickable current-directory bar at the bottom of the terminal card.
+    pub show_cwd: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
 pub struct HighlightRule { pub pattern: String, pub color: String, pub bold: bool }
 fn default_highlights() -> Vec<HighlightRule> { ssh_term_proto::highlight::DEFAULTS.iter().map(|(p, c, b)| HighlightRule { pattern: p.to_string(), color: c.to_string(), bold: *b }).collect() }
-impl Default for Terminal { fn default() -> Self { Self { padding: f_pad(), keyword_highlight: t(), highlights: default_highlights(), shell: String::new(), scrollback: u_scroll(), cursor_style: s_block(), cursor_blink: t(), bell: s_visual(), copy_on_select: false, paste_confirm: t(), mouse_reporting: t(), shell_integration: s_auto(), osc52_write: "ask".into(), osc52_read: false, block_select: "alt".into() } } }
+impl Default for Terminal { fn default() -> Self { Self { padding: f_pad(), show_cwd: t(), keyword_highlight: t(), highlights: default_highlights(), shell: String::new(), scrollback: u_scroll(), cursor_style: s_block(), cursor_blink: t(), bell: s_visual(), copy_on_select: false, paste_confirm: t(), mouse_reporting: t(), shell_integration: s_auto(), osc52_write: "ask".into(), osc52_read: false, block_select: "alt".into() } } }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -273,10 +288,25 @@ impl Tags {
 /// Sidebar state persisted across runs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
-pub struct Sidebar { pub collapsed: Vec<String>, /** px, 180–480 */ pub width: f32 }
-impl Default for Sidebar { fn default() -> Self { Self { collapsed: vec![], width: SIDEBAR_W } } }
+pub struct Sidebar { pub collapsed: Vec<String>, /** px, 180–480 */ pub width: f32, /** px, 280–560; missing config uses AI_DOCK_W */ #[serde(default = "default_ai_width")] pub ai_width: f32 }
+impl Default for Sidebar { fn default() -> Self { Self { collapsed: vec![], width: SIDEBAR_W, ai_width: AI_DOCK_W } } }
 /// Default sidebar width (double-click on its edge resets to this).
 pub const SIDEBAR_W: f32 = 248.0;
+/// Default AI dock width (double-click on its edge resets to this).
+pub const AI_DOCK_W: f32 = 380.0;
+fn default_ai_width() -> f32 { AI_DOCK_W }
+
+/// A directory the user wants one click away. `host` empty means the local shell;
+/// otherwise it is the sidebar host name.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct Place {
+    pub name: String,
+    pub path: String,
+    pub host: String,
+    /// Sidebar group path. Empty means the top level of Connections.
+    pub group: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
@@ -302,6 +332,8 @@ pub struct Settings {
     pub groups: Vec<ssh_term_proto::hosttree::GroupEntry>,
     pub tags: Tags,
     pub sidebar: Sidebar,
+    /// Saved directories opened from the sidebar.
+    pub places: Vec<Place>,
     /// legacy top-level keys (v0.5 files); folded into sections on load
     #[serde(skip_serializing)] pub theme: Option<String>,
     #[serde(skip_serializing)] pub known_hosts: Option<String>,
