@@ -171,11 +171,18 @@ pub fn parse_hop(s: &str) -> HostEntry {
     HostEntry { name: s.to_string(), host, user, port, source: "jump", ..Default::default() }
 }
 
-/// Turn an entry into a connect target. Defaults: $USER, port 22, ~/.ssh/id_ed25519 + id_rsa.
+/// Turn an entry into a connect target. Defaults: $USER, port 22.
+/// An explicit `key` auth method with a chosen identity uses only that file.
+/// `auto` still falls back to ~/.ssh/id_ed25519, id_ecdsa and id_rsa.
 pub fn to_target(e: &HostEntry, known_hosts: &Path) -> SshTarget {
     let mut keys = Vec::new();
-    if let Some(f) = &e.identity_file { keys.push(expand_tilde(f)); }
-    for d in ["id_ed25519", "id_ecdsa", "id_rsa"] { let p = home().join(".ssh").join(d); if !keys.contains(&p) { keys.push(p); } }
+    let chosen = e.identity_file.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(expand_tilde);
+    let auth = e.auth.as_deref().unwrap_or("auto");
+    let only_chosen = chosen.is_some() && auth.split(',').any(|m| m.trim() == "key") && !matches!(auth, "" | "auto" | "auto-noagent");
+    if let Some(f) = chosen { keys.push(f); }
+    if !only_chosen {
+        for d in ["id_ed25519", "id_ecdsa", "id_rsa"] { let p = home().join(".ssh").join(d); if !keys.contains(&p) { keys.push(p); } }
+    }
     SshTarget {
         cert: e.cert.as_deref().map(expand_tilde),
         host: e.host.clone(),
@@ -232,4 +239,14 @@ Match host foo
     }
     #[test]
     fn glob_works() { assert!(glob("prod-*", "prod-1")); assert!(glob("h?st", "host")); assert!(!glob("a*", "b")); }
+    #[test]
+    fn explicit_key_auth_uses_only_the_chosen_file() {
+        let e = HostEntry { name: "h".into(), host: "h".into(), identity_file: Some("~/.ssh/shellax_ed25519".into()), auth: Some("key".into()), source: "config", ..Default::default() };
+        let t = to_target(&e, Path::new("known_hosts"));
+        assert_eq!(t.auth, "key");
+        assert_eq!(t.keys.len(), 1);
+        assert!(t.keys[0].ends_with("shellax_ed25519"));
+        let auto = HostEntry { auth: Some("auto".into()), ..e };
+        assert!(to_target(&auto, Path::new("known_hosts")).keys.len() > 1);
+    }
 }

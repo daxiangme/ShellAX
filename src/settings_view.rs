@@ -536,10 +536,24 @@ impl SettingsView {
         let keys = scan_keys();
         if keys.is_empty() { list = list.child(div().p_3().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ui.no_private_keys_found_in"))); }
         for (i, (name, kind, fp)) in keys.iter().enumerate() {
+            let copy_name = name.clone();
             list = list.child(div().flex().items_center().gap_3().px_3().py(px(8.)).when(i > 0, |d| d.border_t_1().border_color(c(th.surface0)))
                 .child(icon(IconName::KeyRound, 14., c(th.warning)))
-                .child(div().flex_1().flex().flex_col().child(div().text_size(px(12.5)).text_color(c(th.text)).child(name.clone()))
-                    .child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(fp.clone())))
+                .child(div().flex_1().min_w_0().flex().flex_col().child(div().text_size(px(12.5)).text_color(c(th.text)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(name.clone()))
+                    .child(div().text_size(px(11.)).text_color(c(th.overlay1)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(fp.clone())))
+                .child(ui::button(("key-copy", i), t("settings.copy_pubkey"), 0).on_click(cx.listener(move |this, _, _, cx| {
+                    let stem = copy_name.rsplit(['/', '\\']).next().unwrap_or(copy_name.as_str()).to_string();
+                    let path = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".ssh").join(format!("{stem}.pub"));
+                    this.notice = Some(match std::fs::read_to_string(&path) {
+                        Ok(text) => {
+                            let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").to_string();
+                            if line.is_empty() { t("settings.pubkey_empty").into() }
+                            else { cx.write_to_clipboard(gpui::ClipboardItem::new_string(line)); t("settings.pubkey_copied").into() }
+                        }
+                        Err(e) => tf("settings.key_failed", &[("e", &e)]),
+                    });
+                    cx.notify();
+                })))
                 .child(ui::tag(kind.clone(), c(th.info))));
         }
         let agent = std::env::var("SSH_AUTH_SOCK").ok().filter(|p| std::path::Path::new(p).exists());

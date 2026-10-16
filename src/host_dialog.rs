@@ -35,6 +35,8 @@ pub struct HostDialog {
     cert_path: Entity<InputState>,
     methods: Vec<Method>,
     add_menu: bool,
+    /// Open the list of keys already in ~/.ssh.
+    key_menu: bool,
     tags: Vec<String>,
     error: Option<String>,
     prompts: ssh::Prompts,
@@ -82,7 +84,7 @@ impl HostDialog {
         };
         methods.dedup();
         if methods.is_empty() { methods.push(Method::Password); }
-        Self { editing: existing.map(|h| h.name), fields, password, key_path, passphrase, cert_path, methods, add_menu: false, tags: e.tags.clone(), error: None, prompts, rt, test: None, test_task: None }
+        Self { editing: existing.map(|h| h.name), fields, password, key_path, passphrase, cert_path, methods, add_menu: false, key_menu: false, tags: e.tags.clone(), error: None, prompts, rt, test: None, test_task: None }
     }
 
     fn val(&self, key: &str, cx: &Context<Self>) -> String {
@@ -167,6 +169,11 @@ impl HostDialog {
 
 impl Drop for HostDialog { fn drop(&mut self) { if let Some(h) = self.test_task.take() { h.abort(); } } }
 
+fn same_key(a: &str, b: &str) -> bool {
+    let norm = |s: &str| ssh_term_proto::hosts::expand_tilde(s.trim()).display().to_string().replace('\\', "/").to_lowercase();
+    !a.trim().is_empty() && norm(a) == norm(b)
+}
+
 impl Render for HostDialog {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
@@ -196,7 +203,38 @@ impl Render for HostDialog {
                 Method::Key | Method::Cert => {
                     if m == Method::Key || !self.methods.contains(&Method::Key) {
                         let kp = self.key_path.clone();
+                        let current = self.key_path.read(cx).value().trim().to_string();
+                        let keys = crate::settings_view::scan_keys();
+                        let mut pick = div().relative().flex_shrink_0().child(ui::button(SharedString::from(format!("am-pick-{i}")), t("host.pick_key"), 0).on_click(cx.listener(|this, _, _w, cx| { this.key_menu = !this.key_menu; cx.notify(); })));
+                        if self.key_menu {
+                            let mut menu = ui::popover().id("key-pick").occlude().absolute().top(px(32.)).right_0().w(px(420.)).max_h(px(260.)).overflow_y_scroll().p(px(5.)).flex().flex_col()
+                                .on_mouse_down_out(cx.listener(|this, _, _, cx| { this.key_menu = false; cx.notify(); }));
+                            if keys.is_empty() {
+                                menu = menu.child(div().px_2().py_2().text_size(px(12.)).text_color(c(th.subtext)).child(t("host.no_keys")));
+                            }
+                            for (k, (path, kind, fp)) in keys.iter().enumerate() {
+                                let chosen = path.clone();
+                                let on = same_key(&current, path);
+                                menu = menu.child(div().id(("keypick", k)).px_2().py_1().rounded(px(6.)).flex().items_center().gap_2().cursor_pointer()
+                                    .when(on, |d| d.bg(c(th.accent).opacity(0.16)))
+                                    .hover(|d| d.bg(c(cur().surface0)))
+                                    .on_click(cx.listener(move |this, _, w, cx| {
+                                        this.key_menu = false;
+                                        let path = chosen.clone();
+                                        this.key_path.update(cx, |s, cx| s.set_value(path, w, cx));
+                                        cx.notify();
+                                    }))
+                                    .child(icon(IconName::KeyRound, 13., c(th.warning)))
+                                    .child(div().flex_1().min_w_0().flex().flex_col()
+                                        .child(div().text_size(px(12.)).text_color(c(th.text)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(path.clone()))
+                                        .child(div().text_size(px(10.5)).text_color(c(th.overlay1)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(fp.clone())))
+                                    .child(ui::tag(kind.clone(), c(th.info)))
+                                    .when(on, |d| d.child(icon(IconName::Check, 12., c(th.accent)))));
+                            }
+                            pick = pick.child(gpui::deferred(menu).with_priority(2));
+                        }
                         block = block.child(div().flex().gap_2().child(div().flex_1().child(Input::new(&self.key_path)))
+                            .child(pick)
                             .child(ui::button(SharedString::from(format!("am-browse-{i}")), t("host.browse"), 0).on_click(cx.listener(move |_this, _, w, cx| {
                                 let rx = cx.prompt_for_paths(gpui::PathPromptOptions { files: true, directories: false, multiple: false, prompt: None });
                                 let kp = kp.clone();
