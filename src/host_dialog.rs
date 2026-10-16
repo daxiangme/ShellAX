@@ -5,6 +5,7 @@
 use ssh_term_proto::i18n::{t, tf};
 use gpui::{div, prelude::*, px, Context, Entity, EventEmitter, FontWeight, SharedString, Window};
 use gpui_component::input::{Input, InputState};
+use gpui_component::switch::Switch;
 use ssh_term_proto::hosts::HostEntry;
 use ssh_term_proto::ssh;
 
@@ -12,7 +13,7 @@ use crate::config;
 use crate::theme::{c, cur};
 use crate::ui::{self, icon, IconName};
 
-pub enum HostEvent { Saved(String), Deleted(String), Close }
+pub enum HostEvent { Saved(String), Deleted(String), Close, OpenProxySettings }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Method { Password, Key, Cert, Agent }
@@ -34,6 +35,7 @@ pub struct HostDialog {
     passphrase: Entity<InputState>,
     cert_path: Entity<InputState>,
     methods: Vec<Method>,
+    use_proxy: bool,
     add_menu: bool,
     /// Open the list of keys already in ~/.ssh.
     key_menu: bool,
@@ -84,7 +86,7 @@ impl HostDialog {
         };
         methods.dedup();
         if methods.is_empty() { methods.push(Method::Password); }
-        Self { editing: existing.map(|h| h.name), fields, password, key_path, passphrase, cert_path, methods, add_menu: false, key_menu: false, tags: e.tags.clone(), error: None, prompts, rt, test: None, test_task: None }
+        Self { editing: existing.map(|h| h.name), fields, password, key_path, passphrase, cert_path, methods, use_proxy: e.use_proxy, add_menu: false, key_menu: false, tags: e.tags.clone(), error: None, prompts, rt, test: None, test_task: None }
     }
 
     fn val(&self, key: &str, cx: &Context<Self>) -> String {
@@ -105,7 +107,7 @@ impl HostDialog {
         let cert = if uses(Method::Cert) { opt(Self::v(&self.cert_path, cx)) } else { None };
         let auth = self.methods.iter().map(|m| m.id()).collect::<Vec<_>>().join(",");
         Some(HostEntry { name, host, port, user: opt(self.val("user", cx)), identity_file: key, cert,
-            group: opt(self.val("group", cx)).map(|g| ssh_term_proto::outline::normalize(&g)).filter(|g| !g.is_empty()), auth: Some(auth), production: false, tags: self.tags.clone(), jump: opt(self.val("jump", cx)), source: "config" })
+            group: opt(self.val("group", cx)).map(|g| ssh_term_proto::outline::normalize(&g)).filter(|g| !g.is_empty()), auth: Some(auth), production: false, tags: self.tags.clone(), jump: opt(self.val("jump", cx)), use_proxy: self.use_proxy, source: "config" })
     }
 
     fn save(&mut self, cx: &mut Context<Self>) {
@@ -140,6 +142,7 @@ impl HostDialog {
         self.error = None;
         let s = config::get();
         let mut tg = ssh_term_proto::hosts::resolve(&entry, &s.known_hosts_path(), &s.all_hosts(), &s.ssh_opts());
+        if let Some(msg) = tg.proxy_block_message() { self.error = Some(msg); cx.notify(); return; }
         tg.auth = entry.auth.clone().unwrap_or_default();
         let pw = Self::v(&self.password, cx);
         if self.methods.contains(&Method::Password) && !pw.is_empty() { tg.password_override = Some(pw); }
@@ -262,6 +265,16 @@ impl Render for HostDialog {
                 add = add.child(gpui::deferred(menu).with_priority(2));
             }
             cred = cred.child(add);
+        }
+        let proxy_missing = self.use_proxy && ssh_term_proto::proxy::parse(config::get().ssh.proxy.trim()).is_err();
+        form = form.child(div().flex().items_start().gap_3()
+            .child(label(t("host.use_proxy")))
+            .child(Switch::new("host-use-proxy").checked(self.use_proxy).on_click(cx.listener(|this, on: &bool, _, cx| { this.use_proxy = *on; cx.notify(); })))
+            .child(div().flex_1().min_w_0().pt(px(2.)).text_size(px(11.5)).text_color(c(th.overlay1)).whitespace_normal().child(t("host.use_proxy_desc"))));
+        if proxy_missing {
+            form = form.child(div().p_3().rounded(px(8.)).bg(c(th.warning).opacity(0.14)).flex().flex_col().gap_2()
+                .child(div().text_size(px(12.)).text_color(c(th.text)).whitespace_normal().child(t("host.proxy_missing")))
+                .child(div().flex().child(ui::button("host-proxy-settings", t("host.proxy_settings"), 1).on_click(cx.listener(|_, _, _, cx| cx.emit(HostEvent::OpenProxySettings))))));
         }
         form = form.child(cred);
         // Finder-style color tags; the production tag drives the permission engine

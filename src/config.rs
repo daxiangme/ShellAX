@@ -110,12 +110,15 @@ pub struct Terminal {
     pub padding: f32,
     /// Clickable current-directory bar at the bottom of the terminal card.
     pub show_cwd: bool,
+    /// On connect, turn on ls/grep colors for this session only. Does not edit remote shell rc files.
+    #[serde(default = "t")]
+    pub style: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
 pub struct HighlightRule { pub pattern: String, pub color: String, pub bold: bool }
 fn default_highlights() -> Vec<HighlightRule> { ssh_term_proto::highlight::DEFAULTS.iter().map(|(p, c, b)| HighlightRule { pattern: p.to_string(), color: c.to_string(), bold: *b }).collect() }
-impl Default for Terminal { fn default() -> Self { Self { padding: f_pad(), show_cwd: t(), keyword_highlight: t(), highlights: default_highlights(), shell: String::new(), scrollback: u_scroll(), cursor_style: s_block(), cursor_blink: t(), bell: s_visual(), copy_on_select: false, paste_confirm: t(), mouse_reporting: t(), shell_integration: s_auto(), osc52_write: "ask".into(), osc52_read: false, block_select: "alt".into() } } }
+impl Default for Terminal { fn default() -> Self { Self { padding: f_pad(), show_cwd: t(), style: t(), keyword_highlight: t(), highlights: default_highlights(), shell: String::new(), scrollback: u_scroll(), cursor_style: s_block(), cursor_blink: t(), bell: s_visual(), copy_on_select: false, paste_confirm: t(), mouse_reporting: t(), shell_integration: s_auto(), osc52_write: "ask".into(), osc52_read: false, block_select: "alt".into() } } }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -129,7 +132,8 @@ pub struct Ssh {
     pub known_hosts: String, pub host_key_policy: String, pub jump_host: String, pub ciphers: Vec<String>,
     pub read_ssh_config: bool, pub ssh_config: String, pub agent_forwarding: bool,
     pub kex: Vec<String>, pub reconnect: bool, pub reuse_connections: bool, pub remote_agent_hooks: bool,
-    /// Outbound proxy for SSH: socks5://[user:pass@]host:port or http://[user:pass@]host:port (empty = direct)
+    /// Outbound proxy URL (`socks5://` or `http://`). Empty = none.
+    /// SSH uses it only for connections that opt in. AI requests and update checks use it whenever it is set.
     pub proxy: String,
     /// Hosts that bypass the proxy (globs, comma separated)
     pub no_proxy: String,
@@ -523,6 +527,7 @@ fn apply_runtime(s: &Settings) {
     *ssh_term_proto::proxy::NO_PROXY.lock().unwrap() = s.ssh.no_proxy.clone();
     ssh_term_proto::ssh::HOST_KEY_POLICY.store(match s.ssh.host_key_policy.as_str() { "strict" => 1, "accept-new" => 2, _ => 0 }, Relaxed);
     ssh_term_proto::local::INTEGRATE.store(if s.terminal.shell_integration == "off" { 0 } else if s.terminal.shell.is_empty() { 1 } else { 2 }, Relaxed);
+    ssh_term_proto::ssh::STYLE.store(s.terminal.style, Relaxed);
     let _ = ssh_term_proto::suggest::set_extra_filters(&s.suggest.filter_patterns);
 }
 

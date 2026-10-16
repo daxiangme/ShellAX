@@ -19,7 +19,7 @@ ksni = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 # GUI-subsystem exe has no console: send stderr to a log file (MIT/Apache-2.0)
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Registry"] }
 
 [dependencies]
 # GPUI: gpui-pre weekly snapshot of Zed (Apache-2.0), same pin as gpui-component 0.7.3
@@ -54,7 +54,7 @@ russh-sftp = "3"
 getrandom = { version = "0.4", features = ["sys_rng"] }
 serde_yaml = "0.9"
 # Inline graphics: decode Kitty PNG payloads and build frames for gpui (MIT/Apache-2.0; already a gpui dependency)
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp"] }
 
 # Distribution build (installer payload): `cargo build --profile dist`.
 # Kept separate from `release` so day-to-day release builds/tests stay fast.

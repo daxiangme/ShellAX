@@ -100,6 +100,7 @@ impl Root {
     }
     /// New terminal for `spec` split off the focused pane (opens a tab if there is none).
     pub(crate) fn split_with(&mut self, spec: Spec, dir: Dir, window: &mut Window, cx: &mut Context<Self>) {
+        if self.block_proxy(&spec, true, window, cx) { return; }
         let Some(target) = self.focused_pane(window, cx) else { return self.new_tab(spec, window, cx) };
         let pane = self.open_pane(spec, window, cx);
         let fh = pane.read(cx).focus.clone();

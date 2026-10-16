@@ -39,6 +39,8 @@ pub struct SshTarget {
     pub tmux: Option<String>,
     /// OpenSSH certificate (`*-cert.pub`) used with the first identity file ("cert" auth step).
     pub cert: Option<PathBuf>,
+    /// This hop's TCP connection goes through the configured outbound proxy.
+    pub use_proxy: bool,
     /// Unsaved password / passphrase from the host dialog ("Test connection"); never persisted.
     #[serde(skip)]
     pub password_override: Option<String>,
@@ -49,7 +51,23 @@ impl SshTarget {
     pub fn label(&self) -> String { format!("{}@{}:{}", self.user, self.host, self.port) }
     /// Pool key: same user/host/port/jump chain → same connection.
     pub fn pool_key(&self) -> String {
-        match &self.jump { Some(j) => format!("{}>{}", j.pool_key(), self.label()), None => self.label() }
+        let via = if self.use_proxy { "+proxy" } else { "" };
+        match &self.jump { Some(j) => format!("{}>{}{via}", j.pool_key(), self.label()), None => format!("{}{via}", self.label()) }
+    }
+    /// Outermost hop: the TCP connection that leaves this machine.
+    pub fn first_hop(&self) -> &SshTarget {
+        let mut cur = self;
+        while let Some(j) = cur.jump.as_ref() { cur = j; }
+        cur
+    }
+    /// `Some` when this connection asked for a proxy and none is configured (or the URL is invalid).
+    /// Matching `ssh.no_proxy` is not a block: that hop connects directly on purpose.
+    pub fn proxy_block_message(&self) -> Option<String> {
+        let hop = self.first_hop();
+        match crate::proxy::for_ssh(&hop.host, hop.use_proxy) {
+            Err(e) => Some(format!("{e:#}")),
+            Ok(_) => None,
+        }
     }
     pub fn password_secret(&self) -> String { format!("ssh-password:{}", self.label()) }
 }
@@ -294,8 +312,8 @@ pub fn connect<'a>(tg: &'a SshTarget, prompts: &'a Prompts) -> std::pin::Pin<Box
                 let h = tokio::time::timeout(Duration::from_secs(300), client::connect_stream(cfg, stream, handler)).await.map_err(|_| anyhow!(t("ssh.handshake_timeout")))??;
                 Ok((h, Some(jc)))
             } else {
-                // ssh.proxy: HTTP CONNECT / SOCKS5 tunnel for the first hop (jump hosts ride on it)
-                let tcp = match crate::proxy::for_host(&tg.host)? {
+                // Opt-in proxy: HTTP CONNECT / SOCKS5 for this hop. Jump hosts ride the first hop's tunnel.
+                let tcp = match crate::proxy::for_ssh(&tg.host, tg.use_proxy)? {
                     Some(p) => tokio::time::timeout(Duration::from_secs(secs), crate::proxy::connect(&p, &tg.host, tg.port)).await
                         .map_err(|_| anyhow!(tf("ssh.connect_timeout", &[("secs", &secs)])))??,
                     None => tokio::time::timeout(Duration::from_secs(secs), tokio::net::TcpStream::connect((tg.host.as_str(), tg.port))).await
@@ -462,22 +480,33 @@ pub async fn test_connection(tg: &SshTarget, prompts: &Prompts, secs: u64, tx: f
     let send = |idx: u8, ok: Option<bool>, ms: u128, detail: String| { let _ = tx.send(TestStep { idx, ok, ms, detail }); };
     let lim = Duration::from_secs(secs.max(1));
     let to = |what: &str| tf("ssh.test_timeout", &[("what", &what), ("secs", &secs)]);
-    // 1. DNS
+    // 1. DNS. A proxied hop lets the proxy resolve the name, so a local lookup failure is not fatal.
     send(0, None, 0, String::new());
     let t0 = Instant::now();
-    let addrs = match tokio::time::timeout(lim, tokio::net::lookup_host((tg.host.as_str(), tg.port))).await {
-        Err(_) => return send(0, Some(false), t0.elapsed().as_millis(), to("DNS")),
-        Ok(Err(e)) => return send(0, Some(false), t0.elapsed().as_millis(), format!("{e}")),
-        Ok(Ok(a)) => a.collect::<Vec<_>>(),
+    let via = match crate::proxy::for_ssh(&tg.host, tg.use_proxy) {
+        Err(e) => return send(0, Some(false), 0, format!("{e:#}")),
+        Ok(v) => v,
     };
-    let Some(addr) = addrs.first().copied() else { return send(0, Some(false), t0.elapsed().as_millis(), t("ssh.test_no_address").into()) };
-    send(0, Some(true), t0.elapsed().as_millis(), addr.ip().to_string());
+    let direct_addr = if via.is_some() {
+        let via_detail = if tg.host.parse::<std::net::IpAddr>().is_ok() { t("ssh.proxy_ip") } else { t("ssh.proxy_dns") };
+        send(0, Some(true), t0.elapsed().as_millis(), via_detail.into());
+        None
+    } else {
+        let addrs = match tokio::time::timeout(lim, tokio::net::lookup_host((tg.host.as_str(), tg.port))).await {
+            Err(_) => return send(0, Some(false), t0.elapsed().as_millis(), to("DNS")),
+            Ok(Err(e)) => return send(0, Some(false), t0.elapsed().as_millis(), format!("{e}")),
+            Ok(Ok(a)) => a.collect::<Vec<_>>(),
+        };
+        let Some(addr) = addrs.first().copied() else { return send(0, Some(false), t0.elapsed().as_millis(), t("ssh.test_no_address").into()) };
+        send(0, Some(true), t0.elapsed().as_millis(), addr.ip().to_string());
+        Some(addr)
+    };
     // 2. TCP
     send(1, None, 0, String::new());
     let t1 = Instant::now();
-    let tcp = match crate::proxy::for_host(&tg.host) {
-        Ok(Some(p)) => tokio::time::timeout(lim, crate::proxy::connect(&p, &tg.host, tg.port)).await.map(|r| r.map_err(|e| format!("{e:#}"))),
-        _ => tokio::time::timeout(lim, tokio::net::TcpStream::connect(addr)).await.map(|r| r.map_err(|e| match e.kind() {
+    let tcp = match via {
+        Some(p) => tokio::time::timeout(lim, crate::proxy::connect(&p, &tg.host, tg.port)).await.map(|r| r.map_err(|e| format!("{e:#}"))),
+        None => tokio::time::timeout(lim, tokio::net::TcpStream::connect(direct_addr.unwrap())).await.map(|r| r.map_err(|e| match e.kind() {
             std::io::ErrorKind::ConnectionRefused => t("ssh.test_refused").to_string(),
             _ => e.to_string(),
         })),
@@ -488,7 +517,7 @@ pub async fn test_connection(tg: &SshTarget, prompts: &Prompts, secs: u64, tx: f
         Ok(Ok(s)) => s,
     };
     let _ = tcp.set_nodelay(true);
-    send(1, Some(true), t1.elapsed().as_millis(), format!("{addr}"));
+    send(1, Some(true), t1.elapsed().as_millis(), direct_addr.map(|a| a.to_string()).unwrap_or_else(|| format!("{}:{}", tg.host, tg.port)));
     // 3. SSH handshake + host key (an unknown key is offered for trust through the normal prompt)
     send(2, None, 0, String::new());
     let t2 = Instant::now();
@@ -517,6 +546,39 @@ pub async fn test_connection(tg: &SshTarget, prompts: &Prompts, secs: u64, tx: f
 /// Connection reuse (PRD: multiplexing): one SSH connection per user@host:port (+jump chain).
 static POOL: std::sync::LazyLock<tokio::sync::Mutex<HashMap<String, std::sync::Weak<Conn>>>> = std::sync::LazyLock::new(Default::default);
 pub static REUSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// Session-only ls/grep colors. Does not rewrite remote shell rc files.
+pub static STYLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Remote command that starts an interactive shell with color aliases for this session only.
+pub fn style_shell_command() -> String {
+    r#"if [ -n "$ZSH_VERSION" ] || [ "$(basename "${SHELL:-}")" = zsh ]; then
+  d=$(mktemp -d /tmp/shellax-style.XXXXXX 2>/dev/null) || d=$(mktemp -d) || exec "${SHELL:-/bin/sh}" -l
+  printf '%s\n' '[ -f "$HOME/.zshenv" ] && . "$HOME/.zshenv"' > "$d/.zshenv"
+  cat > "$d/.zshrc" << 'END'
+[ -f "$HOME/.zshrc" ] && . "$HOME/.zshrc"
+if command -v dircolors >/dev/null 2>&1; then eval "$(dircolors -b 2>/dev/null)"; fi
+alias ls='ls --color=auto'
+alias ll='ls -alF --color=auto'
+alias grep='grep --color=auto'
+alias egrep='egrep --color=auto'
+alias fgrep='fgrep --color=auto'
+END
+  ZDOTDIR="$d" exec zsh -i
+fi
+f=$(mktemp /tmp/shellax-style.XXXXXX 2>/dev/null) || f=$(mktemp) || exec "${SHELL:-/bin/bash}" -l
+cat > "$f" << 'END'
+[ -f /etc/profile ] && . /etc/profile
+[ -f ~/.bashrc ] && . ~/.bashrc
+if command -v dircolors >/dev/null 2>&1; then eval "$(dircolors -b 2>/dev/null)"; fi
+alias ls='ls --color=auto'
+alias ll='ls -alF --color=auto'
+alias grep='grep --color=auto'
+alias egrep='egrep --color=auto'
+alias fgrep='fgrep --color=auto'
+END
+exec bash --rcfile "$f" -i
+"#.to_string()
+}
 
 pub async fn connect_shared(t: &SshTarget, prompts: &Prompts) -> Result<(Arc<Conn>, bool)> {
     let key = t.pool_key();
@@ -623,6 +685,7 @@ async fn run_shell(target: &SshTarget, prompts: &Prompts, s: &Arc<Session>, out_
     match &target.tmux {
         // reattach (or create) the persistent session; fall back to a login shell without tmux
         Some(name) => ch.exec(false, tmux_command(name)).await?,
+        None if STYLE.load(Ordering::Relaxed) => ch.exec(false, style_shell_command()).await?,
         None => ch.request_shell(false).await?,
     }
     let (mut rd, wr) = ch.split();
@@ -647,5 +710,18 @@ async fn run_shell(target: &SshTarget, prompts: &Prompts, s: &Arc<Session>, out_
                 _ => {}
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn style_command_colors_ls_without_editing_bashrc() {
+        let c = style_shell_command();
+        assert!(c.contains("alias ls='ls --color=auto'"));
+        assert!(c.contains("alias ll='ls -alF --color=auto'"));
+        assert!(!c.contains(">>"), "must not append to the remote shell rc");
+        assert!(c.contains(". ~/.bashrc"));
     }
 }

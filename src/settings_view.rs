@@ -19,14 +19,15 @@ use crate::theme::{c, cur};
 use crate::ui::{self, icon, IconName};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub enum Cat { General, Appearance, Terminal, Suggest, Ssh, Credentials, Ai, Agents, Permissions, Tags, Audit, Session, Keys, Notify, ContextMenu, About }
+pub enum Cat { General, Appearance, Terminal, Suggest, Ssh, Proxy, Credentials, Ai, Agents, Permissions, Tags, Audit, Session, Keys, Notify, ContextMenu, About }
 
 impl Cat {
-    pub const ALL: [Cat; 16] = [Cat::General, Cat::Appearance, Cat::Terminal, Cat::Suggest, Cat::Ssh, Cat::Credentials, Cat::Ai, Cat::Agents,
+    pub const ALL: [Cat; 17] = [Cat::General, Cat::Appearance, Cat::Terminal, Cat::Suggest, Cat::Ssh, Cat::Proxy, Cat::Credentials, Cat::Ai, Cat::Agents,
         Cat::Permissions, Cat::Tags, Cat::Audit, Cat::Session, Cat::Keys, Cat::Notify, Cat::ContextMenu, Cat::About];
     pub fn name(self) -> &'static str {
         match self {
             Cat::General => t("ui.general"), Cat::Appearance => t("ui.appearance"), Cat::Terminal => t("ui.terminal"), Cat::Suggest => t("ui.suggestions"), Cat::Ssh => "SSH",
+            Cat::Proxy => t("ui.proxy"),
             Cat::Credentials => t("ui.credentials_keys"), Cat::Ai => "AI", Cat::Agents => t("ui.external_agents"), Cat::Permissions => t("ui.permissions_security"), Cat::Tags => t("tag.tags"),
             Cat::Audit => t("ui.audit"), Cat::Session => t("ui.sessions_layout"), Cat::Keys => t("ui.keyboard_shortcuts"), Cat::Notify => t("ui.notifications"), Cat::ContextMenu => t("cm.settings_title"), Cat::About => t("ui.about"),
         }
@@ -35,6 +36,7 @@ impl Cat {
     fn color(self) -> u32 {
         match self {
             Cat::General => 0x8e8e93, Cat::Appearance => 0x5856d6, Cat::Terminal => 0x3a3a3c, Cat::Suggest => 0xffb300, Cat::Ssh => 0x007aff,
+            Cat::Proxy => 0x5ac8fa,
             Cat::Credentials => 0xa2845e, Cat::Ai => 0xaf52de, Cat::Agents => 0x34c759, Cat::Permissions => 0xff3b30, Cat::Tags => 0xff9f0a, Cat::Audit => 0xff9500,
             Cat::Session => 0x30b0c7, Cat::Keys => 0x636366, Cat::Notify => 0xff2d55, Cat::ContextMenu => 0x32ade6, Cat::About => 0x0a84ff,
         }
@@ -42,7 +44,7 @@ impl Cat {
     fn icon(self) -> IconName {
         match self {
             Cat::General => IconName::SlidersHorizontal, Cat::Appearance => IconName::Palette, Cat::Terminal => IconName::SquareTerminal,
-            Cat::Suggest => IconName::Lightbulb, Cat::Ssh => IconName::Server, Cat::Credentials => IconName::KeyRound, Cat::Ai => IconName::Sparkles,
+            Cat::Suggest => IconName::Lightbulb, Cat::Ssh => IconName::Server, Cat::Proxy => IconName::Globe, Cat::Credentials => IconName::KeyRound, Cat::Ai => IconName::Sparkles,
             Cat::Agents => IconName::Bot, Cat::Permissions => IconName::ShieldCheck, Cat::Tags => IconName::Tag, Cat::Audit => IconName::ScrollText, Cat::Session => IconName::Layers,
             Cat::Keys => IconName::Keyboard, Cat::Notify => IconName::Bell, Cat::ContextMenu => IconName::FileText, Cat::About => IconName::Info,
         }
@@ -54,6 +56,7 @@ impl Cat {
             Cat::Terminal => t("ui.terminal_behaviour_cursor_copy_paste"),
             Cat::Suggest => t("ui.history_based_grey_command_suggestions"),
             Cat::Ssh => t("ui.ssh_defaults_and_host_key"),
+            Cat::Proxy => t("ui.proxy_desc"),
             Cat::Credentials => t("ui.private_keys_ssh_agent_and"),
             Cat::Ai => t("ui.built_in_ai_bring_your"),
             Cat::Agents => t("ui.detect_claude_code_codex_grok"),
@@ -108,6 +111,17 @@ pub struct SettingsView {
     /// context_menu.toml editor (created when the section is first shown) and last save result.
     cm_editor: Option<Entity<gpui_component::input::EditorState>>,
     cm_note: Option<(bool, String)>,
+    proxy_http: bool,
+    proxy_auth: bool,
+    proxy_host: Entity<InputState>,
+    proxy_port: Entity<InputState>,
+    proxy_user: Entity<InputState>,
+    proxy_pass: Entity<InputState>,
+    proxy_candidates: Vec<ssh_term_proto::proxy::Candidate>,
+    proxy_bypass_suggest: String,
+    proxy_detecting: bool,
+    proxy_started: bool,
+    proxy_note: Option<(bool, String)>,
     _subs: Vec<Subscription>,
 }
 
@@ -127,11 +141,20 @@ impl SettingsView {
         let key_pass = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder(t("ui.key_passphrase_optional")));
         let key_import = cx.new(|cx| InputState::new(window, cx).placeholder(t("ui.key_import_path")));
         let theme_import = cx.new(|cx| InputState::new(window, cx).placeholder(t("ui.theme_import_path")));
+        let saved = ssh_term_proto::proxy::parse(config::get().ssh.proxy.trim()).ok();
+        let proxy_http = matches!(saved.as_ref().map(|p| &p.kind), Some(ssh_term_proto::proxy::Kind::Http));
+        let proxy_auth = saved.as_ref().is_some_and(|p| p.user.is_some());
+        let proxy_host = mk(t("proxy.addr"), saved.as_ref().map(|p| p.host.as_str()).unwrap_or("127.0.0.1"), window, cx);
+        let proxy_port = mk("7890", &saved.as_ref().map(|p| p.port.to_string()).unwrap_or_default(), window, cx);
+        let proxy_user = mk(t("proxy.user"), &saved.as_ref().and_then(|p| p.user.as_ref()).map(|u| u.0.as_str()).unwrap_or(""), window, cx);
+        let proxy_pass = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder(t("proxy.pass")).default_value(saved.as_ref().and_then(|p| p.user.as_ref()).map(|u| u.1.clone()).unwrap_or_default()));
         let mut me = Self { cm_editor: None, cm_note: None, key_pass, key_import, theme_import, cat, search, inputs: HashMap::new(), errors: HashMap::new(), theme_names, scheme_names, new_rule, new_effect: Effect::Allow, tester, notice: None,
             ai_sel: config::get().ai.default_provider().map(|p| p.id.clone()), ai_key, ai_keys: HashMap::new(), ai_note: None, ai_test: HashMap::new(), ai_testing: None, lang_seen: ssh_term_proto::i18n::current() as u8,
-            ai_models: HashMap::new(), ai_dropdown: None, ai_model_search, ai_url_gen: 0, _subs: subs };
+            ai_models: HashMap::new(), ai_dropdown: None, ai_model_search, ai_url_gen: 0,
+            proxy_http, proxy_auth, proxy_host, proxy_port, proxy_user, proxy_pass, proxy_candidates: Vec::new(), proxy_bypass_suggest: String::new(), proxy_detecting: false, proxy_started: false, proxy_note: None, _subs: subs };
         if let Some(id) = me.ai_sel.clone() { me.load_models(&id, false, cx); }
         me.refresh_keys();
+        if cat == Cat::Proxy { me.start_proxy_detect(false, cx); }
         me
     }
 
@@ -168,6 +191,7 @@ impl SettingsView {
             r(Terminal, t("ui.default_shell"), t("ui.empty_uses_shell_applies_to"), Ctl::Text("terminal.shell", "/bin/zsh")),
             r(Terminal, t("ui.term_padding"), t("ui.term_padding_desc"), Ctl::Text("terminal.padding", "8")),
             r(Terminal, t("ui.show_cwd"), t("ui.show_cwd_desc"), Ctl::Toggle("terminal.show_cwd")),
+            r(Terminal, t("ui.style_optimize"), t("ui.style_optimize_desc"), Ctl::Toggle("terminal.style")),
             r(Terminal, t("ui.scrollback_lines"), t("ui.applies_to_new_sessions"), Ctl::Text("terminal.scrollback", "10000")),
             r(Terminal, t("ui.cursor_style"), "", Ctl::Choice("terminal.cursor_style", opts(&[("block", t("ui.block")), ("bar", t("ui.bar")), ("underline", t("ui.underline"))]))),
             r(Terminal, t("ui.cursor_blink"), t("ui.stops_blinking_after_10_s"), Ctl::Toggle("terminal.cursor_blink")),
@@ -187,8 +211,10 @@ impl SettingsView {
             r(Suggest, t("ui.ai_suggest"), t("ui.ai_suggest.d"), Ctl::Toggle("suggest.ai")),
             r(Suggest, t("ui.sensitive_command_filters"), t("ui.regexes_comma_separated_combined_with"), Ctl::Text("suggest.filter_patterns", "(?i)vault +login")),
 
-            r(Ssh, t("ui.ssh_proxy"), t("ui.ssh_proxy_desc"), Ctl::Text("ssh.proxy", "socks5://127.0.0.1:1080")),
-            r(Ssh, t("ui.ssh_no_proxy"), t("ui.ssh_no_proxy_desc"), Ctl::Text("ssh.no_proxy", "10.*, *.lan")),
+            r(Proxy, t("ui.proxy"), t("ui.proxy_desc"), Ctl::Info(match ssh_term_proto::proxy::parse(config::get().ssh.proxy.trim()) {
+                Ok(p) => ssh_term_proto::proxy::candidate_label(&ssh_term_proto::proxy::Candidate { kind: p.kind, host: p.host, port: p.port, user: p.user, source: ssh_term_proto::proxy::DetectSource::System }),
+                Err(_) => t("proxy.current_none").into(),
+            })),
             r(Ssh, t("ui.default_user"), t("ui.used_when_a_host_has"), Ctl::Text("ssh.default_user", "$USER")),
             r(Ssh, t("ui.default_port"), "", Ctl::Text("ssh.default_port", "22")),
             r(Ssh, t("ui.keepalive_interval_s"), t("ui.0_disables"), Ctl::Text("ssh.keepalive_secs", "30")),
@@ -875,7 +901,12 @@ impl Render for SettingsView {
             nav = nav.child(div().id(("cat", i)).h(px(28.)).px(px(6.)).rounded(px(6.)).flex().items_center().gap(px(8.)).cursor_pointer()
                 .when(active, |d| d.bg(c(th.accent)))
                 .when(!active, |d| d.hover(|d| d.bg(c(cur().surface0).opacity(0.7))))
-                .on_click(cx.listener(move |this, _, window, cx| { this.cat = cat; this.search.update(cx, |s, cx| s.set_value("", window, cx)); cx.notify(); }))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.cat = cat;
+                    this.search.update(cx, |s, cx| s.set_value("", window, cx));
+                    if cat == Cat::Proxy { this.start_proxy_detect(false, cx); }
+                    cx.notify();
+                }))
                 .child(div().size(px(20.)).rounded(px(5.)).flex().items_center().justify_center().bg(c(cat.color())).child(icon(cat.icon(), 12., gpui::white())))
                 .child(div().text_size(px(12.5)).text_color(if active { gpui::white() } else { c(th.text) }).child(cat.name())));
         }
@@ -887,6 +918,9 @@ impl Render for SettingsView {
                 .child(div().pt_1().pb_2().text_size(px(12.)).text_color(c(th.overlay1)).child(self.cat.desc()));
             let cur_cat = self.cat;
             if cur_cat == Cat::Appearance { body = body.child(self.scheme_preview()); }
+            if cur_cat == Cat::Proxy {
+                body = body.child(self.proxy_extra(window, cx));
+            } else {
             let els: Vec<AnyElement> = rows.iter().enumerate().filter(|(_, r)| r.cat == cur_cat).map(|(i, row)| self.row_el(row, i, window, cx)).collect();
             if !els.is_empty() { body = body.child(Self::group_card(els)); }
             let extra = match self.cat {
@@ -905,6 +939,7 @@ impl Render for SettingsView {
                 _ => None,
             };
             if let Some(e) = extra { body = body.child(e); }
+            }
         } else {
             let hits: Vec<(usize, &Row)> = rows.iter().enumerate().filter(|(_, r)| {
                 format!("{} {} {} {}", r.label, r.desc, r.cat.name(), match &r.ctl { Ctl::Toggle(p) | Ctl::Choice(p, _) | Ctl::Text(p, _) => *p, _ => "" }).to_lowercase().contains(&query)
@@ -950,6 +985,144 @@ pub fn location_label(l: &Location) -> String {
 
 // ---------------------------------------------------------------- AI providers
 impl SettingsView {
+    fn start_proxy_detect(&mut self, force: bool, cx: &mut Context<Self>) {
+        if self.proxy_detecting || (self.proxy_started && !force) { return; }
+        self.proxy_started = true;
+        self.proxy_detecting = true;
+        let (tx, rx) = flume::bounded(1);
+        std::thread::spawn(move || { let _ = tx.send(ssh_term_proto::proxy::detect()); });
+        cx.spawn(async move |this, cx| {
+            let found = rx.recv_async().await.unwrap_or_default();
+            let _ = this.update(cx, |this, cx| {
+                this.proxy_detecting = false;
+                this.proxy_candidates = found.candidates;
+                this.proxy_bypass_suggest = found.bypass;
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
+    }
+
+    fn apply_proxy_candidate(&mut self, c: &ssh_term_proto::proxy::Candidate, window: &mut Window, cx: &mut Context<Self>) {
+        self.proxy_http = matches!(c.kind, ssh_term_proto::proxy::Kind::Http);
+        self.proxy_auth = c.user.is_some();
+        let host = c.host.clone();
+        let port = c.port.to_string();
+        let (user, pass) = c.user.clone().unwrap_or_default();
+        self.proxy_host.update(cx, |s, cx| s.set_value(host, window, cx));
+        self.proxy_port.update(cx, |s, cx| s.set_value(port, window, cx));
+        self.proxy_user.update(cx, |s, cx| s.set_value(user, window, cx));
+        self.proxy_pass.update(cx, |s, cx| s.set_value(pass, window, cx));
+        self.save_proxy_form(cx);
+    }
+
+    fn save_proxy_form(&mut self, cx: &mut Context<Self>) {
+        let host = self.proxy_host.read(cx).value().trim().to_string();
+        let port_s = self.proxy_port.read(cx).value().trim().to_string();
+        if host.is_empty() { self.proxy_note = Some((false, t("proxy.bad_host").into())); cx.notify(); return; }
+        let port: u16 = match port_s.parse::<u16>() { Ok(p) if p > 0 => p, _ => { self.proxy_note = Some((false, t("proxy.bad_port").into())); cx.notify(); return; } };
+        let user = if self.proxy_auth {
+            let u = self.proxy_user.read(cx).value().trim().to_string();
+            let pw = self.proxy_pass.read(cx).value().to_string();
+            (!u.is_empty()).then(|| (u, pw))
+        } else { None };
+        let kind = if self.proxy_http { ssh_term_proto::proxy::Kind::Http } else { ssh_term_proto::proxy::Kind::Socks5 };
+        let url = ssh_term_proto::proxy::format_url(&ssh_term_proto::proxy::Proxy { kind, host: host.clone(), port, user });
+        let Ok(back) = ssh_term_proto::proxy::parse(&url) else { self.proxy_note = Some((false, t("proxy.bad_url").into())); cx.notify(); return; };
+        if back.host != host || back.port != port { self.proxy_note = Some((false, t("proxy.bad_url").into())); cx.notify(); return; }
+        let err = config::update(|s| s.ssh.proxy = url);
+        self.proxy_note = Some(match err { Some(e) => (false, e), None => (true, t("proxy.saved").into()) });
+        cx.emit(SettingsEvent::Changed("ssh.proxy".into()));
+        cx.notify();
+    }
+
+    fn clear_proxy(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.proxy_http = false;
+        self.proxy_auth = false;
+        self.proxy_host.update(cx, |s, cx| s.set_value("127.0.0.1", window, cx));
+        self.proxy_port.update(cx, |s, cx| s.set_value("", window, cx));
+        self.proxy_user.update(cx, |s, cx| s.set_value("", window, cx));
+        self.proxy_pass.update(cx, |s, cx| s.set_value("", window, cx));
+        let err = config::update(|s| s.ssh.proxy.clear());
+        self.proxy_note = Some(match err { Some(e) => (false, e), None => (true, t("proxy.cleared").into()) });
+        cx.emit(SettingsEvent::Changed("ssh.proxy".into()));
+        cx.notify();
+    }
+
+    fn proxy_extra(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        use ssh_term_proto::proxy::{candidate_label, Candidate, DetectSource};
+        let th = cur();
+        let dark = th.appearance == crate::theme::Appearance::Dark;
+        let card = |body: gpui::Div| body.rounded(px(10.)).p(px(12.)).flex().flex_col().gap(px(8.))
+            .bg(if dark { c(th.surface0).opacity(0.55) } else { c(th.base) }).border_1().border_color(c(th.surface1).opacity(0.6));
+        let lab = |text: &str| div().w(px(72.)).flex_shrink_0().text_size(px(12.5)).text_color(c(cur().subtext)).child(text.to_string());
+        let saved = config::get().ssh.proxy.clone();
+        let current = match ssh_term_proto::proxy::parse(saved.trim()) {
+            Ok(p) => tf("proxy.current", &[("url", &candidate_label(&Candidate { kind: p.kind, host: p.host, port: p.port, user: p.user, source: DetectSource::System }))]),
+            Err(_) => t("proxy.current_none").into(),
+        };
+        let para = |s: &str| div().text_size(px(12.)).text_color(c(th.subtext)).whitespace_normal().child(s.to_string());
+        let guide = card(div())
+            .child(div().flex().items_center().gap_2()
+                .child(icon(IconName::Info, 14., c(th.accent)))
+                .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("proxy.howto_title"))))
+            .child(para(t("proxy.howto_1")))
+            .child(para(t("proxy.howto_2")))
+            .child(para(t("proxy.howto_3")));
+        let mut detect = card(div()).child(div().flex().items_center().gap_2()
+            .child(div().flex_1().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("proxy.detected")))
+            .child(ui::button("proxy-redetect", t("proxy.redetect"), 0).on_click(cx.listener(|this, _, _, cx| this.start_proxy_detect(true, cx)))));
+        if self.proxy_detecting {
+            detect = detect.child(div().flex().items_center().gap_2().text_size(px(12.)).text_color(c(th.subtext)).child(icon(IconName::LoaderCircle, 14., c(th.accent))).child(t("proxy.detecting")));
+        } else if self.proxy_candidates.is_empty() {
+            detect = detect.child(div().text_size(px(12.)).text_color(c(th.subtext)).whitespace_normal().child(t("proxy.none")));
+        } else {
+            for (i, cnd) in self.proxy_candidates.clone().into_iter().enumerate() {
+                let src = match cnd.source { DetectSource::System => t("proxy.source_system"), DetectSource::Env => t("proxy.source_env"), DetectSource::Listen => t("proxy.source_listen") };
+                let label = candidate_label(&cnd);
+                let chosen = cnd.clone();
+                detect = detect.child(div().flex().items_center().gap_2()
+                    .child(ui::tag(src, c(th.info)))
+                    .child(div().flex_1().min_w_0().text_size(px(12.5)).text_color(c(th.text)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(label))
+                    .child(ui::button(SharedString::from(format!("proxy-use-{i}")), t("proxy.use"), 1).on_click(cx.listener(move |this, _, w, cx| this.apply_proxy_candidate(&chosen, w, cx)))));
+            }
+        }
+        if !self.proxy_bypass_suggest.is_empty() && config::get().ssh.no_proxy.trim().is_empty() {
+            let hint = self.proxy_bypass_suggest.clone();
+            detect = detect.child(div().flex().items_center().gap_2()
+                .child(div().flex_1().min_w_0().text_size(px(11.5)).text_color(c(th.overlay1)).whitespace_normal().child(tf("proxy.bypass_suggest", &[("list", &hint)])))
+                .child(ui::button("proxy-bypass", t("proxy.use_bypass"), 0).on_click(cx.listener(move |this, _, w, cx| {
+                    let list = this.proxy_bypass_suggest.clone();
+                    if let Some(e) = this.inputs.get("ssh.no_proxy").cloned() { e.update(cx, |s, cx| s.set_value(list, w, cx)); }
+                    else { let _ = config::update(|s| s.ssh.no_proxy = list); cx.emit(SettingsEvent::Changed("ssh.no_proxy".into())); }
+                    cx.notify();
+                }))));
+        }
+        let kinds = vec![("socks5".to_string(), t("proxy.socks5").to_string()), ("http".to_string(), t("proxy.http").to_string())];
+        let me = cx.entity().downgrade();
+        let mut form = card(div())
+            .child(div().text_size(px(12.5)).text_color(c(th.text)).child(current))
+            .child(div().flex().items_center().gap_3().child(lab(t("proxy.kind"))).child(div().flex_1().child(ui::segmented("proxy-kind", &kinds, if self.proxy_http { "http" } else { "socks5" }, move |v, _, cx| { let _ = me.update(cx, |this, cx| { this.proxy_http = v == "http"; cx.notify(); }); }))))
+            .child(div().flex().items_center().gap_3().child(lab(t("proxy.addr"))).child(div().flex_1().child(Input::new(&self.proxy_host))).child(lab(t("proxy.port"))).child(div().w(px(88.)).child(Input::new(&self.proxy_port))))
+            .child(div().flex().items_center().gap_3().child(lab(t("proxy.auth"))).child(Switch::new("proxy-auth").checked(self.proxy_auth).on_click(cx.listener(|this, on: &bool, _, cx| { this.proxy_auth = *on; cx.notify(); }))));
+        if self.proxy_auth {
+            form = form.child(div().flex().items_center().gap_3().child(lab(t("proxy.user"))).child(div().flex_1().child(Input::new(&self.proxy_user))).child(div().flex_1().child(Input::new(&self.proxy_pass).mask_toggle())));
+        }
+        let no_proxy = self.input("ssh.no_proxy", "10.*, 192.168.*, localhost", config::get().ssh.no_proxy.clone(), window, cx);
+        form = form.child(div().flex().items_start().gap_3().child(lab(t("proxy.no_proxy"))).child(div().flex_1().flex().flex_col().gap(px(2.))
+            .child(Input::new(&no_proxy))
+            .child(div().text_size(px(11.5)).text_color(c(th.overlay1)).whitespace_normal().child(t("proxy.no_proxy_desc")))));
+        form = form.child(div().text_size(px(11.5)).text_color(c(th.overlay1)).whitespace_normal().child(t("proxy.ai_note")));
+        form = form.child(div().flex().items_center().gap_2()
+            .child(ui::button("proxy-save", t("proxy.save"), 1).on_click(cx.listener(|this, _, _, cx| this.save_proxy_form(cx))))
+            .child(ui::button("proxy-clear", t("proxy.clear"), 0).on_click(cx.listener(|this, _, w, cx| this.clear_proxy(w, cx)))));
+        if let Some((ok, msg)) = &self.proxy_note {
+            let col = if *ok { c(th.success) } else { c(th.error) };
+            form = form.child(div().text_size(px(12.)).text_color(col).whitespace_normal().child(msg.clone()));
+        }
+        div().flex().flex_col().gap_3().mt_1().child(guide).child(detect).child(form).into_any_element()
+    }
+
     fn refresh_keys(&mut self) {
         let st = crate::secret_store();
         self.ai_keys = config::get().ai.providers.iter()

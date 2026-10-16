@@ -34,6 +34,9 @@ pub struct HostEntry {
     /// ProxyJump host (stored; jump connections not implemented yet).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jump: Option<String>,
+    /// Connect this host through the outbound proxy configured in Settings → Proxy.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub use_proxy: bool,
     /// OpenSSH certificate file for the "cert" auth method (PRD 5.24).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cert: Option<String>,
@@ -161,7 +164,16 @@ fn resolve_depth(e: &HostEntry, known_hosts: &Path, all: &[HostEntry], o: &SshOp
         }
         t.jump = prev;
     }
+    if depth == 0 { arm_first_hop_proxy(&mut t); }
     t
+}
+
+/// The leaf's "use proxy" switch applies to the TCP hop that actually leaves this machine.
+fn arm_first_hop_proxy(t: &mut SshTarget) {
+    if !t.use_proxy { return; }
+    let mut cur = &mut *t;
+    while cur.jump.is_some() { cur = cur.jump.as_mut().unwrap(); }
+    cur.use_proxy = true;
 }
 
 /// `[user@]host[:port]` → entry.
@@ -192,6 +204,7 @@ pub fn to_target(e: &HostEntry, known_hosts: &Path) -> SshTarget {
         known_hosts: known_hosts.to_path_buf(),
         production: e.production,
         auth: e.auth.clone().unwrap_or_else(|| "auto".into()),
+        use_proxy: e.use_proxy,
         ..Default::default()
     }
 }
@@ -236,6 +249,18 @@ Match host foo
         assert_eq!(t.pool_key(), "jump@10.0.0.1:22>ops@10.0.0.3:2222>".to_string() + &t.label());
         let g = resolve(all.iter().find(|h| h.name == "bastion").unwrap(), Path::new("/kh"), &all, &SshOpts { jump: "bastion".into(), ..Default::default() });
         assert!(g.jump.is_none(), "global jump is not applied to the jump host itself");
+    }
+    #[test]
+    fn use_proxy_marks_the_first_hop() {
+        let e = HostEntry { name: "inner".into(), host: "10.0.0.2".into(), jump: Some("ops@10.0.0.3:2222".into()), use_proxy: true, source: "config", ..Default::default() };
+        let t = resolve(&e, Path::new("/kh"), &[], &SshOpts::default());
+        assert!(t.use_proxy);
+        let hop = t.jump.as_ref().unwrap();
+        assert!(hop.use_proxy && hop.jump.is_none());
+        assert!(hop.pool_key().ends_with("+proxy"));
+        let direct = HostEntry { name: "web".into(), host: "example.com".into(), use_proxy: true, source: "config", ..Default::default() };
+        let d = resolve(&direct, Path::new("/kh"), &[], &SshOpts::default());
+        assert!(d.jump.is_none() && d.use_proxy && d.pool_key().ends_with("+proxy"));
     }
     #[test]
     fn glob_works() { assert!(glob("prod-*", "prod-1")); assert!(glob("h?st", "host")); assert!(!glob("a*", "b")); }

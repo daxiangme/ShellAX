@@ -64,6 +64,16 @@ fn home() -> Option<std::path::PathBuf> { std::env::var_os("HOME").map(Into::int
 /// Shell integration (OSC 133 hooks for bash/zsh): 0 = off, 1 = only for the default $SHELL, 2 = always.
 pub static INTEGRATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
 
+/// Color aliases appended to a local bash/zsh startup file. Session only.
+const COLOR_ALIASES: &str = r#"
+if command -v dircolors >/dev/null 2>&1; then eval "$(dircolors -b 2>/dev/null)"; fi
+alias ls='ls --color=auto'
+alias ll='ls -alF --color=auto'
+alias grep='grep --color=auto'
+alias egrep='egrep --color=auto'
+alias fgrep='fgrep --color=auto'
+"#;
+
 /// `shell`: explicit shell path; None = $SHELL (bash/zsh get OSC 133 integration).
 pub fn spawn_local(size: Size, shell: Option<&str>) -> Result<Arc<Session>> { spawn_local_in(size, shell, None) }
 
@@ -78,17 +88,23 @@ pub fn spawn_local_in(size: Size, shell: Option<&str>, cwd: Option<&std::path::P
         2 => true,
         _ => shell.is_none() || std::env::var("SHELLAX_INTEGRATE").is_ok(),
     };
+    let style = crate::ssh::STYLE.load(std::sync::atomic::Ordering::Relaxed);
     let mut cmd = CommandBuilder::new(&sh);
     let mut hist_file = ".bash_history";
-    if integrate && sh.ends_with("bash") {
+    if (integrate || style) && sh.ends_with("bash") {
+        let mut body = if integrate { BASH_INTEGRATION.to_string() } else { "[ -f ~/.bashrc ] && . ~/.bashrc\n".into() };
+        if style { body.push_str(COLOR_ALIASES); }
         let rc = std::env::temp_dir().join("shellax-bash-integration.sh");
-        let _ = std::fs::write(&rc, BASH_INTEGRATION);
+        let _ = std::fs::write(&rc, body);
         cmd.args(["--rcfile", rc.to_str().unwrap_or_default()]);
-    } else if integrate && sh.ends_with("zsh") {
+    } else if (integrate || style) && sh.ends_with("zsh") {
         let dir = std::env::temp_dir().join("shellax-zsh");
         let _ = std::fs::create_dir_all(&dir);
-        let _ = std::fs::write(dir.join(".zshenv"), ZSH_ZSHENV);
-        let _ = std::fs::write(dir.join(".zshrc"), ZSH_ZSHRC);
+        let zshenv = if integrate { ZSH_ZSHENV.to_string() } else { "[ -f \"$HOME/.zshenv\" ] && . \"$HOME/.zshenv\"\n".into() };
+        let mut zshrc = if integrate { ZSH_ZSHRC.to_string() } else { "[ -f \"$HOME/.zshrc\" ] && . \"$HOME/.zshrc\"\n".into() };
+        if style { zshrc.push_str(COLOR_ALIASES); }
+        let _ = std::fs::write(dir.join(".zshenv"), zshenv);
+        let _ = std::fs::write(dir.join(".zshrc"), zshrc);
         if let Ok(z) = std::env::var("ZDOTDIR") { cmd.env("SHELLAX_ORIG_ZDOTDIR", z); }
         cmd.env("ZDOTDIR", dir.as_os_str());
         hist_file = ".zsh_history";

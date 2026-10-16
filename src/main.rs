@@ -361,6 +361,31 @@ impl Root {
                     this.toast(t("cm.ai_context_set").to_string(), cx);
                     return;
                 }
+                termview::TermEvent::PasteImage(path) => {
+                    let Spec::Ssh(target) = pane.read(cx).spec.clone() else { return };
+                    let path = path.clone();
+                    let host = target.label();
+                    this.toast(tf("term.paste_image_sending", &[("host", &host)]), cx);
+                    let rt = this.rt.clone();
+                    let prompts = this.prompts.clone();
+                    let pane = pane.clone();
+                    cx.spawn(async move |this, cx| {
+                        let uploaded = rt.spawn(async move {
+                            let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+                            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("paste.png");
+                            let remote = termview::remote_paste_path(name).ok_or_else(|| "bad file name".to_string())?;
+                            let (c, _) = ssh::connect_shared(&target, &prompts).await.map_err(|e| format!("{e:#}"))?;
+                            c.write_file(&remote, &bytes).await.map_err(|e| format!("{e:#}"))?;
+                            Ok::<String, String>(remote)
+                        }).await;
+                        let _ = this.update(cx, |this, cx| match uploaded {
+                            Ok(Ok(remote)) => { let _ = pane.update(cx, |v, cx| v.paste_text(remote, cx)); }
+                            Ok(Err(e)) => this.toast(tf("term.paste_image_failed", &[("e", &e.chars().take(180).collect::<String>())]), cx),
+                            Err(e) => this.toast(tf("term.paste_image_failed", &[("e", &e.to_string())]), cx),
+                        });
+                    }).detach();
+                    return;
+                }
                 termview::TermEvent::Explain => {}
             }
             let fc = pane.update(cx, |p, cx| { let f = p.failure_context(); p.failed = None; cx.notify(); f });
@@ -411,7 +436,17 @@ impl Root {
             }
         }
     }
+    /// Proxy was requested and Settings has no usable address. Toast, and optionally open the proxy page.
+    /// Returns true when the caller should not open the connection.
+    fn block_proxy(&mut self, spec: &Spec, open_settings: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Spec::Ssh(t) = spec else { return false };
+        let Some(msg) = t.proxy_block_message() else { return false };
+        self.toast(msg, cx);
+        if open_settings { self.open_settings(Cat::Proxy, window, cx); }
+        true
+    }
     fn new_tab(&mut self, spec: Spec, window: &mut Window, cx: &mut Context<Self>) {
+        if self.block_proxy(&spec, true, window, cx) { return; }
         let pane = self.open_pane(spec, window, cx);
         let fh = pane.read(cx).focus.clone();
         self.tabs.push(Tab { layout: Node::Leaf(pane.clone()), focused: pane, name: None });
@@ -602,6 +637,7 @@ impl Root {
     /// view; tab/split/window create a new view (several per host are allowed).
     fn open_sftp_mode(&mut self, target: Option<SshTarget>, mode: SftpMode, window: &mut Window, cx: &mut Context<Self>) {
         let Some(t) = target.or_else(|| self.ssh_target_for_tools(cx)) else { self.sftp_current = None; self.overlay = Overlay::Sftp; cx.notify(); return };
+        if self.block_proxy(&Spec::Ssh(t.clone()), true, window, cx) { return; }
         self.log("sftp.open", format!("host={} mode={}", t.label(), mode.as_str()));
         if mode == SftpMode::Popup {
             let v = self.sftp_for(t, window, cx);
@@ -710,6 +746,7 @@ impl Root {
     fn split(&mut self, dir: Option<Dir>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(target) = self.focused_pane(window, cx) else { return self.new_tab(Spec::Local, window, cx) };
         let (spec, sz) = { let v = target.read(cx); (v.spec.clone(), v.session.as_ref().map(|s| s.size())) };
+        if self.block_proxy(&spec, true, window, cx) { return; }
         let dir = dir.or_else(|| sz.and_then(|s| auto_direction(s.rows, s.cols))).unwrap_or(Dir::Vertical);
         let pane = self.open_pane(spec, window, cx);
         let fh = pane.read(cx).focus.clone();
@@ -1234,11 +1271,11 @@ impl Root {
         let d = cx.new(|cx| HostDialog::new(existing, group, prompts, rt, window, cx));
         self._subs.push(cx.subscribe_in(&d, window, |this, _, ev: &HostEvent, window, cx| {
             match ev {
-                HostEvent::Saved(n) => { this.log("host.save", n); this.toast(tf("main.host_saved", &[("n", &n)]), cx); }
-                HostEvent::Deleted(n) => { this.log("host.delete", n); this.toast(tf("main.host_deleted", &[("n", &n)]), cx); }
-                HostEvent::Close => {}
+                HostEvent::Saved(n) => { this.log("host.save", n); this.toast(tf("main.host_saved", &[("n", &n)]), cx); this.close_overlay(window, cx); }
+                HostEvent::Deleted(n) => { this.log("host.delete", n); this.toast(tf("main.host_deleted", &[("n", &n)]), cx); this.close_overlay(window, cx); }
+                HostEvent::Close => this.close_overlay(window, cx),
+                HostEvent::OpenProxySettings => this.open_settings(Cat::Proxy, window, cx),
             }
-            this.close_overlay(window, cx);
         }));
         self.overlay = Overlay::Host(d);
         cx.notify();
@@ -1941,8 +1978,10 @@ fn main() {
                         let l = root.open_pane(Spec::Local, window, cx);
                         let mut layout = Node::Leaf(l.clone());
                         if let Some(t) = root.default_target.clone() {
-                            let r = root.open_pane(Spec::Ssh(t), window, cx);
-                            layout.split(&l, r, Dir::Vertical);
+                            if !root.block_proxy(&Spec::Ssh(t.clone()), false, window, cx) {
+                                let r = root.open_pane(Spec::Ssh(t), window, cx);
+                                layout.split(&l, r, Dir::Vertical);
+                            }
                         }
                         let fh = l.read(cx).focus.clone();
                         root.tabs.push(Tab { layout, focused: l, name: None });

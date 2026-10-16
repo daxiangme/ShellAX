@@ -26,13 +26,210 @@ pub fn parse(url: &str) -> Result<Proxy> {
     Ok(Proxy { kind, host, port, user })
 }
 
-/// The proxy to use for `host`, if any.
+fn bypass(host: &str) -> bool {
+    let np = NO_PROXY.lock().unwrap().clone();
+    np.split(',').map(str::trim).filter(|p| !p.is_empty()).any(|p| p == host || crate::policy::glob(p, host))
+}
+
+/// The proxy to use for an HTTP client (`host` of the request URL), if `ssh.proxy` is set.
 pub fn for_host(host: &str) -> Result<Option<Proxy>> {
     let url = URL.lock().unwrap().clone();
-    if url.trim().is_empty() { return Ok(None); }
-    let np = NO_PROXY.lock().unwrap().clone();
-    if np.split(',').map(str::trim).filter(|p| !p.is_empty()).any(|p| p == host || crate::policy::glob(p, host)) { return Ok(None); }
+    if url.trim().is_empty() || bypass(host) { return Ok(None); }
     parse(&url).map(Some)
+}
+
+/// SSH hop. `use_proxy` is the per-connection switch. An empty or invalid URL is an error so the
+/// hop is not silently opened directly. `no_proxy` still means direct.
+pub fn for_ssh(host: &str, use_proxy: bool) -> Result<Option<Proxy>> {
+    if !use_proxy || bypass(host) { return Ok(None); }
+    let url = URL.lock().unwrap().clone();
+    if url.trim().is_empty() { bail!(crate::i18n::t("ssh.proxy_not_configured")); }
+    parse(&url).map(Some)
+}
+
+pub fn format_url(p: &Proxy) -> String {
+    let scheme = match p.kind { Kind::Socks5 => "socks5", Kind::Http => "http" };
+    let auth = p.user.as_ref().map(|(u, pw)| format!("{u}:{pw}@")).unwrap_or_default();
+    let host = if p.host.contains(':') { format!("[{}]", p.host) } else { p.host.clone() };
+    format!("{scheme}://{auth}{host}:{}", p.port)
+}
+
+/// Where a detected proxy came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetectSource { System, Env, Listen }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Candidate {
+    pub kind: Kind,
+    pub host: String,
+    pub port: u16,
+    pub user: Option<(String, String)>,
+    pub source: DetectSource,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Detected { pub candidates: Vec<Candidate>, pub bypass: String }
+
+pub fn candidate_label(c: &Candidate) -> String {
+    let scheme = match c.kind { Kind::Socks5 => "socks5", Kind::Http => "http" };
+    let auth = c.user.as_ref().map(|(u, _)| format!("{u}@")).unwrap_or_default();
+    let host = if c.host.contains(':') { format!("[{}]", c.host) } else { c.host.clone() };
+    format!("{scheme}://{auth}{host}:{}", c.port)
+}
+
+/// Windows `ProxyServer` value, or a bare `host:port` (treated as HTTP).
+pub fn parse_system_server(raw: &str) -> Vec<Candidate> {
+    let raw = raw.trim();
+    if raw.is_empty() { return vec![]; }
+    let mut out = Vec::new();
+    if raw.contains('=') {
+        for part in raw.split([';', ' ']) {
+            let Some((k, v)) = part.split_once('=') else { continue };
+            let kind = match k.trim().to_ascii_lowercase().as_str() {
+                "socks" | "socks5" => Kind::Socks5,
+                "http" | "https" => Kind::Http,
+                _ => continue,
+            };
+            if let Some(c) = host_port(v.trim(), kind, DetectSource::System) { out.push(c); }
+        }
+    } else if let Some(c) = host_port(raw, Kind::Http, DetectSource::System) {
+        out.push(c);
+    }
+    dedup(out)
+}
+
+/// `ProxyOverride` / `NO_PROXY` → comma-separated globs. `<local>` becomes `localhost`.
+pub fn windows_bypass_to_globs(raw: &str) -> String {
+    let mut out = Vec::new();
+    let mut local = false;
+    for p in raw.split([';', ',']).map(str::trim).filter(|p| !p.is_empty()) {
+        if p.eq_ignore_ascii_case("<local>") || p.eq_ignore_ascii_case("localhost") { local = true; continue; }
+        if !out.iter().any(|x: &String| x == p) { out.push(p.to_string()); }
+    }
+    if local { out.insert(0, "localhost".into()); }
+    out.join(", ")
+}
+
+fn host_port(s: &str, kind: Kind, source: DetectSource) -> Option<Candidate> {
+    if s.contains("://") {
+        return parse(s).ok().map(|p| Candidate { kind: p.kind, host: p.host, port: p.port, user: p.user, source });
+    }
+    let (host, port) = s.rsplit_once(':')?;
+    let port: u16 = port.parse().ok()?;
+    let host = host.trim().trim_matches(['[', ']']).to_string();
+    if host.is_empty() || port == 0 { return None; }
+    Some(Candidate { kind, host, port, user: None, source })
+}
+
+fn dedup(mut v: Vec<Candidate>) -> Vec<Candidate> {
+    v.sort_by_key(|c| (c.host.to_ascii_lowercase(), c.port, match c.kind { Kind::Socks5 => 0, Kind::Http => 1 }, match c.source { DetectSource::System => 0, DetectSource::Env => 1, DetectSource::Listen => 2 }));
+    v.dedup_by(|a, b| a.kind == b.kind && a.port == b.port && a.host.eq_ignore_ascii_case(&b.host));
+    v
+}
+
+fn loopback(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "localhost" | "::1" | "0.0.0.0")
+}
+
+fn from_env() -> (Vec<Candidate>, String) {
+    let mut out = Vec::new();
+    for key in ["ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
+        let Ok(v) = std::env::var(key) else { continue };
+        let Ok(p) = parse(v.trim()) else { continue };
+        out.push(Candidate { kind: p.kind, host: p.host, port: p.port, user: p.user, source: DetectSource::Env });
+    }
+    let bypass = std::env::var("NO_PROXY").or_else(|_| std::env::var("no_proxy")).unwrap_or_default();
+    (dedup(out), windows_bypass_to_globs(&bypass))
+}
+
+#[cfg(windows)]
+fn system_proxy() -> (Vec<Candidate>, String) {
+    let enabled = read_reg_dword(r"Software\Microsoft\Windows\CurrentVersion\Internet Settings", "ProxyEnable").unwrap_or(0) != 0;
+    if !enabled { return (vec![], String::new()); }
+    let server = read_reg_sz(r"Software\Microsoft\Windows\CurrentVersion\Internet Settings", "ProxyServer").unwrap_or_default();
+    let over = read_reg_sz(r"Software\Microsoft\Windows\CurrentVersion\Internet Settings", "ProxyOverride").unwrap_or_default();
+    (parse_system_server(&server), windows_bypass_to_globs(&over))
+}
+
+#[cfg(not(windows))]
+fn system_proxy() -> (Vec<Candidate>, String) { (vec![], String::new()) }
+
+#[cfg(windows)]
+fn read_reg_sz(sub: &str, name: &str) -> Option<String> {
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_SZ};
+    let sub: Vec<u16> = sub.encode_utf16().chain(std::iter::once(0)).collect();
+    let name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut buf = vec![0u16; 2048];
+    let mut len = (buf.len() * 2) as u32;
+    let status = unsafe { RegGetValueW(HKEY_CURRENT_USER, sub.as_ptr(), name.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), buf.as_mut_ptr() as *mut _, &mut len) };
+    if status != 0 || len < 2 { return None; }
+    let n = (len as usize / 2).saturating_sub(1);
+    Some(String::from_utf16_lossy(&buf[..n]))
+}
+
+#[cfg(windows)]
+fn read_reg_dword(sub: &str, name: &str) -> Option<u32> {
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+    let sub: Vec<u16> = sub.encode_utf16().chain(std::iter::once(0)).collect();
+    let name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut val = 0u32;
+    let mut len = 4u32;
+    let status = unsafe { RegGetValueW(HKEY_CURRENT_USER, sub.as_ptr(), name.as_ptr(), RRF_RT_REG_DWORD, std::ptr::null_mut(), &mut val as *mut u32 as *mut _, &mut len) };
+    (status == 0).then_some(val)
+}
+
+const COMMON_PORTS: &[u16] = &[7890, 7891, 7897, 1080, 10808, 10809, 20171, 1081];
+
+fn probe_port(port: u16) -> Option<Kind> {
+    if socks5_alive(port) { return Some(Kind::Socks5); }
+    if http_proxy_alive(port) { return Some(Kind::Http); }
+    None
+}
+
+fn socks5_alive(port: u16) -> bool {
+    use std::io::{Read, Write};
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let Ok(mut s) = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(200)) else { return false };
+    let _ = s.set_read_timeout(Some(std::time::Duration::from_millis(200)));
+    let _ = s.set_write_timeout(Some(std::time::Duration::from_millis(200)));
+    if s.write_all(&[5, 1, 0]).is_err() { return false; }
+    let mut b = [0u8; 2];
+    s.read_exact(&mut b).is_ok() && b[0] == 5
+}
+
+fn http_proxy_alive(port: u16) -> bool {
+    use std::io::{Read, Write};
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let Ok(mut s) = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(200)) else { return false };
+    let _ = s.set_read_timeout(Some(std::time::Duration::from_millis(200)));
+    let _ = s.set_write_timeout(Some(std::time::Duration::from_millis(200)));
+    if s.write_all(b"CONNECT 127.0.0.1:1 HTTP/1.1\r\nHost: 127.0.0.1:1\r\n\r\n").is_err() { return false; }
+    let mut buf = [0u8; 16];
+    let Ok(n) = s.read(&mut buf) else { return false };
+    n >= 5 && buf.starts_with(b"HTTP/")
+}
+
+/// System proxy, environment variables, then common local proxy ports. Does not scan the LAN.
+pub fn detect() -> Detected {
+    let (mut candidates, sys_bypass) = system_proxy();
+    let (env, env_bypass) = from_env();
+    candidates.extend(env);
+    let mut ports: Vec<u16> = COMMON_PORTS.to_vec();
+    for c in &candidates {
+        if loopback(&c.host) { ports.push(c.port); }
+    }
+    ports.sort();
+    ports.dedup();
+    let probed = std::thread::scope(|sc| {
+        let mut jobs = Vec::new();
+        for port in ports {
+            jobs.push(sc.spawn(move || probe_port(port).map(|kind| Candidate { kind, host: "127.0.0.1".into(), port, user: None, source: DetectSource::Listen })));
+        }
+        jobs.into_iter().filter_map(|j| j.join().ok().flatten()).collect::<Vec<_>>()
+    });
+    candidates.extend(probed);
+    let bypass = if !sys_bypass.is_empty() { sys_bypass } else { env_bypass };
+    Detected { candidates: dedup(candidates), bypass }
 }
 
 /// Host part of an http(s) URL (for no_proxy matching).
@@ -68,6 +265,27 @@ fn b64(d: &[u8]) -> String {
     o
 }
 
+/// SOCKS5 CONNECT packet. IP literals use the IPv4/IPv6 address type so a local proxy in rule
+/// mode routes them as addresses. Sending an IP as a domain makes rule mode try a DNS lookup
+/// and drop the tunnel; global mode skips that lookup, which is why only global mode worked.
+fn socks5_connect_packet(host: &str, port: u16) -> Result<Vec<u8>> {
+    let mut req = vec![5, 1, 0];
+    if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+        req.push(1);
+        req.extend_from_slice(&ip.octets());
+    } else if let Ok(ip) = host.parse::<std::net::Ipv6Addr>() {
+        req.push(4);
+        req.extend_from_slice(&ip.octets());
+    } else {
+        if host.len() > 255 { bail!("host name too long"); }
+        req.push(3);
+        req.push(host.len() as u8);
+        req.extend_from_slice(host.as_bytes());
+    }
+    req.extend_from_slice(&port.to_be_bytes());
+    Ok(req)
+}
+
 /// Open a TCP tunnel to `host:port` through the proxy.
 pub async fn connect(p: &Proxy, host: &str, port: u16) -> Result<TcpStream> {
     let mut s = TcpStream::connect((p.host.as_str(), p.port)).await.map_err(|e| anyhow!("proxy {}:{}: {e}", p.host, p.port))?;
@@ -90,8 +308,7 @@ pub async fn connect(p: &Proxy, host: &str, port: u16) -> Result<TcpStream> {
                 }
                 _ => bail!("SOCKS5 proxy accepts none of our auth methods"),
             }
-            if host.len() > 255 { bail!("host name too long"); }
-            let mut req = vec![5, 1, 0, 3, host.len() as u8]; req.extend_from_slice(host.as_bytes()); req.extend_from_slice(&port.to_be_bytes());
+            let req = socks5_connect_packet(host, port)?;
             s.write_all(&req).await?;
             let mut h = [0u8; 4]; s.read_exact(&mut h).await?;
             if h[1] != 0 { bail!("SOCKS5 proxy: connect to {host}:{port} failed (code {})", h[1]); }
@@ -164,6 +381,10 @@ mod tests {
             let mut b = [0u8; 4]; s.read_exact(&mut b).await.unwrap();
             assert_eq!(&b, b"ping", "{url}");
         }
+        let mut s = connect(&parse(&format!("socks5://127.0.0.1:{sport}")).unwrap(), "127.0.0.1", eport).await.unwrap();
+        s.write_all(b"ping").await.unwrap();
+        let mut b = [0u8; 4]; s.read_exact(&mut b).await.unwrap();
+        assert_eq!(&b, b"ping");
         assert!(connect(&parse(&format!("http://127.0.0.1:{hport}")).unwrap(), "localhost", eport).await.unwrap_err().to_string().contains("407"));
         let _g = CFG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         *URL.lock().unwrap() = "socks5://1.2.3.4:1".into(); *NO_PROXY.lock().unwrap() = "10.*, localhost".into();
@@ -228,5 +449,33 @@ mod tests {
         assert_eq!(seen.lock().unwrap().len(), 2);
         assert_eq!(url_host("https://user@API.example.com:443/v1"), "api.example.com");
         URL.lock().unwrap().clear(); NO_PROXY.lock().unwrap().clear();
+    }
+
+    #[test]
+    fn ssh_proxy_is_opt_in_and_system_strings_parse() {
+        let _g = CFG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        *URL.lock().unwrap() = "socks5://127.0.0.1:1080".into();
+        *NO_PROXY.lock().unwrap() = "10.*".into();
+        assert!(for_ssh("example.com", false).unwrap().is_none());
+        assert!(for_ssh("10.1.1.1", true).unwrap().is_none());
+        assert_eq!(for_ssh("example.com", true).unwrap().unwrap().port, 1080);
+        URL.lock().unwrap().clear();
+        assert!(for_ssh("example.com", true).is_err());
+        URL.lock().unwrap().clear();
+        NO_PROXY.lock().unwrap().clear();
+        let v = parse_system_server("http=127.0.0.1:7890;socks=127.0.0.1:7891");
+        assert!(v.iter().any(|c| c.kind == Kind::Socks5 && c.port == 7891));
+        assert!(v.iter().any(|c| c.kind == Kind::Http && c.port == 7890));
+        assert_eq!(parse_system_server("127.0.0.1:7890")[0].kind, Kind::Http);
+        assert_eq!(windows_bypass_to_globs("localhost;<local>;10.*"), "localhost, 10.*");
+        let ip = socks5_connect_packet("136.0.57.118", 22).unwrap();
+        assert_eq!(&ip[..4], &[5, 1, 0, 1]);
+        assert_eq!(&ip[4..8], &[136, 0, 57, 118]);
+        assert_eq!(&ip[8..], &22u16.to_be_bytes());
+        let name = socks5_connect_packet("example.com", 22).unwrap();
+        assert_eq!(name[3], 3);
+        assert_eq!(name[4] as usize, "example.com".len());
+        let url = format_url(&Proxy { kind: Kind::Socks5, host: "127.0.0.1".into(), port: 7890, user: Some(("u".into(), "p".into())) });
+        assert_eq!(parse(&url).unwrap().port, 7890);
     }
 }

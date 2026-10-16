@@ -417,7 +417,7 @@ tools = ["jq"]
 pub struct FileObj { pub path: String, pub is_dir: bool, pub mode: u32 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Target { Files(Vec<FileObj>), Url(String), HostPort { host: String, port: Option<u16> }, Selection(String), Blank { paste: Option<String> } }
+pub enum Target { Files(Vec<FileObj>), Url(String), HostPort { host: String, port: Option<u16> }, Selection(String), Blank { paste: Option<String>, image: bool } }
 
 /// Where the menu was opened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -437,6 +437,8 @@ pub enum Act {
     Search(String),
     AiExplain(String),
     PasteInput(String),
+    /// Paste whatever is on the clipboard now (text, or a screenshot saved as a file).
+    PasteClipboard,
     /// Point the open AI assistant at the terminal that opened this menu.
     UseAiContext,
 }
@@ -629,10 +631,12 @@ pub fn build(target: &Target, ctx: &Ctx) -> Menu {
             b.push("ai_explain", t("cm.ai_explain").into(), Act::AiExplain(s.clone()), &[]);
             b.push("paste_input", t("cm.paste_input").into(), Act::PasteInput(s.clone()), &[]);
         }
-        Target::Blank { paste } => {
+        Target::Blank { paste, image } => {
             header = t("cm.blank").to_string();
             if let Some(s) = paste {
                 b.push("paste_input", t("cm.paste").into(), Act::PasteInput(s.clone()), &[]);
+            } else if *image {
+                b.push("paste_input", t("cm.paste").into(), Act::PasteClipboard, &[]);
             }
         }
     }
