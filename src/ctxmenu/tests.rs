@@ -255,10 +255,13 @@ fn menus_by_type_with_previews_and_missing_tools() {
     let m = build(&Target::HostPort { host: "10.0.0.5".into(), port: Some(8080) }, &ctx(Place::Terminal { remote: true }, Some(&tools), &[]));
     assert_eq!(find(&m, "nc").act, Act::Insert("nc -zv 10.0.0.5 8080".into()));
     assert_eq!(find(&m, "copy").act, Act::Copy("10.0.0.5:8080".into()));
-    let m = build(&Target::Selection("ls -la".into()), &ctx(Place::Terminal { remote: true }, Some(&tools), &[]));
-    for id in ["copy", "search", "ai_explain", "paste_input"] { find(&m, id); }
-    // no insert command ever contains a newline
-    for it in &m.items { if let Act::Insert(c) = &it.act { assert!(!c.contains('\n')); } }
+    let sel = build(&Target::Selection("ls -la".into()), &ctx(Place::Terminal { remote: true }, Some(&tools), &[]));
+    for id in ["copy", "search", "ai_explain", "paste_input"] { find(&sel, id); }
+    for it in &sel.items { if let Act::Insert(c) = &it.act { assert!(!c.contains('\n')); } }
+    let m = build(&Target::Blank { paste: None, image: true }, &ctx(Place::Terminal { remote: false }, Some(&tools), &[]));
+    assert!(matches!(find(&m, "paste_input").act, Act::PasteClipboard));
+    let m = build(&Target::Blank { paste: None, image: false }, &ctx(Place::Terminal { remote: false }, Some(&tools), &[]));
+    assert!(m.items.iter().all(|i| i.id != "paste_input"));
 }
 
 #[test]
