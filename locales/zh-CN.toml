@@ -277,8 +277,6 @@
 "term.connect_failed" = "连接失败：{e}"
 "term.cwd_unknown" = "当前目录未知"
 "term.paste_confirm" = "粘贴 {lines} 行文本？每一行都可能被立即执行"
-"term.paste_image_sending" = "正在把截图传到 {host}…"
-"term.paste_image_failed" = "截图没能传到远程：{e}"
 "ui.0_disables" = "0 表示关闭"
 "ui.about" = "关于"
 "ui.accept_and_save" = "接受并保存"

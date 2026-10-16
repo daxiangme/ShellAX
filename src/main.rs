@@ -361,31 +361,6 @@ impl Root {
                     this.toast(t("cm.ai_context_set").to_string(), cx);
                     return;
                 }
-                termview::TermEvent::PasteImage(path) => {
-                    let Spec::Ssh(target) = pane.read(cx).spec.clone() else { return };
-                    let path = path.clone();
-                    let host = target.label();
-                    this.toast(tf("term.paste_image_sending", &[("host", &host)]), cx);
-                    let rt = this.rt.clone();
-                    let prompts = this.prompts.clone();
-                    let pane = pane.clone();
-                    cx.spawn(async move |this, cx| {
-                        let uploaded = rt.spawn(async move {
-                            let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-                            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("paste.png");
-                            let remote = termview::remote_paste_path(name).ok_or_else(|| "bad file name".to_string())?;
-                            let (c, _) = ssh::connect_shared(&target, &prompts).await.map_err(|e| format!("{e:#}"))?;
-                            c.write_file(&remote, &bytes).await.map_err(|e| format!("{e:#}"))?;
-                            Ok::<String, String>(remote)
-                        }).await;
-                        let _ = this.update(cx, |this, cx| match uploaded {
-                            Ok(Ok(remote)) => { let _ = pane.update(cx, |v, cx| v.paste_text(remote, cx)); }
-                            Ok(Err(e)) => this.toast(tf("term.paste_image_failed", &[("e", &e.chars().take(180).collect::<String>())]), cx),
-                            Err(e) => this.toast(tf("term.paste_image_failed", &[("e", &e.to_string())]), cx),
-                        });
-                    }).detach();
-                    return;
-                }
                 termview::TermEvent::Explain => {}
             }
             let fc = pane.update(cx, |p, cx| { let f = p.failure_context(); p.failed = None; cx.notify(); f });

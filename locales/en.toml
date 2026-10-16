@@ -277,8 +277,6 @@
 "term.connect_failed" = "Connection failed: {e}"
 "term.cwd_unknown" = "Current directory unknown"
 "term.paste_confirm" = "Paste {lines} lines? Each line may run immediately"
-"term.paste_image_sending" = "Sending the screenshot to {host}…"
-"term.paste_image_failed" = "Could not send the screenshot: {e}"
 "ui.0_disables" = "0 disables"
 "ui.about" = "About"
 "ui.accept_and_save" = "Accept and save"

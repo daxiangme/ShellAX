@@ -431,7 +431,7 @@ impl SftpView {
             Act::Download(paths) => for p in paths { self.download(p, cx) },
             Act::Upload(paths) => for p in paths { self.upload(PathBuf::from(p), cx) },
             Act::OpenUrl(u) => cx.open_url(&u),
-            Act::Search(_) | Act::AiExplain(_) | Act::PasteInput(_) | Act::PasteClipboard | Act::UseAiContext => {}
+            Act::Search(_) | Act::AiExplain(_) | Act::PasteInput(_) | Act::UseAiContext => {}
         }
         cx.notify();
     }

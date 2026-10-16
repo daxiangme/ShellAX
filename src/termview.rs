@@ -524,8 +524,7 @@ pub struct SearchBar { pub query: String, pub cur: Option<(BPoint, BPoint)>, pub
 #[derive(Clone, Debug, PartialEq)]
 pub struct StepOutput { pub cmd: String, pub exit: Option<i32>, pub output: String, pub withheld: bool }
 
-pub enum TermEvent { Keyword(String, String), Explain, Agent(String, AgentState), LongDone(String, u64, i32), Audit(&'static str, String), CtxEditor(String), CtxCdTab(String), CtxAiExplain(String), CtxUseAi, /// Screenshot saved on this machine; an SSH pane still has to upload it.
-    PasteImage(std::path::PathBuf) }
+pub enum TermEvent { Keyword(String, String), Explain, Agent(String, AgentState), LongDone(String, u64, i32), Audit(&'static str, String), CtxEditor(String), CtxCdTab(String), CtxAiExplain(String), CtxUseAi }
 
 /// IME support (PRD 3.3: IME must work for agents too). Committed text goes to the PTY like typing;
 /// composition text is only drawn (never sent) until the IME commits it.
@@ -941,16 +940,7 @@ impl TermView {
     }
 
     pub fn paste(&mut self, cx: &mut Context<Self>) {
-        self.ctx_menu = None;
-        let Some(item) = cx.read_from_clipboard() else { return };
-        match classify_clipboard(&item) {
-            ClipboardPaste::Text(text) => self.queue_paste_text(text, cx),
-            ClipboardPaste::Image(png) => self.paste_image(png, cx),
-            ClipboardPaste::Empty => {}
-        }
-    }
-
-    fn queue_paste_text(&mut self, text: String, cx: &mut Context<Self>) {
+        let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) else { return };
         // multi-line paste outside bracketed-paste mode would execute each line: confirm first
         if config::get().terminal.paste_confirm && text.trim_end().contains('\n') && !self.mode().contains(TermMode::BRACKETED_PASTE) {
             self.pending_paste = Some(text);
@@ -958,19 +948,6 @@ impl TermView {
             return;
         }
         self.paste_text(text, cx);
-    }
-
-    /// A screenshot has no text. Save a PNG and hand the program a path it can open.
-    /// Local (including Claude on this machine): paste the path. SSH: upload first, then paste the remote path.
-    fn paste_image(&mut self, png: Vec<u8>, cx: &mut Context<Self>) {
-        let Ok(path) = save_paste_png(&paste_image_dir(), &png) else { return };
-        match &self.spec {
-            Spec::Local => {
-                let cwd = self.shell_cwd();
-                self.paste_text(image_paste_text(&path.to_string_lossy(), cwd.as_deref()), cx);
-            }
-            Spec::Ssh(_) => { cx.emit(TermEvent::PasteImage(path)); }
-        }
     }
 
     pub fn paste_text(&mut self, text: String, cx: &mut Context<Self>) {
@@ -1019,12 +996,6 @@ impl TermView {
                 "v" => { self.paste(cx); cx.stop_propagation(); return; }
                 _ => {}
             }
-        }
-        // Windows Ctrl+V / macOS Cmd+V. Alt+V is left for Claude's own image-paste key.
-        if claims_paste_key(m.control, m.shift, m.alt, m.platform, &k.key) {
-            self.paste(cx);
-            cx.stop_propagation();
-            return;
         }
         if m.shift && !m.control && k.key == "insert" { self.paste(cx); cx.stop_propagation(); return; }
         if m.shift && !m.control && (k.key == "pageup" || k.key == "pagedown") && !self.mode().contains(TermMode::ALT_SCREEN) {
@@ -1593,11 +1564,9 @@ impl TermView {
         let mut note = None;
         let target = if let Some(sel) = sel { Target::Selection(sel) } else {
             let mut blank = || {
-                let item = cx.read_from_clipboard();
-                let paste = item.as_ref().and_then(|i| i.text()).filter(|t| !t.trim().is_empty());
-                let image = paste.is_none() && item.as_ref().is_some_and(clipboard_has_image);
-                if paste.is_none() && !image { note = Some(t("cm.clipboard_empty").to_string()); }
-                Target::Blank { paste, image }
+                let paste = cx.read_from_clipboard().and_then(|i| i.text()).filter(|t| !t.trim().is_empty());
+                if paste.is_none() { note = Some(t("cm.clipboard_empty").to_string()); }
+                Target::Blank { paste }
             };
             match self.line_at(cell) {
                 None => blank(),
@@ -1652,7 +1621,6 @@ impl TermView {
             Act::PasteInput(text) => {
                 if let Some(s) = self.session.clone() { let one = text.replace(['\r', '\n'], " "); s.write(one.clone().into_bytes()); self.tracker.key(Key::Text(&one)); }
             }
-            Act::PasteClipboard => self.paste(cx),
             Act::UseAiContext => cx.emit(TermEvent::CtxUseAi),
             Act::Download(_) | Act::Upload(_) => {}
         }
@@ -1860,106 +1828,6 @@ pub enum ScriptGate {
     Allow,
     Ask(Vec<String>),
     Deny { line: String, why: String },
-}
-
-/// What a clipboard paste should deliver. Text wins when both text and an image are present.
-#[derive(Debug, PartialEq, Eq)]
-pub enum ClipboardPaste { Text(String), Image(Vec<u8>), Empty }
-
-const PASTE_IMAGE_MAX: usize = 20 * 1024 * 1024;
-static PASTE_SEQ: AtomicU64 = AtomicU64::new(0);
-
-/// Windows Ctrl+V and macOS Cmd+V paste. Alt+V is not claimed: Claude binds image paste to it on Windows.
-/// Linux keeps Ctrl+V for the program (Ctrl+Shift+V still pastes).
-pub fn claims_paste_key(control: bool, shift: bool, alt: bool, platform: bool, key: &str) -> bool {
-    if !key.eq_ignore_ascii_case("v") || alt || shift { return false; }
-    #[cfg(target_os = "macos")]
-    { return platform && !control; }
-    #[cfg(windows)]
-    { return control && !platform; }
-    #[cfg(not(any(windows, target_os = "macos")))]
-    { let _ = (control, platform); false }
-}
-
-pub fn clipboard_has_image(item: &ClipboardItem) -> bool {
-    item.entries().iter().any(|e| matches!(e, gpui::ClipboardEntry::Image(img) if !img.bytes().is_empty()))
-}
-
-pub fn classify_clipboard(item: &ClipboardItem) -> ClipboardPaste {
-    if let Some(text) = item.text().filter(|t| !t.trim().is_empty()) { return ClipboardPaste::Text(text); }
-    let Some(img) = item.entries().iter().find_map(|e| match e { gpui::ClipboardEntry::Image(img) => Some(img), _ => None }) else { return ClipboardPaste::Empty };
-    match image_to_png(img) {
-        Some(png) if !png.is_empty() && png.len() <= PASTE_IMAGE_MAX => ClipboardPaste::Image(png),
-        _ => ClipboardPaste::Empty,
-    }
-}
-
-fn gpui_image_format(fmt: gpui::ImageFormat) -> Option<image::ImageFormat> {
-    Some(match fmt {
-        gpui::ImageFormat::Jpeg => image::ImageFormat::Jpeg,
-        gpui::ImageFormat::Gif => image::ImageFormat::Gif,
-        gpui::ImageFormat::Bmp => image::ImageFormat::Bmp,
-        _ => return None,
-    })
-}
-
-/// PNG bytes Claude (and anything else) can open. Already-PNG clipboard data is kept as-is.
-pub fn image_to_png(img: &gpui::Image) -> Option<Vec<u8>> {
-    match img.format() {
-        gpui::ImageFormat::Png => { let b = img.bytes(); (!b.is_empty()).then(|| b.to_vec()) }
-        gpui::ImageFormat::Svg => None,
-        fmt => {
-            let decoded = gpui_image_format(fmt)?;
-            let im = image::load_from_memory_with_format(img.bytes(), decoded).ok()?;
-            let mut buf = Vec::new();
-            im.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png).ok()?;
-            (!buf.is_empty()).then_some(buf)
-        }
-    }
-}
-
-pub fn paste_image_dir() -> std::path::PathBuf { std::env::temp_dir().join("shellax-pastes") }
-
-pub fn save_paste_png(dir: &std::path::Path, png: &[u8]) -> std::io::Result<std::path::PathBuf> {
-    std::fs::create_dir_all(dir)?;
-    prune_paste_dir(dir);
-    let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-    let path = dir.join(format!("paste-{ms}-{}.png", PASTE_SEQ.fetch_add(1, Ordering::Relaxed)));
-    std::fs::write(&path, png)?;
-    Ok(path)
-}
-
-fn prune_paste_dir(dir: &std::path::Path) {
-    let Ok(cutoff) = std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(24 * 3600)) else { return };
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
-    for ent in rd.flatten() {
-        let name = ent.file_name();
-        let name = name.to_string_lossy();
-        if !(name.starts_with("paste-") && name.ends_with(".png")) { continue; }
-        if ent.metadata().ok().and_then(|m| m.modified().ok()).is_some_and(|t| t < cutoff) { let _ = std::fs::remove_file(ent.path()); }
-    }
-}
-
-/// Remote path for an uploaded screenshot. The name is the file we just wrote, never a caller path.
-pub fn remote_paste_path(file_name: &str) -> Option<String> {
-    if file_name.is_empty() || file_name.contains('/') || file_name.contains('\\') || file_name.contains('\0') || file_name.contains(' ') { return None; }
-    Some(format!("/tmp/shellax-pastes/{file_name}"))
-}
-
-fn windows_path_to_wsl(path: &str) -> Option<String> {
-    let b = path.as_bytes();
-    if b.len() < 3 || !b[0].is_ascii_alphabetic() || b[1] != b':' || (b[2] != b'\\' && b[2] != b'/') { return None; }
-    let drive = (b[0] as char).to_ascii_lowercase();
-    Some(format!("/mnt/{drive}{}", path[2..].replace('\\', "/")))
-}
-
-/// Path text to insert. A WSL/Linux cwd gets `/mnt/<drive>/…` so the guest can open the file.
-/// Paths with spaces or shell metacharacters are quoted; a plain Windows temp path is not.
-pub fn image_paste_text(path: &str, cwd: Option<&str>) -> String {
-    let wsl = cwd.is_some_and(|c| c.starts_with('/') && !is_windows_path(c));
-    let raw = if wsl { windows_path_to_wsl(path).unwrap_or_else(|| path.to_string()) } else { path.to_string() };
-    let safe = raw.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '\\' | '/' | '.' | '-' | '_'));
-    if safe { raw } else { format!("\"{}\"", raw.replace('"', "")) }
 }
 
 /// Bytes to send for a paste. Bracketed paste wraps the text and strips any embedded
@@ -2251,48 +2119,5 @@ mod tests {
         assert_eq!(cwd_crumbs("D:\\a\\b"), vec![("D:".into(), "D:\\".into()), ("a".into(), "D:\\a".into()), ("b".into(), "D:\\a\\b".into())]);
         assert_eq!(cd_command_for("/var/log"), "cd -- /var/log");
         assert_eq!(cd_command_for(r"D:\a b"), "Set-Location -LiteralPath 'D:\\a b'");
-    }
-    fn png_1x1() -> Vec<u8> {
-        let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([9, 8, 7, 255]));
-        let mut buf = Vec::new();
-        image::DynamicImage::ImageRgba8(img).write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png).unwrap();
-        buf
-    }
-    #[test]
-    fn screenshot_clipboard_becomes_png_path() {
-        let png = png_1x1();
-        let img = gpui::Image::from_bytes(gpui::ImageFormat::Png, png.clone());
-        assert_eq!(image_to_png(&img).as_deref(), Some(png.as_slice()));
-        let item = ClipboardItem::new_image(&img);
-        assert!(clipboard_has_image(&item));
-        assert_eq!(classify_clipboard(&item), ClipboardPaste::Image(png.clone()));
-        let both = ClipboardItem { entries: vec![gpui::ClipboardEntry::String(gpui::ClipboardString::new("hello".into())), gpui::ClipboardEntry::Image(img)] };
-        assert_eq!(classify_clipboard(&both), ClipboardPaste::Text("hello".into()));
-        assert_eq!(classify_clipboard(&ClipboardItem::new_string("  ".into())), ClipboardPaste::Empty);
-
-        let rgba = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255])));
-        let mut bmp = Vec::new();
-        rgba.write_to(&mut std::io::Cursor::new(&mut bmp), image::ImageFormat::Bmp).unwrap();
-        let converted = image_to_png(&gpui::Image::from_bytes(gpui::ImageFormat::Bmp, bmp)).unwrap();
-        assert!(converted.starts_with(b"\x89PNG\r\n\x1a\n"));
-
-        let plain = r"C:\Users\Administrator\AppData\Local\Temp\shellax-pastes\paste-1-2.png";
-        assert_eq!(image_paste_text(plain, Some(r"C:\Users\Administrator")), plain);
-        assert_eq!(image_paste_text(plain, Some("/home/xyy")), "/mnt/c/Users/Administrator/AppData/Local/Temp/shellax-pastes/paste-1-2.png");
-        assert_eq!(image_paste_text(r"C:\Users\A B\shot.png", None), r#""C:\Users\A B\shot.png""#);
-        assert_eq!(image_paste_text(r"D:\a b\x.png", Some("/home/xyy")), r#""/mnt/d/a b/x.png""#);
-        assert_eq!(remote_paste_path("paste-1-2.png").as_deref(), Some("/tmp/shellax-pastes/paste-1-2.png"));
-        assert_eq!(remote_paste_path("../x.png"), None);
-        assert!(!claims_paste_key(true, false, true, false, "v"));
-        assert!(!claims_paste_key(true, true, false, false, "v"));
-        assert_eq!(claims_paste_key(true, false, false, false, "v"), cfg!(windows));
-        assert_eq!(claims_paste_key(false, false, false, true, "v"), cfg!(target_os = "macos"));
-
-        let dir = std::env::temp_dir().join(format!("shellax-paste-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let saved = save_paste_png(&dir, &png).unwrap();
-        assert_eq!(std::fs::read(&saved).unwrap(), png);
-        assert!(saved.extension().is_some_and(|e| e == "png"));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
