@@ -2270,8 +2270,6 @@ mod tests {
         assert_eq!(classify_clipboard(&both), ClipboardPaste::Text("hello".into()));
         assert_eq!(classify_clipboard(&ClipboardItem::new_string("  ".into())), ClipboardPaste::Empty);
 
-        let mut bmp_img = image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]));
-        let _ = &mut bmp_img;
         let rgba = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255])));
         let mut bmp = Vec::new();
         rgba.write_to(&mut std::io::Cursor::new(&mut bmp), image::ImageFormat::Bmp).unwrap();
