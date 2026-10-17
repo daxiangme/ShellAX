@@ -16,6 +16,7 @@ ShellAX 是用 Rust + GPUI 写的 SSH 终端，内置面向 AI Agent 的权限�
 - 配置：`~/.config/shellax/config.toml`（Windows `%APPDATA%\ShellAX`）；数据：`~/.local/share/shellax`（Windows `%LOCALAPPDATA%\shellax`）
 - 首次启动会把旧的 `agentshell` / `AgentShell` 目录改名为新目录（新目录已存在时不动）；钥匙串里旧 `agentshell` 服务的凭据在首次读取时复制过来；配置中的 `AgentShell Midnight/Daylight` 主题名自动改为 `shellax …`；环境变量前缀由 `AGENTSHELL_` 改为 `SHELLAX_`。已安装的旧 Agent hook 在重新安装时会被识别并替换。
 - Windows 安装包：`tools/package_win.sh` → `/workspace/dist-win/ShellAX-Setup-x64.exe`、`ShellAX-portable-x64.zip`、`SHA256SUMS.txt`
+- Windows 本机打包（0.1.2 起）：`tools/package_win.ps1` → `dist/ShellAX-Setup-x64.exe`、`ShellAX-portable-x64.zip`、`SHA256SUMS.txt`
 
 ## 构建与测试（第 11 轮）
 ```bash

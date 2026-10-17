@@ -159,3 +159,13 @@
 - 首次启动迁移：coossh 目录优先，其次 AgentShell；钥匙串服务 "coossh"/"agentshell" 首次读取时复制到 "shellax"；hook 识别 shellax/coossh/agentshell。
 - 未改：crate 名 ssh-term-proto / ssh_term_proto、docs/prd-history、testenv/test.env 里的测试密码。
 - 只跑了 cargo check（含 --tests）；未重新打 Windows 安装包。
+
+## 第 20 轮：打包 0.1.2（Windows x64）
+- 版本号 0.1.2，同步 5 处：Cargo.toml、Cargo.lock、packaging/windows/installer.nsi（`VER`、`VIProductVersion`）、packaging/windows/shellax.rc（`FILEVERSION`、`ProductVersion`）、docs/WINDOWS_TEST.md 标题与首段。
+- 收录 0.1.1 之后的 4 个提交：每台主机可单独选一把私钥 + 复制公钥（ffce616）、主机级「使用代理」开关与设置里的代理页（30e548f）、终端剪贴板图片粘贴加了又撤（c02ef5b / d52ea3c / eae2c1b，净变化为零）。WINDOWS_TEST.md 新增「0.1.2 新增验证项」，原来那节 5.23 清单改标 0.1.1。
+- build.rs：GNU 目标（本机默认 x86_64-pc-windows-gnu）改为用 MinGW `windres` 编译 shellax.rc、把 `.rsrc` 对象链进 `shellax` 二进制，图标和版本信息由构建产生；MSVC 目标仍走 `llvm-rc` / `rc.exe`。之前 GNU 构建直接 return，0.1.1 的图标和版本是打包时用 rcedit 事后补写的，所以 `target\dist` 里的 exe 一直没有资源、只有装好的那份有。找不到资源编译器时仍只警告，不失败。
+- 新增 `tools/package_win.ps1`：Windows 本机一条命令打包（此前是手工 makensis + zip）。从 Cargo.toml 读版本；installer.nsi / shellax.rc 版本不一致直接报错（0.1.1 那次的 dist 就是版本对不上、后来又落后 4 个提交）；makensis 依次查 PATH、`SHELLAX_MAKENSIS`、`-Makensis`、`%TEMP%\shellax-pack-tools`、electron-builder 缓存、Program Files。
+- 产物 `dist/`：ShellAX-Setup-x64.exe（10,297,565 B）、ShellAX-portable-x64.zip（16,545,244 B）、SHA256SUMS.txt。setup `2c040cce98b2eccf…`，zip `d00a4c8e47cfcf8c…`。
+- 验证：zip 里的 shellax.exe 与 `target\dist\shellax.exe` 逐字节一致；在隔离的 `XDG_DATA_HOME` / `SHELLAX_CONFIG` 下启动，日志第一行是 `ShellAX 0.1.2 started`；exe 的 FileVersion 0.1.2、ProductName ShellAX，图标已嵌入；`shellax-cli status` 退出码 0、无参数退出码 64（usage）；用同一份暂存目录重跑 makensis，产物与 dist 里的 setup **逐字节一致**，说明安装包里就是 shellax.exe、shellax-cli.exe 和两份 md。dist 构建 0 警告。
+- 没有执行安装包本体：本机已装 0.1.1（`D:\Program Files (x86)\ShellAX`，HKCU 卸载项 DisplayVersion 0.1.1），装新包会就地升级并改写**同一个**卸载登记项，测完再卸载会把用户的 0.1.1 变成未登记状态。升级留给用户在真机上点。
+- 没跑：`cargo test`（Windows 上没有 testenv 的 sshd）、全量 clippy。

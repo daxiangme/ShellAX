@@ -40,6 +40,14 @@ cargo xwin build --profile dist --target x86_64-pc-windows-msvc --bin shellax --
 tools/package_win.sh        # 生成 ShellAX-Setup-x64.exe / portable zip
 ```
 Windows 本机发布构建直接：`cargo build --profile dist --bin shellax --bin shellax-cli`，产物在 `target\dist\`。
+
+在 Windows 本机打包（推荐）：
+```powershell
+pwsh -File tools\package_win.ps1                              # 构建 + 打包，产物在 dist\
+pwsh -File tools\package_win.ps1 -SkipBuild -Out D:\dist-win  # 不重新构建，换个输出目录
+```
+脚本从 `Cargo.toml` 读版本号，如果 `packaging/windows/installer.nsi` 或 `shellax.rc` 里的版本不一致就直接报错（避免打出旧版本号的包）；需要 `makensis.exe`，按 PATH、`SHELLAX_MAKENSIS`、`-Makensis` 的顺序查找。
+exe 的图标和版本信息由 `build.rs` 在构建时写入：GNU 目标（本机默认 `x86_64-pc-windows-gnu`）调 MinGW 的 `windres`，MSVC 目标调 `llvm-rc` / `rc.exe`。找不到资源编译器时只打印警告，exe 会没有图标和版本信息。
 `.cargo/config.toml` 已为 MSVC 目标静态链接 C 运行库（无需 VC++ 运行库）。
 
 ## 4. 调试
