@@ -1811,9 +1811,30 @@ fn main() {
         let installed = cx.text_system().all_font_names();
         theme::set_ui_font(theme::pick_ui_font(&installed));
         let fc = config::get().font.clone();
-        if let Some(f) = theme::pick_term_font(&fc.family, &fc.fallbacks, &installed) {
-            eprintln!("terminal font {:?} not installed, using {f:?}", fc.family);
-            let mut s = (*config::get()).clone(); s.font.family = f; config::install(s);
+        let is_stock_default = cfg!(target_os = "windows") && fc.family == "Cascadia Mono";
+        let not_installed = !installed.iter().any(|i| i.eq_ignore_ascii_case(&fc.family));
+        if is_stock_default || not_installed {
+            if let Some(det) = ssh_term_proto::platform::detect_system_terminal_font(&installed) {
+                eprintln!("detected system terminal font: {:?} from {}", det.family, det.source);
+                let mut s = (*config::get()).clone();
+                s.font.family = det.family.clone();
+                if let Some(sz) = det.size { if (8.0..=32.0).contains(&sz) { s.font.size = sz; } }
+                if !s.font.fallbacks.iter().any(|fb| fb.eq_ignore_ascii_case(&det.family)) {
+                    s.font.fallbacks.insert(0, det.family);
+                }
+                config::install(s.clone());
+                let _ = s.save();
+            } else if let Some(f) = theme::pick_term_font(&fc.family, &fc.fallbacks, &installed) {
+                eprintln!("terminal font {:?} not installed, using {f:?}", fc.family);
+                let mut s = (*config::get()).clone(); s.font.family = f; config::install(s);
+            }
+        } else if let Some(det) = ssh_term_proto::platform::detect_system_terminal_font(&installed) {
+            if !fc.fallbacks.iter().any(|fb| fb.eq_ignore_ascii_case(&det.family)) {
+                let mut s = (*config::get()).clone();
+                s.font.fallbacks.insert(0, det.family);
+                config::install(s.clone());
+                let _ = s.save();
+            }
         }
         let bounds = Bounds::centered(None, size(px(1440.), px(860.)), cx);
         cx.open_window(

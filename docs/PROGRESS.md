@@ -169,3 +169,19 @@
 - 验证：zip 里的 shellax.exe 与 `target\dist\shellax.exe` 逐字节一致；在隔离的 `XDG_DATA_HOME` / `SHELLAX_CONFIG` 下启动，日志第一行是 `ShellAX 0.1.2 started`；exe 的 FileVersion 0.1.2、ProductName ShellAX，图标已嵌入；`shellax-cli status` 退出码 0、无参数退出码 64（usage）；用同一份暂存目录重跑 makensis，产物与 dist 里的 setup **逐字节一致**，说明安装包里就是 shellax.exe、shellax-cli.exe 和两份 md。dist 构建 0 警告。
 - 没有执行安装包本体：本机已装 0.1.1（`D:\Program Files (x86)\ShellAX`，HKCU 卸载项 DisplayVersion 0.1.1），装新包会就地升级并改写**同一个**卸载登记项，测完再卸载会把用户的 0.1.1 变成未登记状态。升级留给用户在真机上点。
 - 没跑：`cargo test`（Windows 上没有 testenv 的 sshd）、全量 clippy。
+
+## 第 21 轮：0.1.3 版本（系统终端字体自动检测、回退链注入、设置项左右规范排版、交互式字体选择器）
+- 自动检测系统终端字体（`src/platform.rs`）：
+  - 扫描 Windows Terminal（`settings.json`：默认 profile 或 PowerShell/cmd profile 中的 `font.face` / `fontFace` 及字号）与 VS Code（`terminal.integrated.fontFamily`）。
+  - 支持别名精准映射（如 `JetBrainsMono Nerd Font Mono` <-> `JetBrainsMono NFM`）。
+  - 若系统终端未配置或未找到，自动扫描系统已安装的常用 Nerd Font（如 JetBrainsMono NFM, Cascadia Code NF, MesloLGS NF 等）。
+- 首次启动与初始化注入（`src/main.rs`）：
+  - 启动时若终端字体为默认（如 Cascadia Mono）或未安装，自动采用系统终端检测到的字体（同步字号）并持久化；
+  - 自动将检测到的 Nerd Font 注入到 `font.fallbacks` 首位，确保 oh-my-posh / starship 图标开箱即用，彻底解决豆腐块 `[]` 方框问题。
+- 设置页左右排版规范重构（`src/settings_view.rs`）：
+  - 彻底去除原来 168px 窄列限制，左侧标题与描述占据弹性区域（`flex-1`），右侧操作控件靠右端对齐（`justify-between`），层级清晰优雅，参考 Windows Terminal / macOS 现代规范。
+- 交互式字体选择下拉组件（`Ctl::Font`）：
+  - 点击弹出下拉面板，支持快速即时搜索过滤；
+  - 默认仅展示等宽 / 终端字体，提供“仅等宽字体”切换；
+  - 顶部置顶展示“系统终端推荐”卡片，支持一键点击直接应用；
+  - 支持直接输入任意自定义字体名并快捷应用。

@@ -72,7 +72,7 @@ impl Cat {
     }
 }
 
-enum Ctl { Toggle(&'static str), Choice(&'static str, Vec<(String, String)>), Text(&'static str, &'static str), Info(String) }
+enum Ctl { Toggle(&'static str), Choice(&'static str, Vec<(String, String)>), Text(&'static str, &'static str), Font(&'static str), Info(String) }
 
 struct Row { cat: Cat, label: &'static str, desc: &'static str, ctl: Ctl }
 
@@ -122,6 +122,10 @@ pub struct SettingsView {
     proxy_detecting: bool,
     proxy_started: bool,
     proxy_note: Option<(bool, String)>,
+    font_dropdown: bool,
+    font_search: Entity<InputState>,
+    font_show_all: bool,
+    system_term_font: Option<ssh_term_proto::platform::DetectedTerminalFont>,
     _subs: Vec<Subscription>,
 }
 
@@ -141,6 +145,10 @@ impl SettingsView {
         let key_pass = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder(t("ui.key_passphrase_optional")));
         let key_import = cx.new(|cx| InputState::new(window, cx).placeholder(t("ui.key_import_path")));
         let theme_import = cx.new(|cx| InputState::new(window, cx).placeholder(t("ui.theme_import_path")));
+        let font_search = cx.new(|cx| InputState::new(window, cx).placeholder(t("ui.search_fonts")));
+        subs.push(cx.subscribe_in(&font_search, window, |_, _, ev: &InputEvent, _, cx| if matches!(ev, InputEvent::Change) { cx.notify() }));
+        let installed_fonts = cx.text_system().all_font_names();
+        let system_term_font = ssh_term_proto::platform::detect_system_terminal_font(&installed_fonts);
         let saved = ssh_term_proto::proxy::parse(config::get().ssh.proxy.trim()).ok();
         let proxy_http = matches!(saved.as_ref().map(|p| &p.kind), Some(ssh_term_proto::proxy::Kind::Http));
         let proxy_auth = saved.as_ref().is_some_and(|p| p.user.is_some());
@@ -151,7 +159,8 @@ impl SettingsView {
         let mut me = Self { cm_editor: None, cm_note: None, key_pass, key_import, theme_import, cat, search, inputs: HashMap::new(), errors: HashMap::new(), theme_names, scheme_names, new_rule, new_effect: Effect::Allow, tester, notice: None,
             ai_sel: config::get().ai.default_provider().map(|p| p.id.clone()), ai_key, ai_keys: HashMap::new(), ai_note: None, ai_test: HashMap::new(), ai_testing: None, lang_seen: ssh_term_proto::i18n::current() as u8,
             ai_models: HashMap::new(), ai_dropdown: None, ai_model_search, ai_url_gen: 0,
-            proxy_http, proxy_auth, proxy_host, proxy_port, proxy_user, proxy_pass, proxy_candidates: Vec::new(), proxy_bypass_suggest: String::new(), proxy_detecting: false, proxy_started: false, proxy_note: None, _subs: subs };
+            proxy_http, proxy_auth, proxy_host, proxy_port, proxy_user, proxy_pass, proxy_candidates: Vec::new(), proxy_bypass_suggest: String::new(), proxy_detecting: false, proxy_started: false, proxy_note: None,
+            font_dropdown: false, font_search, font_show_all: false, system_term_font, _subs: subs };
         if let Some(id) = me.ai_sel.clone() { me.load_models(&id, false, cx); }
         me.refresh_keys();
         if cat == Cat::Proxy { me.start_proxy_detect(false, cx); }
@@ -180,7 +189,7 @@ impl SettingsView {
             r(Appearance, t("ui.theme"), t("ui.follow_system_switches_with_the"), Ctl::Choice("appearance.theme", themes)),
             r(Appearance, t("ui.light_theme"), t("ui.used_in_light_mode_when"), Ctl::Choice("appearance.light_theme", light)),
             r(Appearance, t("ui.dark_theme"), t("ui.used_in_dark_mode_when"), Ctl::Choice("appearance.dark_theme", dark)),
-            r(Appearance, t("ui.terminal_font"), t("ui.primary_font_monospace"), Ctl::Text("font.family", "JetBrains Mono")),
+            r(Appearance, t("ui.terminal_font"), t("ui.primary_font_monospace"), Ctl::Font("font.family")),
             r(Appearance, t("ui.fallback_fonts"), t("ui.comma_separated_used_in_order"), Ctl::Text("font.fallbacks", "Noto Sans Mono CJK SC, …")),
             r(Appearance, t("ui.font_size"), t("ui.in_pt_8_32"), Ctl::Text("font.size", "13.5")),
             r(Appearance, t("ui.line_height"), t("ui.multiple_of_the_font_size"), Ctl::Text("font.line_height", "1.4")),
@@ -351,21 +360,233 @@ impl SettingsView {
                 let e = self.input(path, ph, s.get_str(path), window, cx);
                 div().w(px(260.)).child(Input::new(&e)).into_any_element()
             }
-            Ctl::Info(text) => div().max_w(px(320.)).text_size(px(12.)).text_color(c(th.subtext)).child(text.clone()).into_any_element(),
+            Ctl::Font(path) => self.font_picker(path, window, cx).into_any_element(),
+            Ctl::Info(text) => div().max_w(px(360.)).text_size(px(12.)).text_color(c(th.subtext)).text_align(gpui::TextAlign::Right).child(text.clone()).into_any_element(),
         }
+    }
+
+    fn font_picker(&mut self, path: &'static str, _window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
+        let th = cur();
+        let s = config::get();
+        let current = s.get_str(path);
+        let current_display = if current.trim().is_empty() { "Cascadia Mono".to_string() } else { current.clone() };
+        let open = self.font_dropdown;
+        let installed = cx.text_system().all_font_names();
+        let query = self.font_search.read(cx).value().trim().to_lowercase();
+        let show_all = self.font_show_all;
+
+        let is_mono = |name: &str| -> bool {
+            let l = name.to_lowercase();
+            l.contains("mono") || l.contains("nerd font") || l.contains("code") || l.contains("consolas")
+                || l.contains("courier") || l.contains("fixed") || l.contains("terminal") || l.contains("hack")
+                || l.contains("fira") || l.contains("jetbrains") || l.contains("cascadia") || l.contains("inconsolata")
+                || l.contains("menlo") || l.contains("source code") || l.ends_with(" nf") || l.ends_with(" nfm")
+                || l.ends_with(" nfp")
+        };
+
+        let mut filtered: Vec<String> = installed.into_iter()
+            .filter(|f| show_all || is_mono(f))
+            .filter(|f| query.is_empty() || f.to_lowercase().contains(&query))
+            .collect();
+        filtered.sort_by(|a, b| {
+            let a_mono = is_mono(a);
+            let b_mono = is_mono(b);
+            if a_mono != b_mono { b_mono.cmp(&a_mono) } else { a.cmp(b) }
+        });
+        filtered.dedup();
+
+        let mut trigger = div().relative().w(px(260.));
+        let button = div()
+            .id("font-select-btn")
+            .w_full()
+            .h(px(32.))
+            .px_3()
+            .rounded(px(6.))
+            .bg(c(th.surface0).opacity(0.85))
+            .border_1()
+            .border_color(if open { c(th.accent) } else { c(th.surface1) })
+            .flex()
+            .items_center()
+            .justify_between()
+            .cursor_pointer()
+            .hover(|d| d.bg(c(th.surface1)))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.font_dropdown = !this.font_dropdown;
+                if this.font_dropdown {
+                    this.font_search.update(cx, |s, cx| { s.set_value("", window, cx); s.focus(window, cx); });
+                }
+                cx.notify();
+            }))
+            .child(
+                div().flex().items_center().gap_2().min_w_0()
+                    .child(icon(IconName::SquareTerminal, 13., c(th.accent)))
+                    .child(
+                        div().text_size(px(12.5)).text_color(c(th.text))
+                            .overflow_hidden().text_ellipsis().whitespace_nowrap()
+                            .child(current_display)
+                    )
+            )
+            .child(icon(if open { IconName::ChevronUp } else { IconName::ChevronDown }, 12., c(th.overlay1)));
+        trigger = trigger.child(button);
+
+        if open {
+            let mut popover = ui::popover()
+                .id("font-picker-popover")
+                .occlude()
+                .absolute()
+                .top(px(36.))
+                .right_0()
+                .w(px(340.))
+                .max_h(px(360.))
+                .p(px(8.))
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.font_dropdown = false;
+                    cx.notify();
+                }));
+
+            // Search input
+            popover = popover.child(
+                div().w_full().child(Input::new(&self.font_search))
+            );
+
+            // Filter bar: Monospace toggle
+            let show_all_val = self.font_show_all;
+            popover = popover.child(
+                div().flex().items_center().justify_between().px_1().py(px(2.))
+                    .child(div().text_size(px(11.5)).text_color(c(th.subtext)).child(t("ui.monospace_only")))
+                    .child(Switch::new("font-mono-only").small().checked(!show_all_val).on_click(cx.listener(|this, on: &bool, _, cx| {
+                        this.font_show_all = !*on;
+                        cx.notify();
+                    })))
+            );
+
+            // Detected system terminal font suggestion if available
+            if let Some(det) = &self.system_term_font {
+                let det_fam = det.family.clone();
+                let det_src = det.source.clone();
+                let is_current = det.family.eq_ignore_ascii_case(&current);
+                popover = popover.child(
+                    div().id("font-detected-item")
+                        .px_2().py(px(5.)).rounded(px(6.))
+                        .bg(c(th.accent).opacity(0.12))
+                        .border_1().border_color(c(th.accent).opacity(0.35))
+                        .flex().items_center().justify_between().cursor_pointer()
+                        .hover(|d| d.bg(c(th.accent).opacity(0.2)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set(path, toml::Value::String(det_fam.clone()), cx);
+                            this.font_dropdown = false;
+                            cx.notify();
+                        }))
+                        .child(
+                            div().flex().flex_col().gap(px(1.)).min_w_0()
+                                .child(
+                                    div().flex().items_center().gap_1()
+                                        .child(icon(IconName::Sparkles, 11., c(th.accent)))
+                                        .child(div().text_size(px(10.5)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.accent)).child(format!("{} ({})", t("ui.system_terminal_font"), det_src)))
+                                )
+                                .child(div().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(det.family.clone()))
+                        )
+                        .child(
+                            if is_current {
+                                icon(IconName::Check, 13., c(th.accent)).into_any_element()
+                            } else {
+                                ui::tag(t("ui.use_detected"), c(th.accent)).into_any_element()
+                            }
+                        )
+                );
+            }
+
+            // Font list
+            let mut list = div().id("font-list-scroll").max_h(px(200.)).overflow_y_scroll().flex().flex_col().gap(px(2.));
+            if filtered.is_empty() {
+                list = list.child(div().p_3().text_center().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ui.no_matching_fonts")));
+            } else {
+                for (i, font_name) in filtered.into_iter().take(200).enumerate() {
+                    let fam = font_name.clone();
+                    let is_active = font_name.eq_ignore_ascii_case(&current);
+                    let is_nerd = font_name.to_lowercase().contains("nerd font") || font_name.ends_with(" NF") || font_name.ends_with(" NFM");
+                    list = list.child(
+                        div().id(("font-opt", i))
+                            .px_2().py(px(5.)).rounded(px(5.))
+                            .flex().items_center().justify_between().cursor_pointer()
+                            .when(is_active, |d| d.bg(c(th.accent).opacity(0.14)))
+                            .hover(|d| d.bg(c(cur().surface0)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set(path, toml::Value::String(fam.clone()), cx);
+                                this.font_dropdown = false;
+                                cx.notify();
+                            }))
+                            .child(
+                                div().flex().items_center().gap_2().min_w_0()
+                                    .child(
+                                        div().text_size(px(12.5)).text_color(if is_active { c(th.accent) } else { c(th.text) })
+                                            .overflow_hidden().text_ellipsis().whitespace_nowrap()
+                                            .child(font_name)
+                                    )
+                                    .when(is_nerd, |d| d.child(ui::tag("NF", c(th.info))))
+                            )
+                            .when(is_active, |d| d.child(icon(IconName::Check, 12., c(th.accent))))
+                    );
+                }
+            }
+            popover = popover.child(list);
+
+            // Option to use the typed custom name if query is not empty
+            if !query.is_empty() {
+                let custom_q = self.font_search.read(cx).value().trim().to_string();
+                let custom_label = tf("ui.use_custom_font_name", &[("name", &custom_q)]);
+                popover = popover.child(
+                    div().id("font-custom-use")
+                        .px_2().py(px(4.)).rounded(px(5.))
+                        .border_t_1().border_color(c(th.surface1).opacity(0.5))
+                        .flex().items_center().gap_2().cursor_pointer()
+                        .hover(|d| d.bg(c(cur().surface0)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set(path, toml::Value::String(custom_q.clone()), cx);
+                            this.font_dropdown = false;
+                            cx.notify();
+                        }))
+                        .child(icon(IconName::Plus, 12., c(th.subtext)))
+                        .child(div().text_size(px(11.5)).text_color(c(th.subtext)).child(custom_label))
+                );
+            }
+
+            trigger = trigger.child(gpui::deferred(popover).with_priority(3));
+        }
+
+        trigger
     }
 
     fn row_el(&mut self, row: &Row, idx: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
         let ctl = self.control(&row.ctl, window, cx);
-        let path = match &row.ctl { Ctl::Toggle(p) | Ctl::Choice(p, _) | Ctl::Text(p, _) => Some(*p), _ => None };
+        let path = match &row.ctl {
+            Ctl::Toggle(p) | Ctl::Choice(p, _) | Ctl::Text(p, _) | Ctl::Font(p) => Some(*p),
+            _ => None,
+        };
         let err = path.and_then(|p| self.errors.get(p).cloned());
-        let mut left = div().w(px(168.)).flex_shrink_0().flex().flex_col().gap(px(2.))
-            .child(div().flex().items_center().gap_2().text_size(px(13.)).text_color(c(th.text)).whitespace_normal().child(row.label));
-        if !row.desc.is_empty() { left = left.child(div().text_size(px(11.5)).text_color(c(th.overlay1)).whitespace_normal().child(row.desc)); }
-        if let Some(e) = err { left = left.child(div().text_size(px(11.5)).text_color(c(th.error)).whitespace_normal().child(e)); }
-        div().id(("row", idx)).px(px(12.)).py(px(8.)).min_h(px(40.)).flex().items_start().gap_4()
-            .child(left).child(div().flex_1().min_w_0().child(ctl)).into_any_element()
+        let mut left = div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
+            .child(div().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).whitespace_normal().child(row.label));
+        if !row.desc.is_empty() {
+            left = left.child(div().text_size(px(12.)).text_color(c(th.overlay1)).whitespace_normal().child(row.desc));
+        }
+        if let Some(e) = err {
+            left = left.child(div().text_size(px(11.5)).text_color(c(th.error)).whitespace_normal().child(e));
+        }
+        div().id(("row", idx))
+            .px(px(16.))
+            .py(px(10.))
+            .min_h(px(48.))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(16.))
+            .child(left)
+            .child(div().flex_shrink_0().flex().items_center().justify_end().child(ctl))
+            .into_any_element()
     }
     /// Grouped inset card (System Settings): rows separated by inset hairlines.
     fn group_card(rows: Vec<AnyElement>) -> gpui::Div {
@@ -942,7 +1163,7 @@ impl Render for SettingsView {
             }
         } else {
             let hits: Vec<(usize, &Row)> = rows.iter().enumerate().filter(|(_, r)| {
-                format!("{} {} {} {}", r.label, r.desc, r.cat.name(), match &r.ctl { Ctl::Toggle(p) | Ctl::Choice(p, _) | Ctl::Text(p, _) => *p, _ => "" }).to_lowercase().contains(&query)
+                format!("{} {} {} {}", r.label, r.desc, r.cat.name(), match &r.ctl { Ctl::Toggle(p) | Ctl::Choice(p, _) | Ctl::Text(p, _) | Ctl::Font(p) => *p, _ => "" }).to_lowercase().contains(&query)
             }).collect();
             body = body.child(div().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(tf("settings.search_results", &[("n", &hits.len())])));
             let mut last = None;
