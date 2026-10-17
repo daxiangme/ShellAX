@@ -31,6 +31,17 @@ use crate::{config, font_size, line_h};
 
 const SCROLLBAR_W: f32 = 8.0;
 
+/// Pixels the scrollbar takes from the cell grid.
+///
+/// The bar is painted in the rightmost `SCROLLBAR_W` px. Right padding already
+/// covers that strip when it is at least that wide, so those columns stay in
+/// the grid. With thinner padding, only the uncovered part is reserved, and
+/// only while a bar is drawn (the active grid has scrollback; the alternate
+/// screen's grid does not).
+fn scrollbar_reserve(pad: f32, history: usize) -> f32 {
+    if history == 0 { 0.0 } else { (SCROLLBAR_W - pad).max(0.0) }
+}
+
 // ---------------------------------------------------------------- perf counters (PERF_LOG=1)
 pub static GRID_PAINTS: AtomicU64 = AtomicU64::new(0);
 pub static ROWS_BUILT: AtomicU64 = AtomicU64::new(0);
@@ -147,11 +158,14 @@ impl Render for GridLayer {
                 let mh = f32::from(ts.ascent(fid, px(font_size()))) + f32::from(ts.descent(fid, px(font_size()))).abs();
                 if mh.is_finite() && mh > 0.0 { crate::FONT_METRIC_H.store(mh.to_bits(), Ordering::Relaxed); }
                 let pad = crate::term_pad();
+                // Drop the term lock before resize(); that path locks the term again.
+                let history = session.as_ref().map(|s| s.term.lock().unwrap().grid().history_size()).unwrap_or(0);
+                let reserve = scrollbar_reserve(pad, history);
                 let mut s = st.borrow_mut();
                 s.cell_w = cw;
                 s.bounds = bounds;
                 s.origin = bounds.origin + point(px(pad), px(pad));
-                let cols = ((f32::from(bounds.size.width) - 2.0 * pad - SCROLLBAR_W) / cw).floor().max(10.0) as usize;
+                let cols = ((f32::from(bounds.size.width) - 2.0 * pad - reserve) / cw).floor().max(10.0) as usize;
                 let rows = ((f32::from(bounds.size.height) - 2.0 * pad) / line_h()).floor().max(3.0) as usize;
                 if let Some(s) = &session { s.resize(Size { cols, rows }); *s.cell_px.lock().unwrap() = (cw * window.scale_factor(), line_h() * window.scale_factor()); }
                 session
@@ -1436,8 +1450,12 @@ impl TermView {
     }
 
     fn in_scrollbar(&self, p: gpui::Point<Pixels>) -> bool {
+        let hist = self.session.as_ref().map(|s| s.term.lock().unwrap().grid().history_size()).unwrap_or(0);
+        if hist == 0 { return false; }
         let b = self.st.borrow().bounds;
-        p.x >= b.origin.x + b.size.width - px(SCROLLBAR_W + 2.) && p.x <= b.origin.x + b.size.width
+        // The track is the rightmost SCROLLBAR_W px. A wider slop would land on the last cell
+        // now that the gutter is no longer kept empty.
+        p.x >= b.origin.x + b.size.width - px(SCROLLBAR_W) && p.x <= b.origin.x + b.size.width
     }
 
     fn scrollbar_jump(&mut self, p: gpui::Point<Pixels>, cx: &mut Context<Self>) {
@@ -2112,6 +2130,15 @@ mod tests {
         assert_eq!(encode_mouse(0, true, 0, 0, false), vec![0x1b, b'[', b'M', 32, 33, 33]);
         assert_eq!(encode_mouse(0, false, 0, 0, false)[3], 35);
         assert_eq!(encode_mouse(64, true, 1, 1, true), b"\x1b[<64;2;2M");
+    }
+    #[test]
+    fn scrollbar_sits_in_padding_until_it_would_cover_cells() {
+        assert_eq!(scrollbar_reserve(8.0, 0), 0.0);
+        assert_eq!(scrollbar_reserve(8.0, 40), 0.0);
+        assert_eq!(scrollbar_reserve(0.0, 0), 0.0);
+        assert_eq!(scrollbar_reserve(0.0, 40), SCROLLBAR_W);
+        assert_eq!(scrollbar_reserve(3.0, 10), SCROLLBAR_W - 3.0);
+        assert_eq!(scrollbar_reserve(40.0, 10), 0.0);
     }
     #[test]
     fn crumbs_keep_each_prefix() {
