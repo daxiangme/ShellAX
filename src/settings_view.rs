@@ -126,6 +126,9 @@ pub struct SettingsView {
     font_search: Entity<InputState>,
     font_show_all: bool,
     system_term_font: Option<ssh_term_proto::platform::DetectedTerminalFont>,
+    ai_add_dropdown: bool,
+    ai_template_dropdown: bool,
+    ai_advanced: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -160,7 +163,8 @@ impl SettingsView {
             ai_sel: config::get().ai.default_provider().map(|p| p.id.clone()), ai_key, ai_keys: HashMap::new(), ai_note: None, ai_test: HashMap::new(), ai_testing: None, lang_seen: ssh_term_proto::i18n::current() as u8,
             ai_models: HashMap::new(), ai_dropdown: None, ai_model_search, ai_url_gen: 0,
             proxy_http, proxy_auth, proxy_host, proxy_port, proxy_user, proxy_pass, proxy_candidates: Vec::new(), proxy_bypass_suggest: String::new(), proxy_detecting: false, proxy_started: false, proxy_note: None,
-            font_dropdown: false, font_search, font_show_all: false, system_term_font, _subs: subs };
+            font_dropdown: false, font_search, font_show_all: false, system_term_font,
+            ai_add_dropdown: false, ai_template_dropdown: false, ai_advanced: false, _subs: subs };
         if let Some(id) = me.ai_sel.clone() { me.load_models(&id, false, cx); }
         me.refresh_keys();
         if cat == Cat::Proxy { me.start_proxy_detect(false, cx); }
@@ -1387,20 +1391,27 @@ impl SettingsView {
         let th = cur();
         let s = config::get();
         let default_id = s.ai.default_provider().map(|p| p.id.clone());
-        let mut out = div().flex().flex_col();
+        let mut out = div().flex().flex_col().gap_3();
 
-        // storage backend banner
+        // Storage backend banner
         let probe = crate::secret_store();
         let backend = self.ai_keys.values().flatten().next().map(|(_, l)| location_label(l))
             .unwrap_or_else(|| tf("ai.loc_pending", &[("path", &probe.file_path().display())]));
-        out = out.child(Self::section_title(t("ai.providers")))
-            .child(div().flex().items_center().gap_2().p_2().mb_2().rounded_md().bg(c(th.mantle)).text_size(px(11.5)).text_color(c(th.subtext))
-                .child(icon(IconName::KeyRound, 13., c(th.accent))).child(tf("ai.key_storage", &[("where", &backend)])));
+        out = out.child(
+            div().flex().items_center().gap_2().p_2().rounded_md().bg(c(th.mantle)).text_size(px(11.5)).text_color(c(th.subtext))
+                .child(icon(IconName::KeyRound, 13., c(th.accent))).child(tf("ai.key_storage", &[("where", &backend)]))
+        );
 
-        // provider list
-        let mut list = div().flex().flex_col().rounded_lg().border_1().border_color(c(th.surface0));
+        // Provider list header
+        let list_header = div().flex().items_center().justify_between().pt_2()
+            .child(Self::section_title(t("ai.providers")))
+            .child(self.preset_menu("add", cx));
+        out = out.child(list_header);
+
+        // Provider list
+        let mut list = div().flex().flex_col().rounded_lg().border_1().border_color(c(th.surface1).opacity(0.6)).bg(c(th.surface0).opacity(0.3)).overflow_hidden();
         if s.ai.providers.is_empty() {
-            list = list.child(div().p_3().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ai.no_providers")));
+            list = list.child(div().p_4().text_center().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ai.no_providers")));
         }
         for (i, p) in s.ai.providers.iter().enumerate() {
             let sel = self.ai_sel.as_deref() == Some(p.id.as_str());
@@ -1409,13 +1420,14 @@ impl SettingsView {
             let pid = p.id.clone();
             let pid2 = p.id.clone();
             let pid3 = p.id.clone();
-            list = list.child(div().id(("aip", i)).flex().items_center().gap_3().px_3().py(px(8.)).cursor_pointer()
-                .when(i > 0, |d| d.border_t_1().border_color(c(th.surface0)))
-                .when(sel, |d| d.bg(c(th.accent).opacity(0.08)))
+            list = list.child(div().id(("aip", i)).flex().items_center().gap_3().px_3().py(px(9.)).cursor_pointer()
+                .when(i > 0, |d| d.border_t_1().border_color(c(th.surface1).opacity(0.5)))
+                .when(sel, |d| d.bg(c(th.accent).opacity(0.1)))
+                .hover(|d| d.bg(c(th.surface0).opacity(0.6)))
                 .on_click(cx.listener(move |this, _, _w, cx| { this.ai_sel = Some(pid.clone()); this.ai_key_reset(cx); this.ai_dropdown = None; this.load_models(&pid, false, cx); cx.notify(); }))
-                .child(icon(IconName::Sparkles, 14., if sel { c(th.accent) } else { c(th.overlay1) }))
+                .child(icon(if p.kind == Kind::Anthropic { IconName::Bot } else { IconName::Sparkles }, 15., if sel { c(th.accent) } else { c(th.overlay1) }))
                 .child(div().flex_1().min_w_0().flex().flex_col()
-                    .child(div().flex().items_center().gap_2().text_size(px(13.)).text_color(c(th.text)).child(if p.name.is_empty() { p.id.clone() } else { p.name.clone() })
+                    .child(div().flex().items_center().gap_2().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(if p.name.is_empty() { p.id.clone() } else { p.name.clone() })
                         .child(ui::tag(if p.kind == Kind::Anthropic { "Anthropic" } else { t("ai.kind_openai") }, c(th.overlay1)))
                         .when(is_def, |d| d.child(ui::tag(t("ai.default"), c(th.accent)))))
                     .child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(format!("{} · {}", p.model, p.base_url))))
@@ -1427,7 +1439,7 @@ impl SettingsView {
                         this.notice = config::update(|s| s.ai.default_provider = pid2.clone());
                         cx.emit(SettingsEvent::Changed("ai.default_provider".into())); cx.notify();
                     }))))
-                .child(div().id(("aip-del", i)).size(px(22.)).rounded_md().flex().items_center().justify_center().cursor_pointer().hover(|d| d.bg(c(cur().error).opacity(0.15)))
+                .child(div().id(("aip-del", i)).size(px(24.)).rounded_md().flex().items_center().justify_center().cursor_pointer().hover(|d| d.bg(c(cur().error).opacity(0.15)))
                     .on_click(cx.listener(move |this, _, _w, cx| {
                         let name = config::get().ai.providers.iter().find(|p| p.id == pid3).map(|p| p.secret_name());
                         if let Some(n) = name { crate::secret_store().delete(&n); }
@@ -1439,151 +1451,307 @@ impl SettingsView {
                     }))
                     .child(icon(IconName::Trash, 13., c(th.error)))));
         }
-        out = out.child(list).child(div().pt_2().flex().gap_2()
-            .child(div().text_size(px(12.)).text_color(c(th.subtext)).child(t("ai.add_provider")))
-            .child(self.preset_chips("add", cx)));
+        out = out.child(list);
 
-        // editor for the selected provider
+        // Editor for the selected provider
         let Some(p) = self.ai_sel.as_ref().and_then(|id| s.ai.providers.iter().find(|p| &p.id == id)).cloned() else { return out.into_any_element() };
-        out = out.child(Self::section_title(t("ai.edit_provider")));
-        let field = |this: &mut Self, label: &str, f: &'static str, ph: &str, val: String, window: &mut Window, cx: &mut Context<Self>| {
-            let e = this.provider_input(&p.id, f, ph, val, window, cx);
-            let err = this.errors.get(&format!("aip.{}.{f}", p.id)).cloned();
-            div().py(px(8.)).flex().items_center().gap_4().border_b_1().border_color(c(cur().surface0))
-                .child(div().flex_1().flex().flex_col().text_size(px(13.)).text_color(c(cur().text)).child(label.to_string())
-                    .when_some(err, |d, e| d.child(div().text_size(px(11.5)).text_color(c(cur().error)).child(e))))
-                .child(div().w(px(320.)).child(Input::new(&e)))
-        };
-        let pid = p.id.clone();
-        let me = cx.entity().downgrade();
-        let kind_opts = opts(&[("openai", t("ai.kind_openai")), ("anthropic", "Anthropic")]);
-        out = out
-            .child(div().py(px(8.)).flex().items_center().gap_4().border_b_1().border_color(c(th.surface0))
-                .child(div().w(px(140.)).flex_shrink_0().flex().flex_col().text_size(px(13.)).text_color(c(th.text)).child(t("models.template"))
-                    .child(div().text_size(px(11.5)).text_color(c(th.overlay1)).child(t("models.template.d"))))
-                .child(div().flex_1().child(self.preset_chips("apply", cx))))
-            .child(field(self, t("ui.name"), "name", "OpenAI", p.name.clone(), window, cx))
-            .child(div().py(px(8.)).flex().items_center().gap_4().border_b_1().border_color(c(th.surface0))
-                .child(div().flex_1().flex().flex_col().text_size(px(13.)).text_color(c(th.text)).child(t("ai.kind"))
-                    .child(div().text_size(px(11.5)).text_color(c(th.overlay1)).child(t("ai.kind.d"))))
-                .child(ui::segmented("aip-kind", &kind_opts, p.kind.id(), move |v, _w, cx| {
-                    let pid = pid.clone();
-                    let _ = me.update(cx, |this, cx| this.update_provider(&pid, |p| {
-                        let k = Kind::from_id(&v);
-                        if k != p.kind && k == Kind::Anthropic && p.base_url.contains("openai.com") { p.base_url = "https://api.anthropic.com".into(); p.model = "claude-sonnet-4-5".into(); }
-                        p.kind = k;
-                    }, cx));
-                })))
-            .child(field(self, t("ui.base_url"), "base_url", "https://api.openai.com/v1", p.base_url.clone(), window, cx))
-            .child(self.model_picker(&p, "model", window, cx))
-            .child(self.model_picker(&p, "fast_model", window, cx))
-            .child(field(self, t("ai.timeout"), "timeout_secs", "30", p.timeout_secs.to_string(), window, cx))
-            .child(field(self, t("ai.temperature"), "temperature", "0.2", p.temperature.to_string(), window, cx))
-            .child(field(self, t("ai.max_tokens"), "max_tokens", "512", p.max_tokens.to_string(), window, cx));
 
-        // API key
+        let edit_title = div().flex().items_center().justify_between().pt_4()
+            .child(Self::section_title(t("ai.edit_provider")))
+            .child(self.preset_menu("apply", cx));
+        out = out.child(edit_title);
+
+        let mut editor_card = div().flex().flex_col().rounded_lg().border_1().border_color(c(th.surface1).opacity(0.6)).bg(c(th.surface0).opacity(0.3)).overflow_hidden();
+
+        // 1. Name
+        let name_input = self.provider_input(&p.id, "name", "OpenAI", p.name.clone(), window, cx);
+        editor_card = editor_card.child(
+            div().px_4().py(px(10.)).flex().items_center().justify_between().gap_4().border_b_1().border_color(c(th.surface1).opacity(0.4))
+                .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
+                    .child(div().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ui.name")))
+                    .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ai.name_desc"))))
+                .child(div().w(px(280.)).child(Input::new(&name_input)))
+        );
+
+        // 2. Base URL
+        let url_input = self.provider_input(&p.id, "base_url", "https://api.openai.com/v1", p.base_url.clone(), window, cx);
+        editor_card = editor_card.child(
+            div().px_4().py(px(10.)).flex().items_center().justify_between().gap_4().border_b_1().border_color(c(th.surface1).opacity(0.4))
+                .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
+                    .child(div().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ui.base_url")))
+                    .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ai.base_url_desc"))))
+                .child(div().w(px(320.)).child(Input::new(&url_input)))
+        );
+
+        // 3. API Key & Test Connection
         let key = self.ai_keys.get(&p.id).cloned().flatten();
         let (sid, sid2, sid3) = (p.id.clone(), p.id.clone(), p.id.clone());
-        out = out.child(div().py(px(8.)).flex().items_center().gap_4().border_b_1().border_color(c(th.surface0))
-            .child(div().flex_1().flex().flex_col().gap(px(2.)).min_w_0()
-                .child(div().text_size(px(13.)).text_color(c(th.text)).child("API Key"))
-                .child(div().text_size(px(11.5)).text_color(c(th.overlay1)).child(match &key {
-                    Some((m, l)) => tf("ai.key_saved", &[("mask", m), ("where", &location_label(l))]),
-                    None => t("ai.key_none").to_string(),
-                }))
-                .when_some(self.ai_note.clone(), |d, (ok, n)| d.child(div().text_size(px(11.5)).text_color(if ok { c(th.subtext) } else { c(th.warning) }).child(n))))
-            .child(div().w(px(200.)).child(Input::new(&self.ai_key)))
-            .child(ui::button("aip-key-save", t("ui.save"), 1).on_click(cx.listener(move |this, _, window, cx| {
-                let v = this.ai_key.read(cx).value().trim().to_string();
-                if v.is_empty() { return; }
-                let name = config::get().ai.providers.iter().find(|p| p.id == sid).map(|p| p.secret_name());
-                if let Some(n) = name {
-                    this.ai_note = Some(match crate::secret_store().set(&n, &v) {
-                        Ok((Location::Keychain, _)) => (true, t("ai.saved_keychain").into()),
-                        Ok((l, why)) => (false, tf("ai.saved_fallback", &[("where", &location_label(&l)), ("why", &why.unwrap_or_default().split(": ").last().unwrap_or("").chars().take(80).collect::<String>())])),
-                        Err(e) => (false, format!("{e:#}")),
+        let testing = self.ai_testing.as_deref() == Some(p.id.as_str());
+        let res = self.ai_test.get(&p.id).cloned();
+
+        let mut key_right = div().flex().items_center().gap_2();
+        key_right = key_right.child(div().w(px(200.)).child(Input::new(&self.ai_key)));
+        key_right = key_right.child(ui::button("aip-key-save", t("ui.save"), 1).on_click(cx.listener(move |this, _, window, cx| {
+            let v = this.ai_key.read(cx).value().trim().to_string();
+            if v.is_empty() { return; }
+            let name = config::get().ai.providers.iter().find(|p| p.id == sid).map(|p| p.secret_name());
+            if let Some(n) = name {
+                this.ai_note = Some(match crate::secret_store().set(&n, &v) {
+                    Ok((Location::Keychain, _)) => (true, t("ai.saved_keychain").into()),
+                    Ok((l, why)) => (false, tf("ai.saved_fallback", &[("where", &location_label(&l)), ("why", &why.unwrap_or_default().split(": ").last().unwrap_or("").chars().take(80).collect::<String>())])),
+                    Err(e) => (false, format!("{e:#}")),
+                });
+            }
+            this.ai_key.update(cx, |s, cx| s.set_value("", window, cx));
+            this.refresh_keys();
+            this.load_models(&sid, true, cx);
+            cx.notify();
+        })));
+        key_right = key_right.child(ui::button("aip-test", if testing { t("ai.testing") } else { t("ai.test") }, 0).on_click(cx.listener(move |this, _, _w, cx| {
+            if this.ai_testing.is_some() { return; }
+            let Some(p) = config::get().ai.providers.iter().find(|p| p.id == sid3).cloned() else { return };
+            let key = crate::secret_store().get(&p.secret_name()).map(|x| x.0).unwrap_or_default();
+            this.ai_testing = Some(p.id.clone());
+            cx.notify();
+            let task = cx.background_executor().spawn(async move { ssh_term_proto::ai::test_connection(&p, &key).map(|r| (r.latency, r.model)).map_err(|e| format!("{e:#}")) });
+            let id = sid3.clone();
+            cx.spawn(async move |this, cx| {
+                let r = task.await;
+                let _ = this.update(cx, |this, cx| {
+                    this.ai_testing = None;
+                    this.ai_test.insert(id, match r {
+                        Ok((lat, model)) => (true, tf("ai.test_ok", &[("ms", &lat.as_millis()), ("model", &model)])),
+                        Err(e) => (false, tf("ai.test_fail", &[("e", &e)])),
                     });
-                }
-                this.ai_key.update(cx, |s, cx| s.set_value("", window, cx));
-                this.refresh_keys();
-                this.load_models(&sid, true, cx);
-                cx.notify();
-            })))
-            .when(key.is_some(), |d| d.child(ui::button("aip-key-del", t("ui.delete"), 2).on_click(cx.listener(move |this, _, _w, cx| {
+                    cx.notify();
+                });
+            }).detach();
+        })));
+        if key.is_some() {
+            key_right = key_right.child(ui::button("aip-key-del", t("ui.delete"), 2).on_click(cx.listener(move |this, _, _w, cx| {
                 let name = config::get().ai.providers.iter().find(|p| p.id == sid2).map(|p| p.secret_name());
                 if let Some(n) = name { crate::secret_store().delete(&n); }
                 this.ai_note = Some((true, t("ai.key_deleted").into()));
                 this.refresh_keys(); cx.notify();
-            })))));
+            })));
+        }
 
-        // test connection
-        let testing = self.ai_testing.as_deref() == Some(p.id.as_str());
-        let res = self.ai_test.get(&p.id).cloned();
-        out = out.child(div().py(px(10.)).flex().items_center().gap_3()
-            .child(ui::button("aip-test", if testing { t("ai.testing") } else { t("ai.test") }, 1).on_click(cx.listener(move |this, _, _w, cx| {
-                if this.ai_testing.is_some() { return; }
-                let Some(p) = config::get().ai.providers.iter().find(|p| p.id == sid3).cloned() else { return };
-                let key = crate::secret_store().get(&p.secret_name()).map(|x| x.0).unwrap_or_default();
-                this.ai_testing = Some(p.id.clone());
+        let key_desc = match &key {
+            Some((m, l)) => tf("ai.key_saved", &[("mask", m), ("where", &location_label(l))]),
+            None => t("ai.key_none").to_string(),
+        };
+
+        editor_card = editor_card.child(
+            div().px_4().py(px(10.)).flex().flex_col().gap(px(6.)).border_b_1().border_color(c(th.surface1).opacity(0.4))
+                .child(
+                    div().flex().items_center().justify_between().gap_4()
+                        .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
+                            .child(div().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child("API Key"))
+                            .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(key_desc)))
+                        .child(key_right)
+                )
+                .when_some(res, |d, (ok, msg)| d.child(div().text_size(px(12.)).text_color(if ok { c(th.success) } else { c(th.error) }).child(msg)))
+                .when_some(self.ai_note.clone(), |d, (ok, n)| d.child(div().text_size(px(11.5)).text_color(if ok { c(th.subtext) } else { c(th.warning) }).child(n)))
+        );
+
+        // 4. Model picker
+        editor_card = editor_card.child(
+            div().px_4().py(px(8.)).border_b_1().border_color(c(th.surface1).opacity(0.4))
+                .child(self.model_picker(&p, "model", window, cx))
+        );
+
+        // 5. Collapsible Advanced Settings
+        let adv_open = self.ai_advanced;
+        let adv_header = div().id("ai-adv-toggle").px_4().py(px(10.)).cursor_pointer()
+            .flex().items_center().justify_between()
+            .hover(|d| d.bg(c(th.surface1).opacity(0.3)))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.ai_advanced = !this.ai_advanced;
                 cx.notify();
-                let task = cx.background_executor().spawn(async move { ssh_term_proto::ai::test_connection(&p, &key).map(|r| (r.latency, r.model)).map_err(|e| format!("{e:#}")) });
-                let id = sid3.clone();
-                cx.spawn(async move |this, cx| {
-                    let r = task.await;
-                    let _ = this.update(cx, |this, cx| {
-                        this.ai_testing = None;
-                        this.ai_test.insert(id, match r {
-                            Ok((lat, model)) => (true, tf("ai.test_ok", &[("ms", &lat.as_millis()), ("model", &model)])),
-                            Err(e) => (false, tf("ai.test_fail", &[("e", &e)])),
-                        });
-                        cx.notify();
-                    });
-                }).detach();
-            })))
-            .when_some(res, |d, (ok, msg)| d.child(div().flex_1().min_w_0().text_size(px(12.)).text_color(if ok { c(th.success) } else { c(th.error) }).child(msg)))
-            .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(t("ai.test.d"))));
+            }))
+            .child(
+                div().flex().items_center().gap_2()
+                    .child(icon(if adv_open { IconName::ChevronDown } else { IconName::ChevronRight }, 13., c(th.overlay1)))
+                    .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ai.advanced_settings")))
+                    .child(div().text_size(px(11.5)).text_color(c(th.overlay1)).child(t("ai.advanced_settings_desc")))
+            )
+            .child(div().text_size(px(11.5)).text_color(c(th.accent)).child(if adv_open { t("ai.collapse") } else { t("ai.expand") }));
+        editor_card = editor_card.child(adv_header);
+
+        if adv_open {
+            let pid = p.id.clone();
+            let me = cx.entity().downgrade();
+            let kind_opts = opts(&[("openai", t("ai.kind_openai")), ("anthropic", "Anthropic")]);
+
+            // Protocol kind
+            editor_card = editor_card.child(
+                div().px_4().py(px(10.)).flex().items_center().justify_between().gap_4().border_t_1().border_color(c(th.surface1).opacity(0.4))
+                    .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
+                        .child(div().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ai.kind")))
+                        .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ai.kind.d"))))
+                    .child(ui::segmented("aip-kind", &kind_opts, p.kind.id(), move |v, _w, cx| {
+                        let pid = pid.clone();
+                        let _ = me.update(cx, |this, cx| this.update_provider(&pid, |p| {
+                            let k = Kind::from_id(&v);
+                            if k != p.kind && k == Kind::Anthropic && p.base_url.contains("openai.com") {
+                                p.base_url = "https://api.anthropic.com".into();
+                                p.model = "claude-sonnet-4-5".into();
+                            }
+                            p.kind = k;
+                        }, cx));
+                    }))
+            );
+
+            // Fast / Command Model
+            editor_card = editor_card.child(
+                div().px_4().py(px(8.)).border_t_1().border_color(c(th.surface1).opacity(0.4))
+                    .child(self.model_picker(&p, "fast_model", window, cx))
+            );
+
+            // Timeout
+            let timeout_in = self.provider_input(&p.id, "timeout_secs", "30", p.timeout_secs.to_string(), window, cx);
+            editor_card = editor_card.child(
+                div().px_4().py(px(10.)).flex().items_center().justify_between().gap_4().border_t_1().border_color(c(th.surface1).opacity(0.4))
+                    .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
+                        .child(div().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ai.timeout")))
+                        .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ai.timeout.d"))))
+                    .child(div().w(px(200.)).child(Input::new(&timeout_in)))
+            );
+
+            // Temperature
+            let temp_in = self.provider_input(&p.id, "temperature", "0.2", p.temperature.to_string(), window, cx);
+            editor_card = editor_card.child(
+                div().px_4().py(px(10.)).flex().items_center().justify_between().gap_4().border_t_1().border_color(c(th.surface1).opacity(0.4))
+                    .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
+                        .child(div().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ai.temperature")))
+                        .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ai.temperature.d"))))
+                    .child(div().w(px(200.)).child(Input::new(&temp_in)))
+            );
+
+            // Max Tokens
+            let tokens_in = self.provider_input(&p.id, "max_tokens", "512", p.max_tokens.to_string(), window, cx);
+            editor_card = editor_card.child(
+                div().px_4().py(px(10.)).flex().items_center().justify_between().gap_4().border_t_1().border_color(c(th.surface1).opacity(0.4))
+                    .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
+                        .child(div().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ai.max_tokens")))
+                        .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ai.max_tokens.d"))))
+                    .child(div().w(px(200.)).child(Input::new(&tokens_in)))
+            );
+        }
+
+        out = out.child(editor_card);
         out.into_any_element()
     }
+
     fn ai_key_reset(&mut self, _cx: &mut Context<Self>) { self.ai_note = None; }
 
-    fn preset_chips(&mut self, mode: &'static str, cx: &mut Context<Self>) -> gpui::Div {
+    fn preset_menu(&mut self, mode: &'static str, cx: &mut Context<Self>) -> gpui::Div {
         let th = cur();
+        let open = if mode == "add" { self.ai_add_dropdown } else { self.ai_template_dropdown };
         let cur_preset = self.ai_sel.as_ref().and_then(|id| config::get().ai.providers.iter().find(|p| &p.id == id).map(|p| p.preset.clone()));
-        let mut row = div().flex().flex_wrap().gap_1();
-        for (i, pr) in models::PRESETS.iter().enumerate() {
-            let active = mode == "apply" && cur_preset.as_deref() == Some(pr.id);
-            let label = if pr.id == "custom" { t("models.preset_custom") } else { pr.name };
-            row = row.child(div().id(SharedString::from(format!("preset-{mode}-{i}"))).px_2().py(px(3.)).rounded_md().cursor_pointer().text_size(px(11.5))
-                .border_1().border_color(if active { c(th.accent) } else { c(th.surface1) })
-                .bg(if active { c(th.accent).opacity(0.12) } else { c(th.surface0) }).text_color(c(th.text))
-                .hover(|d| d.border_color(c(cur().accent)))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    let pr = &models::PRESETS[i];
-                    if mode == "add" {
-                        let id = format!("p{}", chrono::Local::now().format("%m%d%H%M%S%3f"));
-                        let p = Provider { id: id.clone(), name: if pr.id == "custom" { t("models.preset_custom").to_string() } else { pr.name.to_string() }, kind: pr.kind,
-                            base_url: pr.base_url.into(), model: pr.model.into(), fast_model: pr.fast_model.into(), preset: pr.id.into(), ..Default::default() };
-                        this.notice = config::update(|s| { if s.ai.default_provider.is_empty() { s.ai.default_provider = id.clone(); } s.ai.providers.push(p); });
-                        this.ai_sel = Some(id.clone());
-                        this.refresh_keys(); this.ai_key_reset(cx);
-                        if !pr.needs_key { this.load_models(&id, true, cx); }
-                    } else if let Some(id) = this.ai_sel.clone() {
-                        this.update_provider(&id, |p| {
-                            p.preset = pr.id.into(); p.kind = pr.kind;
-                            if !pr.base_url.is_empty() { p.base_url = pr.base_url.into(); }
-                            if !pr.model.is_empty() { p.model = pr.model.into(); }
-                            p.fast_model = pr.fast_model.into();
-                        }, cx);
-                        // re-create the bound inputs so they show the new values
-                        this.inputs.retain(|k, _| !k.starts_with(&format!("aip.{id}.")));
-                        let _ = window;
-                        this.load_models(&id, true, cx);
-                    }
-                    cx.emit(SettingsEvent::Changed("ai.providers".into())); cx.notify();
+        let cur_name = cur_preset.as_deref().and_then(|id| models::PRESETS.iter().find(|p| p.id == id)).map(|p| p.name).unwrap_or(t("models.preset_custom"));
+
+        let mut trigger = div().relative();
+        let btn = if mode == "add" {
+            div().id("ai-add-btn").px_3().py(px(6.)).rounded(px(6.)).cursor_pointer()
+                .bg(c(th.accent)).text_color(gpui::white()).text_size(px(12.)).font_weight(FontWeight::MEDIUM)
+                .flex().items_center().gap_1()
+                .hover(|d| d.opacity(0.9))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.ai_add_dropdown = !this.ai_add_dropdown;
+                    this.ai_template_dropdown = false;
+                    cx.notify();
                 }))
-                .child(label));
+                .child(icon(IconName::Plus, 13., gpui::white()))
+                .child(t("ai.add_provider"))
+                .child(icon(if open { IconName::ChevronUp } else { IconName::ChevronDown }, 11., gpui::white()))
+        } else {
+            div().id("ai-tpl-btn").px_3().py(px(5.)).rounded(px(6.)).cursor_pointer()
+                .bg(c(th.surface0)).border_1().border_color(c(th.surface1))
+                .text_color(c(th.text)).text_size(px(12.)).font_weight(FontWeight::MEDIUM)
+                .flex().items_center().gap_2()
+                .hover(|d| d.bg(c(th.surface1)))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.ai_template_dropdown = !this.ai_template_dropdown;
+                    this.ai_add_dropdown = false;
+                    cx.notify();
+                }))
+                .child(div().text_color(c(th.overlay1)).text_size(px(11.)).child(t("models.template")))
+                .child(div().child(cur_name))
+                .child(icon(if open { IconName::ChevronUp } else { IconName::ChevronDown }, 11., c(th.overlay1)))
+        };
+        trigger = trigger.child(btn);
+
+        if open {
+            let mut popover = ui::popover().id(SharedString::from(format!("pop-preset-{mode}")))
+                .occlude().absolute().top(px(34.)).right_0().w(px(240.))
+                .max_h(px(320.)).overflow_y_scroll().p(px(6.)).flex().flex_col().gap(px(2.))
+                .on_mouse_down_out(cx.listener(move |this, _, _, cx| {
+                    if mode == "add" { this.ai_add_dropdown = false; } else { this.ai_template_dropdown = false; }
+                    cx.notify();
+                }));
+
+            for (i, pr) in models::PRESETS.iter().enumerate() {
+                let active = mode == "apply" && cur_preset.as_deref() == Some(pr.id);
+                let label = if pr.id == "custom" { t("models.preset_custom") } else { pr.name };
+                let is_anthropic = pr.kind == Kind::Anthropic;
+                popover = popover.child(
+                    div().id(SharedString::from(format!("pr-opt-{mode}-{i}")))
+                        .px_2().py(px(6.)).rounded(px(5.)).cursor_pointer()
+                        .flex().items_center().justify_between()
+                        .when(active, |d| d.bg(c(th.accent).opacity(0.12)))
+                        .hover(|d| d.bg(c(cur().surface0)))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            let pr = &models::PRESETS[i];
+                            if mode == "add" {
+                                this.ai_add_dropdown = false;
+                                let id = format!("p{}", chrono::Local::now().format("%m%d%H%M%S%3f"));
+                                let p = Provider {
+                                    id: id.clone(),
+                                    name: if pr.id == "custom" { t("models.preset_custom").to_string() } else { pr.name.to_string() },
+                                    kind: pr.kind,
+                                    base_url: pr.base_url.into(),
+                                    model: pr.model.into(),
+                                    fast_model: pr.fast_model.into(),
+                                    preset: pr.id.into(),
+                                    ..Default::default()
+                                };
+                                this.notice = config::update(|s| {
+                                    if s.ai.default_provider.is_empty() { s.ai.default_provider = id.clone(); }
+                                    s.ai.providers.push(p);
+                                });
+                                this.ai_sel = Some(id.clone());
+                                this.refresh_keys();
+                                this.ai_key_reset(cx);
+                                if !pr.needs_key { this.load_models(&id, true, cx); }
+                            } else if let Some(id) = this.ai_sel.clone() {
+                                this.ai_template_dropdown = false;
+                                this.update_provider(&id, |p| {
+                                    p.preset = pr.id.into();
+                                    p.kind = pr.kind;
+                                    if !pr.base_url.is_empty() { p.base_url = pr.base_url.into(); }
+                                    if !pr.model.is_empty() { p.model = pr.model.into(); }
+                                    p.fast_model = pr.fast_model.into();
+                                }, cx);
+                                this.inputs.retain(|k, _| !k.starts_with(&format!("aip.{id}.")));
+                                let _ = window;
+                                this.load_models(&id, true, cx);
+                            }
+                            cx.emit(SettingsEvent::Changed("ai.providers".into()));
+                            cx.notify();
+                        }))
+                        .child(
+                            div().flex().items_center().gap_2()
+                                .child(icon(if is_anthropic { IconName::Bot } else { IconName::Sparkles }, 13., if active { c(th.accent) } else { c(th.overlay1) }))
+                                .child(div().text_size(px(12.5)).text_color(if active { c(th.accent) } else { c(th.text) }).child(label))
+                        )
+                        .when(active, |d| d.child(icon(IconName::Check, 12., c(th.accent))))
+                );
+            }
+            trigger = trigger.child(gpui::deferred(popover).with_priority(3));
         }
-        row
+
+        trigger
     }
 
     /// Show cached models at once; fetch when forced, missing or stale.
