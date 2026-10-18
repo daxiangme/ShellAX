@@ -44,14 +44,15 @@ pub struct Shared {
 
 pub type ClipFormatter = Arc<dyn Fn(&str) -> String + Sync + Send + 'static>;
 
-/// OSC 52 write policy (terminal.osc52_write: allow | ask | deny). Payloads over 1 MiB are refused.
+/// OSC 52 write policy (`ssh.osc52_write`: allow | ask | deny).
+/// Payloads over [`OSC52_MAX`] are still copied when the user allows them; the UI warns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClipDecision { Allow, Ask, Deny }
 pub const OSC52_MAX: usize = 1 << 20;
-pub fn osc52_write_decision(mode: &str, len: usize) -> ClipDecision {
-    if len > OSC52_MAX { return ClipDecision::Deny; }
+pub fn osc52_write_decision(mode: &str, _len: usize) -> ClipDecision {
     match mode { "allow" => ClipDecision::Allow, "deny" | "off" => ClipDecision::Deny, _ => ClipDecision::Ask }
 }
+pub fn osc52_is_large(len: usize) -> bool { len > OSC52_MAX }
 
 /// Listener that forwards terminal-generated replies (e.g. DA/DSR answers) back to the backend
 /// and records title changes.
@@ -397,7 +398,9 @@ mod tests {
         assert_eq!(osc52_write_decision("allow", 10), ClipDecision::Allow);
         assert_eq!(osc52_write_decision("ask", 10), ClipDecision::Ask);
         assert_eq!(osc52_write_decision("deny", 10), ClipDecision::Deny);
-        assert_eq!(osc52_write_decision("allow", OSC52_MAX + 1), ClipDecision::Deny);
+        assert_eq!(osc52_write_decision("allow", OSC52_MAX + 1), ClipDecision::Allow);
+        assert!(osc52_is_large(OSC52_MAX + 1));
+        assert!(!osc52_is_large(OSC52_MAX));
     }
 
     #[test]

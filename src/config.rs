@@ -96,9 +96,10 @@ pub struct Terminal {
     pub bell: String, pub copy_on_select: bool, pub paste_confirm: bool, pub mouse_reporting: bool,
     /// auto = inject OSC 133 hooks for bash/zsh; off = never
     pub shell_integration: String,
-    /// OSC 52 clipboard write from programs: allow | ask | deny
+    /// Kept so older config files still parse. The app no longer reads this:
+    /// program clipboard writes are always allowed (over 1 MiB refused).
     pub osc52_write: String,
-    /// OSC 52 clipboard read (programs reading your clipboard); off by default
+    /// Kept so older config files still parse. Program clipboard reads are always ignored.
     pub osc52_read: bool,
     /// modifier for rectangular selection drag: alt (default) | ctrl (for desktops whose window
     /// manager grabs Alt+drag, e.g. Xfwm / many Linux WMs)
@@ -118,7 +119,7 @@ pub struct Terminal {
 #[serde(default)]
 pub struct HighlightRule { pub pattern: String, pub color: String, pub bold: bool }
 fn default_highlights() -> Vec<HighlightRule> { ssh_term_proto::highlight::DEFAULTS.iter().map(|(p, c, b)| HighlightRule { pattern: p.to_string(), color: c.to_string(), bold: *b }).collect() }
-impl Default for Terminal { fn default() -> Self { Self { padding: f_pad(), show_cwd: t(), style: t(), keyword_highlight: t(), highlights: default_highlights(), shell: String::new(), scrollback: u_scroll(), cursor_style: s_block(), cursor_blink: t(), bell: s_visual(), copy_on_select: false, paste_confirm: t(), mouse_reporting: t(), shell_integration: s_auto(), osc52_write: "ask".into(), osc52_read: false, block_select: "alt".into() } } }
+impl Default for Terminal { fn default() -> Self { Self { padding: f_pad(), show_cwd: t(), style: t(), keyword_highlight: t(), highlights: default_highlights(), shell: String::new(), scrollback: u_scroll(), cursor_style: s_block(), cursor_blink: t(), bell: s_visual(), copy_on_select: false, paste_confirm: t(), mouse_reporting: t(), shell_integration: s_auto(), osc52_write: "allow".into(), osc52_read: false, block_select: "alt".into() } } }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -132,6 +133,11 @@ pub struct Ssh {
     pub known_hosts: String, pub host_key_policy: String, pub jump_host: String, pub ciphers: Vec<String>,
     pub read_ssh_config: bool, pub ssh_config: String, pub agent_forwarding: bool,
     pub kex: Vec<String>, pub reconnect: bool, pub reuse_connections: bool, pub remote_agent_hooks: bool,
+    /// Remote program writes to this computer's clipboard: allow | ask | deny. Ask by default
+    /// so an SSH session cannot silently replace what the user just copied.
+    pub osc52_write: String,
+    /// Remote program may read this computer's clipboard (so vim/tmux can paste). On by default.
+    pub osc52_read: bool,
     /// Outbound proxy URL (`socks5://` or `http://`). Empty = none.
     /// SSH uses it only for connections that opt in. AI requests and update checks use it whenever it is set.
     pub proxy: String,
@@ -143,7 +149,7 @@ impl Default for Ssh {
         Self { default_user: String::new(), default_port: u_22(), keepalive_secs: u_30(), connect_timeout_secs: u_15(), known_hosts: s_kh(),
             host_key_policy: s_ask(), jump_host: String::new(), ciphers: vec!["chacha20-poly1305@openssh.com".into(), "aes256-gcm@openssh.com".into(), "aes128-ctr".into()],
             read_ssh_config: t(), ssh_config: s_sc(), agent_forwarding: false,
-            kex: vec![], reconnect: t(), reuse_connections: t(), remote_agent_hooks: t(), proxy: String::new(), no_proxy: String::new() }
+            kex: vec![], reconnect: t(), reuse_connections: t(), remote_agent_hooks: t(), osc52_write: "ask".into(), osc52_read: true, proxy: String::new(), no_proxy: String::new() }
     }
 }
 
@@ -229,8 +235,10 @@ pub struct SessionCfg { pub persistent: String, pub restore_layout: bool, pub co
     /// SFTP split pane follows the neighbouring terminal's cwd (OSC 7 / prompt).
     pub sftp_follow_cwd: bool,
     /// Double-click on a sidebar host asks before opening another tab (PRD 5.24).
-    pub confirm_new_tab: bool }
-impl Default for SessionCfg { fn default() -> Self { Self { confirm_new_tab: t(), persistent: s_off(), restore_layout: t(), confirm_close: t(), auto_reconnect: t(), local_daemon: false, sftp_mode: "popup".into(), sftp_follow_cwd: t() } } }
+    pub confirm_new_tab: bool,
+    /// After a layout restore, ask before re-running the last Agent command. Off by default.
+    pub prompt_resume_agent: bool }
+impl Default for SessionCfg { fn default() -> Self { Self { confirm_new_tab: t(), persistent: s_off(), restore_layout: t(), confirm_close: t(), auto_reconnect: t(), local_daemon: false, sftp_mode: "popup".into(), sftp_follow_cwd: t(), prompt_resume_agent: false } } }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -649,6 +657,11 @@ mod tests {
         assert!(s.get_bool("terminal.copy_on_select"));
         assert_eq!((s.font.size, s.terminal.scrollback, s.permissions.mode), (15.5, 5000, Mode::Plan));
         assert_eq!(s.font.fallbacks, vec!["A".to_string(), "B".to_string()]);
+        assert!(!s.session.prompt_resume_agent);
+        s.set("session.prompt_resume_agent", toml::Value::Boolean(true)).unwrap();
+        assert!(s.get_bool("session.prompt_resume_agent"));
+        let old = Settings::parse("[session]\nrestore_layout = true\n").unwrap();
+        assert!(!old.session.prompt_resume_agent);
         assert!(s.set("font.size", toml::Value::String("abc".into())).is_err());
         let back = Settings::parse(&toml::to_string_pretty(&s).unwrap()).unwrap();
         assert_eq!(back, s);

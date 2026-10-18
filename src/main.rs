@@ -259,12 +259,16 @@ impl Root {
     fn log(&self, kind: &str, detail: impl AsRef<str>) { let _ = self.audit.append(kind, "user", detail.as_ref()); }
 
     pub(crate) fn toast(&mut self, msg: String, cx: &mut Context<Self>) {
+        self.toast_after(msg, std::time::Duration::from_secs(4), cx);
+    }
+
+    pub(crate) fn toast_after(&mut self, msg: String, dur: std::time::Duration, cx: &mut Context<Self>) {
         self.toast_seq += 1;
         let seq = self.toast_seq;
         self.toast = Some((msg, seq));
         cx.notify();
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(std::time::Duration::from_secs(4)).await;
+            cx.background_executor().timer(dur).await;
             let _ = this.update(cx, |r, cx| { if r.toast.as_ref().is_some_and(|t| t.1 == seq) { r.toast = None; cx.notify(); } });
         }).detach();
     }
@@ -361,6 +365,8 @@ impl Root {
                     this.toast(t("cm.ai_context_set").to_string(), cx);
                     return;
                 }
+                termview::TermEvent::Copied => { this.toast_after(t("term.copied").to_string(), std::time::Duration::from_secs(2), cx); return; }
+                termview::TermEvent::Toast(msg) => { this.toast(msg.clone(), cx); return; }
                 termview::TermEvent::Explain => {}
             }
             let fc = pane.update(cx, |p, cx| { let f = p.failure_context(); p.failed = None; cx.notify(); f });

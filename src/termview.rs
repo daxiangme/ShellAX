@@ -538,7 +538,7 @@ pub struct SearchBar { pub query: String, pub cur: Option<(BPoint, BPoint)>, pub
 #[derive(Clone, Debug, PartialEq)]
 pub struct StepOutput { pub cmd: String, pub exit: Option<i32>, pub output: String, pub withheld: bool }
 
-pub enum TermEvent { Keyword(String, String), Explain, Agent(String, AgentState), LongDone(String, u64, i32), Audit(&'static str, String), CtxEditor(String), CtxCdTab(String), CtxAiExplain(String), CtxUseAi }
+pub enum TermEvent { Keyword(String, String), Explain, Agent(String, AgentState), LongDone(String, u64, i32), Audit(&'static str, String), CtxEditor(String), CtxCdTab(String), CtxAiExplain(String), CtxUseAi, Copied, Toast(String) }
 
 /// IME support (PRD 3.3: IME must work for agents too). Committed text goes to the PTY like typing;
 /// composition text is only drawn (never sent) until the IME commits it.
@@ -643,27 +643,41 @@ impl TermView {
         }
     }
 
-    /// OSC 52: writes follow terminal.osc52_write (ask shows a bar), reads only when osc52_read is on.
+    /// OSC 52 from a program. Only SSH panes honor it (`ssh.osc52_write` / `ssh.osc52_read`).
+    /// A local pane ignores these sequences, so a program cannot replace a ⌘C / Ctrl+C copy.
+    /// Writes default to ask. Over 1 MiB is still copied when allowed, and the UI says so.
     fn handle_osc52(&mut self, s: &Arc<Session>, cx: &mut Context<Self>) {
         let stores: Vec<String> = std::mem::take(&mut *s.shared.clip_store.lock().unwrap());
         let loads: Vec<ssh_term_proto::term::ClipFormatter> = std::mem::take(&mut *s.shared.clip_load.lock().unwrap());
+        if !matches!(self.spec, Spec::Ssh(_)) {
+            return;
+        }
         let cfg = config::get();
         for text in stores {
             use ssh_term_proto::term::{osc52_write_decision, ClipDecision};
-            match osc52_write_decision(&cfg.terminal.osc52_write, text.len()) {
-                ClipDecision::Allow => { cx.emit(TermEvent::Audit("osc52.write", format!("allowed {} bytes", text.len()))); cx.write_to_clipboard(ClipboardItem::new_string(text)); }
+            match osc52_write_decision(&cfg.ssh.osc52_write, text.len()) {
+                ClipDecision::Allow => self.commit_clip_write(text, cx),
                 ClipDecision::Ask => { self.clip_ask = Some(text); cx.notify(); }
                 ClipDecision::Deny => cx.emit(TermEvent::Audit("osc52.write", format!("denied {} bytes", text.len()))),
             }
         }
         for f in loads {
-            if cfg.terminal.osc52_read {
+            if cfg.ssh.osc52_read {
                 let text = cx.read_from_clipboard().and_then(|i| i.text()).unwrap_or_default();
                 cx.emit(TermEvent::Audit("osc52.read", format!("allowed {} bytes", text.len())));
                 s.write(f(&text).into_bytes());
             } else {
-                cx.emit(TermEvent::Audit("osc52.read", "denied (terminal.osc52_read = false)".into()));
+                cx.emit(TermEvent::Audit("osc52.read", "denied".into()));
             }
+        }
+    }
+
+    fn commit_clip_write(&self, text: String, cx: &mut Context<Self>) {
+        let n = text.len();
+        cx.emit(TermEvent::Audit("osc52.write", format!("allowed {n} bytes")));
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        if ssh_term_proto::term::osc52_is_large(n) {
+            cx.emit(TermEvent::Toast(t("term.osc52_large").to_string()));
         }
     }
 
@@ -949,8 +963,12 @@ impl TermView {
         Some(out)
     }
 
-    pub fn copy(&self, cx: &mut Context<Self>) {
-        if let Some(t) = self.selection_text().filter(|t| !t.is_empty()) { cx.write_to_clipboard(ClipboardItem::new_string(t)); }
+    /// Copy the selection. Returns false when there is nothing to copy, and does not notify then.
+    pub fn copy(&self, cx: &mut Context<Self>) -> bool {
+        let Some(t) = self.selection_text().filter(|t| !t.is_empty()) else { return false };
+        cx.write_to_clipboard(ClipboardItem::new_string(t));
+        cx.emit(TermEvent::Copied);
+        true
     }
 
     pub fn paste(&mut self, cx: &mut Context<Self>) {
@@ -1010,6 +1028,19 @@ impl TermView {
                 "v" => { self.paste(cx); cx.stop_propagation(); return; }
                 _ => {}
             }
+        }
+        // ⌘C on macOS, Ctrl+C on Windows/Linux, only while text is selected.
+        // A bare Ctrl+C with no selection still falls through and interrupts the program.
+        let has_sel = self.st.borrow().sel.is_some();
+        if should_copy_selection(cfg!(target_os = "macos"), &k.key, m.control, m.platform, m.shift, m.alt, has_sel) && self.copy(cx) {
+            cx.stop_propagation();
+            return;
+        }
+        // ⌘V on macOS, Ctrl+V on Windows/Linux. Ctrl+Shift+V is handled above.
+        if should_paste(cfg!(target_os = "macos"), &k.key, m.control, m.platform, m.shift, m.alt) {
+            self.paste(cx);
+            cx.stop_propagation();
+            return;
         }
         if m.shift && !m.control && k.key == "insert" { self.paste(cx); cx.stop_propagation(); return; }
         if m.shift && !m.control && (k.key == "pageup" || k.key == "pagedown") && !self.mode().contains(TermMode::ALT_SCREEN) {
@@ -1630,7 +1661,12 @@ impl TermView {
         cx.emit(TermEvent::Audit("ctxmenu.pick", format!("host={} item={} custom={}", self.audit_host(), item.id, item.custom)));
         match item.act {
             Act::Insert(cmd) => self.insert_command(&cmd, cx),
-            Act::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            Act::Copy(text) => {
+                if !text.is_empty() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    cx.emit(TermEvent::Copied);
+                }
+            }
             Act::OpenEditor(p) => cx.emit(TermEvent::CtxEditor(p)),
             Act::CdNewTab(d) => cx.emit(TermEvent::CtxCdTab(d)),
             Act::OpenUrl(u) => cx.open_url(&u),
@@ -1910,6 +1946,27 @@ pub fn encode_mouse(button: u8, pressed: bool, row: usize, col: usize, sgr: bool
     }
 }
 
+/// True when this key copies the terminal selection instead of going to the shell.
+/// macOS uses ⌘C. Windows and Linux use Ctrl+C. Every OS also accepts Ctrl+Shift+C.
+/// A selection is required, so Ctrl+C with nothing selected still interrupts the program.
+pub fn should_copy_selection(macos: bool, key: &str, control: bool, platform: bool, shift: bool, alt: bool, has_selection: bool) -> bool {
+    if !has_selection || alt || !key.eq_ignore_ascii_case("c") { return false; }
+    if control && shift && !platform { return true; }
+    if macos && platform && !control && !shift { return true; }
+    if !macos && control && !platform && !shift { return true; }
+    false
+}
+
+/// True when this key pastes the clipboard into the terminal.
+/// macOS uses ⌘V. Windows and Linux use Ctrl+V. Every OS also accepts Ctrl+Shift+V.
+pub fn should_paste(macos: bool, key: &str, control: bool, platform: bool, shift: bool, alt: bool) -> bool {
+    if alt || !key.eq_ignore_ascii_case("v") { return false; }
+    if control && shift && !platform { return true; }
+    if macos && platform && !control && !shift { return true; }
+    if !macos && control && !platform && !shift { return true; }
+    false
+}
+
 pub fn key_to_bytes(k: &gpui::Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
     let m = &k.modifiers;
     let arrow = |ch: char| Some(if app_cursor { format!("\x1bO{ch}") } else { format!("\x1b[{ch}") }.into_bytes());
@@ -2003,7 +2060,7 @@ impl Render for TermView {
             body = body.child(canvas(|_, _, _| {}, move |bounds, _, window, cx| { window.handle_input(&focus, gpui::ElementInputHandler::new(bounds, me.clone()), cx); }).absolute().size_full());
         }
         if let Some(card) = self.ai_card(cx) { body = body.child(card); }
-        if let Some(cmd) = self.resume_offer.clone() {
+        if let Some(cmd) = self.resume_offer.clone().filter(|_| config::get().session.prompt_resume_agent) {
             body = body.child(div().absolute().bottom(px(12.)).left(px(12.)).right(px(12.)).p_2().rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.accent))
                 .flex().flex_wrap().items_center().gap_2().text_size(px(12.)).text_color(c(th.text))
                 .child(tf("term.restored_resume", &[("cmd", &cmd)]))
@@ -2025,11 +2082,13 @@ impl Render for TermView {
         }
         if let Some(text) = self.clip_ask.clone() {
             let preview: String = text.chars().take(80).collect::<String>().replace(['\n', '\r'], " ");
+            let large = ssh_term_proto::term::osc52_is_large(text.len());
+            let ask = if large { tf("term.osc52_ask_large", &[("n", &text.len()), ("preview", &preview)]) } else { tf("term.osc52_ask", &[("n", &text.len()), ("preview", &preview)]) };
             body = body.child(div().absolute().bottom(px(12.)).left(px(12.)).right(px(12.)).p_2().rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.warning))
                 .flex().flex_wrap().items_center().gap_2().text_size(px(12.)).text_color(c(th.text))
-                .child(tf("term.osc52_ask", &[("n", &text.len()), ("preview", &preview)]))
+                .child(ask)
                 .child(div().id("osc52-allow").px_3().py(px(3.)).rounded_md().cursor_pointer().bg(c(th.accent)).text_color(c(th.base)).child(t("ui.allow"))
-                    .on_click(cx.listener(|v, _, _w, cx| { if let Some(t) = v.clip_ask.take() { cx.emit(TermEvent::Audit("osc52.write", format!("approved {} bytes", t.len()))); cx.write_to_clipboard(ClipboardItem::new_string(t)); } cx.notify(); })))
+                    .on_click(cx.listener(|v, _, _w, cx| { if let Some(t) = v.clip_ask.take() { v.commit_clip_write(t, cx); } cx.notify(); })))
                 .child(div().id("osc52-deny").px_2().py(px(3.)).rounded_md().cursor_pointer().bg(c(th.surface0)).child(t("ui.deny"))
                     .on_click(cx.listener(|v, _, _w, cx| { if let Some(t) = v.clip_ask.take() { cx.emit(TermEvent::Audit("osc52.write", format!("rejected {} bytes", t.len()))); } cx.notify(); }))));
         }
@@ -2146,5 +2205,31 @@ mod tests {
         assert_eq!(cwd_crumbs("D:\\a\\b"), vec![("D:".into(), "D:\\".into()), ("a".into(), "D:\\a".into()), ("b".into(), "D:\\a\\b".into())]);
         assert_eq!(cd_command_for("/var/log"), "cd -- /var/log");
         assert_eq!(cd_command_for(r"D:\a b"), "Set-Location -LiteralPath 'D:\\a b'");
+    }
+    #[test]
+    fn copy_shortcut_follows_the_selection_and_the_os() {
+        let copy = |macos, key, control, platform, shift, alt, sel| should_copy_selection(macos, key, control, platform, shift, alt, sel);
+        assert!(copy(true, "c", false, true, false, false, true));
+        assert!(!copy(true, "c", false, true, false, false, false));
+        assert!(!copy(true, "c", true, false, false, false, true));
+        assert!(copy(true, "c", true, false, true, false, true));
+        assert!(copy(false, "c", true, false, false, false, true));
+        assert!(!copy(false, "c", true, false, false, false, false));
+        assert!(copy(false, "C", true, false, true, false, true));
+        assert!(!copy(false, "c", true, false, false, true, true));
+        assert!(!copy(false, "c", false, true, false, false, true));
+        assert!(!copy(false, "v", true, false, false, false, true));
+    }
+    #[test]
+    fn paste_shortcut_follows_the_os() {
+        let paste = |macos, key, control, platform, shift, alt| should_paste(macos, key, control, platform, shift, alt);
+        assert!(paste(true, "v", false, true, false, false));
+        assert!(!paste(true, "v", true, false, false, false));
+        assert!(paste(true, "v", true, false, true, false));
+        assert!(paste(false, "v", true, false, false, false));
+        assert!(paste(false, "V", true, false, true, false));
+        assert!(!paste(false, "v", false, true, false, false));
+        assert!(!paste(false, "v", true, false, false, true));
+        assert!(!paste(true, "c", false, true, false, false));
     }
 }

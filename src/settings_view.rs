@@ -2,7 +2,9 @@
 //! Every control reads/writes `config::get()` by dotted path and persists config.toml
 //! immediately; the root view re-applies what can take effect live.
 use ssh_term_proto::i18n::{t, tf};
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use gpui::{div, prelude::*, px, AnyElement, Context, Entity, EventEmitter, FontWeight, SharedString, Subscription, Window};
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -128,6 +130,13 @@ pub struct SettingsView {
     system_term_font: Option<ssh_term_proto::platform::DetectedTerminalFont>,
     ai_add_dropdown: bool,
     ai_template_dropdown: bool,
+    /// Window-space bounds of the add / template buttons, recorded during prepaint.
+    /// The menu anchors to these so it can flip above the button instead of being
+    /// clipped by the settings sheet.
+    ai_add_anchor: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    ai_tpl_anchor: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    /// Click point used only when the button has not been measured yet.
+    ai_menu_at: Option<gpui::Point<gpui::Pixels>>,
     ai_advanced: bool,
     _subs: Vec<Subscription>,
 }
@@ -164,7 +173,9 @@ impl SettingsView {
             ai_models: HashMap::new(), ai_dropdown: None, ai_model_search, ai_url_gen: 0,
             proxy_http, proxy_auth, proxy_host, proxy_port, proxy_user, proxy_pass, proxy_candidates: Vec::new(), proxy_bypass_suggest: String::new(), proxy_detecting: false, proxy_started: false, proxy_note: None,
             font_dropdown: false, font_search, font_show_all: false, system_term_font,
-            ai_add_dropdown: false, ai_template_dropdown: false, ai_advanced: false, _subs: subs };
+            ai_add_dropdown: false, ai_template_dropdown: false,
+            ai_add_anchor: Rc::new(Cell::new(None)), ai_tpl_anchor: Rc::new(Cell::new(None)), ai_menu_at: None,
+            ai_advanced: false, _subs: subs };
         if let Some(id) = me.ai_sel.clone() { me.load_models(&id, false, cx); }
         me.refresh_keys();
         if cat == Cat::Proxy { me.start_proxy_detect(false, cx); }
@@ -209,9 +220,7 @@ impl SettingsView {
             r(Terminal, t("ui.cursor_style"), "", Ctl::Choice("terminal.cursor_style", opts(&[("block", t("ui.block")), ("bar", t("ui.bar")), ("underline", t("ui.underline"))]))),
             r(Terminal, t("ui.cursor_blink"), t("ui.stops_blinking_after_10_s"), Ctl::Toggle("terminal.cursor_blink")),
             r(Terminal, t("ui.bell"), t("ui.on_bel"), Ctl::Choice("terminal.bell", opts(&[("none", t("ui.off")), ("visual", t("ui.flash_border")), ("sound", t("ui.sound"))]))),
-            r(Terminal, t("ui.osc52_write"), t("ui.osc52_write_desc"), Ctl::Choice("terminal.osc52_write", opts(&[("allow", t("ui.allow")), ("ask", t("ui.ask")), ("deny", t("ui.deny"))]))),
             r(Terminal, t("ui.block_select"), t("ui.block_select_desc"), Ctl::Choice("terminal.block_select", opts(&[("alt", "Alt"), ("ctrl", "Ctrl")]))),
-            r(Terminal, t("ui.osc52_read"), t("ui.osc52_read_desc"), Ctl::Toggle("terminal.osc52_read")),
             r(Terminal, t("ui.copy_on_select"), t("ui.copy_to_the_clipboard_on"), Ctl::Toggle("terminal.copy_on_select")),
             r(Terminal, t("ui.confirm_multi_line_paste"), t("ui.confirm_before_pasting_multiple_lines"), Ctl::Toggle("terminal.paste_confirm")),
             r(Terminal, t("ui.mouse_reporting"), t("ui.let_vim_htop_etc_receive"), Ctl::Toggle("terminal.mouse_reporting")),
@@ -240,6 +249,8 @@ impl SettingsView {
             r(Ssh, t("ui.cipher_preference"), t("ui.comma_separated_by_priority"), Ctl::Text("ssh.ciphers", "")),
             r(Ssh, t("ui.kex_preference"), t("ui.comma_separated_by_priority"), Ctl::Text("ssh.kex", "curve25519-sha256")),
             r(Ssh, t("ui.agent_forwarding"), "", Ctl::Toggle("ssh.agent_forwarding")),
+            r(Ssh, t("ssh.clip_write"), t("ssh.clip_write.d"), Ctl::Choice("ssh.osc52_write", opts(&[("allow", t("ui.allow")), ("ask", t("ui.ask")), ("deny", t("ui.deny"))]))),
+            r(Ssh, t("ssh.clip_read"), t("ssh.clip_read.d"), Ctl::Toggle("ssh.osc52_read")),
 
             r(Credentials, t("ui.use_system_keychain"), t("ui.store_key_passphrases_and_api"), Ctl::Toggle("credentials.use_keychain")),
             r(Credentials, t("ui.use_ssh_agent"), "", Ctl::Toggle("credentials.use_ssh_agent")),
@@ -278,6 +289,7 @@ impl SettingsView {
             r(Session, t("sftp.follow_cwd"), t("sftp.follow_cwd.d"), Ctl::Toggle("session.sftp_follow_cwd")),
             r(Session, t("ui.local_daemon"), t("ui.local_daemon.d"), Ctl::Toggle("session.local_daemon")),
             r(Session, t("ui.restore_layout_on_startup"), "", Ctl::Toggle("session.restore_layout")),
+            r(Session, t("ui.prompt_resume_agent"), t("ui.prompt_resume_agent.d"), Ctl::Toggle("session.prompt_resume_agent")),
             r(Session, t("sb.confirm_new_tab_setting"), t("sb.confirm_new_tab_desc"), Ctl::Toggle("session.confirm_new_tab")),
             r(Session, t("ui.confirm_before_closing"), t("ui.confirm_closing_a_tab_while"), Ctl::Toggle("session.confirm_close")),
             r(Session, t("ui.auto_reconnect"), "", Ctl::Toggle("session.auto_reconnect")),
@@ -1405,7 +1417,7 @@ impl SettingsView {
         // Provider list header
         let list_header = div().flex().items_center().justify_between().pt_2()
             .child(Self::section_title(t("ai.providers")))
-            .child(self.preset_menu("add", cx));
+            .child(self.preset_menu("add", window, cx));
         out = out.child(list_header);
 
         // Provider list
@@ -1458,7 +1470,7 @@ impl SettingsView {
 
         let edit_title = div().flex().items_center().justify_between().pt_4()
             .child(Self::section_title(t("ai.edit_provider")))
-            .child(self.preset_menu("apply", cx));
+            .child(self.preset_menu("apply", window, cx));
         out = out.child(edit_title);
 
         let mut editor_card = div().flex().flex_col().rounded_lg().border_1().border_color(c(th.surface1).opacity(0.6)).bg(c(th.surface0).opacity(0.3)).overflow_hidden();
@@ -1645,19 +1657,19 @@ impl SettingsView {
 
     fn ai_key_reset(&mut self, _cx: &mut Context<Self>) { self.ai_note = None; }
 
-    fn preset_menu(&mut self, mode: &'static str, cx: &mut Context<Self>) -> gpui::Div {
+    fn preset_menu(&mut self, mode: &'static str, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
         let th = cur();
         let open = if mode == "add" { self.ai_add_dropdown } else { self.ai_template_dropdown };
         let cur_preset = self.ai_sel.as_ref().and_then(|id| config::get().ai.providers.iter().find(|p| &p.id == id).map(|p| p.preset.clone()));
         let cur_name = cur_preset.as_deref().and_then(|id| models::PRESETS.iter().find(|p| p.id == id)).map(|p| p.name).unwrap_or(t("models.preset_custom"));
 
-        let mut trigger = div().relative();
         let btn = if mode == "add" {
             div().id("ai-add-btn").px_3().py(px(6.)).rounded(px(6.)).cursor_pointer()
                 .bg(c(th.accent)).text_color(gpui::white()).text_size(px(12.)).font_weight(FontWeight::MEDIUM)
                 .flex().items_center().gap_1()
                 .hover(|d| d.opacity(0.9))
-                .on_click(cx.listener(|this, _, _, cx| {
+                .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _, cx| {
+                    this.ai_menu_at = Some(ev.position());
                     this.ai_add_dropdown = !this.ai_add_dropdown;
                     this.ai_template_dropdown = false;
                     cx.notify();
@@ -1671,7 +1683,8 @@ impl SettingsView {
                 .text_color(c(th.text)).text_size(px(12.)).font_weight(FontWeight::MEDIUM)
                 .flex().items_center().gap_2()
                 .hover(|d| d.bg(c(th.surface1)))
-                .on_click(cx.listener(|this, _, _, cx| {
+                .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _, cx| {
+                    this.ai_menu_at = Some(ev.position());
                     this.ai_template_dropdown = !this.ai_template_dropdown;
                     this.ai_add_dropdown = false;
                     cx.notify();
@@ -1680,12 +1693,23 @@ impl SettingsView {
                 .child(div().child(cur_name))
                 .child(icon(if open { IconName::ChevronUp } else { IconName::ChevronDown }, 11., c(th.overlay1)))
         };
-        trigger = trigger.child(btn);
+        let anchor_slot = if mode == "add" { self.ai_add_anchor.clone() } else { self.ai_tpl_anchor.clone() };
+        let record = anchor_slot.clone();
+        let mut trigger = div().relative().child(
+            div().on_children_prepainted(move |bounds, _, _| {
+                if let Some(b) = bounds.first().copied() { record.set(Some(b)); }
+            }).child(btn)
+        );
 
         if open {
+            let trigger_bounds = anchor_slot.get().unwrap_or_else(|| {
+                let p = self.ai_menu_at.unwrap_or_else(|| gpui::point(px(80.), px(80.)));
+                gpui::Bounds::new(p, gpui::size(px(1.), px(28.)))
+            });
+            let (anchor, pos, max_h) = place_preset_menu(trigger_bounds, window.viewport_size());
             let mut popover = ui::popover().id(SharedString::from(format!("pop-preset-{mode}")))
-                .occlude().absolute().top(px(34.)).right_0().w(px(240.))
-                .max_h(px(320.)).overflow_y_scroll().p(px(6.)).flex().flex_col().gap(px(2.))
+                .occlude().w(px(PRESET_MENU_W)).max_h(px(max_h)).overflow_y_scroll()
+                .p(px(6.)).flex().flex_col().gap(px(2.))
                 .on_mouse_down_out(cx.listener(move |this, _, _, cx| {
                     if mode == "add" { this.ai_add_dropdown = false; } else { this.ai_template_dropdown = false; }
                     cx.notify();
@@ -1697,6 +1721,7 @@ impl SettingsView {
                 let is_anthropic = pr.kind == Kind::Anthropic;
                 popover = popover.child(
                     div().id(SharedString::from(format!("pr-opt-{mode}-{i}")))
+                        .flex_shrink_0()
                         .px_2().py(px(6.)).rounded(px(5.)).cursor_pointer()
                         .flex().items_center().justify_between()
                         .when(active, |d| d.bg(c(th.accent).opacity(0.12)))
@@ -1741,14 +1766,19 @@ impl SettingsView {
                             cx.notify();
                         }))
                         .child(
-                            div().flex().items_center().gap_2()
+                            div().flex().items_center().gap_2().min_w_0()
                                 .child(icon(if is_anthropic { IconName::Bot } else { IconName::Sparkles }, 13., if active { c(th.accent) } else { c(th.overlay1) }))
-                                .child(div().text_size(px(12.5)).text_color(if active { c(th.accent) } else { c(th.text) }).child(label))
+                                .child(div().min_w_0().text_size(px(12.5)).whitespace_nowrap().overflow_hidden().text_ellipsis()
+                                    .text_color(if active { c(th.accent) } else { c(th.text) }).child(label))
                         )
                         .when(active, |d| d.child(icon(IconName::Check, 12., c(th.accent))))
                 );
             }
-            trigger = trigger.child(gpui::deferred(popover).with_priority(3));
+            trigger = trigger.child(
+                gpui::deferred(
+                    gpui::anchored().anchor(anchor).position(pos).snap_to_window_with_margin(px(8.)).child(popover)
+                ).with_priority(3)
+            );
         }
 
         trigger
@@ -1876,5 +1906,75 @@ impl SettingsView {
                 .child(list));
         }
         col
+    }
+}
+
+/// Width of the provider preset menu. Long enough for "通义千问 DashScope" and the custom label.
+const PRESET_MENU_W: f32 = 280.;
+/// Preferred height: all ten presets, without scrolling, when the window has the room.
+const PRESET_MENU_WANT: f32 = 380.;
+
+/// Anchor the preset menu to `trigger` so the whole list stays inside `viewport`.
+/// Opens downward when that side can hold the list (or has more room); otherwise upward.
+/// The returned height is the scrollport cap — shorter than the list, the menu scrolls.
+fn place_preset_menu(trigger: gpui::Bounds<gpui::Pixels>, viewport: gpui::Size<gpui::Pixels>) -> (gpui::Anchor, gpui::Point<gpui::Pixels>, f32) {
+    const MARGIN: f32 = 8.;
+    const GAP: f32 = 4.;
+    let vh = f32::from(viewport.height);
+    let vw = f32::from(viewport.width);
+    let top = f32::from(trigger.top());
+    let bottom = f32::from(trigger.bottom());
+    let right = f32::from(trigger.right());
+    let below = (vh - bottom - GAP - MARGIN).max(0.);
+    let above = (top - GAP - MARGIN).max(0.);
+    let open_down = below + 0.5 >= PRESET_MENU_WANT || below >= above;
+    let max_h = (if open_down { below } else { above }).min(PRESET_MENU_WANT).max(1.);
+    let anchor = if open_down { gpui::Anchor::TopRight } else { gpui::Anchor::BottomRight };
+    let mut x = right;
+    if x > vw - MARGIN { x = (vw - MARGIN).max(MARGIN); }
+    if x - PRESET_MENU_W < MARGIN { x = (MARGIN + PRESET_MENU_W).min((vw - MARGIN).max(MARGIN)); }
+    let y = if open_down { bottom + GAP } else { top - GAP };
+    (anchor, gpui::point(gpui::px(x), gpui::px(y)), max_h)
+}
+
+#[cfg(test)]
+mod preset_menu_tests {
+    use super::*;
+    use gpui::{px, size, Bounds, Point};
+
+    fn box_at(x: f32, y: f32, w: f32, h: f32) -> Bounds<gpui::Pixels> {
+        Bounds::new(Point::new(px(x), px(y)), size(px(w), px(h)))
+    }
+
+    #[test]
+    fn opens_down_when_the_list_fits_below() {
+        let (anchor, pos, max_h) = place_preset_menu(box_at(800., 100., 140., 32.), size(px(1200.), px(800.)));
+        assert_eq!(anchor, gpui::Anchor::TopRight);
+        assert!((max_h - PRESET_MENU_WANT).abs() < 0.1, "{max_h}");
+        assert!((f32::from(pos.y) - 136.).abs() < 0.1, "{}", f32::from(pos.y));
+        assert!((f32::from(pos.x) - 940.).abs() < 0.1, "{}", f32::from(pos.x));
+    }
+
+    #[test]
+    fn flips_up_when_the_window_would_clip_the_bottom() {
+        // Button sits 40px above the bottom of an 800px window.
+        let (anchor, pos, max_h) = place_preset_menu(box_at(800., 728., 140., 32.), size(px(1200.), px(800.)));
+        assert_eq!(anchor, gpui::Anchor::BottomRight);
+        assert!((max_h - PRESET_MENU_WANT).abs() < 0.1, "{max_h}");
+        assert!((f32::from(pos.y) - 724.).abs() < 0.1, "{}", f32::from(pos.y));
+    }
+
+    #[test]
+    fn shrinks_and_scrolls_when_neither_side_holds_the_full_list() {
+        // 400px window, button in the middle: above is the larger side and still under WANT.
+        let (anchor, _, max_h) = place_preset_menu(box_at(200., 200., 120., 32.), size(px(600.), px(400.)));
+        assert_eq!(anchor, gpui::Anchor::BottomRight);
+        assert!((max_h - 188.).abs() < 0.1, "{max_h}");
+    }
+
+    #[test]
+    fn keeps_the_menu_inside_the_left_edge() {
+        let (_, pos, _) = place_preset_menu(box_at(10., 100., 40., 32.), size(px(600.), px(800.)));
+        assert!((f32::from(pos.x) - (8. + PRESET_MENU_W)).abs() < 0.1, "{}", f32::from(pos.x));
     }
 }
