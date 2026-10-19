@@ -66,7 +66,7 @@ pub fn kbd(binding: &str) -> AnyElement {
 /// Modal backdrop + centered card.
 pub fn modal(card: impl IntoElement + 'static) -> Div {
     // occlude: the backdrop swallows mouse/scroll events so the terminal below stays inert
-    div().absolute().top_0().left_0().size_full().occlude().flex().items_center().justify_center().bg(gpui::black().opacity(0.28)).child(crate::chrome::pop_in("modal-pop", card))
+    div().absolute().top_0().left_0().size_full().occlude().flex().items_center().justify_center().bg(gpui::black().opacity(0.28)).p(px(16.)).child(crate::chrome::pop_in("modal-pop", card))
 }
 
 /// Translucent popover surface (menus, palette): radius 10, hairline border, soft layered shadow.

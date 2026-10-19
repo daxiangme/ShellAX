@@ -138,6 +138,13 @@ fn strip_json_comments(s: &str) -> String {
     out
 }
 
+/// A font that only carries icons. The app bundles Symbols Nerd Font Mono and registers it at
+/// startup, so it shows up in the installed list, but it has no letters: using it as the terminal
+/// font falls every glyph back to a proportional face and the grid falls apart.
+fn icon_only_font(name: &str) -> bool {
+    name.to_lowercase().contains("symbols")
+}
+
 /// Detects the terminal font configured in the system (e.g. Windows Terminal, VS Code)
 /// or any installed Nerd Font on the machine.
 pub fn detect_system_terminal_font(installed: &[String]) -> Option<DetectedTerminalFont> {
@@ -200,12 +207,17 @@ fn detect_windows_terminal_font(installed: &[String]) -> Option<DetectedTerminal
         }
 
         if let Some(raw_face) = found_face {
-            let matched = match_installed_font(&raw_face, installed).unwrap_or(raw_face);
-            return Some(DetectedTerminalFont {
-                family: matched,
-                size: found_size,
-                source: "Windows Terminal".into(),
-            });
+            // Only adopt a face that is actually installed here. The settings file may have been
+            // copied from another machine (or name a font the user removed); returning the raw
+            // name would persist an unresolvable family, and GPUI then silently substitutes a
+            // proportional UI font, which tears the terminal grid apart.
+            if let Some(matched) = match_installed_font(&raw_face, installed) {
+                return Some(DetectedTerminalFont {
+                    family: matched,
+                    size: found_size,
+                    source: "Windows Terminal".into(),
+                });
+            }
         }
     }
     None
@@ -223,7 +235,8 @@ fn detect_vscode_terminal_font(installed: &[String]) -> Option<DetectedTerminalF
     let face = face.trim().trim_matches('\'').trim_matches('"');
     if face.is_empty() { return None; }
     let size = json.get("terminal.integrated.fontSize").and_then(|s| s.as_f64()).map(|s| s as f32);
-    let matched = match_installed_font(face, installed).unwrap_or_else(|| face.to_string());
+    // Same rule as the Windows Terminal probe: an uninstalled face is not a detection result.
+    let matched = match_installed_font(face, installed)?;
     Some(DetectedTerminalFont {
         family: matched,
         size,
@@ -246,7 +259,7 @@ pub fn detect_installed_nerd_font(installed: &[String]) -> Option<DetectedTermin
         "UbuntuMono Nerd Font",
     ];
     for pref in PREFERRED {
-        if let Some(f) = installed.iter().find(|i| i.eq_ignore_ascii_case(pref)) {
+        if let Some(f) = installed.iter().find(|i| i.eq_ignore_ascii_case(pref) && !icon_only_font(i)) {
             return Some(DetectedTerminalFont {
                 family: f.clone(),
                 size: None,
@@ -256,6 +269,7 @@ pub fn detect_installed_nerd_font(installed: &[String]) -> Option<DetectedTermin
     }
     for f in installed {
         let l = f.to_lowercase();
+        if icon_only_font(f) { continue; }
         if l.contains("nerd font") || l.ends_with(" nfm") || l.ends_with(" nf") {
             return Some(DetectedTerminalFont {
                 family: f.clone(),
@@ -306,6 +320,15 @@ mod tests {
         let det = super::detect_installed_nerd_font(&installed).unwrap();
         assert_eq!(det.family, "JetBrainsMono NFM");
         assert_eq!(det.source, "Nerd Font");
+    }
+
+    #[test]
+    fn skips_the_bundled_icon_font() {
+        // Symbols Nerd Font Mono is registered by the app itself and contains no letters, so a
+        // machine whose Windows Terminal and VS Code name no font must not be offered it.
+        let installed = vec!["Segoe UI".into(), "Symbols Nerd Font Mono".into(), "Consolas".into()];
+        assert_eq!(super::detect_installed_nerd_font(&installed), None);
+        assert_eq!(super::detect_system_terminal_font(&installed), None);
     }
 
     #[cfg(windows)]

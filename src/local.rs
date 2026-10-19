@@ -44,6 +44,31 @@ add-zsh-hook preexec __as_preexec
 /// Shell started for a local pane without an explicit shell: $SHELL, else the platform default.
 pub fn default_shell_path() -> String { std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(default_shell) }
 
+/// Switches this process's console to UTF-8 for the duration of a spawn, then restores it.
+///
+/// `CreateProcess` copies the parent's input and output code pages into the child, and Windows
+/// PowerShell 5.1 snapshots `[Console]::OutputEncoding` from that page before it prints anything.
+/// Restoring matters: the GUI process keeps using this console afterwards.
+#[cfg(windows)]
+fn utf8_console() -> ConsolePages {
+    use windows_sys::Win32::System::Console::{GetConsoleCP, GetConsoleOutputCP, SetConsoleCP, SetConsoleOutputCP};
+    let saved = ConsolePages { input: unsafe { GetConsoleCP() }, output: unsafe { GetConsoleOutputCP() } };
+    const UTF8: u32 = 65001;
+    unsafe { SetConsoleOutputCP(UTF8); SetConsoleCP(UTF8); }
+    saved
+}
+
+#[cfg(windows)]
+struct ConsolePages { input: u32, output: u32 }
+
+#[cfg(windows)]
+impl Drop for ConsolePages {
+    fn drop(&mut self) {
+        use windows_sys::Win32::System::Console::{SetConsoleCP, SetConsoleOutputCP};
+        unsafe { SetConsoleOutputCP(self.output); SetConsoleCP(self.input); }
+    }
+}
+
 /// Login shell when $SHELL is unset. Windows: PowerShell 7 (pwsh) if on PATH, else
 /// Windows PowerShell, else %COMSPEC% (cmd.exe).
 fn default_shell() -> String {
@@ -112,6 +137,14 @@ pub fn spawn_local_in(size: Size, shell: Option<&str>, cwd: Option<&std::path::P
     if sh.ends_with("zsh") { hist_file = ".zsh_history"; }
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
+    // Windows PowerShell 5.1 reads the console code page once, at startup, and then encodes
+    // everything it writes with it. A machine whose OEM code page is not 65001 therefore emits
+    // GBK (or another legacy page) into a terminal that decodes UTF-8, which is exactly the
+    // spaced-out banner. The code page is inherited from the spawning process, and a ConPTY child
+    // has no console of its own for `chcp` to change afterwards, so it has to be set here — and
+    // put back, because this also moves the GUI process's own console.
+    #[cfg(windows)]
+    let _code_page = utf8_console();
     match cwd.filter(|c| c.is_dir()) { Some(c) => cmd.cwd(c), None => if let Some(h) = home() { cmd.cwd(h); } }
     let mut child = pair.slave.spawn_command(cmd)?;
     if let Some(pid) = child.process_id() {

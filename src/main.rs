@@ -2,6 +2,7 @@
 //! shellax prototype v5 UI: sidebar (host search / groups / function area), tabs with split
 //! panes, settings page, command palette, host dialog, tool panels, status bar.
 mod actions;
+mod app_menu;
 mod chrome;
 mod filekind;
 mod sidebar;
@@ -11,6 +12,7 @@ mod host_dialog;
 mod palette;
 mod panels;
 mod settings_view;
+mod setup_view;
 mod sftp_view;
 mod port_view;
 mod host_tools_view;
@@ -62,6 +64,18 @@ pub fn line_h() -> f32 {
 }
 /// Terminal content padding (terminal.padding, px).
 pub fn term_pad() -> f32 { config::get().terminal.padding.clamp(0.0, 40.0) }
+
+/// True when `family` resolves to a font whose glyphs share one advance. The terminal paints every
+/// row as a single shaped string and advances cells by `advance('M')` (see `termview::build_row`),
+/// so a proportional family — or a family GPUI cannot resolve and silently replaces with the UI
+/// default — misaligns the whole grid: letters drift, CJK overlaps ASCII, the cursor lands elsewhere.
+fn monospace_ok(cx: &gpui::App, family: &str, size: f32) -> bool {
+    let ts = cx.text_system();
+    let fid = ts.resolve_font(&gpui::font(SharedString::from(family.to_string())));
+    let advance = |ch: char| ts.advance(fid, px(size), ch).ok().map(|a| f32::from(a.width)).unwrap_or(0.0);
+    let (i, m, zero) = (advance('i'), advance('M'), advance('0'));
+    i > 0.0 && (i - m).abs() < 0.05 && (m - zero).abs() < 0.05
+}
 
 /// One shared audit writer (the hash chain needs a single tail cache per process).
 pub(crate) fn audit_log() -> Arc<AuditLog> {
@@ -153,7 +167,7 @@ enum Modal { Broadcast(Vec<String>), Snapshots, Recordings, QuickStart { dir: St
 
 struct Tab { layout: Node<Entity<TermView>>, focused: Entity<TermView>, /** custom name (PRD 5.23) */ name: Option<String> }
 
-pub(crate) enum Overlay { None, Settings(Entity<SettingsView>), Palette(Entity<Palette>), Host(Entity<HostDialog>), Audit, Sftp, Port, HostTools(Entity<host_tools_view::HostToolsView>) }
+pub(crate) enum Overlay { None, Palette(Entity<Palette>), Host(Entity<HostDialog>), Audit, Sftp, Port, HostTools(Entity<host_tools_view::HostToolsView>) }
 
 /// Which right-hand card is open. AI, saved commands and history share one slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,6 +192,10 @@ pub(crate) struct Root {
     deny_reason: Option<Entity<InputState>>,
     pub(crate) policy_port: Option<u16>,
     overlay: Overlay,
+    /// Settings tab, kept alive while other tabs are shown. `None` means the tab is closed;
+    /// `Some(false)` means it exists but another tab is in front; `Some(true)` means it is the
+    /// active tab. Switching away must not drop it — only its own close button does.
+    settings: Option<(Entity<SettingsView>, bool)>,
     host_search: Entity<InputState>,
     lang_seen: u8,
     bg_seen: Option<gpui::WindowBackgroundAppearance>,
@@ -432,6 +450,8 @@ impl Root {
         let fh = pane.read(cx).focus.clone();
         self.tabs.push(Tab { layout: Node::Leaf(pane.clone()), focused: pane, name: None });
         self.active = self.tabs.len() - 1;
+        // A new terminal tab comes to the front, but the settings tab stays open behind it.
+        self.leave_settings();
         self.overlay = Overlay::None;
         window.focus(&fh, cx);
         cx.notify();
@@ -545,6 +565,7 @@ impl Root {
         });
         let Some((ti, p)) = found else { return };
         self.active = ti;
+        self.leave_settings();
         self.tabs[ti].focused = p.clone();
         let fh = p.read(cx).focus.clone();
         window.focus(&fh, cx);
@@ -561,7 +582,7 @@ impl Root {
         if let Some(tab) = self.tabs.get(self.active) { if want(tab.focused.read(cx)) { let p = tab.focused.clone(); let fh = p.read(cx).focus.clone(); window.focus(&fh, cx); return p; } }
         let found = self.tabs.iter().enumerate().find_map(|(ti, tab)| tab.layout.leaves().into_iter().find(|p| want(p.read(cx))).map(|p| (ti, p)));
         if let Some((ti, p)) = found {
-            self.active = ti; self.tabs[ti].focused = p.clone();
+            self.active = ti; self.leave_settings(); self.tabs[ti].focused = p.clone();
             let fh = p.read(cx).focus.clone(); window.focus(&fh, cx); cx.notify();
             return p;
         }
@@ -668,6 +689,7 @@ impl Root {
                 let fh = pane.read(cx).focus.clone();
                 self.tabs.push(Tab { layout: Node::Leaf(pane.clone()), focused: pane, name: None });
                 self.active = self.tabs.len() - 1;
+                self.leave_settings();
                 self.overlay = Overlay::None;
                 window.focus(&fh, cx);
             }
@@ -855,6 +877,7 @@ impl Root {
         let focused = layout.leaves()[0].clone();
         self.tabs.push(Tab { layout, focused, name: None });
         self.active = self.tabs.len() - 1;
+        self.leave_settings();
         self.log("quickstart.open", format!("dir={dir:?} preset={preset}"));
         if preset == "agent" {
             // left: configured Agent 1; right: shell following the newest *.log in dir (or logs/)
@@ -1070,6 +1093,7 @@ impl Root {
             self.tabs.push(Tab { layout, focused, name: l.names.get(i).cloned().flatten() });
         }
         self.active = l.active.min(self.tabs.len() - 1);
+        self.leave_settings();
         self.log("layout.restore", format!("{} tabs from {}", self.tabs.len(), l.saved_at));
         self.toast(t("main.layout_restored").into(), cx);
         self.focus_active(window, cx);
@@ -1196,24 +1220,47 @@ impl Root {
     }
 
     // ---- overlays
-    pub(crate) fn close_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.overlay, Overlay::Settings(_)) && !self.settings_dirty.is_empty() {
+    /// The settings tab is in front. A real modal (palette, host dialog, …) covers it.
+    fn settings_active(&self) -> bool {
+        self.settings.as_ref().is_some_and(|(_, on)| *on) && matches!(self.overlay, Overlay::None)
+    }
+    /// Another tab comes to the front. The settings tab stays open, it just stops being the one shown.
+    fn leave_settings(&mut self) {
+        if let Some((_, on)) = &mut self.settings { *on = false; }
+    }
+    /// Close the settings tab itself (its close button or Done), and log the changes made while it lived.
+    fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.is_none() { return; }
+        if !self.settings_dirty.is_empty() {
             let mut paths = std::mem::take(&mut self.settings_dirty);
             paths.sort();
             paths.dedup();
             self.log("settings.change", paths.join(", "));
         }
-        self.overlay = Overlay::None;
+        self.settings = None;
         self.focus_active(window, cx);
         cx.notify();
     }
+    pub(crate) fn close_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.overlay = Overlay::None;
+        if !self.settings_active() { self.focus_active(window, cx); }
+        cx.notify();
+    }
     pub(crate) fn open_settings(&mut self, cat: Cat, window: &mut Window, cx: &mut Context<Self>) {
+        // Already a tab: bring it to the front and switch category, keeping search and edits.
+        if let Some((v, on)) = &mut self.settings {
+            *on = true;
+            let v = v.clone();
+            v.update(cx, |s, cx| s.select_category(cat, window, cx));
+            cx.notify();
+            return;
+        }
         let names = self.themes.iter().map(|t| (t.name.clone(), t.appearance == Appearance::Dark)).collect();
         let schemes = self.schemes.iter().map(|s| (s.name.clone(), s.appearance == Appearance::Dark)).collect();
         let v = cx.new(|cx| SettingsView::new(cat, names, schemes, window, cx));
         self._subs.push(cx.subscribe_in(&v, window, |this, _, ev: &SettingsEvent, window, cx| match ev {
-            SettingsEvent::Close => this.close_overlay(window, cx),
-            SettingsEvent::OpenAudit => { this.close_overlay(window, cx); this.overlay = Overlay::Audit; }
+            SettingsEvent::Close => this.close_settings(window, cx),
+            SettingsEvent::OpenAudit => { this.leave_settings(); this.overlay = Overlay::Audit; }
             SettingsEvent::ThemesChanged => {
                 this.themes = theme::load_all();
                 this.schemes = theme::load_schemes(&this.themes);
@@ -1228,7 +1275,7 @@ impl Root {
             }
         }));
         v.update(cx, |s, cx| s.focus_search(window, cx));
-        self.overlay = Overlay::Settings(v);
+        self.settings = Some((v, true));
         cx.notify();
     }
     fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1273,8 +1320,22 @@ impl Root {
             Action::SplitDown => self.split(Some(Dir::Horizontal), window, cx),
             Action::ClosePane => self.close_pane(window, cx),
             Action::NextTab | Action::PrevTab => {
+                // The settings tab is one stop in the cycle, between the last terminal and the first.
                 let n = self.tabs.len();
-                if n > 0 { self.active = if a == Action::NextTab { (self.active + 1) % n } else { (self.active + n - 1) % n }; self.focus_active(window, cx); }
+                let forward = a == Action::NextTab;
+                if self.settings_active() {
+                    self.leave_settings();
+                    if n > 0 { self.active = if forward { 0 } else { n - 1 }; }
+                    self.focus_active(window, cx);
+                } else if n > 0 {
+                    let at_end = if forward { self.active + 1 >= n } else { self.active == 0 };
+                    if at_end && self.settings.is_some() {
+                        if let Some((_, on)) = &mut self.settings { *on = true; }
+                    } else {
+                        self.active = if forward { (self.active + 1) % n } else { (self.active + n - 1) % n };
+                    }
+                    if !self.settings_active() { self.focus_active(window, cx); }
+                }
             }
             Action::CycleTheme => self.cycle_theme(window, cx),
             Action::ThemeSystem => { self.report(config::update(|s| s.appearance.theme = "system".into()), cx); self.apply_theme(window, cx); self.refresh_all(cx); }
@@ -1328,6 +1389,14 @@ impl Root {
             Action::SettingsTerminal => self.open_settings(Cat::Terminal, window, cx),
             Action::SettingsSsh => self.open_settings(Cat::Ssh, window, cx),
             Action::SettingsKeys => self.open_settings(Cat::Keys, window, cx),
+            // ⌘Q / 菜单「退出」：走和关闭窗口同一条确认路径（有运行中的 Agent 时先问一句）。
+            Action::Quit => {
+                if self.should_close(window, cx) {
+                    self.log("app.quit", "quit command");
+                    window.remove_window();
+                    cx.quit();
+                }
+            }
         }
         cx.notify();
     }
@@ -1470,6 +1539,9 @@ impl Render for Root {
         if self.lang_seen != lang {
             self.lang_seen = lang;
             self.host_search.update(cx, |s, cx| s.set_placeholder(t("ui.search_hosts"), window, cx));
+            // the native menu is built from these strings; rebuild it in the new language.
+            // Deferred: set_menus talks to AppKit, so keep it out of the paint pass.
+            cx.defer(|cx| app_menu::refresh(cx));
         }
         let th = cur();
         let s = config::get();
@@ -1481,6 +1553,10 @@ impl Render for Root {
         if self.bg_seen != Some(want) { self.bg_seen = Some(want); window.set_background_appearance(want); }
         let ui = s.appearance.ui_font_size.clamp(10., 20.);
         if self.ui_size_seen != ui { self.ui_size_seen = ui; gpui_component::Theme::global_mut(cx).font_size = px(ui); }
+        // Settings is a tab of its own. It stays in the tab strip while other tabs are in front,
+        // and only its close button (or Done) drops it.
+        let settings_tab = self.settings.clone();
+        let settings_on = self.settings_active();
 
         // Top row is the window chrome. Tabs are the row under it.
         let mac = chrome::style() == chrome::Style::Mac;
@@ -1515,7 +1591,7 @@ impl Render for Root {
             .on_click(cx.listener(|this, _, _w, cx| { this.sidebar_visible = !this.sidebar_visible; cx.notify(); }))
             .child(icon(IconName::PanelLeft, 14., c(th.overlay1))));
         for (i, t) in self.tabs.iter().enumerate() {
-            let active = i == self.active;
+            let active = i == self.active && !settings_on;
             let panes = t.layout.leaves();
             let title: SharedString = match &t.name {
                 Some(n) => n.clone().into(),
@@ -1534,6 +1610,8 @@ impl Render for Root {
                 .when(!active, |d| d.hover(|s| s.bg(c(cur().surface0).opacity(0.6))))
                 .on_click(cx.listener({ let title = title.to_string(); move |this, ev: &gpui::ClickEvent, w, cx| {
                     this.active = i;
+                    // Switching to a terminal tab only puts it in front; the settings tab stays open.
+                    this.leave_settings();
                     if ev.click_count() >= 2 { this.start_rename(i, title.clone(), w, cx); } else { this.focus_active(w, cx); }
                     cx.notify();
                 } }))
@@ -1570,6 +1648,25 @@ impl Render for Root {
                 .child(icon(IconName::X, 12., c(th.overlay0))));
             tabbar = tabbar.child(tabel);
         }
+        // Settings tab (not a session): it sits after the terminals and borrows the tab look, but
+        // stays out of `tabs`, so layout restore, broadcast and SSH actions never see it. It lives
+        // until its own close button, exactly like a terminal tab.
+        if settings_tab.is_some() {
+            let tg = SharedString::from("settings-tab-g");
+            tabbar = tabbar.child(div().w(px(1.)).h(px(16.)).flex_shrink_0().bg(c(th.surface2).opacity(0.5)));
+            tabbar = tabbar.child(div().id("settings-tab").group(tg.clone()).h(px(24.)).min_w(px(120.)).max_w(px(220.)).pl(px(12.)).pr(px(4.)).rounded(px(6.)).flex().items_center().gap(px(6.)).cursor_pointer()
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .when(settings_on, |d| d.bg(c(th.surface0)))
+                .when(!settings_on, |d| d.hover(|s| s.bg(c(cur().surface0).opacity(0.6))))
+                .on_click(cx.listener(|this, _, w, cx| this.open_settings(Cat::General, w, cx)))
+                .child(icon(IconName::Settings, 12., if settings_on { c(th.accent) } else { c(th.overlay1) }))
+                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.)).text_color(if settings_on { c(th.text) } else { c(th.subtext) }).when(settings_on, |d| d.font_weight(FontWeight::MEDIUM)).child(t("ui.settings")))
+                .child(div().id("settings-tab-close").size(px(18.)).rounded(px(4.)).flex().items_center().justify_center()
+                    .when(!settings_on, |d| d.invisible().group_hover(tg, |s| s.visible()))
+                    .hover(|s| s.bg(c(cur().surface1)))
+                    .on_click(cx.listener(|this, _, w, cx| { cx.stop_propagation(); this.close_settings(w, cx); }))
+                    .child(icon(IconName::X, 12., c(th.overlay0)))));
+        }
         // "+" then the empty title-bar area (window drag / double-click maximize / Windows snap),
         // then the window's own min / max / close buttons (Windows/Linux style, PRD 5.23)
         tabbar = tabbar.child(
@@ -1580,7 +1677,10 @@ impl Render for Root {
                 .child(icon(IconName::Plus, 15., c(th.overlay1))),
         ).child(chrome::drag_spacer("title-spacer"));
 
-        let workspace = match self.tabs.get(self.active) {
+        let workspace = if settings_on {
+            settings_tab.unwrap().0.into_any_element()
+        } else {
+            match self.tabs.get(self.active) {
             Some(tab) => self.render_node(self.active, &tab.layout, vec![], &th, cx),
             None => div().flex_1().size_full().flex().flex_col().items_center().justify_center().gap_3().bg(c(th.base))
                 .child(icon(IconName::SquareTerminal, 36., c(th.overlay0)))
@@ -1590,8 +1690,9 @@ impl Render for Root {
                     .child(ui::button("empty-palette", t("ui.command_palette"), 0).on_click(cx.listener(|this, _, w, cx| this.open_palette(w, cx))))
                     .when(!self.closed_tabs.is_empty(), |d| d.child(ui::button("empty-reopen", t("tab.reopen"), 0).on_click(cx.listener(|this, _, w, cx| this.reopen_closed(w, cx))))))
                 .into_any_element(),
+            }
         };
-        let cwd_bar = self.cwd_bar(window, cx);
+        let cwd_bar = if settings_on { None } else { self.cwd_bar(window, cx) };
         let center = div().id("center").flex_1().min_w_0().min_h_0().flex().flex_col().rounded(px(12.)).overflow_hidden().bg(c(theme::scheme().bg))
             .when(cwd_bar.is_none(), |d| d.pb(px(12.)))
             .child(tabbar)
@@ -1657,6 +1758,39 @@ impl Render for Root {
                 }
                 let ks = actions::keystroke_str(&ev.keystroke);
                 if let Some(a) = actions::find(&ks) { this.run(a, w, cx); cx.stop_propagation(); }
+            }))
+            // Native menu bar (macOS) dispatches GPUI actions; they land here and run the very same
+            // commands as the keyboard and the palette. stop_propagation keeps a handled action from
+            // also reaching the key listeners below.
+            .on_action(cx.listener(|this, _: &app_menu::QuitApp, w, cx| { this.run(Action::Quit, w, cx); cx.stop_propagation(); }))
+            .on_action(cx.listener(|this, _: &app_menu::OpenSettings, w, cx| { this.run(Action::OpenSettings, w, cx); cx.stop_propagation(); }))
+            .on_action(cx.listener(|this, _: &app_menu::OpenAbout, w, cx| { this.run(Action::OpenAbout, w, cx); cx.stop_propagation(); }))
+            .on_action(cx.listener(|this, _: &app_menu::NewTerminalTab, w, cx| { this.run(Action::NewLocalTab, w, cx); cx.stop_propagation(); }))
+            .on_action(cx.listener(|this, _: &app_menu::NewHostDialog, w, cx| { this.run(Action::NewHost, w, cx); cx.stop_propagation(); }))
+            .on_action(cx.listener(|this, _: &app_menu::SplitRightPane, w, cx| { this.run(Action::SplitRight, w, cx); cx.stop_propagation(); }))
+            .on_action(cx.listener(|this, _: &app_menu::SplitDownPane, w, cx| { this.run(Action::SplitDown, w, cx); cx.stop_propagation(); }))
+            .on_action(cx.listener(|this, _: &app_menu::ClosePane, w, cx| { this.run(Action::ClosePane, w, cx); cx.stop_propagation(); }))
+            .on_action(cx.listener(|this, _: &app_menu::OpenSftp, w, cx| { this.run(Action::OpenSftp, w, cx); cx.stop_propagation(); }))
+            .on_action(cx.listener(|this, _: &app_menu::ToggleSidebar, w, cx| { this.run(Action::ToggleSidebar, w, cx); cx.stop_propagation(); }))
+            .on_action(cx.listener(|this, _: &app_menu::CycleTheme, w, cx| { this.run(Action::CycleTheme, w, cx); cx.stop_propagation(); }))
+            .on_action(cx.listener(|this, _: &app_menu::OpenPalette, w, cx| { this.run(Action::CommandPalette, w, cx); cx.stop_propagation(); }))
+            .on_action(cx.listener(|this, _: &app_menu::OpenAiPanel, w, cx| { this.run(Action::OpenAi, w, cx); cx.stop_propagation(); }))
+            .on_action(cx.listener(|this, _: &app_menu::OpenSnippets, w, cx| { this.run(Action::OpenSnippets, w, cx); cx.stop_propagation(); }))
+            .on_action(cx.listener(|this, _: &app_menu::OpenHistory, w, cx| { this.run(Action::OpenHistory, w, cx); cx.stop_propagation(); }))
+            .on_action(cx.listener(|this, _: &app_menu::OpenAuditLog, w, cx| { this.run(Action::OpenAudit, w, cx); cx.stop_propagation(); }))
+            .on_action(cx.listener(|_, _: &app_menu::MinimizeWindow, w, cx| { w.minimize_window(); cx.stop_propagation(); }))
+            // 编辑菜单只作用于终端；焦点在设置或对话框的输入框时不抢它们的复制粘贴。
+            .on_action(cx.listener(|this, _: &app_menu::CopySelection, w, cx| {
+                if matches!(this.overlay, Overlay::None) {
+                    if let Some(p) = this.focused_pane(w, cx) { p.update(cx, |v, cx| { let _ = v.copy(cx); }); }
+                }
+                cx.stop_propagation();
+            }))
+            .on_action(cx.listener(|this, _: &app_menu::PasteClipboard, w, cx| {
+                if matches!(this.overlay, Overlay::None) {
+                    if let Some(p) = this.focused_pane(w, cx) { p.update(cx, |v, cx| v.paste(cx)); }
+                }
+                cx.stop_propagation();
             }));
         root = root.child(chrome_row).child(body).child(statusbar);
         if let Some(e) = chrome::resize_edges(window) { root = root.child(e); }
@@ -1664,7 +1798,6 @@ impl Render for Root {
         let host_menu = self.sb_menu.clone().map(|m| self.sb_menu_el(m, cx));
         let overlay: Option<AnyElement> = match &self.overlay {
             Overlay::None => None,
-            Overlay::Settings(v) => Some(ui::modal(v.clone()).into_any_element()),
             Overlay::Palette(p) => Some(div().absolute().top_0().left_0().size_full().child(p.clone()).into_any_element()),
             Overlay::Host(d) => Some(div().absolute().top_0().left_0().size_full().child(d.clone()).into_any_element()),
             Overlay::Audit => Some(self.audit_panel(cx)),
@@ -1811,37 +1944,68 @@ fn main() {
     let default_target = if std::env::var("NO_SSH").is_ok() { None } else { env_target(&config::get().known_hosts_path()) };
     gpui_platform::application().with_assets(gpui_kit_assets::AllAssets).run(move |cx: &mut App| {
         gpui_component::init(cx);
+        // macOS menu bar (no-op elsewhere): app / file / edit / view / window / help, with ⌘Q.
+        app_menu::install(cx);
         // bundled icon font (Nerd Fonts symbols, MIT): prompts with powerline / devicon glyphs render
         // even when no Nerd Font is installed (e.g. stock Windows). Used through font.fallbacks.
         if let Err(e) = cx.text_system().add_fonts(vec![std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/SymbolsNerdFontMono-Regular.ttf").as_slice())]) { eprintln!("nerd font: {e:#}"); }
+        // Decided before the font probe below: that probe writes config.toml, which would otherwise
+        // look like an existing profile and skip setup on the very first launch.
+        let show_setup = setup_view::needed();
         let installed = cx.text_system().all_font_names();
         theme::set_ui_font(theme::pick_ui_font(&installed));
         let fc = config::get().font.clone();
+        let has = |f: &str| installed.iter().any(|i| i.eq_ignore_ascii_case(f));
+        let usable = |f: &str| has(f) && monospace_ok(cx, f, fc.size);
         let is_stock_default = cfg!(target_os = "windows") && fc.family == "Cascadia Mono";
-        let not_installed = !installed.iter().any(|i| i.eq_ignore_ascii_case(&fc.family));
-        if is_stock_default || not_installed {
+        let mut chosen: Option<(String, Option<f32>)> = None;
+        if is_stock_default || !usable(&fc.family) {
+            // Prefer the font the user's other terminal uses, but only when it is installed here and
+            // actually monospaced. An uninstalled family used to be persisted as-is, after which GPUI
+            // substituted a proportional UI font for the whole grid (the "乱码" on a fresh machine).
             if let Some(det) = ssh_term_proto::platform::detect_system_terminal_font(&installed) {
-                eprintln!("detected system terminal font: {:?} from {}", det.family, det.source);
-                let mut s = (*config::get()).clone();
-                s.font.family = det.family.clone();
-                if let Some(sz) = det.size { if (8.0..=32.0).contains(&sz) { s.font.size = sz; } }
-                if !s.font.fallbacks.iter().any(|fb| fb.eq_ignore_ascii_case(&det.family)) {
-                    s.font.fallbacks.insert(0, det.family);
+                if usable(&det.family) {
+                    eprintln!("detected system terminal font: {:?} from {}", det.family, det.source);
+                    chosen = Some((det.family, det.size));
                 }
-                config::install(s.clone());
-                let _ = s.save();
-            } else if let Some(f) = theme::pick_term_font(&fc.family, &fc.fallbacks, &installed) {
-                eprintln!("terminal font {:?} not installed, using {f:?}", fc.family);
-                let mut s = (*config::get()).clone(); s.font.family = f; config::install(s);
+            }
+            if chosen.is_none() {
+                chosen = theme::pick_mono_family(&fc.fallbacks, &installed).filter(|f| usable(f)).map(|f| (f, None));
             }
         } else if let Some(det) = ssh_term_proto::platform::detect_system_terminal_font(&installed) {
-            if !fc.fallbacks.iter().any(|fb| fb.eq_ignore_ascii_case(&det.family)) {
+            if usable(&det.family) && !fc.fallbacks.iter().any(|fb| fb.eq_ignore_ascii_case(&det.family)) {
                 let mut s = (*config::get()).clone();
                 s.font.fallbacks.insert(0, det.family);
                 config::install(s.clone());
                 let _ = s.save();
             }
         }
+        match chosen {
+            Some((family, size)) => {
+                let size = size.filter(|sz| (8.0..=32.0).contains(sz));
+                if family != fc.family || size.is_some_and(|sz| (sz - fc.size).abs() > 0.01) {
+                    eprintln!("terminal font {:?} is missing or not monospaced; using {family:?}", fc.family);
+                    let mut s = (*config::get()).clone();
+                    s.font.family = family;
+                    if let Some(sz) = size { s.font.size = sz; }
+                    config::install(s.clone());
+                    let _ = s.save();
+                }
+            }
+            None if !usable(&fc.family) => eprintln!("terminal font {:?} is missing or not monospaced, and no installed monospace fallback was found", fc.family),
+            None => {}
+        }
+        // First launch: the setup window is the only window until it closes, so the main window
+        // never flashes behind it. Closing setup (finished, skipped, or the window button) continues.
+        if show_setup {
+            open_setup(themes.clone(), installed.clone(), cx, rt, themes, schemes, default_target, links, load_err);
+            return;
+        }
+        open_main(cx, rt, themes, schemes, default_target, links, load_err);
+    });
+}
+
+fn open_main(cx: &mut App, rt: Arc<tokio::runtime::Runtime>, themes: Vec<Arc<Theme>>, schemes: Vec<Arc<Scheme>>, default_target: Option<SshTarget>, links: Vec<String>, load_err: Option<String>) {
         let bounds = Bounds::centered(None, size(px(1440.), px(860.)), cx);
         cx.open_window(
             chrome::window_options(bounds, Some("ShellAX".into())),
@@ -1858,7 +2022,7 @@ fn main() {
                     let audit = audit_log();
                     let mut root = Root {
                         rt, default_target, tabs: vec![], active: 0, themes, schemes, histories: HashMap::new(),
-                        manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], deny_reason: None, policy_port: None, overlay: Overlay::None, sftp_views: HashMap::new(), sftp_current: None, sftp_windows: vec![], drag_div: None, port_view: None, quit_confirm: false, modal: None, quit_ok: false, chat_view: None,
+                        manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], deny_reason: None, policy_port: None, overlay: Overlay::None, settings: None, sftp_views: HashMap::new(), sftp_current: None, sftp_windows: vec![], drag_div: None, port_view: None, quit_confirm: false, modal: None, quit_ok: false, chat_view: None,
                         host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, sb_menu_at: std::time::Instant::now(), sb_modal: None, tag_filter: vec![], tab_menu: None, tab_menu_at: std::time::Instant::now(), tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), dock: SideDock::None, lib_search: lib_search.clone(), lib_group: String::new(), lib_hist_all: false, lib_editor: None, lib_vars: None, lib_confirm: None, lib_notice: String::new(), ai_width: { let w = config::get().sidebar.ai_width; if (280.0..=560.0).contains(&w) { w } else { config::AI_DOCK_W } }, host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: true, audit, audit_verify: None, audit_filter: Default::default(),
                         settings_dirty: vec![], toast: None, toast_seq: 0, _subs: vec![],
                     };
@@ -2009,7 +2173,51 @@ fn main() {
             },
         ).unwrap();
         cx.activate(true);
-    });
+}
+
+/// First-run window. It is the only window until it closes, and the choices only reach config.toml
+/// when the user finishes, so closing or skipping leaves the defaults.
+fn open_setup(setup_themes: Vec<Arc<Theme>>, installed_fonts: Vec<String>, cx: &mut App, rt: Arc<tokio::runtime::Runtime>, themes: Vec<Arc<Theme>>, schemes: Vec<Arc<Scheme>>, default_target: Option<SshTarget>, links: Vec<String>, load_err: Option<String>) {
+    let bounds = Bounds::centered(None, size(px(760.), px(600.)), cx);
+    if cx.open_window(chrome::window_options(bounds, Some("ShellAX".into())), |window, cx| {
+        if !chrome::NATIVE_LIGHTS { window.set_client_inset(px(0.)); }
+        let font_search = cx.new(|cx| gpui_component::input::InputState::new(window, cx));
+        let view = cx.new(|_cx| {
+            let setup = setup_view::SetupView::new(setup_themes, &installed_fonts, font_search);
+            // Paint with the suggested language before the first frame, so a Chinese Windows
+            // does not flash the English page and then switch.
+            ssh_term_proto::i18n::set_language(setup.language());
+            setup
+        });
+        // Taken exactly once. Both finishing and the title-bar close come through here: finishing
+        // emits the event below, and the close button raises the same callback. remove_window alone
+        // does not, which is why the app used to vanish instead of opening the main window.
+        let pending = std::rc::Rc::new(std::cell::RefCell::new(Some((rt, themes, schemes, default_target, links, load_err))));
+        let continue_to_main = move |completed: bool, w: &mut Window, cx: &mut App| {
+            if let Some((rt, themes, schemes, default_target, links, load_err)) = pending.borrow_mut().take() {
+                // Reaching the main window at all counts as having seen setup, including the
+                // title-bar close, which never goes through the Skip button.
+                setup_view::mark_seen();
+                // Setup previews its theme in memory. Apply it once more against the window that is
+                // about to open, so "follow the system" resolves here instead of only when the row
+                // was clicked during setup.
+                if let Some(th) = setup_view::committed_theme(completed, &themes, cx) {
+                    crate::theme::set_current(th.clone());
+                    crate::theme::set_scheme(std::sync::Arc::new(th.to_scheme()));
+                    crate::sync_component_theme(&th, cx);
+                }
+                open_main(cx, rt, themes, schemes, default_target, links, load_err);
+            }
+            w.remove_window();
+        };
+        let on_done = continue_to_main.clone();
+        window.subscribe(&view, cx, move |_, ev: &setup_view::SetupEvent, w, cx| {
+            let setup_view::SetupEvent::Done(completed) = ev;
+            on_done(*completed, w, cx);
+        }).detach();
+        window.on_window_should_close(cx, move |w, cx| { continue_to_main(false, w, cx); false });
+        cx.new(|cx| gpui_component::Root::new(view, window, cx))
+    }).is_err() { return }
 }
 
 fn shown_title(v: &TermView) -> SharedString { v.shown_title() }

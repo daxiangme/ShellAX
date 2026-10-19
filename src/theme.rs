@@ -390,12 +390,12 @@ pub fn pick_ui_font(installed: &[String]) -> String {
     if cfg!(target_os = "macos") { return ".SystemUIFont".into(); }
     CHAIN.iter().find(|f| installed.iter().any(|i| i.eq_ignore_ascii_case(f))).map(|s| s.to_string()).unwrap_or_else(|| "Inter".into())
 }
-/// Terminal font actually used: the configured family if installed, else the first installed
-/// configured fallback, else a platform monospace (Win10 has Consolas but not Cascadia Mono).
-pub fn pick_term_font(family: &str, fallbacks: &[String], installed: &[String]) -> Option<String> {
+/// First installed family that is plausibly monospace: the configured fallbacks whose name says
+/// "mono", then the platform monospace chain. Used both to replace a missing family and to replace
+/// an installed but proportional one (the terminal grid requires one advance per cell).
+pub fn pick_mono_family(fallbacks: &[String], installed: &[String]) -> Option<String> {
     const MONO: &[&str] = &["Cascadia Mono", "Consolas", "Menlo", "SF Mono", "JetBrains Mono", "DejaVu Sans Mono", "Noto Sans Mono", "Liberation Mono", "Courier New"];
     let has = |f: &str| installed.iter().any(|i| i.eq_ignore_ascii_case(f));
-    if installed.is_empty() || has(family) { return None; }
     fallbacks.iter().map(|s| s.as_str()).filter(|f| { let l = f.to_ascii_lowercase(); l.contains("mono") && !l.contains("symbols") })
         .chain(MONO.iter().copied()).find(|f| has(f)).map(str::to_string)
 }
@@ -475,10 +475,17 @@ mod tests {
     fn term_font_fallback() {
         let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let fb = v(&["Microsoft YaHei UI", "Symbols Nerd Font Mono"]);
-        assert_eq!(pick_term_font("Cascadia Mono", &fb, &v(&["Cascadia Mono", "Consolas"])), None);
-        assert_eq!(pick_term_font("Cascadia Mono", &fb, &v(&["Segoe UI", "Consolas"])).as_deref(), Some("Consolas"));
-        assert_eq!(pick_term_font("Cascadia Mono", &fb, &v(&["Symbols Nerd Font Mono", "Consolas"])).as_deref(), Some("Consolas"));
-        assert_eq!(pick_term_font("X", &[], &v(&[])), None);
+        assert_eq!(pick_mono_family(&fb, &v(&["Cascadia Mono", "Consolas"])).as_deref(), Some("Cascadia Mono"));
+        assert_eq!(pick_mono_family(&fb, &v(&["Segoe UI", "Consolas"])).as_deref(), Some("Consolas"));
+        assert_eq!(pick_mono_family(&fb, &v(&["Symbols Nerd Font Mono", "Consolas"])).as_deref(), Some("Consolas"));
+        assert_eq!(pick_mono_family(&[], &v(&[])), None);
+    }
+    #[test]
+    fn mono_family_skips_proportional_fonts() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let fb = v(&["Microsoft YaHei UI", "Symbols Nerd Font Mono"]);
+        assert_eq!(pick_mono_family(&fb, &v(&["Microsoft YaHei UI", "Consolas"])).as_deref(), Some("Consolas"));
+        assert_eq!(pick_mono_family(&[], &v(&["Segoe UI", "Microsoft YaHei UI"])), None);
     }
     #[test]
     fn alacritty_import() {

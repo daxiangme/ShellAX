@@ -186,6 +186,16 @@ impl SettingsView {
         self.search.update(cx, |s, cx| s.focus(window, cx));
     }
 
+    /// Switch category in place when the settings tab is already open (no second page, no lost
+    /// search/category state).
+    pub fn select_category(&mut self, cat: Cat, window: &mut Window, cx: &mut Context<Self>) {
+        self.cat = cat;
+        self.search.update(cx, |s, cx| s.set_value("", window, cx));
+        if cat == Cat::Proxy { self.start_proxy_detect(false, cx); }
+        self.focus_search(window, cx);
+        cx.notify();
+    }
+
     fn rows(&self) -> Vec<Row> {
         let themes: Vec<(String, String)> = std::iter::once(("system".to_string(), t("ui.follow_system").to_string()))
             .chain(self.theme_names.iter().map(|n| (n.0.clone(), crate::theme::display_name(&n.0)))).collect();
@@ -1125,13 +1135,16 @@ impl Render for SettingsView {
             self.ai_key.update(cx, |s, cx| s.set_placeholder(t("ai.key_placeholder"), window, cx));
         }
         let th = cur();
-        // One opaque surface for the card and both columns, so the rounded corners match the body.
+        // The settings view is a tab page, so it fills the tab body instead of a fixed-size card.
+        // `compact` keeps the category rail from squeezing the form in a narrow window.
+        let compact = f32::from(window.viewport_size().width) < 980.0;
+        // One opaque surface for the page and both columns, so the rounded corners match the body.
         let sheet = if th.appearance == crate::theme::Appearance::Dark { c(th.base) } else { c(th.mantle) };
         let query = self.search.read(cx).value().to_string().to_lowercase();
         let rows = self.rows();
 
         // ---- left: search + categories
-        let mut nav = div().id("settings-nav").w(px(224.)).flex_shrink_0().h_full().overflow_y_scroll().flex().flex_col().gap(px(1.)).p(px(10.)).bg(sheet).border_r_1().border_color(c(th.surface1).opacity(0.6))
+        let mut nav = div().id("settings-nav").w(px(if compact { 168. } else { 224. })).flex_shrink_0().h_full().overflow_y_scroll().flex().flex_col().gap(px(1.)).p(px(10.)).bg(sheet).border_r_1().border_color(c(th.surface1).opacity(0.6))
             .child(div().pb_2().child(Input::new(&self.search).prefix(icon(IconName::Search, 14., c(th.overlay1))).cleanable(true)));
         for (i, cat) in Cat::ALL.iter().copied().enumerate() {
             let active = query.is_empty() && cat == self.cat;
@@ -1194,19 +1207,22 @@ impl Render for SettingsView {
             if !group.is_empty() { body = body.child(Self::group_card(group)); }
         }
 
-        let header = div().h(px(44.)).px_4().flex().items_center().gap_2().border_b_1().border_color(c(th.surface1).opacity(0.6))
+        let header = div().h(px(44.)).flex_shrink_0().px_4().flex().items_center().gap_2().border_b_1().border_color(c(th.surface1).opacity(0.6))
             .child(div().size(px(20.)).rounded(px(5.)).flex().items_center().justify_center().bg(c(0x8e8e93)).child(icon(IconName::Settings, 12., gpui::white())))
             .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("ui.settings")))
-            .child(div().pl_2().text_size(px(11.)).text_color(c(th.overlay0)).child(t("ui.changes_are_saved_to_config")))
-            .child(div().flex_1())
-            .child(div().id("settings-close").size(px(28.)).rounded_md().flex().items_center().justify_center().cursor_pointer()
-                .hover(|d| d.bg(c(cur().surface0))).on_click(cx.listener(|_, _, _w, cx| cx.emit(SettingsEvent::Close)))
-                .child(icon(IconName::X, 16., c(th.overlay1))));
-        ui::card(1120.).h(px(740.)).bg(sheet)
+            .when(!compact, |d| d.child(div().pl_2().text_size(px(11.)).text_color(c(th.overlay0)).child(t("ui.changes_are_saved_to_config"))));
+        // The tab strip carries the close affordance; this footer keeps a visible "Done" even when
+        // many tabs push the settings tab out of view.
+        let footer = div().h(px(44.)).flex_shrink_0().px_4().flex().items_center().justify_end()
+            .border_t_1().border_color(c(th.surface1).opacity(0.6))
+            .child(ui::button("settings-done", t("ui.done"), 1)
+                .on_click(cx.listener(|_, _, _w, cx| cx.emit(SettingsEvent::Close))));
+        div().size_full().min_w_0().flex().flex_col().bg(sheet)
             .child(header)
             .child(div().flex_1().min_h_0().flex().flex_row().bg(sheet)
                 .child(nav)
                 .child(div().id("settings-scroll").flex_1().min_w_0().h_full().overflow_y_scroll().px_6().py_4().bg(sheet).child(body.w_full())))
+            .child(footer)
     }
 }
 
@@ -1482,7 +1498,7 @@ impl SettingsView {
                 .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
                     .child(div().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ui.name")))
                     .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ai.name_desc"))))
-                .child(div().w(px(280.)).child(Input::new(&name_input)))
+                .child(div().w(px(280.)).flex_shrink_0().child(Input::new(&name_input)))
         );
 
         // 2. Base URL
@@ -1492,7 +1508,7 @@ impl SettingsView {
                 .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
                     .child(div().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ui.base_url")))
                     .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ai.base_url_desc"))))
-                .child(div().w(px(320.)).child(Input::new(&url_input)))
+                .child(div().w(px(320.)).flex_shrink_0().child(Input::new(&url_input)))
         );
 
         // 3. API Key & Test Connection
@@ -1582,12 +1598,14 @@ impl SettingsView {
                 cx.notify();
             }))
             .child(
-                div().flex().items_center().gap_2()
+                // Title and hint share one shrinking column, so a narrow pane ellipsizes the hint
+                // instead of pushing 展开 / 收起 off the card.
+                div().flex_1().min_w_0().flex().items_center().gap_2()
                     .child(icon(if adv_open { IconName::ChevronDown } else { IconName::ChevronRight }, 13., c(th.overlay1)))
-                    .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ai.advanced_settings")))
-                    .child(div().text_size(px(11.5)).text_color(c(th.overlay1)).child(t("ai.advanced_settings_desc")))
+                    .child(div().flex_shrink_0().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ai.advanced_settings")))
+                    .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(11.5)).text_color(c(th.overlay1)).child(t("ai.advanced_settings_desc")))
             )
-            .child(div().text_size(px(11.5)).text_color(c(th.accent)).child(if adv_open { t("ai.collapse") } else { t("ai.expand") }));
+            .child(div().flex_shrink_0().text_size(px(11.5)).text_color(c(th.accent)).child(if adv_open { t("ai.collapse") } else { t("ai.expand") }));
         editor_card = editor_card.child(adv_header);
 
         if adv_open {
@@ -1601,17 +1619,20 @@ impl SettingsView {
                     .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
                         .child(div().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ai.kind")))
                         .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ai.kind.d"))))
-                    .child(ui::segmented("aip-kind", &kind_opts, p.kind.id(), move |v, _w, cx| {
-                        let pid = pid.clone();
-                        let _ = me.update(cx, |this, cx| this.update_provider(&pid, |p| {
-                            let k = Kind::from_id(&v);
-                            if k != p.kind && k == Kind::Anthropic && p.base_url.contains("openai.com") {
-                                p.base_url = "https://api.anthropic.com".into();
-                                p.model = "claude-sonnet-4-5".into();
-                            }
-                            p.kind = k;
-                        }, cx));
-                    }))
+                    // Right-hand column like every settings row: the control keeps its own width, so
+                    // the segmented control's `w_full` cannot starve the label of its column.
+                    .child(div().flex_shrink_0().flex().items_center().justify_end()
+                        .child(ui::segmented("aip-kind", &kind_opts, p.kind.id(), move |v, _w, cx| {
+                            let pid = pid.clone();
+                            let _ = me.update(cx, |this, cx| this.update_provider(&pid, |p| {
+                                let k = Kind::from_id(&v);
+                                if k != p.kind && k == Kind::Anthropic && p.base_url.contains("openai.com") {
+                                    p.base_url = "https://api.anthropic.com".into();
+                                    p.model = "claude-sonnet-4-5".into();
+                                }
+                                p.kind = k;
+                            }, cx));
+                        })))
             );
 
             // Fast / Command Model
@@ -1627,7 +1648,7 @@ impl SettingsView {
                     .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
                         .child(div().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ai.timeout")))
                         .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ai.timeout.d"))))
-                    .child(div().w(px(200.)).child(Input::new(&timeout_in)))
+                    .child(div().w(px(200.)).flex_shrink_0().child(Input::new(&timeout_in)))
             );
 
             // Temperature
@@ -1637,7 +1658,7 @@ impl SettingsView {
                     .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
                         .child(div().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ai.temperature")))
                         .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ai.temperature.d"))))
-                    .child(div().w(px(200.)).child(Input::new(&temp_in)))
+                    .child(div().w(px(200.)).flex_shrink_0().child(Input::new(&temp_in)))
             );
 
             // Max Tokens
@@ -1647,7 +1668,7 @@ impl SettingsView {
                     .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
                         .child(div().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ai.max_tokens")))
                         .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ai.max_tokens.d"))))
-                    .child(div().w(px(200.)).child(Input::new(&tokens_in)))
+                    .child(div().w(px(200.)).flex_shrink_0().child(Input::new(&tokens_in)))
             );
         }
 
@@ -1855,9 +1876,9 @@ impl SettingsView {
         let desc = if field == "model" { t("models.model.d") } else { t("models.fast.d") };
         let mut col = div().py(px(8.)).flex().flex_col().gap_1().border_b_1().border_color(c(th.surface0))
             .child(div().flex().items_center().gap_3()
-                .child(div().flex_1().flex().flex_col().text_size(px(13.)).text_color(c(th.text)).child(label)
+                .child(div().flex_1().min_w_0().flex().flex_col().text_size(px(13.)).text_color(c(th.text)).child(label)
                     .child(div().text_size(px(11.5)).text_color(c(th.overlay1)).child(desc)))
-                .child(div().w(px(240.)).child(Input::new(&e)))
+                .child(div().w(px(240.)).flex_shrink_0().child(Input::new(&e)))
                 .child(ui::button(SharedString::from(format!("mdl-open-{field}")), if open { t("models.close_list") } else { t("models.pick") }, 0)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.ai_dropdown = if this.ai_dropdown == Some(field) { None } else { Some(field) };

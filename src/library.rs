@@ -184,19 +184,21 @@ impl Root {
 
     fn snippet_editor(&mut self, ed: &LibEditor, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
+        // Full-size controls: the dock is narrow, so a 24px compact input reads as cramped next to
+        // the editor's own 12px labels.
         let field = |label: &'static str, input: &Entity<InputState>| {
-            div().flex().flex_col().gap(px(2.))
-                .child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(t(label)))
-                .child(Input::new(input).small())
+            div().flex().flex_col().gap(px(4.))
+                .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t(label)))
+                .child(Input::new(input))
         };
-        div().id("lib-editor").flex_1().min_h_0().overflow_y_scroll().px_3().py_2().flex().flex_col().gap_2()
+        div().id("lib-editor").flex_1().min_h_0().overflow_y_scroll().px_3().py_3().flex().flex_col().gap_3()
             .child(field("lib.name", &ed.name))
             .child(field("lib.group", &ed.group))
             .child(field("lib.note", &ed.note))
-            .child(div().flex().flex_col().gap(px(2.))
-                .child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(t("lib.body")))
+            .child(div().flex().flex_col().gap(px(4.))
+                .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t("lib.body")))
                 .child(Textarea::new(&ed.body)))
-            .child(div().flex().gap_2().justify_end()
+            .child(div().pt_1().flex().gap_2().justify_end()
                 .child(ui::button("lib-ed-cancel", t("ui.cancel"), 0).on_click(cx.listener(|this, _, _, cx| { this.lib_editor = None; cx.notify(); })))
                 .child(ui::button("lib-ed-save", t("lib.save"), 1).on_click(cx.listener(|this, _, _, cx| this.save_lib_editor(cx)))))
             .into_any_element()

@@ -141,7 +141,7 @@ impl Root {
             .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip).build(w, cx))
             .child(icon(ic, 13., c(th.overlay1)));
         let focus = |this: &mut Root, p: &Entity<TermView>, w: &mut Window, cx: &mut Context<Root>| {
-            if let Some(ti) = this.tabs.iter().position(|t| t.layout.leaves().iter().any(|x| x == p)) { this.active = ti; this.tabs[ti].focused = p.clone(); }
+            if let Some(ti) = this.tabs.iter().position(|t| t.layout.leaves().iter().any(|x| x == p)) { this.active = ti; this.leave_settings(); this.tabs[ti].focused = p.clone(); }
             let fh = p.read(cx).focus.clone(); w.focus(&fh, cx);
         };
         let (a, b, d) = (p.clone(), p.clone(), p.clone());

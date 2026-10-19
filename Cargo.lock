@@ -7289,7 +7289,7 @@ dependencies = [
 
 [[package]]
 name = "ssh-term-proto"
-version = "0.1.6"
+version = "0.1.10"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -7321,6 +7321,7 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-bash",
  "ureq",
+ "windows-link 0.2.1",
  "windows-sys 0.61.2",
  "zbus 5.19.0",
 ]

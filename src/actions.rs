@@ -10,6 +10,7 @@ pub enum Action {
     SettingsPermissions, SettingsAppearance, SettingsTerminal, SettingsSsh, SettingsKeys,
     LaunchAgent1, LaunchAgent2, LaunchAgent3,
     ToggleBroadcast, ToggleRecording, PlayRecording, SnapshotLayout, RollbackLayout, QuickStart,
+    Quit,
 }
 
 pub struct Info { pub id: &'static str, pub label: &'static str, pub group: &'static str, pub key: &'static str, pub icon: IconName }
@@ -23,6 +24,7 @@ impl Action {
         Action::SettingsPermissions, Action::SettingsAppearance, Action::SettingsTerminal, Action::SettingsSsh, Action::SettingsKeys,
         Action::LaunchAgent1, Action::LaunchAgent2, Action::LaunchAgent3,
         Action::ToggleBroadcast, Action::ToggleRecording, Action::PlayRecording, Action::SnapshotLayout, Action::RollbackLayout, Action::QuickStart,
+        Action::Quit,
     ];
     pub fn info(self) -> Info {
         use IconName as I;
@@ -73,6 +75,8 @@ impl Action {
             Action::SnapshotLayout => i("layout_snapshot", t("snap.action"), t("ui.terminal"), "", I::Camera),
             Action::RollbackLayout => i("layout_rollback", t("snap.rollback_action"), t("ui.terminal"), "", I::RotateCcw),
             Action::QuickStart => i("quick_start", t("qs.action"), t("ui.terminal"), "ctrl-shift-o", I::FolderOpen),
+            // macOS 习惯是 ⌘Q；其他平台留空，避免占用 Ctrl+Q（终端里的流控键）。
+            Action::Quit => i("quit", t("menu.quit"), t("ui.general"), if cfg!(target_os = "macos") { "cmd-q" } else { "" }, I::X),
         }
     }
     /// Effective binding (user override from settings.keys, else default; "" = unbound).

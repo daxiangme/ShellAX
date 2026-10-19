@@ -161,6 +161,7 @@ impl Root {
         let fh = pane.read(cx).focus.clone();
         self.tabs.push(crate::Tab { layout: ssh_term_proto::layout::Node::Leaf(pane.clone()), focused: pane, name: Some(place.name) });
         self.active = self.tabs.len() - 1;
+        self.leave_settings();
         self.overlay = crate::Overlay::None;
         window.focus(&fh, cx);
         cx.notify();
@@ -714,7 +715,7 @@ impl Root {
         };
         let hit = self.tabs.iter().enumerate().find_map(|(i, t)| t.layout.leaves().into_iter().find(|p| same(p, cx)).map(|p| (i, p)));
         match hit {
-            Some((i, p)) => { self.active = i; self.tabs[i].focused = p.clone(); let fh = p.read(cx).focus.clone(); window.focus(&fh, cx); cx.notify(); }
+            Some((i, p)) => { self.active = i; self.leave_settings(); self.tabs[i].focused = p.clone(); let fh = p.read(cx).focus.clone(); window.focus(&fh, cx); cx.notify(); }
             None => self.new_tab(spec, window, cx),
         }
     }
