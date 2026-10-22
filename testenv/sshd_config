@@ -1,0 +1,11 @@
+Port 2222
+ListenAddress 127.0.0.1
+HostKey @REPO@/testenv/host_ed25519
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+UsePAM no
+PidFile @REPO@/testenv/sshd.pid
+Subsystem sftp internal-sftp
+AllowTcpForwarding yes

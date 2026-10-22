@@ -1,0 +1,14 @@
+Port 2224
+ListenAddress 127.0.0.1
+HostKey @REPO@/testenv/host_ed25519
+PasswordAuthentication no
+KbdInteractiveAuthentication yes
+PubkeyAuthentication no
+AuthorizedKeysFile .ssh/authorized_keys
+UsePAM yes
+PidFile @REPO@/testenv/sshd3.pid
+AllowTcpForwarding yes
+AllowAgentForwarding yes
+PermitUserEnvironment no
+AcceptEnv SHELLAX_HOST LANG
+Subsystem sftp internal-sftp

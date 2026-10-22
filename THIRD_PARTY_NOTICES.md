@@ -1,0 +1,91 @@
+# 第三方组件许可声明 / Third-party notices
+
+ShellAX is licensed under AGPL-3.0 (see `LICENSE`). It includes or links the third-party components
+listed below under their own licenses.
+
+## 1. Source files containing third-party code
+
+| File | Component | License | Copyright |
+|---|---|---|---|
+| `src/agent.rs` (items marked `[3p]`), modified | herdr | Apache-2.0 | Copyright (c) herdr contributors |
+| `agents/claude.toml`, `agents/codex.toml`, `agents/grok.toml`, unmodified | herdr | Apache-2.0 | Copyright (c) herdr contributors |
+| `src/layout.rs` (`auto_direction`, marked `[3p]`), modified | zellij | MIT | Copyright (c) 2020 Zellij contributors |
+
+License texts: `licenses/herdr-LICENSE-Apache-2.0.txt`, `licenses/zellij-LICENSE-MIT.md`.
+
+### herdr
+Copyright (c) herdr contributors. Licensed under the Apache License, Version 2.0 (the "License");
+you may not use these files except in compliance with the License. You may obtain a copy at
+http://www.apache.org/licenses/LICENSE-2.0. Unless required by applicable law or agreed to in
+writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+WARRANTIES OR CONDITIONS OF ANY KIND.
+
+### zellij
+MIT License — Copyright (c) 2020 Zellij contributors. The full permission notice is in
+`licenses/zellij-LICENSE-MIT.md`.
+
+## 2. Libraries linked as dependencies (not copied)
+
+| Crate / asset | License |
+|---|---|
+| gpui-pre / gpui-pre-platform 0.3.9 (GPUI) | Apache-2.0 |
+| alacritty_terminal 0.26.0 | Apache-2.0 |
+| russh 0.64.1 (+ aws-lc-rs backend) | russh: Apache-2.0；aws-lc-rs: "ISC AND (Apache-2.0 OR ISC)"；aws-lc-sys: ISC AND Apache-2.0 AND MIT AND BSD-3-Clause 等组合（发布前需单独核对） |
+| portable-pty 0.9.0 | MIT |
+| gpui-component 0.7.3, gpui-base 0.7.3, gpui-component-macros 0.7.3 (settings inputs / switches) | Apache-2.0 |
+| gpui-kit-assets 0.7.3 (embedded Lucide icon SVGs) | crate Apache-2.0; icons ISC — Copyright (c) Lucide Icons and Contributors (crate ships `LICENSE-LUCIDE`) |
+| sha2 0.10, chrono 0.4, serde_json 1 (audit log) | MIT OR Apache-2.0 |
+| regex 1.x, serde, toml, tokio, flume, anyhow, libc | MIT OR Apache-2.0 |
+| keyring 3.6.3 (OS keychain; features async-secret-service + crypto-rust on Linux, apple-native, windows-native) | MIT OR Apache-2.0 |
+| secret-service 4.0.0, zbus 4.4 (pure-Rust D-Bus, pulled in by keyring) | secret-service: MIT OR Apache-2.0; zbus: MIT |
+| chacha20poly1305 0.10.1 (encrypted fallback file for API keys), rand 0.8 | Apache-2.0 OR MIT |
+| ureq 2.12.1 (AI HTTP client) | MIT OR Apache-2.0 |
+| rustls 0.23 (via ureq "tls") | Apache-2.0 OR ISC OR MIT |
+| socks 0.3.4 (via ureq "socks-proxy"; SOCKS5 for AI/update requests) | MIT OR Apache-2.0 |
+| serde_yaml 0.9.34 (managed-policy.yaml) | MIT OR Apache-2.0 |
+| unsafe-libyaml 0.2.11 (via serde_yaml) | MIT |
+| ksni 0.3.6 (Linux tray, StatusNotifierItem) | Unlicense (public-domain dedication; permissive) |
+| zbus 4.4 / 5.19 (D-Bus, via ksni; zbus 5 also as dev-dependency for the test watcher) | MIT |
+| pastey 0.2.3 (via ksni) | MIT OR Apache-2.0 |
+| ring 0.17 (via rustls) | Apache-2.0 AND ISC (`ring` ships its LICENSE incl. the BoringSSL/OpenSSL-derived ISC parts; reproduce it in release notices) |
+| webpki-roots 0.26 / 1.0 (Mozilla CA bundle, via ureq) | CDLA-Permissive-2.0 (data license; permissive, attribution — include the license text in releases) |
+| Catppuccin Mocha / Latte palettes (`themes/catppuccin-*.toml`) | MIT, © Catppuccin |
+
+Transitive notes: `self_cell` and `r-efi` are dual/tri-licensed and used under Apache-2.0/MIT; `dwrote` (Windows only), `cbindgen` (build tool) and `option-ext` (build-time, via rust-embed's proc-macro) are MPL-2.0 — not modified, no source copied.
+
+
+Fonts are **not** bundled (see README "字体许可").
+
+## models.dev（运行时数据）
+
+- 来源：https://github.com/sst/models.dev ，许可证 MIT（Copyright (c) sst）。
+- 用法：程序运行时从 https://models.dev/api.json 拉取模型元数据（上下文长度、价格），缓存在本地数据目录 24 小时。没有复制代码，也没有把数据打包进程序。如果以后改为打包快照，需要随附 MIT 许可文本。
+
+## tree-sitter / tree-sitter-bash（依赖）
+
+- tree-sitter 0.25（MIT，Copyright (c) 2018 Max Brunsfeld）、tree-sitter-bash 0.25.1（MIT，Copyright (c) 2017 Max Brunsfeld）、tree-sitter-language（MIT）。作为 crate 依赖链接（含 C 解析器源码，编译进二进制），没有复制代码。用于给命令分段，再做风险分级。
+
+## notify-rust 4.x — MIT OR Apache-2.0 (dependency, unmodified)
+## russh-sftp 3.0.1 — Apache-2.0 (dependency, unmodified)
+## getrandom 0.4 — MIT OR Apache-2.0 (dependency, unmodified)
+## toml_edit 0.22 — MIT OR Apache-2.0 (dependency, unmodified)
+
+## image 0.25 — MIT OR Apache-2.0 (dependency, unmodified; decodes Kitty PNG payloads and builds gpui image frames; already a transitive dependency of gpui)
+
+
+## gpui-pre-macos 0.3.9 — Apache-2.0 (vendored and modified: `vendor/gpui-pre-macos`)
+- Source: crates.io `gpui-pre-macos` 0.3.9 (GPUI backend), Apache License 2.0. `LICENSE-APACHE` is in the vendored directory.
+- Modification (2026-10-21, ShellAX): in `src/pasteboard.rs` `write_plaintext`, plain text is written with `setString:forType:` instead of `setData:forType:`. The original call stored raw UTF-8 bytes; other applications read that pasteboard type as MacRoman, so non-ASCII text pasted as mojibake. `setData:forType:` remains only as a fallback when `setString:forType:` returns false. A regression test checks that `stringForType:` returns the original Unicode. Nothing else was changed. The change is marked in the file with an "ShellAX patch" comment.
+## gpui-pre-windows 0.3.9 — Apache-2.0 (vendored and modified: `vendor/gpui-pre-windows`)
+- Source: crates.io `gpui-pre-windows` 0.3.9 (GPUI Windows backend), Apache License 2.0. `LICENSE-APACHE` is in the vendored directory.
+- Modification (2026-10-14, ShellAX): in `build.rs`, when cross-compiling for Windows from a non-Windows host, copy `prebuilt/shaders_bytes.rs` into OUT_DIR. The original build script compiles the HLSL with fxc.exe only on a Windows host. The prebuilt file is generated by `tools/gen_win_shaders.sh` from the crate's own `src/*.hlsl`, using Microsoft fxc.exe under wine with the same entry points, profiles and flags. Nothing else was changed. The change is marked in the file with an "ShellAX patch" comment.
+- fxc.exe / d3dcompiler_47.dll (Microsoft Windows SDK, NuGet package Microsoft.Windows.SDK.CPP) are build tools only and are not redistributed. Only the compiled shader bytecode ends up in the binary.
+## windows-sys 0.61 — MIT OR Apache-2.0 (dependency, unmodified; Windows only: redirects stderr to the log file)
+## App icon (packaging/windows/shellax.ico) — original artwork for this project, generated with ImageMagick
+## Symbols Nerd Font Mono (assets/fonts/SymbolsNerdFontMono-Regular.ttf) — MIT (bundled, unmodified)
+Nerd Fonts v3.4.0 "NerdFontsSymbolsOnly" release, Copyright (c) 2014 Ryan L McIntyre. The release ships under the MIT
+license (full text: `assets/fonts/SymbolsNerdFont-LICENSE.txt`). It is embedded in the binary and registered at startup as
+a fallback font for prompt icons (powerline, devicons, etc.). The icon sets it aggregates are credited upstream
+(https://github.com/ryanoasis/nerd-fonts#license): Font Awesome (OFL-1.1), Material Design Icons (Apache-2.0),
+Octicons (MIT), Codicons (CC-BY-4.0), Powerline symbols (MIT), Font Logos (Unlicense), Pomicons (OFL-1.1), Weather Icons (OFL-1.1).
+On Windows the default fallback chain also lists the system fonts "Segoe UI Symbol", "Segoe Fluent Icons" and "Segoe MDL2 Assets" (not bundled).

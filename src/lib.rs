@@ -1,0 +1,44 @@
+//! ssh-term-proto core: backend-agnostic terminal session (alacritty_terminal grid)
+//! fed by either a local PTY (portable-pty) or an SSH channel (russh).
+pub mod outline;
+pub mod agent;
+pub mod ai;
+pub mod models;
+pub mod i18n;
+pub mod secrets;
+pub mod audit;
+pub mod policy;
+pub mod hooks;
+pub mod policy_server;
+pub mod broker;
+pub mod proxy;
+pub mod boxdraw;
+pub mod hosts;
+pub mod keygen;
+pub mod layout;
+pub mod local;
+pub mod ssh;
+pub mod platform;
+pub mod hosttree;
+pub mod update;
+pub mod sftp;
+#[cfg(unix)]
+pub mod daemon;
+pub mod session_store;
+pub mod forward;
+pub mod suggest;
+pub mod snippets;
+pub mod term;
+pub mod highlight;
+pub mod tray;
+pub mod managed;
+pub mod link;
+pub mod hosttools;
+pub mod dirsync;
+pub mod asciicast;
+pub mod broadcast;
+pub mod snapshot;
+pub mod notify_rules;
+pub mod graphics;
+pub mod ctxmenu;
+pub mod sftp_mode;
