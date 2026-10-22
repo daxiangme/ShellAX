@@ -1,0 +1,116 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and publish (e.g. v0.1.11)'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          if (-not (Test-Path 'C:\Program Files (x86)\NSIS\makensis.exe')) { choco install nsis -y --no-progress }
+      - name: Build and package (installer + portable zip)
+        shell: pwsh
+        run: pwsh -File tools\package_win.ps1 -Out dist -Makensis 'C:\Program Files (x86)\NSIS\makensis.exe'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/ShellAX-Setup-x64.exe
+            dist/ShellAX-portable-x64.zip
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --profile dist --bin shellax --bin shellax-cli
+      - name: Package .app and .dmg (unsigned)
+        run: |
+          set -euo pipefail
+          VER=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          APP=dist/ShellAX.app
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp target/dist/shellax target/dist/shellax-cli "$APP/Contents/MacOS/"
+          if [ -f packaging/windows/agentshell-256.png ]; then
+            mkdir -p icon.iconset
+            for s in 16 32 128 256; do sips -z $s $s packaging/windows/agentshell-256.png --out icon.iconset/icon_${s}x${s}.png >/dev/null; done
+            iconutil -c icns icon.iconset -o "$APP/Contents/Resources/ShellAX.icns" || true
+          fi
+          cat > "$APP/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>ShellAX</string>
+            <key>CFBundleDisplayName</key><string>ShellAX</string>
+            <key>CFBundleIdentifier</key><string>com.daxiangme.shellax</string>
+            <key>CFBundleExecutable</key><string>shellax</string>
+            <key>CFBundleIconFile</key><string>ShellAX</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>${VER}</string>
+            <key>CFBundleVersion</key><string>${VER}</string>
+            <key>LSMinimumSystemVersion</key><string>12.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          PLIST
+          codesign --force --deep -s - "$APP" || true   # ad-hoc signature only (not notarized)
+          hdiutil create -volname ShellAX -srcfolder "$APP" -ov -format UDZO dist/ShellAX-macos-aarch64.dmg
+          (cd dist && ditto -c -k --keepParent ShellAX.app ShellAX-macos-aarch64.zip)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: |
+            dist/ShellAX-macos-aarch64.dmg
+            dist/ShellAX-macos-aarch64.zip
+
+  publish:
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: Checksums
+        run: cd out && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: ShellAX ${{ env.TAG }}
+          prerelease: ${{ contains(env.TAG, '-beta') || contains(env.TAG, '-rc') }}
+          generate_release_notes: true
+          body: |
+            ### 下载 / Downloads
+            - Windows x64：`ShellAX-Setup-x64.exe`（安装包）或 `ShellAX-portable-x64.zip`（便携版）
+            - macOS Apple Silicon：`ShellAX-macos-aarch64.dmg` 或 `.zip`
+
+            ### 注意 / Notes
+            - macOS 包未签名、未公证。首次打开请右键 →“打开”，或执行 `xattr -dr com.apple.quarantine /Applications/ShellAX.app`。
+              The macOS app is not signed or notarized: right-click → Open on first launch.
+            - Windows 安装包未做代码签名，SmartScreen 可能提示“已保护你的电脑”，点“更多信息 → 仍要运行”。
+              The Windows installer is unsigned; SmartScreen may warn on first run.
+          files: out/*
