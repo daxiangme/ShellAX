@@ -96,6 +96,8 @@ pub struct SettingsView {
     new_effect: Effect,
     tester: Entity<InputState>,
     notice: Option<String>,
+    /// Newer release found by "Check now".
+    update_found: Option<ssh_term_proto::update::Manifest>,
     // AI providers
     ai_sel: Option<String>,
     ai_key: Entity<InputState>,
@@ -170,7 +172,7 @@ impl SettingsView {
         let proxy_port = mk("7890", &saved.as_ref().map(|p| p.port.to_string()).unwrap_or_default(), window, cx);
         let proxy_user = mk(t("proxy.user"), &saved.as_ref().and_then(|p| p.user.as_ref()).map(|u| u.0.as_str()).unwrap_or(""), window, cx);
         let proxy_pass = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder(t("proxy.pass")).default_value(saved.as_ref().and_then(|p| p.user.as_ref()).map(|u| u.1.clone()).unwrap_or_default()));
-        let mut me = Self { cm_editor: None, cm_note: None, key_pass, key_import, theme_import, cat, search, inputs: HashMap::new(), errors: HashMap::new(), theme_swatch: crate::theme::load_all().iter().map(|t| (t.name.clone(), [t.base, t.crust, t.text, t.accent])).collect(), theme_names, scheme_names, new_rule, new_effect: Effect::Allow, tester, notice: None,
+        let mut me = Self { cm_editor: None, cm_note: None, key_pass, key_import, theme_import, cat, search, inputs: HashMap::new(), errors: HashMap::new(), theme_swatch: crate::theme::load_all().iter().map(|t| (t.name.clone(), [t.base, t.crust, t.text, t.accent])).collect(), theme_names, scheme_names, new_rule, new_effect: Effect::Allow, tester, notice: None, update_found: None,
             ai_sel: config::get().ai.default_provider().map(|p| p.id.clone()), ai_key, ai_keys: HashMap::new(), ai_note: None, ai_test: HashMap::new(), ai_testing: None, lang_seen: ssh_term_proto::i18n::current() as u8,
             ai_models: HashMap::new(), ai_dropdown: None, ai_model_search, ai_url_gen: 0,
             proxy_http, proxy_auth, proxy_host, proxy_port, proxy_user, proxy_pass, proxy_candidates: Vec::new(), proxy_bypass_suggest: String::new(), proxy_detecting: false, proxy_started: false, proxy_note: None,
@@ -939,22 +941,34 @@ impl SettingsView {
     fn general_extra(&self, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
         div().flex().flex_col().child(Self::section_title(t("ui.updates")))
-            .child(div().text_size(px(12.)).text_color(c(th.subtext)).pb_2().child(tf("settings.update_source", &[("v", &ssh_term_proto::update::CURRENT), ("url", &config::get().general.manifest_url())])))
-            .child(div().flex().gap_2().child(ui::button("check-update", t("ui.check_now"), 1).on_click(cx.listener(|this, _, _w, cx| {
+            .child(div().text_size(px(12.)).text_color(c(th.subtext)).pb_2().child(tf("settings.update_source", &[("v", &ssh_term_proto::update::CURRENT), ("url", &config::get().general.update_source())])))
+            .child(div().flex().gap_2().child(ui::button("check-update", t("ui.check_now"), 0).on_click(cx.listener(|this, _, _w, cx| {
                 this.notice = Some(t("settings.update_checking").into());
-                let url = config::get().general.manifest_url();
+                this.update_found = None;
+                let g = config::get().general.clone();
                 cx.spawn(async move |this, cx| {
-                    let r = cx.background_executor().spawn(async move { ssh_term_proto::update::check(&url) }).await;
-                    let msg = match r {
-                        Ok(Some(m)) => tf("main.update_available", &[("v", &m.version), ("url", &m.url)]),
-                        Ok(None) => tf("settings.update_latest", &[("v", &ssh_term_proto::update::CURRENT)]),
-                        Err(e) => tf("settings.update_failed", &[("e", &format!("{e:#}"))]),
-                    };
-                    let _ = this.update(cx, |v, cx| { v.notice = Some(msg); cx.notify(); });
+                    let r = cx.background_executor().spawn(async move { g.check_update() }).await;
+                    let _ = this.update(cx, |v, cx| {
+                        match r {
+                            Ok(Some(m)) => { v.notice = Some(tf("main.update_available", &[("v", &m.version)])); v.update_found = Some(m); }
+                            Ok(None) => v.notice = Some(tf("settings.update_latest", &[("v", &ssh_term_proto::update::CURRENT)])),
+                            Err(e) => v.notice = Some(tf("settings.update_failed", &[("e", &format!("{e:#}"))])),
+                        }
+                        cx.notify();
+                    });
                 }).detach();
                 cx.notify();
             }))))
             .children(self.notice.clone().map(|n| div().pt_2().text_size(px(12.)).text_color(c(th.subtext)).child(n)))
+            .children(self.update_found.clone().map(|m| {
+                // release notes (trimmed) and a button that opens the download in the browser
+                let notes: String = m.notes.chars().take(1200).collect();
+                let url = m.url.clone();
+                div().pt_2().flex().flex_col().gap_2()
+                    .when(!notes.trim().is_empty(), |d| d.child(div().id("update-notes").max_h(px(200.)).overflow_y_scroll().p_2().rounded(px(6.)).bg(c(th.mantle)).border_1().border_color(c(th.surface1))
+                        .text_size(px(12.)).text_color(c(th.text)).whitespace_normal().child(notes)))
+                    .child(div().flex().child(ui::button("open-update", t("settings.update_download"), 1).on_click(move |_, _w, cx| cx.open_url(&url))))
+            }))
             .into_any_element()
     }
 

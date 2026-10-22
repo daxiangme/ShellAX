@@ -47,10 +47,17 @@ pub struct General { pub language: String, pub startup: String, pub check_update
     pub tray: bool }
 impl Default for General { fn default() -> Self { Self { language: s_system(), startup: s_restore(), check_updates: t(), update_channel: s_stable(), update_url: String::new(), tray: t() } } }
 impl General {
-    /// Manifest URL for the selected channel (SHELLAX_UPDATE_URL > general.update_url > built-in).
-    pub fn manifest_url(&self) -> String {
-        let tpl = std::env::var("SHELLAX_UPDATE_URL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| if self.update_url.is_empty() { ssh_term_proto::update::DEFAULT_URL.into() } else { self.update_url.clone() });
-        ssh_term_proto::update::url_for(&tpl, &self.update_channel)
+    /// Custom manifest URL template (SHELLAX_UPDATE_URL > general.update_url); None = GitHub Releases.
+    pub fn custom_update_url(&self) -> Option<String> {
+        std::env::var("SHELLAX_UPDATE_URL").ok().filter(|s| !s.is_empty()).or_else(|| (!self.update_url.is_empty()).then(|| self.update_url.clone()))
+    }
+    /// Where updates come from, for display.
+    pub fn update_source(&self) -> String {
+        match self.custom_update_url() { Some(u) => ssh_term_proto::update::url_for(&u, &self.update_channel), None => ssh_term_proto::update::DEFAULT_SOURCE.to_string() }
+    }
+    /// Run the update check for the configured channel and source (blocking).
+    pub fn check_update(&self) -> anyhow::Result<Option<ssh_term_proto::update::Manifest>> {
+        ssh_term_proto::update::check_source(self.custom_update_url().as_deref(), &self.update_channel)
     }
 }
 

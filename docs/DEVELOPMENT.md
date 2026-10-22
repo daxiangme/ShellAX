@@ -108,3 +108,21 @@ cargo build --profile dist --bin shellax --bin shellax-cli   # 发布构建，�
 - VS Code + rust-analyzer + **CodeLLDB** 扩展，`launch.json` 程序指向 `target/debug/shellax`；或命令行 `lldb target/debug/shellax`。
 - Metal / GPU 问题：Xcode → Debug → Attach to Process 选 ShellAX，可用 GPU Frame Capture 看渲染。
 - 输入法、透明度、毛玻璃这几项只能在 macOS 真机验证。
+
+## 发版
+
+1. 改版本号，三处必须一致（Windows 打包脚本会校验）：
+   - `Cargo.toml` 的 `version`
+   - `packaging/windows/installer.nsi` 的 `!define VER` 和 `VIProductVersion`
+   - `packaging/windows/shellax.rc` 的 `FILEVERSION` / `PRODUCTVERSION`
+2. 提交并推送到 main，然后打标签：
+   ```sh
+   git tag v0.x.y && git push origin v0.x.y
+   ```
+   标签含 `-beta` / `-rc`（如 `v0.2.0-beta.1`）时发布为预发布版本，只有“测试版”更新通道的用户会收到。
+3. GitHub Actions（`.github/workflows/release.yml`）会在 Windows 和 macOS（Apple Silicon）上构建，并把以下文件上传到对应的 Release：
+   `ShellAX-Setup-x64.exe`、`ShellAX-portable-x64.zip`、`ShellAX-macos-aarch64.dmg`、`ShellAX-macos-aarch64.zip`、`SHA256SUMS.txt`。
+   也可以在 Actions 页面手动运行（workflow_dispatch），填一个已存在的标签。
+4. 应用内“检查更新”读取 GitHub Releases：正式版通道读 `releases/latest`，测试版通道读最新一条（含预发布）。
+
+注意：macOS 包未签名、未公证；Windows 安装包未做代码签名，首次运行可能出现 SmartScreen 提示。

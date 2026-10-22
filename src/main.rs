@@ -2176,11 +2176,11 @@ fn open_main(cx: &mut App, rt: Arc<tokio::runtime::Runtime>, themes: Vec<Arc<The
                     match root.audit.prune(ssh_term_proto::managed::get().and_then(|m| m.retention_floor()).map_or(config::get().audit.retention_days, |f| config::get().audit.retention_days.max(f))) { Ok(0) => {}, Ok(n) => eprintln!("audit: pruned {n} records"), Err(e) => eprintln!("audit prune: {e}") }
                     // update check (general.check_updates); quiet on network errors
                     if !secondary() && config::get().general.check_updates && std::env::var_os("SHELLAX_NO_UPDATE_CHECK").is_none() {
-                        let url = config::get().general.manifest_url();
+                        let g = config::get().general.clone();
                         cx.spawn(async move |this, cx| {
-                            let r = cx.background_executor().spawn(async move { ssh_term_proto::update::check(&url) }).await;
+                            let r = cx.background_executor().spawn(async move { g.check_update() }).await;
                             match r {
-                                Ok(Some(m)) => { let _ = this.update(cx, |r, cx| { r.log("update.available", &m.version); r.toast(tf("main.update_available", &[("v", &m.version), ("url", &m.url)]), cx); }); }
+                                Ok(Some(m)) => { let _ = this.update(cx, |r, cx| { r.log("update.available", &m.version); r.toast_after(tf("main.update_available", &[("v", &m.version)]), std::time::Duration::from_secs(10), cx); }); }
                                 Ok(None) => {}
                                 Err(e) => eprintln!("update check: {e:#}"),
                             }
