@@ -137,6 +137,7 @@ fn newest_log(dir: &std::path::Path) -> Option<std::path::PathBuf> {
 
 // ---------------------------------------------------------------- app shell
 #[derive(Default)]
+
 struct PaneInit { cwd: Option<String>, daemon_id: Option<String>, resume: Option<String> }
 
 #[derive(Clone)]
@@ -229,6 +230,7 @@ pub(crate) struct Root {
     /// tab right-click menu (tab index, position)
     tab_menu: Option<(usize, gpui::Point<gpui::Pixels>)>,
     tab_menu_at: std::time::Instant,
+    tab_scroll: gpui::ScrollHandle,
     /// inline tab rename (tab index, input)
     tab_rename: Option<(usize, Entity<InputState>)>,
     /// recently closed tabs, newest last
@@ -1622,30 +1624,10 @@ impl Render for Root {
         let settings_tab = self.settings.clone();
         let settings_on = self.settings_active();
 
-        // Top row is the window chrome. Tabs are the row under it.
+        // 标签栏即标题栏：没有单独的标题行。标签间隙、“+”右侧空白是窗口拖动区。
         let mac = chrome::style() == chrome::Style::Mac;
-        let mut chrome_row = chrome::drag_region(div().id("chrome-bar")).h(px(chrome::TITLE_H)).flex_shrink_0().flex().items_center().gap_2()
-            .bg(c(th.crust));
-        if mac {
-            chrome_row = chrome_row.child(self.lights(window, cx));
-        } else {
-            chrome_row = chrome_row.pl_3();
-        }
-        chrome_row = chrome_row.child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child("ShellAX"))
-            .child(chrome::drag_spacer("chrome-spacer"))
-            .child(div().id("chrome-local").h(px(24.)).px_2().rounded(px(6.)).flex().items_center().gap_1().cursor_pointer()
-                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .hover(|d| d.bg(c(cur().surface0)))
-                .tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(t("ui.local_terminal")).build(w, cx))
-                .on_click(cx.listener(|this, _, w, cx| this.new_tab(Spec::Local, w, cx)))
-                .child(icon(IconName::SquareTerminal, 14., c(th.overlay1)))
-                .child(div().text_size(px(12.)).text_color(c(th.text)).child(t("ui.local_terminal"))));
         let me = cx.entity().downgrade();
-        if let Some(wc) = chrome::window_controls("winctl", window, move |w, cx| { let _ = me.update(cx, |r, cx| if r.should_close(w, cx) { w.remove_window(); cx.quit(); }); }) {
-            chrome_row = chrome_row.pr_0().child(wc);
-        } else {
-            chrome_row = chrome_row.pr_2();
-        }
+        let win_ctl = chrome::window_controls("winctl", window, move |w, cx| { let _ = me.update(cx, |r, cx| if r.should_close(w, cx) { w.remove_window(); cx.quit(); }); });
 
         // Modern pill tab strip: bar blends with the title bar (crust), active tab is one soft
         // elevated pill (no border / accent bar), inactive tabs are bare text with a faint hover fill.
@@ -1653,8 +1635,15 @@ impl Render for Root {
         let pill_bg = if dark_ui { c(th.surface0) } else { gpui::white() };
         let hover_bg = c(th.text).opacity(0.05);
         let pill_shadow = vec![gpui::BoxShadow { color: gpui::black().opacity(if dark_ui { 0.28 } else { 0.07 }), offset: gpui::point(px(0.), px(1.)), blur_radius: px(2.), spread_radius: px(0.), inset: false }];
-        let mut tabbar = div().id("tabbar").h(px(34.)).flex_shrink_0().px(px(6.)).flex().items_center().gap(px(2.)).bg(c(th.base)).rounded_tl(px(10.)).rounded_tr(px(10.)).overflow_hidden();
-        tabbar = tabbar.child(div().id("sb-collapse").size(px(28.)).flex_shrink_0().rounded(px(7.)).flex().items_center().justify_center().cursor_pointer()
+        // 标签之间的间隙：拖动区（Windows 上为 HTCAPTION，其他平台由整行 drag_region 处理）
+        let gap = |sep: bool| div().w(px(5.)).h(px(28.)).flex_shrink_0().flex().items_center().justify_center()
+            .window_control_area(gpui::WindowControlArea::Drag)
+            .when(sep, |d| d.child(div().w(px(1.)).h(px(14.)).bg(c(th.text).opacity(0.08))));
+        let mut row = chrome::drag_region(div().id("tabbar")).h(px(chrome::TAB_H)).flex_shrink_0().flex().items_center().bg(c(th.base)).overflow_hidden();
+        // 侧栏折叠时标签栏到达窗口左缘：为红黄绿按钮留位
+        row = if mac && !self.sidebar_visible { row.child(self.lights(window, cx)) } else { row.pl(px(6.)) };
+        let mut tabbar = div().id("tab-scroll").h_full().min_w_0().flex_shrink(1.).flex().items_center().overflow_x_scroll().track_scroll(&self.tab_scroll);
+        row = row.child(div().id("sb-collapse").size(px(28.)).flex_shrink_0().rounded(px(7.)).flex().items_center().justify_center().cursor_pointer()
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .hover(move |d| d.bg(hover_bg))
             .tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(t("ui.show_hide_sidebar")).build(w, cx))
@@ -1677,13 +1666,11 @@ impl Render for Root {
             let agent = panes.iter().filter_map(|p| p.read(cx).agent_label())
                 .max_by_key(|(_, st)| match st { AgentState::Blocked => 3, AgentState::Working => 2, AgentState::Idle => 1, _ => 0 });
             // hairline separator only between two inactive tabs
-            if i > 0 && !active && (settings_on || i != self.active + 1) {
-                tabbar = tabbar.child(div().w(px(1.)).h(px(14.)).flex_shrink_0().bg(c(th.text).opacity(0.08)));
-            }
+            if i > 0 { tabbar = tabbar.child(gap(!active && (settings_on || i != self.active + 1))); }
             let tg = SharedString::from(format!("tab-g-{i}"));
-            let mut tabel = div().id(("tab", i)).relative().group(tg.clone()).h(px(28.)).flex_1().min_w(px(110.)).max_w(px(220.)).pl(px(10.)).pr(px(4.)).rounded(px(7.)).flex().items_center().gap(px(6.)).cursor_pointer()
+            let mut tabel = div().id(("tab", i)).relative().group(tg.clone()).h(px(28.)).w(px(TAB_W)).flex_shrink(1.).min_w(px(TAB_MIN_W)).pl(px(10.)).pr(px(4.)).rounded(px(7.)).flex().items_center().gap(px(6.)).cursor_pointer()
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .when(active, |d| d.bg(pill_bg).shadow(pill_shadow.clone()))
+                .when(active, |d| d.bg(pill_bg).shadow(pill_shadow.clone()).rounded_tl(px(10.)).rounded_tr(px(10.)))
                 .when_some(tip, |d, tip| d.tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx)))
                 .when(!active, |d| d.hover(move |s| s.bg(hover_bg)))
                 .on_click(cx.listener({ let title = title.to_string(); move |this, ev: &gpui::ClickEvent, w, cx| {
@@ -1729,11 +1716,11 @@ impl Render for Root {
             // tab appear: fade + grow from a narrow pill (keyed by the first pane, so reorders don't replay it)
             let tabel: AnyElement = if motion::reduced() { tabel.into_any_element() } else {
                 tabel.with_animation(("tab-in", panes[0].entity_id().as_u64() as usize), gpui::Animation::new(motion::ms(motion::APPEAR_MS)).with_easing(gpui::ease_out_quint()),
-                    |d, t| d.opacity(t).min_w(px(120. * t))).into_any_element()
+                    |d, t| d.opacity(t).min_w(px(TAB_MIN_W * t))).into_any_element()
             };
             // active indicator: the pill fades/slides in when a tab becomes active (keyed by the pane, so it replays on switch)
             let tabel: AnyElement = if active && !motion::reduced() {
-                div().flex_1().min_w(px(110.)).max_w(px(220.)).flex().child(tabel)
+                div().w(px(TAB_W)).flex_shrink(1.).min_w(px(TAB_MIN_W)).flex().child(tabel)
                     .with_animation(("tab-act", panes[0].entity_id().as_u64() as usize), gpui::Animation::new(motion::ms(motion::APPEAR_MS)).with_easing(gpui::ease_out_quint()),
                         |d, t| d.opacity(0.55 + 0.45 * t).pl(px(4. * (1. - t)))).into_any_element()
             } else { tabel };
@@ -1744,10 +1731,10 @@ impl Render for Root {
         // until its own close button, exactly like a terminal tab.
         if settings_tab.is_some() {
             let tg = SharedString::from("settings-tab-g");
-            if !settings_on && self.active + 1 != self.tabs.len() { tabbar = tabbar.child(div().w(px(1.)).h(px(14.)).flex_shrink_0().bg(c(th.text).opacity(0.08))); }
-            tabbar = tabbar.child(div().id("settings-tab").group(tg.clone()).h(px(28.)).flex_1().min_w(px(110.)).max_w(px(220.)).pl(px(10.)).pr(px(4.)).rounded(px(7.)).flex().items_center().gap(px(6.)).cursor_pointer()
+            if !self.tabs.is_empty() { tabbar = tabbar.child(gap(!settings_on && self.active + 1 != self.tabs.len())); }
+            tabbar = tabbar.child(div().id("settings-tab").group(tg.clone()).h(px(28.)).w(px(TAB_W)).flex_shrink(1.).min_w(px(TAB_MIN_W)).pl(px(10.)).pr(px(4.)).rounded(px(7.)).flex().items_center().gap(px(6.)).cursor_pointer()
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .when(settings_on, |d| d.bg(pill_bg).shadow(pill_shadow.clone()))
+                .when(settings_on, |d| d.bg(pill_bg).shadow(pill_shadow.clone()).rounded_tl(px(10.)).rounded_tr(px(10.)))
                 .when(!settings_on, |d| d.hover(move |s| s.bg(hover_bg)))
                 .on_click(cx.listener(|this, _, w, cx| this.open_settings(Cat::General, w, cx)))
                 .child(icon(IconName::Settings, 13., if settings_on { c(th.subtext) } else { c(th.overlay1) }))
@@ -1760,13 +1747,14 @@ impl Render for Root {
         }
         // "+" then the empty title-bar area (window drag / double-click maximize / Windows snap),
         // then the window's own min / max / close buttons (Windows/Linux style, PRD 5.23)
-        tabbar = tabbar.child(
+        row = row.child(tabbar).child(
             div().id("new-tab").size(px(28.)).flex_shrink_0().ml(px(2.)).rounded(px(7.)).on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()).flex().items_center().justify_center().cursor_pointer()
                 .hover(move |s| s.bg(hover_bg)).active(move |s| s.bg(pill_bg))
                 .tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(t("ui.new_tab")).build(w, cx))
                 .on_click(cx.listener(|this, _, w, cx| this.new_tab(Spec::Local, w, cx)))
                 .child(icon(IconName::Plus, 15., c(th.overlay1))),
-        ).child(chrome::drag_spacer("title-spacer"));
+        ).child(chrome::drag_spacer("title-spacer").min_w(px(chrome::MIN_DRAG_W)).flex_shrink_0().flex_grow(1.));
+        row = match win_ctl { Some(wc) => row.child(wc), None => row.pr(px(8.)) };
 
         let workspace = if settings_on {
             settings_tab.unwrap().0.into_any_element()
@@ -1786,7 +1774,6 @@ impl Render for Root {
         let cwd_bar = if settings_on { None } else { self.cwd_bar(window, cx) };
         let center = div().id("center").flex_1().min_w_0().min_h_0().flex().flex_col().rounded(px(10.)).overflow_hidden().bg(c(theme::scheme().bg))
             .when(cwd_bar.is_none() && !settings_on, |d| d.pb(px(12.)))
-            .child(tabbar)
             .child(div().flex_1().min_h_0().overflow_hidden().flex().flex_col().child(workspace))
             .children(cwd_bar);
 
@@ -1807,6 +1794,10 @@ impl Render for Root {
         let sb_btn = |id: &'static str| div().id(id).px_2().h(px(20.)).rounded_md().flex().items_center().gap_1().cursor_pointer().hover(|s| s.bg(c(cur().surface0)));
         let statusbar = div().h(px(28.)).px_3().flex().items_center().gap_3().bg(c(th.crust))
             .text_size(px(11.)).text_color(c(th.subtext))
+            // 原标题栏右上角的“本地终端”入口
+            .child(sb_btn("sb-local").tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(t("ui.local_terminal")).build(w, cx))
+                .on_click(cx.listener(|this, _, w, cx| this.new_tab(Spec::Local, w, cx)))
+                .child(icon(IconName::SquareTerminal, 12., c(th.overlay1))).child(t("ui.local_terminal")))
             .child(div().flex().items_center().gap_2().child(div().size(px(7.)).rounded_full().bg(scolor)).child(status))
             .child(title)
             .child(div().flex_1())
@@ -1820,9 +1811,16 @@ impl Render for Root {
                 .when(org.is_some(), |d| d.child(div().pl_1().child(t("main.org_badge")))));
 
         let left = if self.sidebar_visible { px(4.) } else { px(8.) };
-        let mut content = div().flex_1().min_w_0().h_full().flex().flex_row().gap(px(4.));
+        // 顶层：侧栏（全高）| 右列 [标签栏 / 内容]
+        let mut content = div().flex_1().min_h_0().w_full().flex().flex_row().items_stretch().pl(left).pb(px(2.)).gap(px(4.));
         if self.sidebar_visible {
             let sb = self.sidebar(window, cx);
+            // macOS 风格：侧栏顶部一条与标签栏等高的拖动条，放红黄绿按钮
+            let sb: AnyElement = if mac {
+                div().h_full().flex().flex_col()
+                    .child(chrome::drag_region(div().id("sb-chrome")).h(px(chrome::TAB_H)).flex_shrink_0().flex().items_center().child(self.lights(window, cx)).child(chrome::drag_spacer("sb-drag")))
+                    .child(div().flex_1().min_h_0().child(sb)).into_any_element()
+            } else { div().h_full().pt(px(4.)).child(sb).into_any_element() };
             content = match self.sb_anim {
                 Some((show, seq)) => {
                     let w = self.sb_width;
@@ -1835,15 +1833,16 @@ impl Render for Root {
                 None => content.child(sb),
             };
         }
-        content = content.child(center);
-        content = match self.dock {
-            SideDock::Ai => content.child(self.ai_dock(cx)),
-            SideDock::Snippets | SideDock::History => content.child(self.library_dock(window, cx)),
-            SideDock::None => content,
+        let mut work = div().flex_1().min_w_0().min_h_0().flex().flex_row().gap(px(4.)).child(center);
+        work = match self.dock {
+            SideDock::Ai => work.child(self.ai_dock(cx)),
+            SideDock::Snippets | SideDock::History => work.child(self.library_dock(window, cx)),
+            SideDock::None => work,
         };
-        let body = div().flex_1().min_h_0().w_full().flex().flex_row().items_stretch().pl(left).pr(px(4.)).pb(px(2.)).gap(px(4.))
-            .child(content)
-            .child(self.tool_rail(cx));
+        let work_row = div().flex_1().min_h_0().w_full().flex().flex_row().items_stretch().pr(px(4.)).gap(px(4.))
+            .child(work).child(self.tool_rail(cx));
+        let right = div().flex_1().min_w_0().h_full().flex().flex_col().child(row).child(work_row);
+        let body = content.child(right);
         let mut root = div().size_full().relative().flex().flex_col().bg(c(th.crust).opacity(if chrome::NATIVE_LIGHTS { 0. } else { op })).font_family(theme::ui_font()).text_size(px(s.appearance.ui_font_size.clamp(10., 20.))).text_color(c(th.text))
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, w, cx| {
                 let k = &ev.keystroke;
@@ -1896,7 +1895,7 @@ impl Render for Root {
                 }
                 cx.stop_propagation();
             }));
-        root = root.child(chrome_row).child(body).child(statusbar);
+        root = root.child(body).child(statusbar);
         if let Some(e) = chrome::resize_edges(window) { root = root.child(e); }
 
         // menu exit fade: a menu that just closed is drawn once more, fading out
@@ -2043,6 +2042,10 @@ impl Render for Root {
     }
 }
 
+/// 标签宽度：先在 TAB_W 与 TAB_MIN_W 之间压缩，再放不下就横向滚动。
+const TAB_W: f32 = 220.;
+const TAB_MIN_W: f32 = 110.;
+
 fn main() {
     ssh_term_proto::platform::init_env();
     ssh_term_proto::platform::init_log_file(&data_dir());
@@ -2154,7 +2157,7 @@ fn open_main(cx: &mut App, rt: Arc<tokio::runtime::Runtime>, themes: Vec<Arc<The
                     let mut root = Root {
                         rt, default_target, tabs: vec![], active: 0, themes, schemes, histories: HashMap::new(),
                         manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], deny_reason: None, policy_port: None, overlay: Overlay::None, settings: None, sftp_views: HashMap::new(), sftp_current: None, sftp_windows: vec![], drag_div: None, port_view: None, quit_confirm: false, modal: None, quit_ok: false, chat_view: None,
-                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, menu_last: (None, None), menu_ghost: None, menu_ghost_seq: 0, sb_menu_at: std::time::Instant::now(), sb_modal: None, tag_filter: vec![], tab_menu: None, tab_menu_at: std::time::Instant::now(), tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), dock: SideDock::None, lib_search: lib_search.clone(), lib_group: String::new(), lib_hist_all: false, lib_editor: None, lib_vars: None, lib_confirm: None, lib_notice: String::new(), ai_width: { let w = config::get().sidebar.ai_width; if (280.0..=560.0).contains(&w) { w } else { config::AI_DOCK_W } }, host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: true, sb_anim: None, audit, audit_verify: None, audit_filter: Default::default(),
+                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, menu_last: (None, None), menu_ghost: None, menu_ghost_seq: 0, sb_menu_at: std::time::Instant::now(), sb_modal: None, tag_filter: vec![], tab_menu: None, tab_menu_at: std::time::Instant::now(), tab_scroll: gpui::ScrollHandle::new(), tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), dock: SideDock::None, lib_search: lib_search.clone(), lib_group: String::new(), lib_hist_all: false, lib_editor: None, lib_vars: None, lib_confirm: None, lib_notice: String::new(), ai_width: { let w = config::get().sidebar.ai_width; if (280.0..=560.0).contains(&w) { w } else { config::AI_DOCK_W } }, host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: true, sb_anim: None, audit, audit_verify: None, audit_filter: Default::default(),
                         settings_dirty: vec![], toast: None, toast_out: false, toast_seq: 0, _subs: vec![],
                     };
                     crate::ctxmenu_view::init(root.rt.handle().clone(), root.prompts.clone());

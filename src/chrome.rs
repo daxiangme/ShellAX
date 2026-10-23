@@ -10,6 +10,10 @@ pub const NATIVE_LIGHTS: bool = cfg!(target_os = "macos");
 pub const LIGHTS_W: f32 = 76.;
 /// Title bar height. Window buttons stretch to this row.
 pub const TITLE_H: f32 = 32.;
+/// Main window: the tab strip doubles as the title bar.
+pub const TAB_H: f32 = 36.;
+/// Smallest drag area always left to the right of the tabs.
+pub const MIN_DRAG_W: f32 = 48.;
 
 pub fn window_options(bounds: Bounds<Pixels>, title: Option<String>) -> WindowOptions {
     WindowOptions {
