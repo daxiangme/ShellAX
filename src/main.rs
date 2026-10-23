@@ -1639,7 +1639,8 @@ impl Render for Root {
         let gap = |sep: bool| div().w(px(5.)).h(px(28.)).flex_shrink_0().flex().items_center().justify_center()
             .window_control_area(gpui::WindowControlArea::Drag)
             .when(sep, |d| d.child(div().w(px(1.)).h(px(14.)).bg(c(th.text).opacity(0.08))));
-        let mut row = chrome::drag_region(div().id("tabbar")).h(px(chrome::TAB_H)).flex_shrink_0().flex().items_center().bg(c(th.base)).overflow_hidden();
+        // 标签行没有自己的底色，直接落在窗口外层背景上
+        let mut row = chrome::drag_region(div().id("tabbar")).h(px(chrome::TAB_H)).flex_shrink_0().flex().items_center().overflow_hidden();
         // 侧栏折叠时标签栏到达窗口左缘：为红黄绿按钮留位
         row = if mac && !self.sidebar_visible { row.child(self.lights(window, cx)) } else { row.pl(px(6.)) };
         let mut tabbar = div().id("tab-scroll").h_full().min_w_0().flex_shrink(1.).flex().items_center().overflow_x_scroll().track_scroll(&self.tab_scroll);
@@ -1792,7 +1793,7 @@ impl Render for Root {
         let mode = org.as_ref().map_or(s.permissions.mode, |m| m.clamp_mode(s.permissions.mode));
         let mode_col = match mode { Mode::Ask => c(th.accent), Mode::Plan => c(th.info), Mode::Auto => c(th.warning) };
         let sb_btn = |id: &'static str| div().id(id).px_2().h(px(20.)).rounded_md().flex().items_center().gap_1().cursor_pointer().hover(|s| s.bg(c(cur().surface0)));
-        let statusbar = div().h(px(28.)).px_3().flex().items_center().gap_3().bg(c(th.crust))
+        let statusbar = div().h(px(28.)).px_3().flex().items_center().gap_3()
             .text_size(px(11.)).text_color(c(th.subtext))
             // 原标题栏右上角的“本地终端”入口
             .child(sb_btn("sb-local").tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(t("ui.local_terminal")).build(w, cx))
@@ -1810,17 +1811,19 @@ impl Render for Root {
                 .child(icon(IconName::Shield, 12., mode_col)).child(tf("main.perm_status", &[("mode", &mode.label())]))
                 .when(org.is_some(), |d| d.child(div().pl_1().child(t("main.org_badge")))));
 
-        let left = if self.sidebar_visible { px(4.) } else { px(8.) };
+        let left = if self.sidebar_visible { px(0.) } else { px(CARD_GAP) };
         // 顶层：侧栏（全高）| 右列 [标签栏 / 内容]
-        let mut content = div().flex_1().min_h_0().w_full().flex().flex_row().items_stretch().pl(left).pb(px(2.)).gap(px(4.));
+        let mut content = div().flex_1().min_h_0().w_full().flex().flex_row().items_stretch().pl(left).gap(px(CARD_GAP));
         if self.sidebar_visible {
             let sb = self.sidebar(window, cx);
-            // macOS 风格：侧栏顶部一条与标签栏等高的拖动条，放红黄绿按钮
-            let sb: AnyElement = if mac {
-                div().h_full().flex().flex_col()
-                    .child(chrome::drag_region(div().id("sb-chrome")).h(px(chrome::TAB_H)).flex_shrink_0().flex().items_center().child(self.lights(window, cx)).child(chrome::drag_spacer("sb-drag")))
-                    .child(div().flex_1().min_h_0().child(sb)).into_any_element()
-            } else { div().h_full().pt(px(4.)).child(sb).into_any_element() };
+            // 侧栏顶部一行（与标签行同高，可拖动窗口）：红黄绿按钮风格时软件名在按钮右侧，否则靠左带小图标
+            let name = div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).whitespace_nowrap().child("ShellAX");
+            let mut head = chrome::drag_region(div().id("sb-chrome")).h(px(chrome::TAB_H)).flex_shrink_0().flex().items_center().overflow_hidden()
+                .window_control_area(gpui::WindowControlArea::Drag);
+            head = if mac { head.child(self.lights(window, cx)).child(name) } else { head.pl(px(8.)).gap(px(6.)).child(icon(IconName::SquareTerminal, 14., c(th.accent))).child(name) };
+            let sb: AnyElement = div().h_full().flex().flex_col()
+                .child(head.child(chrome::drag_spacer("sb-drag")))
+                .child(div().flex_1().min_h_0().flex().child(sb)).into_any_element();
             content = match self.sb_anim {
                 Some((show, seq)) => {
                     let w = self.sb_width;
@@ -1833,17 +1836,17 @@ impl Render for Root {
                 None => content.child(sb),
             };
         }
-        let mut work = div().flex_1().min_w_0().min_h_0().flex().flex_row().gap(px(4.)).child(center);
+        let mut work = div().flex_1().min_w_0().min_h_0().flex().flex_row().gap(px(CARD_GAP)).child(center);
         work = match self.dock {
             SideDock::Ai => work.child(self.ai_dock(cx)),
             SideDock::Snippets | SideDock::History => work.child(self.library_dock(window, cx)),
             SideDock::None => work,
         };
-        let work_row = div().flex_1().min_h_0().w_full().flex().flex_row().items_stretch().pr(px(4.)).gap(px(4.))
+        let work_row = div().flex_1().min_h_0().w_full().flex().flex_row().items_stretch().pr(px(4.)).pb(px(CARD_GAP)).gap(px(CARD_GAP))
             .child(work).child(self.tool_rail(cx));
         let right = div().flex_1().min_w_0().h_full().flex().flex_col().child(row).child(work_row);
         let body = content.child(right);
-        let mut root = div().size_full().relative().flex().flex_col().bg(c(th.crust).opacity(if chrome::NATIVE_LIGHTS { 0. } else { op })).font_family(theme::ui_font()).text_size(px(s.appearance.ui_font_size.clamp(10., 20.))).text_color(c(th.text))
+        let mut root = div().size_full().relative().flex().flex_col().bg(theme::outer_bg().opacity(if chrome::NATIVE_LIGHTS { 0. } else { op })).font_family(theme::ui_font()).text_size(px(s.appearance.ui_font_size.clamp(10., 20.))).text_color(c(th.text))
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, w, cx| {
                 let k = &ev.keystroke;
                 let bare_tab = k.key == "tab" && !k.modifiers.control && !k.modifiers.alt && !k.modifiers.platform;
@@ -2043,6 +2046,8 @@ impl Render for Root {
 }
 
 /// 标签宽度：先在 TAB_W 与 TAB_MIN_W 之间压缩，再放不下就横向滚动。
+/// 终端卡片与外层之间的间距。
+const CARD_GAP: f32 = 6.;
 const TAB_W: f32 = 220.;
 const TAB_MIN_W: f32 = 110.;
 

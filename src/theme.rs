@@ -555,3 +555,15 @@ mod iterm_tests {
         assert!(Scheme::from_itermcolors("x", "<plist><dict></dict></plist>").is_err());
     }
 }
+
+/// 窗口外层（侧栏、标签行、状态栏所在）背景：用 crust；与终端背景过近时由终端背景调暗或调亮推导，
+/// 保证终端卡片在亮色、暗色主题下都能与外层区分。
+pub fn outer_bg() -> gpui::Hsla {
+    let mut o = c(cur().crust);
+    let bg = c(scheme().bg);
+    if (o.l - bg.l).abs() < 0.04 {
+        o = bg;
+        o.l = if bg.l > 0.5 { bg.l - 0.06 } else if bg.l < 0.08 { bg.l + 0.06 } else { bg.l - 0.05 };
+    }
+    o
+}
