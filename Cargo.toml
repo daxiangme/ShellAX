@@ -1,6 +1,6 @@
 [package]
 name = "ssh-term-proto"
-version = "0.1.14"
+version = "0.1.15"
 edition = "2021"
 publish = false
 license = "LicenseRef-Proprietary"
