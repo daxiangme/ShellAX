@@ -4,7 +4,7 @@ SetCompressor /SOLID lzma
 SetCompressorDictSize 64
 !include "MUI2.nsh"
 !define APP "ShellAX"
-!define VER "0.1.12"
+!define VER "0.1.13"
 !define UNKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\ShellAX"
 Name "${APP} ${VER}"
 OutFile "${OUT}"
@@ -22,7 +22,7 @@ InstallDirRegKey HKCU "Software\${APP}" "InstallDir"
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "SimpChinese"
 !insertmacro MUI_LANGUAGE "English"
-VIProductVersion "0.1.12.0"
+VIProductVersion "0.1.13.0"
 VIAddVersionKey /LANG=0 "ProductName" "${APP}"
 VIAddVersionKey /LANG=0 "FileDescription" "${APP} Setup"
 VIAddVersionKey /LANG=0 "FileVersion" "${VER}"
