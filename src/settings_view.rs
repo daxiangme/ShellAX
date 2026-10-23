@@ -80,7 +80,7 @@ struct Row { cat: Cat, label: &'static str, desc: &'static str, ctl: Ctl }
 
 fn opts(v: &[(&str, &str)]) -> Vec<(String, String)> { v.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect() }
 
-pub enum SettingsEvent { Changed(String), Close, OpenAudit, ThemesChanged }
+pub enum SettingsEvent { Changed(String), Close, OpenAudit, ThemesChanged, ApplyUpdate(ssh_term_proto::updater::Record) }
 
 pub struct SettingsView {
     pub cat: Cat,
@@ -211,6 +211,7 @@ impl SettingsView {
             r(General, t("ui.interface_language"), t("ui.applies_immediately_follow_system_reads"), Ctl::Choice("general.language", opts(&[("system", t("ui.follow_system")), ("zh-CN", "简体中文"), ("en", "English")]))),
             r(General, t("ui.on_startup"), t("ui.what_to_open_when_the"), Ctl::Choice("general.startup", opts(&[("local", t("ui.local_terminal")), ("restore", t("ui.restore_layout")), ("blank", t("ui.blank"))]))),
             r(General, t("ui.check_for_updates_automatically"), "", Ctl::Toggle("general.check_updates")),
+            r(General, t("update.auto_download"), "", Ctl::Toggle("general.auto_download")),
             r(General, t("ui.update_channel"), "", Ctl::Choice("general.update_channel", opts(&[("stable", t("ui.stable")), ("beta", t("ui.beta"))]))),
             r(General, t("ui.tray"), t("ui.tray_desc"), Ctl::Toggle("general.tray")),
             r(General, t("ui.config_file"), t("ui.all_settings_are_stored_here"), Ctl::Info(config::config_path().display().to_string())),
@@ -967,9 +968,46 @@ impl SettingsView {
                 div().pt_2().flex().flex_col().gap_2()
                     .when(!notes.trim().is_empty(), |d| d.child(div().id("update-notes").max_h(px(200.)).overflow_y_scroll().p_2().rounded(px(6.)).bg(c(th.mantle)).border_1().border_color(c(th.surface1))
                         .text_size(px(12.)).text_color(c(th.text)).whitespace_normal().child(notes)))
-                    .child(div().flex().child(ui::button("open-update", t("settings.update_download"), 1).on_click(move |_, _w, cx| cx.open_url(&url))))
+                    .child(div().flex().gap_2()
+                        .when(ssh_term_proto::updater::downloadable(&m), |d| d.child(ui::button("dl-update", t("update.download"), 1).on_click(cx.listener(move |_, _, _w, cx| { crate::update_ui::start(m.clone(), true); cx.notify(); }))))
+                        .child(ui::button("open-update", t("settings.update_download"), 0).on_click(move |_, _w, cx| cx.open_url(&url))))
             }))
+            .child(self.update_progress(cx))
             .into_any_element()
+    }
+
+    /// 下载进度 / 失败原因 / 已下载记录。
+    fn update_progress(&self, cx: &mut Context<Self>) -> AnyElement {
+        use ssh_term_proto::updater::Phase;
+        use std::sync::atomic::Ordering;
+        let th = cur();
+        let line = |s: String, col| div().text_size(px(12.)).text_color(col).child(s);
+        let row = div().pt_2().flex().items_center().gap_2().flex_wrap();
+        match crate::update_ui::phase() {
+            Phase::Idle => div().into_any_element(),
+            Phase::Downloading { version, progress } => {
+                let (done, total) = (progress.done.load(Ordering::Relaxed), progress.total.load(Ordering::Relaxed));
+                let pct = if total > 0 { format!("{}%", done * 100 / total) } else { "…".into() };
+                let size = if total > 0 { format!("{} / {}", crate::update_ui::human(done), crate::update_ui::human(total)) } else { crate::update_ui::human(done) };
+                let frac = if total > 0 { done as f32 / total as f32 } else { 0. };
+                div().pt_2().flex().flex_col().gap_2()
+                    .child(line(tf("update.downloading", &[("v", &version), ("p", &pct), ("s", &size)]), c(th.subtext)))
+                    .child(div().h(px(4.)).w_full().rounded_full().bg(c(th.surface1)).child(div().h_full().rounded_full().bg(c(th.accent)).w(gpui::relative(frac.clamp(0., 1.)))))
+                    .child(div().flex().child(ui::button("dl-cancel", t("ui.cancel"), 0).on_click(|_, _, _| crate::update_ui::cancel())))
+                    .into_any_element()
+            }
+            Phase::Failed { version, error } => row
+                .child(line(tf("update.download_failed", &[("v", &version), ("e", &error)]), c(th.error)))
+                .child(ui::button("dl-retry", t("update.retry"), 0).on_click(|_, _, _| crate::update_ui::retry()))
+                .into_any_element(),
+            Phase::Ready(rec) => {
+                let (r1, r2) = (rec.clone(), rec.file.clone());
+                row.child(line(tf("update.record", &[("v", &rec.version), ("s", &crate::update_ui::human(rec.size)), ("t", &crate::update_ui::when(rec.downloaded_at))]), c(th.text)))
+                    .child(ui::button("dl-install", t("update.install_now"), 1).on_click(cx.listener(move |_, _, _w, cx| cx.emit(SettingsEvent::ApplyUpdate(r1.clone())))))
+                    .child(ui::button("dl-reveal", t("update.show_in_folder"), 0).on_click(move |_, _, _| { let _ = ssh_term_proto::updater::reveal(&r2); }))
+                    .into_any_element()
+            }
+        }
     }
 
     fn scheme_preview(&self) -> AnyElement {
@@ -1168,6 +1206,7 @@ impl Render for SettingsView {
         let query = self.search.read(cx).value().to_string().to_lowercase();
         let mut rows = self.rows();
         // light / dark theme pickers only matter when following the system appearance
+        if !config::get().general.check_updates { rows.retain(|r| !matches!(r.ctl, Ctl::Toggle("general.auto_download"))); }
         if config::get().appearance.theme != "system" { rows.retain(|r| !matches!(r.ctl, Ctl::Choice("appearance.light_theme", _) | Ctl::Choice("appearance.dark_theme", _))); }
 
         // ---- left: search + categories

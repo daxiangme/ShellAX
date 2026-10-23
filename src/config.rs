@@ -43,9 +43,11 @@ d!(u_10, u64, 10);
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct General { pub language: String, pub startup: String, pub check_updates: bool, pub update_channel: String, pub update_url: String,
+    /// 发现新版本后在后台自动下载（需开启自动检查）
+    pub auto_download: bool,
     /// system tray icon with the running-agent count (Linux StatusNotifierItem)
     pub tray: bool }
-impl Default for General { fn default() -> Self { Self { language: s_system(), startup: s_restore(), check_updates: t(), update_channel: s_stable(), update_url: String::new(), tray: t() } } }
+impl Default for General { fn default() -> Self { Self { language: s_system(), startup: s_restore(), check_updates: t(), update_channel: s_stable(), update_url: String::new(), auto_download: false, tray: t() } } }
 impl General {
     /// Custom manifest URL template (SHELLAX_UPDATE_URL > general.update_url); None = GitHub Releases.
     pub fn custom_update_url(&self) -> Option<String> {

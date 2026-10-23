@@ -3,6 +3,7 @@ Unicode true
 SetCompressor /SOLID lzma
 SetCompressorDictSize 64
 !include "MUI2.nsh"
+!include "FileFunc.nsh"
 !define APP "ShellAX"
 !define VER "0.1.15"
 !define UNKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\ShellAX"
@@ -28,8 +29,20 @@ VIAddVersionKey /LANG=0 "FileDescription" "${APP} Setup"
 VIAddVersionKey /LANG=0 "FileVersion" "${VER}"
 VIAddVersionKey /LANG=0 "LegalCopyright" "ShellAX"
 
+; 应用内更新以 `/S /RESTART` 静默运行：先等旧进程退出（运行中的 shellax.exe 删不掉），
+; 安装完成后重新启动应用。手动安装不带 /RESTART，行为不变。
 Section "Install"
   SetShellVarContext current
+  StrCpy $1 0
+  wait_old:
+    ClearErrors
+    Delete "$INSTDIR\shellax.exe"
+    IfErrors 0 wait_done
+    IntOp $1 $1 + 1
+    IntCmp $1 60 wait_done
+    Sleep 500
+    Goto wait_old
+  wait_done:
   SetOutPath "$INSTDIR"
   File "${SRC}\shellax.exe"
   File "${SRC}\shellax-cli.exe"
@@ -49,6 +62,11 @@ Section "Install"
   WriteRegStr HKCU "${UNKEY}" "UninstallString" '"$INSTDIR\Uninstall.exe"'
   WriteRegDWORD HKCU "${UNKEY}" "NoModify" 1
   WriteRegDWORD HKCU "${UNKEY}" "NoRepair" 1
+  ${GetParameters} $0
+  ClearErrors
+  ${GetOptions} $0 "/RESTART" $2
+  IfErrors +2 0
+    Exec '"$INSTDIR\shellax.exe"'
 SectionEnd
 
 Section "Uninstall"

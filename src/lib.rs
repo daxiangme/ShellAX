@@ -21,6 +21,7 @@ pub mod ssh;
 pub mod platform;
 pub mod hosttree;
 pub mod update;
+pub mod updater;
 pub mod sftp;
 #[cfg(unix)]
 pub mod daemon;

@@ -1,8 +1,8 @@
 //! Update check (general.check_updates / general.update_channel).
 //! Default source: GitHub Releases of daxiangme/ShellAX (stable = latest release, beta = newest
 //! release including pre-releases). A custom JSON manifest `{"version","url","notes","sha256"}`
-//! can still be used via general.update_url / SHELLAX_UPDATE_URL. Check-and-notify only: the
-//! user opens the download page; nothing is replaced silently.
+//! can still be used via general.update_url / SHELLAX_UPDATE_URL. Downloading and installing is
+//! in `updater` and only happens after the user asks for it (or turns on auto download).
 use serde::Deserialize;
 use std::time::Duration;
 

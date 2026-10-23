@@ -23,6 +23,7 @@ mod library;
 mod termview;
 mod theme;
 mod ui;
+mod update_ui;
 mod ctxmenu_view;
 
 use ssh_term_proto::i18n::{t, tf};
@@ -1181,6 +1182,19 @@ impl Root {
         self.log("app.quit", "window closed");
         true
     }
+    /// 退出并更新：启动安装或替换流程后退出；无法自动安装时显示安装包并提示。
+    pub(crate) fn apply_update(&mut self, rec: &ssh_term_proto::updater::Record, w: &mut Window, cx: &mut Context<Self>) {
+        match ssh_term_proto::updater::apply(rec) {
+            Ok(ssh_term_proto::updater::Apply::QuitNow) => {
+                self.log("update.apply", &rec.version);
+                self.quit_ok = true; self.save_layout(cx);
+                for v in self.tabs.iter().flat_map(|t| t.layout.leaves()) { if let Some(s) = &v.read(cx).session { if v.read(cx).daemon_id.is_none() { s.close(); } } }
+                w.remove_window(); cx.quit();
+            }
+            Ok(ssh_term_proto::updater::Apply::Revealed) => self.toast_after(t("update.revealed").into(), std::time::Duration::from_secs(8), cx),
+            Err(e) => self.toast_after(tf("update.apply_failed", &[("e", &format!("{e:#}"))]), std::time::Duration::from_secs(8), cx),
+        }
+    }
     fn running_agents(&self, cx: &App) -> usize { self.tabs.iter().flat_map(|t| t.layout.leaves()).filter(|v| v.read(cx).agent_label().is_some()).count() }
 
     fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1333,6 +1347,7 @@ impl Root {
         let v = cx.new(|cx| SettingsView::new(cat, names, schemes, window, cx));
         self._subs.push(cx.subscribe_in(&v, window, |this, _, ev: &SettingsEvent, window, cx| match ev {
             SettingsEvent::Close => this.close_settings(window, cx),
+            SettingsEvent::ApplyUpdate(rec) => this.apply_update(rec, window, cx),
             SettingsEvent::OpenAudit => { this.leave_settings(); this.overlay = Overlay::Audit; }
             SettingsEvent::ThemesChanged => {
                 this.themes = theme::load_all();
@@ -2033,6 +2048,15 @@ impl Render for Root {
                         w.remove_window(); cx.quit();
                     }))))));
         }
+        if let Some(rec) = update_ui::prompt() {
+            root = root.child(ui::modal(ui::card(440.).p_5().gap_3()
+                .child(div().flex().items_center().gap_2().child(icon(IconName::Download, 16., c(th.accent)))
+                    .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(tf("update.ready_title", &[("v", &rec.version)]))))
+                .child(div().text_size(px(13.)).text_color(c(th.subtext)).child(t("update.ready_body")))
+                .child(div().flex().gap_2().justify_end()
+                    .child(ui::button("upd-later", t("update.later"), 0).on_click(cx.listener(|_, _, _w, cx| { update_ui::dismiss_prompt(); cx.notify(); })))
+                    .child(ui::button("upd-quit", t("update.quit_and_update"), 1).on_click(cx.listener(move |this, _, w, cx| { update_ui::dismiss_prompt(); this.apply_update(&rec, w, cx); }))))));
+        }
         if let Some(m) = self.modal.clone() { root = root.child(self.render_modal(m, cx)); }
         if let Some(m) = self.sb_modal.clone() { root = root.child(self.sb_modal_el(m, cx)); }
         if let Some((i, pos)) = self.tab_menu { root = root.child(self.tab_menu_el(i, pos, cx)); }
@@ -2194,13 +2218,31 @@ fn open_main(cx: &mut App, rt: Arc<tokio::runtime::Runtime>, themes: Vec<Arc<The
                     }).detach();
                     // audit retention (audit.retention_days)
                     match root.audit.prune(ssh_term_proto::managed::get().and_then(|m| m.retention_floor()).map_or(config::get().audit.retention_days, |f| config::get().audit.retention_days.max(f))) { Ok(0) => {}, Ok(n) => eprintln!("audit: pruned {n} records"), Err(e) => eprintln!("audit prune: {e}") }
+                    // 应用内更新：读下载记录并清理旧安装包；下载进度变化时刷新主窗口和设置页
+                    if !secondary() {
+                        update_ui::init();
+                        cx.spawn(async move |this, cx| {
+                            let mut seen = u64::MAX;
+                            loop {
+                                cx.background_executor().timer(std::time::Duration::from_millis(300)).await;
+                                let g = update_ui::GEN.load(Ordering::Relaxed);
+                                if g == seen && !update_ui::downloading() { continue; }
+                                seen = g;
+                                if this.update(cx, |r, cx| { if let Some((v, _)) = &r.settings { v.update(cx, |_, cx| cx.notify()); } cx.notify(); }).is_err() { break; }
+                            }
+                        }).detach();
+                    }
                     // update check (general.check_updates); quiet on network errors
                     if !secondary() && config::get().general.check_updates && std::env::var_os("SHELLAX_NO_UPDATE_CHECK").is_none() {
                         let g = config::get().general.clone();
                         cx.spawn(async move |this, cx| {
                             let r = cx.background_executor().spawn(async move { g.check_update() }).await;
                             match r {
-                                Ok(Some(m)) => { let _ = this.update(cx, |r, cx| { r.log("update.available", &m.version); r.toast_after(tf("main.update_available", &[("v", &m.version)]), std::time::Duration::from_secs(10), cx); }); }
+                                Ok(Some(m)) => { let _ = this.update(cx, |r, cx| {
+                                    r.log("update.available", &m.version);
+                                    if config::get().general.auto_download && ssh_term_proto::updater::downloadable(&m) { update_ui::start(m.clone(), true); }
+                                    else { r.toast_after(tf("main.update_available", &[("v", &m.version)]), std::time::Duration::from_secs(10), cx); }
+                                }); }
                                 Ok(None) => {}
                                 Err(e) => eprintln!("update check: {e:#}"),
                             }
