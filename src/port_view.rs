@@ -4,9 +4,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use gpui::{div, prelude::*, px, Context, Entity, FontWeight, Window};
-use gpui_component::input::{Input, InputState};
+use gpui_component::input::{InputState};
 use gpui_component::switch::Switch;
-use gpui_component::Sizable;
 use ssh_term_proto::forward::{self, Kind, Running, Spec, State};
 use ssh_term_proto::i18n::{t, tf};
 use ssh_term_proto::ssh::{self, SshTarget};
@@ -93,7 +92,7 @@ impl Render for PortView {
         let mut inputs = div().flex().gap_3();
         for (i, l) in labels.iter().enumerate() {
             if l.is_empty() { continue; }
-            inputs = inputs.child(div().flex().flex_col().gap_1().w(px(170.)).child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(l.to_string())).child(Input::new(&self.fields[i]).small()));
+            inputs = inputs.child(div().flex().flex_col().gap_1().w(px(170.)).child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(l.to_string())).child(ui::text_field(&self.fields[i], false)));
         }
         let kinds = vec![("L".to_string(), t("ui.local_l").to_string()), ("R".to_string(), t("ui.remote_r").to_string()), ("D".to_string(), t("ui.dynamic_socks_d").to_string())];
         let sel = match self.kind { Kind::L => "L", Kind::R => "R", Kind::D => "D" };

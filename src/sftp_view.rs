@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{div, prelude::*, px, AnimationExt, AnyElement, Context, Entity, ExternalPaths, FontWeight, Window};
-use gpui_component::input::{Editor, EditorState, Input, InputEvent, InputState};
+use gpui_component::input::{Editor, EditorState, InputEvent, InputState};
 use gpui_component::Sizable;
 use russh_sftp::client::SftpSession;
 use ssh_term_proto::i18n::{t, tf};
@@ -881,7 +881,7 @@ impl Render for SftpView {
             let what = match k { Edit::Mkdir => t("sftp.mkdir").to_string(), Edit::Rename => tf("sftp.rename_x", &[("x", name)]), Edit::Chmod => tf("sftp.chmod_x", &[("x", name)]) };
             let where_ = if *side == Side::Local { t("sftp.local") } else { t("sftp.remote") };
             div().mx_4().mt_2().p_2().rounded_md().border_1().border_color(c(th.accent).opacity(0.5)).flex().items_center().gap_2().text_size(px(12.)).text_color(c(th.text))
-                .child(format!("{what} ({where_})")).child(div().w(px(260.)).child(Input::new(st).small()))
+                .child(format!("{what} ({where_})")).child(div().w(px(260.)).child(ui::text_field(st, false)))
                 .child(ui::button("edit-ok", t("ui.save"), 1).on_click(cx.listener(|v, _, _, cx| v.commit_edit(cx))))
                 .child(ui::button("edit-cancel", t("ui.cancel"), 3).on_click(cx.listener(|v, _, _, cx| { v.edit = None; cx.notify() })))
         });

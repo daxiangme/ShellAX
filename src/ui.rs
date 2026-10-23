@@ -20,6 +20,29 @@ pub const H_COMPACT: f32 = 24.;
 pub const H_DEFAULT: f32 = 28.;
 pub const H_LARGE: f32 = 32.;
 
+/// 输入框左右内边距。
+pub const INPUT_PX: f32 = 8.;
+/// 面板内容的左右内边距（与列表、按钮行对齐）。
+pub const PANEL_PX: f32 = 12.;
+
+/// 统一的单行输入框：高 28（`large` 时 32）、圆角 6、左右内边距 8、正文字号。
+/// 聚焦时只把边框换成强调色（主题关闭了外扩的聚焦环），不会被父元素裁切。
+pub fn text_field(state: &gpui::Entity<gpui_component::input::InputState>, large: bool) -> gpui_component::input::Input {
+    gpui_component::input::Input::new(state)
+        .w_full().h(px(if large { H_LARGE } else { H_DEFAULT }))
+        .rounded(px(R_MD)).px(px(INPUT_PX)).text_size(px(if large { FS_BODY } else { FS_SECONDARY }))
+}
+
+/// 统一的搜索框：在 `text_field` 基础上加放大镜图标和清除按钮。
+pub fn search_field(state: &gpui::Entity<gpui_component::input::InputState>, large: bool) -> gpui_component::input::Input {
+    text_field(state, large).prefix(icon(IconName::Search, if large { 14. } else { 13. }, c(cur().overlay1))).cleanable(true)
+}
+
+/// 面板顶部放搜索框的一行：左右与面板内容对齐，不被压缩。
+pub fn field_row() -> Div {
+    div().w_full().flex_shrink_0().px(px(PANEL_PX))
+}
+
 pub fn icon(name: IconName, size: f32, color: Hsla) -> impl IntoElement {
     svg().path(name.path()).size(px(size)).flex_shrink_0().text_color(color)
 }

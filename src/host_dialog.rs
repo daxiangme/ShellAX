@@ -4,7 +4,7 @@
 //! certificate, ssh-agent can be added). "Test connection" runs the unsaved form step by step.
 use ssh_term_proto::i18n::{t, tf};
 use gpui::{div, prelude::*, px, Context, Entity, EventEmitter, FontWeight, SharedString, Window};
-use gpui_component::input::{Input, InputState};
+use gpui_component::input::{InputState};
 use gpui_component::switch::Switch;
 use ssh_term_proto::hosts::HostEntry;
 use ssh_term_proto::ssh;
@@ -184,13 +184,13 @@ impl Render for HostDialog {
         let mut form = div().p_5().flex().flex_col().gap_3().max_h(px(560.)).id("host-form").overflow_y_scroll();
         for (l, key, e) in self.fields.iter() {
             if *key == "user" { break; }
-            form = form.child(div().flex().items_center().gap_3().child(label(l)).child(div().flex_1().child(Input::new(e))));
+            form = form.child(div().flex().items_center().gap_3().child(label(l)).child(div().flex_1().child(ui::text_field(e, false))));
         }
         // ---- credentials card
         let user = self.fields.iter().find(|f| f.1 == "user").map(|f| f.2.clone()).unwrap();
         let mut cred = div().flex().flex_col().gap_2().p_3().rounded(px(10.)).bg(c(th.surface0).opacity(0.45)).border_1().border_color(c(th.surface1).opacity(0.6))
             .child(div().text_size(px(12.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("host.credentials")))
-            .child(div().flex().items_center().gap_3().child(label(t("host.username"))).child(div().flex_1().child(Input::new(&user))));
+            .child(div().flex().items_center().gap_3().child(label(t("host.username"))).child(div().flex_1().child(ui::text_field(&user, false))));
         let n = self.methods.len();
         for (i, m) in self.methods.clone().into_iter().enumerate() {
             let small = |id: String, ic: IconName| div().id(SharedString::from(id)).size(px(22.)).rounded(px(6.)).flex().items_center().justify_center().cursor_pointer().hover(|d| d.bg(c(cur().surface1))).child(icon(ic, 12., c(th.overlay1)));
@@ -202,7 +202,7 @@ impl Render for HostDialog {
                 .when(n > 1, |d| d.child(small(format!("am-rm-{i}"), IconName::X).on_click(cx.listener(move |this, _, _w, cx| { this.methods.remove(i); cx.notify(); }))));
             let mut block = div().flex().flex_col().gap(px(6.)).pt_2().border_t_1().border_color(c(th.surface1).opacity(0.5)).child(head);
             match m {
-                Method::Password => block = block.child(Input::new(&self.password).mask_toggle()),
+                Method::Password => block = block.child(ui::text_field(&self.password, false).mask_toggle()),
                 Method::Key | Method::Cert => {
                     if m == Method::Key || !self.methods.contains(&Method::Key) {
                         let kp = self.key_path.clone();
@@ -236,16 +236,16 @@ impl Render for HostDialog {
                             }
                             pick = pick.child(gpui::deferred(menu).with_priority(2));
                         }
-                        block = block.child(div().flex().gap_2().child(div().flex_1().child(Input::new(&self.key_path)))
+                        block = block.child(div().flex().gap_2().child(div().flex_1().child(ui::text_field(&self.key_path, false)))
                             .child(pick)
                             .child(ui::button(SharedString::from(format!("am-browse-{i}")), t("host.browse"), 0).on_click(cx.listener(move |_this, _, w, cx| {
                                 let rx = cx.prompt_for_paths(gpui::PathPromptOptions { files: true, directories: false, multiple: false, prompt: None });
                                 let kp = kp.clone();
                                 cx.spawn_in(w, async move |_this, cx| { if let Ok(Ok(Some(p))) = rx.await { if let Some(f) = p.first() { let f = f.display().to_string(); let _ = cx.update(|w, cx| kp.update(cx, |s, cx| s.set_value(f, w, cx))); } } }).detach();
                             }))))
-                            .child(Input::new(&self.passphrase).mask_toggle());
+                            .child(ui::text_field(&self.passphrase, false).mask_toggle());
                     }
-                    if m == Method::Cert { block = block.child(Input::new(&self.cert_path)); }
+                    if m == Method::Cert { block = block.child(ui::text_field(&self.cert_path, false)); }
                 }
                 Method::Agent => block = block.child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(t("host.agent_hint"))),
             }

@@ -3,7 +3,7 @@
 //! filter section, "+" menu, right-click menus, ~/.ssh/config import, rename / delete dialogs.
 use gpui::AnimationExt as _;
 use gpui::{div, prelude::*, px, AnyElement, Context, Entity, FontWeight, SharedString, Window};
-use gpui_component::input::{Input, InputState};
+use gpui_component::input::{InputState};
 use ssh_term_proto::hosts::HostEntry;
 use ssh_term_proto::hosttree::{self, Row};
 use ssh_term_proto::i18n::{t, tf};
@@ -376,7 +376,7 @@ impl Root {
 
         // ---- title row (PRD 5.23): macOS = traffic lights + collapse; Windows/Linux = collapse,
         // search and "+" share the title row, so there is no blank strip above the list
-        let search_box = div().flex_1().min_w_0().child(Input::new(&self.host_search).prefix(icon(IconName::Search, 13., c(th.overlay1))).cleanable(true));
+        let search_box = div().flex_1().min_w_0().child(ui::search_field(&self.host_search, false));
         let plus = div().id("new-host").size(px(24.)).flex_shrink_0().rounded(px(6.)).flex().items_center().justify_center().cursor_pointer()
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .hover(|d| d.bg(c(cur().surface0)))
@@ -654,7 +654,7 @@ impl Root {
                 };
                 let (k1, i1, k2, i2) = (kind.clone(), input.clone(), kind, input.clone());
                 card = card.child(title(IconName::TextCursorInput, head, c(th.accent)))
-                    .child(div().on_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, w, cx| if ev.keystroke.key == "enter" { let v = i1.read(cx).value().to_string(); this.prompt_ok(k1.clone(), v, w, cx); cx.notify(); })).child(Input::new(&input)))
+                    .child(div().on_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, w, cx| if ev.keystroke.key == "enter" { let v = i1.read(cx).value().to_string(); this.prompt_ok(k1.clone(), v, w, cx); cx.notify(); })).child(ui::text_field(&input, false)))
                     .child(div().flex().gap_2().justify_end().child(cancel)
                         .child(ui::button("sbm-ok", t("ui.save"), 1).on_click(cx.listener(move |this, _, w, cx| { let v = i2.read(cx).value().to_string(); this.prompt_ok(k2.clone(), v, w, cx); cx.notify(); }))));
             }
@@ -706,7 +706,7 @@ impl Root {
                 let n = checked.iter().filter(|c| **c).count();
                 let g2 = group.clone();
                 card = card.child(lst)
-                    .child(div().flex().items_center().gap_2().child(div().text_size(px(12.)).text_color(c(th.subtext)).child(t("ui.group"))).child(div().flex_1().child(Input::new(&group))))
+                    .child(div().flex().items_center().gap_2().child(div().text_size(px(12.)).text_color(c(th.subtext)).child(t("ui.group"))).child(div().flex_1().child(ui::text_field(&group, false))))
                     .child(div().flex().gap_2().justify_end().child(cancel)
                         .child(ui::button("sbm-import", tf("sb.import_n", &[("n", &n)]), 1).on_click(cx.listener(move |this, _, _w, cx| {
                             let Some(SbModal::Import { cands, checked, .. }) = this.sb_modal.clone() else { return };
