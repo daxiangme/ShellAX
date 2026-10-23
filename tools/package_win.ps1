@@ -55,7 +55,9 @@ $rcPath = Join-Path $root 'packaging\windows\shellax.rc'
 $rc = Get-Content $rcPath -Raw
 if ($rc -notmatch 'FILEVERSION ([0-9]+),([0-9]+),([0-9]+),([0-9]+)') { Fail "cannot read FILEVERSION from $rcPath" }
 $rcVersion = "$($Matches[1]).$($Matches[2]).$($Matches[3])"
-if ($rcVersion -ne $version) { Fail "shellax.rc says $rcVersion but Cargo.toml says $version; update packaging/windows/shellax.rc" }
+# 预发布版本（如 0.1.16-beta.1）的数字版本号只取前三段
+$numericVersion = $version -replace '-.*$', ''
+if ($rcVersion -ne $numericVersion) { Fail "shellax.rc says $rcVersion but Cargo.toml says $version; update packaging/windows/shellax.rc" }
 
 Step "ShellAX $version"
 

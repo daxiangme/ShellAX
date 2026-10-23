@@ -53,6 +53,7 @@ jobs:
         run: |
           set -euo pipefail
           VER=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          NUM=${VER%%-*}  # 预发布后缀不进数字版本号
           APP=dist/ShellAX.app
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
           cp target/dist/shellax target/dist/shellax-cli "$APP/Contents/MacOS/"
@@ -71,8 +72,8 @@ jobs:
             <key>CFBundleExecutable</key><string>shellax</string>
             <key>CFBundleIconFile</key><string>ShellAX</string>
             <key>CFBundlePackageType</key><string>APPL</string>
-            <key>CFBundleShortVersionString</key><string>${VER}</string>
-            <key>CFBundleVersion</key><string>${VER}</string>
+            <key>CFBundleShortVersionString</key><string>${NUM}</string>
+            <key>CFBundleVersion</key><string>${NUM}</string>
             <key>LSMinimumSystemVersion</key><string>12.0</string>
             <key>NSHighResolutionCapable</key><true/>
           </dict></plist>
