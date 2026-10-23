@@ -14,7 +14,20 @@ pub enum PaneSave {
     Local { #[serde(default)] cwd: String, #[serde(default)] daemon_id: Option<String>, #[serde(default)] resume: Option<String> },
     Ssh { target: SshTarget, #[serde(default)] resume: Option<String> },
     /// SFTP browser pane/tab (PRD 5.21): reopens on the same host and directories.
-    Sftp { target: SshTarget, #[serde(default)] local_dir: String, #[serde(default)] remote_dir: String, #[serde(default)] follow: bool },
+    /// `panes` (left, right) describes each pane's source; older files only have `target`.
+    Sftp { target: SshTarget, #[serde(default)] local_dir: String, #[serde(default)] remote_dir: String, #[serde(default)] follow: bool, #[serde(default, skip_serializing_if = "Vec::is_empty")] panes: Vec<SftpSide> },
+}
+
+/// One pane of an SFTP view: `kind` is "local", "remote" or "empty".
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct SftpSide {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<SshTarget>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    #[serde(default)]
+    pub dir: String,
 }
 impl PaneSave {
     pub fn resume(&self) -> Option<&str> { match self { PaneSave::Local { resume, .. } | PaneSave::Ssh { resume, .. } => resume.as_deref(), PaneSave::Sftp { .. } => None } }
@@ -70,9 +83,9 @@ mod tests {
     fn sftp_tabs_roundtrip() {
         let t = SshTarget { host: "h".into(), port: 2222, user: "u".into(), ..Default::default() };
         let l = LayoutSave { version: 1, saved_at: "x".into(), active: 0, names: vec![], tabs: vec![
-            NodeSave::Leaf { pane: PaneSave::Sftp { target: t.clone(), local_dir: "/tmp/本地 dir".into(), remote_dir: "/srv/a b".into(), follow: false } },
+            NodeSave::Leaf { pane: PaneSave::Sftp { target: t.clone(), local_dir: "/tmp/本地 dir".into(), remote_dir: "/srv/a b".into(), follow: false, panes: vec![] } },
             NodeSave::Split { vertical: true, ratio: 0.6, a: Box::new(NodeSave::Leaf { pane: PaneSave::Ssh { target: t.clone(), resume: None } }),
-                b: Box::new(NodeSave::Leaf { pane: PaneSave::Sftp { target: t, local_dir: String::new(), remote_dir: "/".into(), follow: true } }) },
+                b: Box::new(NodeSave::Leaf { pane: PaneSave::Sftp { target: t, local_dir: String::new(), remote_dir: "/".into(), follow: true, panes: vec![SftpSide { kind: "local".into(), dir: "/tmp".into(), ..Default::default() }, SftpSide { kind: "empty".into(), ..Default::default() }] } }) },
         ] };
         let p = std::env::temp_dir().join(format!("stp-layout-sftp-{}.json", std::process::id()));
         save(&p, &l).unwrap();

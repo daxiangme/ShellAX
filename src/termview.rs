@@ -550,9 +550,9 @@ impl TermView {
     /// Pane title in the current UI language (follows a language switch without reopening).
     /// A layout leaf that hosts an SFTP view instead of a shell (tab / split mode, PRD 5.21).
     pub fn new_sftp(v: Entity<crate::sftp_view::SftpView>, history: Arc<Mutex<History>>, manifests: Arc<Vec<Manifest>>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let target = v.read(cx).target.clone();
-        let title = ssh_term_proto::sftp_mode::title(&target.label());
-        let mut me = Self::new(&title, Spec::Ssh(target), Err(anyhow::anyhow!("sftp")), history, manifests, window, cx);
+        let title = v.read(cx).title();
+        let spec = match v.read(cx).target() { Some(t) => Spec::Ssh(t), None => Spec::Local };
+        let mut me = Self::new(&title, spec, Err(anyhow::anyhow!("sftp")), history, manifests, window, cx);
         me.error = None;
         me.sftp = Some(v);
         me
