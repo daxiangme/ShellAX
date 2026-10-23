@@ -1834,7 +1834,7 @@ impl Render for Root {
             SideDock::Snippets | SideDock::History => work.child(self.library_dock(window, cx)),
             SideDock::None => work,
         };
-        let work_row = div().flex_1().min_h_0().w_full().flex().flex_row().items_stretch().pr(px(4.)).pt(px(4.)).pb(px(CARD_GAP)).gap(px(CARD_GAP))
+        let work_row = div().flex_1().min_h_0().w_full().flex().flex_row().items_stretch().pr(px(4.)).pb(px(CARD_GAP)).gap(px(CARD_GAP))
             .child(work).child(self.tool_rail(cx));
         let right = div().flex_1().min_w_0().h_full().flex().flex_col().child(row).child(work_row);
         let body = content.child(right);
