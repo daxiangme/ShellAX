@@ -1538,13 +1538,6 @@ impl Root {
                         .with_animation(("pane-in", p.entity_id().as_u64() as usize), gpui::Animation::new(motion::ms(motion::APPEAR_MS)).with_easing(gpui::ease_out_quint()), |d, t| d.opacity(1. - t)));
                 }
                 if !cx.has_active_drag() && p.read(cx).sftp.is_none() { d = d.child(self.pane_header(p, pg, cx)); }
-                // 分屏时未聚焦的格子叠一层外层色半透明遮罩，略微变暗。遮罩是不带 id、不挂监听的普通 div，
-                // 不产生命中区域，鼠标事件照常落到下面的终端，点击即可切换焦点。
-                if let Some(tb) = self.tabs.get(tab) {
-                    if tb.layout.leaves().len() > 1 && tb.focused != *p {
-                        d = d.child(div().absolute().top_0().left_0().size_full().bg(theme::outer_bg().opacity(0.3)));
-                    }
-                }
                 if cx.has_active_drag() && self.tabs.len() > 1 {
                     // drop zones for a dragged tab: left/right quarter, top/bottom half of the middle (PRD US-03)
                     for (i, edge) in [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom].into_iter().enumerate() {
