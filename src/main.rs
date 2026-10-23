@@ -1774,7 +1774,10 @@ impl Render for Root {
         };
         let cwd_bar = if settings_on { None } else { self.cwd_bar(window, cx) };
         let center = div().id("center").flex_1().min_w_0().min_h_0().flex().flex_col().rounded(px(10.)).overflow_hidden().bg(c(theme::scheme().bg))
-            .when(cwd_bar.is_none() && !settings_on, |d| d.pb(px(12.)))
+            // GPUI 的 overflow_hidden 只按矩形裁剪，不按圆角裁剪：内容（终端、设置页、SFTP 等）若贴边
+            // 绘制自己的背景就会盖住圆角。上下留出内边距，让四个圆角露出卡片自身的背景。
+            .pt(px(CARD_INSET))
+            .when(cwd_bar.is_none(), |d| d.pb(px(if settings_on { CARD_INSET } else { 12. })))
             .child(div().flex_1().min_h_0().overflow_hidden().flex().flex_col().child(workspace))
             .children(cwd_bar);
 
@@ -1842,7 +1845,7 @@ impl Render for Root {
             SideDock::Snippets | SideDock::History => work.child(self.library_dock(window, cx)),
             SideDock::None => work,
         };
-        let work_row = div().flex_1().min_h_0().w_full().flex().flex_row().items_stretch().pr(px(4.)).pb(px(CARD_GAP)).gap(px(CARD_GAP))
+        let work_row = div().flex_1().min_h_0().w_full().flex().flex_row().items_stretch().pr(px(4.)).pt(px(4.)).pb(px(CARD_GAP)).gap(px(CARD_GAP))
             .child(work).child(self.tool_rail(cx));
         let right = div().flex_1().min_w_0().h_full().flex().flex_col().child(row).child(work_row);
         let body = content.child(right);
@@ -2048,6 +2051,8 @@ impl Render for Root {
 /// 标签宽度：先在 TAB_W 与 TAB_MIN_W 之间压缩，再放不下就横向滚动。
 /// 终端卡片与外层之间的间距。
 const CARD_GAP: f32 = 6.;
+/// 卡片内容与卡片上下边缘的内边距，保证圆角不被内容盖住。
+const CARD_INSET: f32 = 8.;
 const TAB_W: f32 = 220.;
 const TAB_MIN_W: f32 = 110.;
 
