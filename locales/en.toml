@@ -1179,4 +1179,5 @@
 "setup.back" = "Back"
 "setup.next" = "Continue"
 "setup.start" = "Start ShellAX"
+"update.both_failed" = "Update check failed. Web: {web}. API: {api}"
 "update.rate_limited" = "GitHub API rate limit reached (60 requests per hour per IP; shared proxy IPs hit it sooner). Please try again later, or download from the Releases page."

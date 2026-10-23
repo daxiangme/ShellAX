@@ -131,34 +131,81 @@ fn web_agent(url: &str, redirects: u32) -> anyhow::Result<ureq::Agent> {
     Ok(crate::proxy::ureq_builder(url, ureq::AgentBuilder::new().timeout(Duration::from_secs(10)).redirects(redirects))?.build())
 }
 
+/// 网页请求的错误说明（保留状态码或底层原因，便于定位）。
+fn web_err(step: &str, e: ureq::Error) -> String {
+    match e {
+        ureq::Error::Status(code, _) => format!("{step}: HTTP {code}"),
+        ureq::Error::Transport(t) => format!("{step}: {t}"),
+    }
+}
+
+/// 网页请求（不带 API 的 Accept 头）。`redirects` 为 0 时 3xx 原样返回。
+fn web_get(url: &str, redirects: u32, step: &str) -> Result<ureq::Response, String> {
+    let agent = web_agent(url, redirects).map_err(|e| format!("{step}: {e}"))?;
+    agent.get(url).set("User-Agent", &format!("shellax/{CURRENT}")).set("Accept", "text/html,application/xhtml+xml,*/*").call().map_err(|e| web_err(step, e))
+}
+
 /// 正式版：/releases/latest 会 302 到 /releases/tag/<最新正式版>，不受 API 限流。
+/// 依次尝试：读 Location → 跟随重定向取最终地址或页面内容 → releases.atom 第一条；全部失败时返回每一步的原因。
 fn latest_tag_web() -> anyhow::Result<String> {
     let url = format!("https://github.com/{REPO}/releases/latest");
-    let ua = format!("shellax/{CURRENT}");
-    // 先不跟随重定向，只读 Location
-    if let Ok(r) = web_agent(&url, 0)?.head(&url).set("User-Agent", &ua).call() {
-        if let Some(t) = r.header("location").and_then(tag_from_url) { return Ok(t); }
+    let mut errs: Vec<String> = Vec::new();
+    match web_get(&url, 0, "redirect") {
+        Ok(r) => match r.header("location").and_then(tag_from_url) {
+            Some(t) => return Ok(t),
+            None => errs.push(format!("redirect: HTTP {} location={:?}", r.status(), r.header("location"))),
+        },
+        Err(e) => errs.push(e),
     }
-    // 再跟随重定向，取最终地址
-    let r = web_agent(&url, 5)?.get(&url).set("User-Agent", &ua).call()?;
-    tag_from_url(r.get_url()).ok_or_else(|| anyhow::anyhow!("no release tag in redirect"))
+    match web_get(&url, 5, "page") {
+        Ok(r) => {
+            if let Some(t) = tag_from_url(r.get_url()) { return Ok(t); }
+            let final_url = r.get_url().to_string();
+            match r.into_string() {
+                Ok(body) => match tag_from_url(&body) {
+                    Some(t) => return Ok(t),
+                    None => errs.push(format!("page: no release tag ({final_url})")),
+                },
+                Err(e) => errs.push(format!("page: {e}")),
+            }
+        }
+        Err(e) => errs.push(e),
+    }
+    match latest_stable_from_atom() {
+        Ok(t) => return Ok(t),
+        Err(e) => errs.push(e),
+    }
+    anyhow::bail!("{}", errs.join("; "))
+}
+
+fn atom_body() -> Result<String, String> {
+    let url = format!("https://github.com/{REPO}/releases.atom");
+    web_get(&url, 5, "atom")?.into_string().map_err(|e| format!("atom: {e}"))
+}
+
+/// releases.atom 里第一条不含预发布后缀（-beta 等）的标签。
+fn latest_stable_from_atom() -> Result<String, String> {
+    let body = atom_body()?;
+    body.split("<entry>").skip(1).filter_map(tag_from_url).find(|t| !t.contains('-')).ok_or_else(|| "atom: no stable release in feed".to_string())
 }
 
 /// 测试版：releases.atom 的第一条即最新发布（含预发布），不受 API 限流。
 fn latest_tag_atom() -> anyhow::Result<String> {
-    let url = format!("https://github.com/{REPO}/releases.atom");
-    let body = web_agent(&url, 5)?.get(&url).set("User-Agent", &format!("shellax/{CURRENT}")).call()?.into_string()?;
-    let entry = body.find("<entry>").map(|i| &body[i..]).ok_or_else(|| anyhow::anyhow!("no release published yet"))?;
-    tag_from_url(entry).ok_or_else(|| anyhow::anyhow!("no release tag in feed"))
+    let body = atom_body().map_err(|e| anyhow::anyhow!(e))?;
+    let entry = body.find("<entry>").map(|i| &body[i..]).ok_or_else(|| anyhow::anyhow!("atom: no release published yet"))?;
+    tag_from_url(entry).ok_or_else(|| anyhow::anyhow!("atom: no release tag in feed"))
 }
 
 /// GitHub：先用网页重定向 / Atom feed 取标签，都失败再退回 API（API 还能带上更新说明）。
+/// 两条路都失败时同时给出两边的原因。
 pub fn check_github_web_first(channel: &str) -> anyhow::Result<Option<Manifest>> {
     let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
     let tag = if channel == "beta" { latest_tag_atom() } else { latest_tag_web() };
     match tag {
         Ok(t) => Ok(manifest_from_tag(&t, os, arch)),
-        Err(_) => check_github(channel),
+        Err(web) => check_github(channel).map_err(|api| {
+            anyhow::anyhow!("{}", crate::i18n::tf("update.both_failed", &[("web", &web), ("api", &api)]))
+        }),
     }
 }
 
@@ -187,5 +234,22 @@ mod tests {
         assert_eq!(url_for("x/{channel}", "weird"), "x/stable");
         assert_eq!(tag_from_url("https://github.com/daxiangme/ShellAX/releases/tag/v0.1.12").as_deref(), Some("v0.1.12"));
         assert_eq!(tag_from_url(r#"<link href="https://github.com/a/b/releases/tag/v1.0.0-beta.1"/>"#).as_deref(), Some("v1.0.0-beta.1"));
+    }
+}
+#[cfg(test)]
+mod live {
+    use super::*;
+    /// 联网验证网页取标签（默认忽略）：cargo test --lib update::live -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn web_and_atom() {
+        // 可用 SHELLAX_TEST_PROXY 指定代理验证代理路径
+        if let Ok(u) = std::env::var("SHELLAX_TEST_PROXY") { *crate::proxy::URL.lock().unwrap() = u; }
+        if std::env::var_os("SHELLAX_TEST_BOTH").is_some() { eprintln!("both={:?}", check_github_web_first("stable").map(|m| m.map(|m| m.version))); }
+        let w = latest_tag_web();
+        let a = latest_tag_atom();
+        eprintln!("web={w:?} atom={a:?}");
+        assert!(w.unwrap().starts_with('v'));
+        assert!(a.unwrap().starts_with('v'));
     }
 }
