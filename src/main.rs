@@ -1719,12 +1719,7 @@ impl Render for Root {
                 tabel.with_animation(("tab-in", panes[0].entity_id().as_u64() as usize), gpui::Animation::new(motion::ms(motion::APPEAR_MS)).with_easing(gpui::ease_out_quint()),
                     |d, t| d.opacity(t).min_w(px(TAB_MIN_W * t))).into_any_element()
             };
-            // active indicator: the pill fades/slides in when a tab becomes active (keyed by the pane, so it replays on switch)
-            let tabel: AnyElement = if active && !motion::reduced() {
-                div().w(px(TAB_W)).flex_shrink(1.).min_w(px(TAB_MIN_W)).flex().child(tabel)
-                    .with_animation(("tab-act", panes[0].entity_id().as_u64() as usize), gpui::Animation::new(motion::ms(motion::APPEAR_MS)).with_easing(gpui::ease_out_quint()),
-                        |d, t| d.opacity(0.55 + 0.45 * t).pl(px(4. * (1. - t)))).into_any_element()
-            } else { tabel };
+            // 选中态只切换底色，不包额外的动画外层：外层会改变元素路径，使“出现”动画对新旧两个选中标签重播而闪烁。
             tabbar = tabbar.child(tabel);
         }
         // Settings tab (not a session): it sits after the terminals and borrows the tab look, but
