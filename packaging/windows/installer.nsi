@@ -5,7 +5,7 @@ SetCompressorDictSize 64
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
 !define APP "ShellAX"
-!define VER "0.1.16-beta.1"
+!define VER "0.1.16-beta.2"
 !define UNKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\ShellAX"
 Name "${APP} ${VER}"
 OutFile "${OUT}"

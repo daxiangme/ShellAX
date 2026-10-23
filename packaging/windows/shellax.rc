@@ -9,11 +9,11 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "ShellAX"
       VALUE "FileDescription", "ShellAX SSH terminal"
-      VALUE "FileVersion", "0.1.16-beta.1"
+      VALUE "FileVersion", "0.1.16-beta.2"
       VALUE "InternalName", "shellax"
       VALUE "OriginalFilename", "shellax.exe"
       VALUE "ProductName", "ShellAX"
-      VALUE "ProductVersion", "0.1.16-beta.1"
+      VALUE "ProductVersion", "0.1.16-beta.2"
     END
   END
   BLOCK "VarFileInfo"
