@@ -1151,4 +1151,5 @@
 "setup.back" = "返回"
 "setup.next" = "继续"
 "setup.start" = "开始使用"
+"update.both_failed" = "检查更新失败。网页方式：{web}；接口方式：{api}"
 "update.rate_limited" = "GitHub 接口访问过于频繁（每小时 60 次限制，使用代理时多人共用同一出口 IP 更容易触发），请稍后再试，或直接打开发布页下载。"
