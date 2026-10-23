@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui::{div, prelude::*, px, AnimationExt, AnyElement, Context, Entity, ExternalPaths, FontWeight, Pixels, Point, Window};
-use gpui_component::input::{Editor, EditorState, Input, InputEvent, InputState};
+use gpui_component::input::{Editor, EditorState, InputEvent, InputState};
 use gpui_component::Sizable;
 use russh_sftp::client::SftpSession;
 use ssh_term_proto::hosts::HostEntry;
@@ -1152,7 +1152,7 @@ impl SftpView {
             .child(ui::button(("sftp-pk-local", pi), t("sftp.local_btn"), 0).h(px(H_COMPACT)).px_2()
                 .child(icon(IconName::Monitor, 13., c(th.subtext)))
                 .on_click(cx.listener(move |v, _, _, cx| v.choose_local(pi, cx))));
-        let search = div().px_3().py_2().flex_shrink_0().child(Input::new(&pk.search).small().prefix(icon(IconName::Search, 13., c(th.overlay1))));
+        let search = ui::field_row().py_2().child(ui::search_field(&pk.search, false));
         let section = |label: String| div().px_3().pt_2().pb_1().text_size(px(FS_CAPTION)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.overlay1)).child(label);
         let mut list = div().id(("sftp-pk-list", pi)).flex_1().min_h_0().overflow_y_scroll().flex().flex_col().pb_2();
         let resolved = config_hosts();
@@ -1223,7 +1223,7 @@ impl SftpView {
         if ready {
             card = card.child(self.nav_row(pi, cx));
             if let Some(f) = &p.filter {
-                card = card.child(div().px_2().py_1().flex_shrink_0().border_b_1().border_color(c(th.surface0)).child(Input::new(f).small().cleanable(true).prefix(icon(IconName::ListFilter, 13., c(th.overlay1)))));
+                card = card.child(ui::field_row().py(px(6.)).border_b_1().border_color(c(th.surface0)).child(ui::text_field(f, false).cleanable(true).prefix(icon(IconName::ListFilter, 13., c(th.overlay1)))));
             }
             card = card.child(self.sort_head(pi, compact, cx));
         }
@@ -1329,7 +1329,7 @@ impl Render for SftpView {
             let what = match k { Edit::Mkdir => t("sftp.mkdir").to_string(), Edit::Rename => tf("sftp.rename_x", &[("x", name)]), Edit::Chmod => tf("sftp.chmod_x", &[("x", name)]) };
             let where_ = self.panes[*pi].label();
             div().mx_4().mt_2().p_2().rounded(px(R_MD)).border_1().border_color(c(th.accent).opacity(0.5)).flex().items_center().gap_2().text_size(px(FS_SECONDARY)).text_color(c(th.text))
-                .child(format!("{what} ({where_})")).child(div().w(px(260.)).child(Input::new(st).small()))
+                .child(format!("{what} ({where_})")).child(div().w(px(260.)).child(ui::text_field(st, false)))
                 .child(ui::button("edit-ok", t("ui.save"), 1).on_click(cx.listener(|v, _, _, cx| v.commit_edit(cx))))
                 .child(ui::button("edit-cancel", t("ui.cancel"), 3).on_click(cx.listener(|v, _, _, cx| { v.edit = None; cx.notify() })))
         });

@@ -1979,7 +1979,7 @@ impl Render for Root {
                 .child(div().flex().items_center().gap_2().child(icon(IconName::KeyRound, 16., c(th.accent)))
                     .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(title)))
                 .child(div().text_size(px(13.)).text_color(c(th.subtext)).child(detail))
-                .child(gpui_component::input::Input::new(&inp))
+                .child(ui::text_field(&inp, false))
                 .when(can_save, |d| d.child(div().flex().items_center().gap_2()
                     .child(gpui_component::switch::Switch::new("auth-save").checked(self.auth_save).on_click(cx.listener(|this, v: &bool, _w, cx| { this.auth_save = *v; cx.notify(); })))
                     .child(div().text_size(px(12.)).text_color(c(th.subtext)).child(t("ui.auth_save")))))
@@ -2001,7 +2001,7 @@ impl Render for Root {
                 .child(div().p_3().rounded_md().bg(c(th.mantle)).text_size(px(13.)).text_color(c(th.text)).font_family(SharedString::from(s.font.family.clone())).child(a.req.command.clone()))
                 .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(tf("main.approval_why", &[("why", &a.reason), ("cwd", &a.req.cwd)])))
                 .when_some(self.deny_reason.clone(), |d, inp| d.child(div().flex().items_center().gap_2()
-                    .child(div().flex_1().child(gpui_component::input::Input::new(&inp)))
+                    .child(div().flex_1().child(ui::text_field(&inp, false)))
                     .child(ui::button("ap-deny-send", t("ui.deny_send_reason"), 2).on_click(cx.listener(|this, _, _w, cx| {
                         let why = this.deny_reason.as_ref().map(|i| i.read(cx).value().to_string()).unwrap_or_default();
                         this.answer_approval(ssh_term_proto::policy_server::Answer::Deny(why), cx);

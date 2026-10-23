@@ -1,7 +1,7 @@
 //! Command palette (Ctrl+Shift+P): fuzzy search over app actions and hosts.
 use ssh_term_proto::i18n::{t, tf};
 use gpui::{div, prelude::*, px, Context, Entity, EventEmitter, FontWeight, KeyDownEvent, Subscription, Window};
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{InputEvent, InputState};
 
 use crate::actions::{fuzzy, Action};
 use crate::theme::{c, cur};
@@ -94,7 +94,7 @@ impl Render for Palette {
                     cx.stop_propagation();
                     cx.notify();
                 }))
-                .child(div().p_3().border_b_1().border_color(c(th.surface1).opacity(0.5)).child(Input::new(&self.query).appearance(false).prefix(icon(IconName::Search, 16., c(th.overlay1)))))
+                .child(div().p_3().border_b_1().border_color(c(th.surface1).opacity(0.5)).child(ui::search_field(&self.query, true).cleanable(false)))
                 .child(list)
                 .child(div().h(px(28.)).px_3().flex().items_center().gap_3().border_t_1().border_color(c(th.surface1).opacity(0.5))
                     .text_size(px(11.)).text_color(c(th.overlay0))

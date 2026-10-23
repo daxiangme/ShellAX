@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui::{div, prelude::*, px, AnyElement, Context, Entity, EventEmitter, FontWeight, SharedString, Subscription, Window};
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{InputEvent, InputState};
 use gpui_component::switch::Switch;
 use gpui_component::Sizable;
 use ssh_term_proto::policy::{self, Effect, Mode, Risk, Rule};
@@ -397,7 +397,7 @@ impl SettingsView {
                 let e = self.input(path, ph, s.get_str(path), window, cx);
                 // width follows content: numbers 80, lists 320, other text 260
                 let w = match *path { "font.size" | "font.line_height" | "appearance.opacity" | "appearance.ui_font_size" => 80., "font.fallbacks" => 320., _ => 260. };
-                div().w(px(w)).flex_shrink_0().child(Input::new(&e)).into_any_element()
+                div().w(px(w)).flex_shrink_0().child(ui::text_field(&e, false)).into_any_element()
             }
             Ctl::Font(path) => self.font_picker(path, window, cx).into_any_element(),
             Ctl::Info(text) => div().max_w(px(360.)).text_size(px(12.)).text_color(c(th.subtext)).text_align(gpui::TextAlign::Right).child(text.clone()).into_any_element(),
@@ -488,7 +488,7 @@ impl SettingsView {
 
             // Search input
             popover = popover.child(
-                div().w_full().child(Input::new(&self.font_search))
+                div().w_full().child(ui::search_field(&self.font_search, false))
             );
 
             // Filter bar: Monospace toggle
@@ -659,11 +659,11 @@ impl SettingsView {
             let name_in = self.input(&format!("tagdef.name.{id}"), &name, if builtin { s.tags.names.get(&id).cloned().unwrap_or_default() } else { name.clone() }, window, cx);
             let mut row = div().flex().items_center().gap_2().px_3().py(px(6.)).rounded(px(6.)).bg(c(th.surface0).opacity(0.5))
                 .child(div().size(px(14.)).flex_shrink_0().rounded_full().bg(c(s.tags.rgb(&id))))
-                .child(div().w(px(180.)).child(Input::new(&name_in)));
+                .child(div().w(px(180.)).child(ui::text_field(&name_in, false)));
             if !builtin {
                 let cur_hex = s.tags.custom.iter().find(|d| d.id == id).map(|d| d.color.clone()).unwrap_or_default();
                 let hex_in = self.input(&format!("tagdef.color.{id}"), "#rrggbb", cur_hex, window, cx);
-                row = row.child(div().w(px(96.)).child(Input::new(&hex_in)));
+                row = row.child(div().w(px(96.)).child(ui::text_field(&hex_in, false)));
                 // preset swatches: click to set the color
                 for (k, rgb) in [0xff3b30u32, 0xff9500, 0xffcc00, 0x34c759, 0x00c7be, 0x5ac8fa, 0x007aff, 0x5856d6, 0xaf52de, 0xff2d55, 0xa2845e, 0x8e8e93].into_iter().enumerate() {
                     let idc = id.clone();
@@ -768,16 +768,16 @@ impl SettingsView {
         let new_eff = format!("{:?}", self.new_effect).to_lowercase();
         table = table.child(div().flex().items_center().gap_2().px_3().py(px(8.)).border_t_1().border_color(c(th.surface0)).bg(c(th.mantle)).rounded_b_lg()
             .child(div().w(px(24.)).child(icon(IconName::Plus, 13., c(th.overlay1))))
-            .child(div().w(px(130.)).child(Input::new(&self.new_rule[0]).small()))
-            .child(div().w(px(70.)).child(Input::new(&self.new_rule[1]).small()))
+            .child(div().w(px(130.)).child(ui::text_field(&self.new_rule[0], false)))
+            .child(div().w(px(70.)).child(ui::text_field(&self.new_rule[1], false)))
             .child(div().w(px(60.)).text_size(px(12.)).text_color(c(th.subtext)).child("exec"))
-            .child(div().flex_1().child(Input::new(&self.new_rule[2]).small()))
+            .child(div().flex_1().child(ui::text_field(&self.new_rule[2], false)))
             .child(div().w(px(176.)).child(ui::segmented("new-eff", &opts(&[("allow", t("ui.allow")), ("ask", t("ui.ask")), ("deny", t("ui.deny"))]), &new_eff, move |v, _w, cx| {
                 let _ = me.update(cx, |this, cx| { this.new_effect = match v.as_str() { "allow" => Effect::Allow, "deny" => Effect::Deny, _ => Effect::Ask }; cx.notify(); });
             })))
             .child(div().w(px(56.)).child(ui::button("rule-add", t("ui.add"), 1).on_click(cx.listener(|this, _, window, cx| this.add_rule(window, cx))))));
         out = out.child(table);
-        out = out.child(div().pt_2().flex().items_center().gap_2().child(div().w(px(300.)).child(Input::new(&self.new_rule[3]).small()))
+        out = out.child(div().pt_2().flex().items_center().gap_2().child(div().w(px(300.)).child(ui::text_field(&self.new_rule[3], false)))
             .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(t("ui.glob_matches_anything_one_character"))));
         if let Some(n) = &self.notice { out = out.child(div().pt_1().text_size(px(12.)).text_color(c(th.error)).child(n.clone())); }
 
@@ -787,7 +787,7 @@ impl SettingsView {
         let eff_col = match eff { Effect::Allow => c(th.success), Effect::Ask => c(th.warning), Effect::Deny => c(th.error) };
         out = out.child(Self::section_title(t("ui.rule_tester")))
             .child(div().p_3().rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.surface0)).flex().flex_col().gap_2()
-                .child(div().flex().items_center().gap_3().child(div().flex_1().child(Input::new(&self.tester)))
+                .child(div().flex().items_center().gap_3().child(div().flex_1().child(ui::text_field(&self.tester, false)))
                     .child(div().flex().items_center().gap_2().child(ui::tag(policy::classify(&tester_cmd).label(), c(th.info))).child(ui::tag(eff.label(), eff_col))))
                 .child(div().text_size(px(12.)).text_color(c(th.subtext)).child(tf("settings.tester_result", &[("mode", &s.permissions.mode.label()), ("effect", &eff.label()), ("why", &why)]))));
 
@@ -849,7 +849,7 @@ impl SettingsView {
             .child(Self::section_title(t("ui.local_private_keys"))).child(list)
             .child(Self::section_title(t("ui.generate_new_key")))
             .child(div().flex().items_center().gap_2()
-                .child(div().w(px(260.)).child(Input::new(&self.key_pass)))
+                .child(div().w(px(260.)).child(ui::text_field(&self.key_pass, false)))
                 .child(ui::button("key-gen", t("ui.generate_ed25519"), 1).on_click(cx.listener(move |this, _, window, cx| {
                     let pass = this.key_pass.read(cx).value().to_string();
                     let path = ssh_term_proto::keygen::free_path(&d1, "shellax_ed25519");
@@ -863,7 +863,7 @@ impl SettingsView {
                 }))))
             .child(Self::section_title(t("ui.import")))
             .child(div().flex().items_center().gap_2()
-                .child(div().flex_1().child(Input::new(&self.key_import)))
+                .child(div().flex_1().child(ui::text_field(&self.key_import, false)))
                 .child(ui::button("key-import", t("ui.import"), 0).on_click(cx.listener(move |this, _, window, cx| {
                     let src = ssh_term_proto::hosts::expand_tilde(this.key_import.read(cx).value().trim());
                     this.notice = Some(match ssh_term_proto::keygen::import(&src, &d2) {
@@ -933,7 +933,7 @@ impl SettingsView {
                     .when_some(conflict, |d, other| d.child(div().text_size(px(11.)).text_color(c(th.error)).child(tf("settings.key_conflict", &[("other", &other)]))))
                     .when_some(self.errors.get(&key).cloned(), |d, e| d.child(div().text_size(px(11.)).text_color(c(th.error)).child(e))))
                 .child(div().w(px(150.)).flex().justify_end().child(if b.is_empty() { div().text_size(px(11.)).text_color(c(th.overlay0)).child("—").into_any_element() } else { ui::kbd(&b) }))
-                .child(div().w(px(170.)).child(Input::new(&e).small())));
+                .child(div().w(px(170.)).child(ui::text_field(&e, false))));
         }
         div().flex().flex_col().child(Self::section_title(t("ui.app_shortcuts_ctrl_shift_c"))).child(list).into_any_element()
     }
@@ -991,7 +991,7 @@ impl SettingsView {
         div().flex().flex_col().child(Self::section_title(t("ui.theme_import")))
             .child(div().text_size(px(12.)).text_color(c(th.subtext)).pb_2().child(t("ui.theme_import_desc")))
             .child(div().flex().items_center().gap_2()
-                .child(div().flex_1().child(Input::new(&self.theme_import)))
+                .child(div().flex_1().child(ui::text_field(&self.theme_import, false)))
                 .child(ui::button("theme-import", t("ui.import"), 0).on_click(cx.listener(move |this, _, window, cx| {
                     let src = ssh_term_proto::hosts::expand_tilde(this.theme_import.read(cx).value().trim());
                     this.notice = Some(match crate::theme::import_file(&src) {
@@ -1172,7 +1172,7 @@ impl Render for SettingsView {
 
         // ---- left: search + categories
         let mut nav = div().id("settings-nav").w(px(if compact { 168. } else { 224. })).flex_shrink_0().h_full().overflow_y_scroll().flex().flex_col().gap(px(1.)).p(px(10.)).bg(sheet).border_r_1().border_color(c(th.surface1).opacity(0.6))
-            .child(div().pb_2().child(Input::new(&self.search).prefix(icon(IconName::Search, 14., c(th.overlay1))).cleanable(true)));
+            .child(div().pb_2().child(ui::search_field(&self.search, false)));
         for (i, cat) in Cat::ALL.iter().copied().enumerate() {
             let active = query.is_empty() && cat == self.cat;
             nav = nav.child(div().id(("cat", i)).h(px(28.)).px(px(6.)).rounded(px(6.)).flex().items_center().gap(px(8.)).cursor_pointer()
@@ -1383,14 +1383,14 @@ impl SettingsView {
         let mut form = card(div())
             .child(div().text_size(px(13.)).text_color(c(th.text)).child(current))
             .child(div().flex().items_center().gap_3().child(lab(t("proxy.kind"))).child(div().flex_1().child(ui::segmented("proxy-kind", &kinds, if self.proxy_http { "http" } else { "socks5" }, move |v, _, cx| { let _ = me.update(cx, |this, cx| { this.proxy_http = v == "http"; cx.notify(); }); }))))
-            .child(div().flex().items_center().gap_3().child(lab(t("proxy.addr"))).child(div().flex_1().child(Input::new(&self.proxy_host))).child(lab(t("proxy.port"))).child(div().w(px(88.)).child(Input::new(&self.proxy_port))))
+            .child(div().flex().items_center().gap_3().child(lab(t("proxy.addr"))).child(div().flex_1().child(ui::text_field(&self.proxy_host, false))).child(lab(t("proxy.port"))).child(div().w(px(88.)).child(ui::text_field(&self.proxy_port, false))))
             .child(div().flex().items_center().gap_3().child(lab(t("proxy.auth"))).child(Switch::new("proxy-auth").checked(self.proxy_auth).on_click(cx.listener(|this, on: &bool, _, cx| { this.proxy_auth = *on; cx.notify(); }))));
         if self.proxy_auth {
-            form = form.child(div().flex().items_center().gap_3().child(lab(t("proxy.user"))).child(div().flex_1().child(Input::new(&self.proxy_user))).child(div().flex_1().child(Input::new(&self.proxy_pass).mask_toggle())));
+            form = form.child(div().flex().items_center().gap_3().child(lab(t("proxy.user"))).child(div().flex_1().child(ui::text_field(&self.proxy_user, false))).child(div().flex_1().child(ui::text_field(&self.proxy_pass, false).mask_toggle())));
         }
         let no_proxy = self.input("ssh.no_proxy", "10.*, 192.168.*, localhost", config::get().ssh.no_proxy.clone(), window, cx);
         form = form.child(div().flex().items_start().gap_3().child(lab(t("proxy.no_proxy"))).child(div().flex_1().flex().flex_col().gap(px(2.))
-            .child(Input::new(&no_proxy))
+            .child(ui::text_field(&no_proxy, false))
             .child(div().text_size(px(12.)).text_color(c(th.overlay1)).whitespace_normal().child(t("proxy.no_proxy_desc")))));
         form = form.child(div().text_size(px(12.)).text_color(c(th.overlay1)).whitespace_normal().child(t("proxy.ai_note")));
         form = form.child(div().flex().items_center().gap_2()
@@ -1525,7 +1525,7 @@ impl SettingsView {
                 .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
                     .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ui.name")))
                     .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ai.name_desc"))))
-                .child(div().w(px(280.)).flex_shrink_0().child(Input::new(&name_input)))
+                .child(div().w(px(280.)).flex_shrink_0().child(ui::text_field(&name_input, false)))
         );
 
         // 2. Base URL
@@ -1535,7 +1535,7 @@ impl SettingsView {
                 .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
                     .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ui.base_url")))
                     .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ai.base_url_desc"))))
-                .child(div().w(px(320.)).flex_shrink_0().child(Input::new(&url_input)))
+                .child(div().w(px(320.)).flex_shrink_0().child(ui::text_field(&url_input, false)))
         );
 
         // 3. API Key & Test Connection
@@ -1545,7 +1545,7 @@ impl SettingsView {
         let res = self.ai_test.get(&p.id).cloned();
 
         let mut key_right = div().flex().items_center().gap_2();
-        key_right = key_right.child(div().w(px(200.)).child(Input::new(&self.ai_key)));
+        key_right = key_right.child(div().w(px(200.)).child(ui::text_field(&self.ai_key, false)));
         key_right = key_right.child(ui::button("aip-key-save", t("ui.save"), 1).on_click(cx.listener(move |this, _, window, cx| {
             let v = this.ai_key.read(cx).value().trim().to_string();
             if v.is_empty() { return; }
@@ -1675,7 +1675,7 @@ impl SettingsView {
                     .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
                         .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ai.timeout")))
                         .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ai.timeout.d"))))
-                    .child(div().w(px(200.)).flex_shrink_0().child(Input::new(&timeout_in)))
+                    .child(div().w(px(200.)).flex_shrink_0().child(ui::text_field(&timeout_in, false)))
             );
 
             // Temperature
@@ -1685,7 +1685,7 @@ impl SettingsView {
                     .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
                         .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ai.temperature")))
                         .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ai.temperature.d"))))
-                    .child(div().w(px(200.)).flex_shrink_0().child(Input::new(&temp_in)))
+                    .child(div().w(px(200.)).flex_shrink_0().child(ui::text_field(&temp_in, false)))
             );
 
             // Max Tokens
@@ -1695,7 +1695,7 @@ impl SettingsView {
                     .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
                         .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ai.max_tokens")))
                         .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ai.max_tokens.d"))))
-                    .child(div().w(px(200.)).flex_shrink_0().child(Input::new(&tokens_in)))
+                    .child(div().w(px(200.)).flex_shrink_0().child(ui::text_field(&tokens_in, false)))
             );
         }
 
@@ -1905,7 +1905,7 @@ impl SettingsView {
             .child(div().flex().items_center().gap_3()
                 .child(div().flex_1().min_w_0().flex().flex_col().text_size(px(13.)).text_color(c(th.text)).child(label)
                     .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(desc)))
-                .child(div().w(px(240.)).flex_shrink_0().child(Input::new(&e)))
+                .child(div().w(px(240.)).flex_shrink_0().child(ui::text_field(&e, false)))
                 .child(ui::button(SharedString::from(format!("mdl-open-{field}")), if open { t("models.close_list") } else { t("models.pick") }, 0)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.ai_dropdown = if this.ai_dropdown == Some(field) { None } else { Some(field) };
@@ -1949,7 +1949,7 @@ impl SettingsView {
                     .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(meta.join(" · "))));
             }
             col = col.child(div().mt_1().p_2().rounded_lg().border_1().border_color(c(th.surface1)).bg(c(th.mantle)).flex().flex_col().gap_1()
-                .child(Input::new(&self.ai_model_search).small().prefix(icon(IconName::Search, 13., c(th.overlay1))))
+                .child(ui::search_field(&self.ai_model_search, false))
                 .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(tf("models.list_hint", &[("n", &hits.len())])))
                 .child(list));
         }

@@ -1,7 +1,6 @@
 //! Right-hand docks for saved commands and command history. Same card as the AI assistant.
 use gpui::{div, prelude::*, px, AnyElement, ClipboardItem, Context, Entity, FontWeight, SharedString, Window};
-use gpui_component::input::{Input, InputState, Textarea, TextareaState};
-use gpui_component::Sizable;
+use gpui_component::input::{InputState, Textarea, TextareaState};
 use ssh_term_proto::i18n::{t, tf};
 use ssh_term_proto::snippets::Snippet;
 use ssh_term_proto::suggest::HistItem;
@@ -71,7 +70,7 @@ impl Root {
         let ready = self.focused_pane(window, cx).is_some_and(|p| p.read(cx).ready());
         let th = cur();
         let mut body = div().flex_1().min_h_0().flex().flex_col();
-        body = body.child(div().px_3().pt_2().child(Input::new(&self.lib_search).small().prefix(icon(IconName::Search, 13., c(th.overlay1))).cleanable(true)));
+        body = body.child(ui::field_row().pt_2().child(ui::search_field(&self.lib_search, false)));
         if !ready {
             body = body.child(div().px_3().pt_2().text_size(px(12.)).text_color(c(th.overlay1)).child(t("lib.need_terminal")));
         }
@@ -189,7 +188,7 @@ impl Root {
         let field = |label: &'static str, input: &Entity<InputState>| {
             div().flex().flex_col().gap(px(4.))
                 .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t(label)))
-                .child(Input::new(input))
+                .child(ui::text_field(input, false))
         };
         div().id("lib-editor").flex_1().min_h_0().overflow_y_scroll().px_3().py_3().flex().flex_col().gap_3()
             .child(field("lib.name", &ed.name))
@@ -211,7 +210,7 @@ impl Root {
         for (i, (name, inp)) in v.names.iter().zip(v.inputs.iter()).enumerate() {
             col = col.child(div().flex().flex_col().gap(px(2.))
                 .child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(name.clone()))
-                .child(Input::new(inp).small()));
+                .child(ui::text_field(inp, false)));
             let _ = i;
         }
         col.child(div().flex().gap_2().justify_end()
