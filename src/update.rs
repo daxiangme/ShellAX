@@ -48,7 +48,7 @@ fn get(url: &str) -> anyhow::Result<ureq::Response> {
     match agent.get(url).set("User-Agent", &format!("shellax/{CURRENT}")).set("Accept", "application/vnd.github+json").call() {
         Ok(r) => Ok(r),
         Err(ureq::Error::Status(403 | 429, r)) if r.header("x-ratelimit-remaining") == Some("0") || r.status() == 429 =>
-            anyhow::bail!("GitHub API rate limit reached; try again later"),
+            anyhow::bail!("{}", crate::i18n::t("update.rate_limited")),
         Err(ureq::Error::Status(404, _)) => anyhow::bail!("no release published yet"),
         Err(ureq::Error::Status(code, _)) => anyhow::bail!("HTTP {code}"),
         Err(ureq::Error::Transport(t)) => anyhow::bail!("network unavailable ({})", t.kind()),
@@ -103,9 +103,68 @@ pub fn check_github(channel: &str) -> anyhow::Result<Option<Manifest>> {
     Ok(from_release(&rel, std::env::consts::OS, std::env::consts::ARCH))
 }
 
+/// 本平台安装包的固定文件名（与 pick_asset 的优先项一致）。
+fn asset_name(os: &str, arch: &str) -> Option<&'static str> {
+    match (os, arch) {
+        ("windows", _) => Some("ShellAX-Setup-x64.exe"),
+        ("macos", "aarch64") => Some("ShellAX-macos-aarch64.dmg"),
+        _ => None,
+    }
+}
+
+/// 从 `.../releases/tag/vX.Y.Z` 形式的地址里取出标签。
+fn tag_from_url(u: &str) -> Option<String> {
+    let i = u.find("/releases/tag/")? + "/releases/tag/".len();
+    let tag: String = u[i..].chars().take_while(|ch| !matches!(ch, '"' | '?' | '#' | '/' | '<' | ' ')).collect();
+    (!tag.is_empty()).then_some(tag)
+}
+
+/// 由标签直接拼出更新信息（不走 API）：安装包为 releases/download/<tag>/<文件名>，说明为 release 网页。
+fn manifest_from_tag(tag: &str, os: &str, arch: &str) -> Option<Manifest> {
+    if !is_newer(tag, CURRENT) { return None; }
+    let page = format!("https://github.com/{REPO}/releases/tag/{tag}");
+    let url = asset_name(os, arch).map(|n| format!("https://github.com/{REPO}/releases/download/{tag}/{n}")).unwrap_or_else(|| page.clone());
+    Some(Manifest { version: tag.trim_start_matches('v').to_string(), url, notes: page, sha256: String::new() })
+}
+
+fn web_agent(url: &str, redirects: u32) -> anyhow::Result<ureq::Agent> {
+    Ok(crate::proxy::ureq_builder(url, ureq::AgentBuilder::new().timeout(Duration::from_secs(10)).redirects(redirects))?.build())
+}
+
+/// 正式版：/releases/latest 会 302 到 /releases/tag/<最新正式版>，不受 API 限流。
+fn latest_tag_web() -> anyhow::Result<String> {
+    let url = format!("https://github.com/{REPO}/releases/latest");
+    let ua = format!("shellax/{CURRENT}");
+    // 先不跟随重定向，只读 Location
+    if let Ok(r) = web_agent(&url, 0)?.head(&url).set("User-Agent", &ua).call() {
+        if let Some(t) = r.header("location").and_then(tag_from_url) { return Ok(t); }
+    }
+    // 再跟随重定向，取最终地址
+    let r = web_agent(&url, 5)?.get(&url).set("User-Agent", &ua).call()?;
+    tag_from_url(r.get_url()).ok_or_else(|| anyhow::anyhow!("no release tag in redirect"))
+}
+
+/// 测试版：releases.atom 的第一条即最新发布（含预发布），不受 API 限流。
+fn latest_tag_atom() -> anyhow::Result<String> {
+    let url = format!("https://github.com/{REPO}/releases.atom");
+    let body = web_agent(&url, 5)?.get(&url).set("User-Agent", &format!("shellax/{CURRENT}")).call()?.into_string()?;
+    let entry = body.find("<entry>").map(|i| &body[i..]).ok_or_else(|| anyhow::anyhow!("no release published yet"))?;
+    tag_from_url(entry).ok_or_else(|| anyhow::anyhow!("no release tag in feed"))
+}
+
+/// GitHub：先用网页重定向 / Atom feed 取标签，都失败再退回 API（API 还能带上更新说明）。
+pub fn check_github_web_first(channel: &str) -> anyhow::Result<Option<Manifest>> {
+    let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+    let tag = if channel == "beta" { latest_tag_atom() } else { latest_tag_web() };
+    match tag {
+        Ok(t) => Ok(manifest_from_tag(&t, os, arch)),
+        Err(_) => check_github(channel),
+    }
+}
+
 /// Check the configured source: a custom manifest URL when given, else GitHub Releases.
 pub fn check_source(custom_url: Option<&str>, channel: &str) -> anyhow::Result<Option<Manifest>> {
-    match custom_url { Some(u) => check(&url_for(u, channel)), None => check_github(channel) }
+    match custom_url { Some(u) => check(&url_for(u, channel)), None => check_github_web_first(channel) }
 }
 
 #[cfg(test)]
@@ -126,5 +185,7 @@ mod tests {
         assert_eq!(pick_asset(&assets, "macos", "aarch64").unwrap().name, "ShellAX-macos-aarch64.dmg");
         assert!(pick_asset(&assets, "linux", "x86_64").is_none());
         assert_eq!(url_for("x/{channel}", "weird"), "x/stable");
+        assert_eq!(tag_from_url("https://github.com/daxiangme/ShellAX/releases/tag/v0.1.12").as_deref(), Some("v0.1.12"));
+        assert_eq!(tag_from_url(r#"<link href="https://github.com/a/b/releases/tag/v1.0.0-beta.1"/>"#).as_deref(), Some("v1.0.0-beta.1"));
     }
 }
