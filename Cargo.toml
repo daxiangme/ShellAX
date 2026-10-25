@@ -17,9 +17,12 @@ path = "src/bin/shellax-cli.rs"
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = "0.3"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 # GUI-subsystem exe has no console: send stderr to a log file (MIT/Apache-2.0)
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Registry"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Registry", "Win32_System_DataExchange", "Win32_UI_Shell"] }
 # `link!` lives here; windows-sys re-exports it only inside its own crate.
 windows-link = "0.2"
 

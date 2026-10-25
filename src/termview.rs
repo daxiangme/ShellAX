@@ -975,8 +975,17 @@ impl TermView {
         true
     }
 
+    /// 剪贴板文本；若复制的是文件/文件夹，则返回其完整路径（多个以空格分隔并按目标 shell 加引号）。
+    fn clipboard_paste_text(&self, cx: &mut Context<Self>) -> Option<String> {
+        if let Some(paths) = ssh_term_proto::clipfiles::read() {
+            let win_shell = cfg!(windows) && matches!(self.spec, Spec::Local);
+            return Some(ssh_term_proto::clipfiles::format(&paths, win_shell));
+        }
+        cx.read_from_clipboard().and_then(|i| i.text())
+    }
+
     pub fn paste(&mut self, cx: &mut Context<Self>) {
-        let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) else { return };
+        let Some(text) = self.clipboard_paste_text(cx) else { return };
         // multi-line paste outside bracketed-paste mode would execute each line: confirm first
         if config::get().terminal.paste_confirm && text.trim_end().contains('\n') && !self.mode().contains(TermMode::BRACKETED_PASTE) {
             self.pending_paste = Some(text);
@@ -1623,7 +1632,7 @@ impl TermView {
         let mut note = None;
         let target = if let Some(sel) = sel { Target::Selection(sel) } else {
             let mut blank = || {
-                let paste = cx.read_from_clipboard().and_then(|i| i.text()).filter(|t| !t.trim().is_empty());
+                let paste = self.clipboard_paste_text(cx).filter(|t| !t.trim().is_empty());
                 if paste.is_none() { note = Some(t("cm.clipboard_empty").to_string()); }
                 Target::Blank { paste }
             };

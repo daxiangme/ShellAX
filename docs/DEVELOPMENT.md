@@ -142,3 +142,10 @@ cargo build --profile dist --bin shellax --bin shellax-cli   # 发布构建，�
    - 只有从包含此功能的版本升级到更新版本时才会走这个流程。
 
 注意：macOS 包未签名、未公证；Windows 安装包未做代码签名，首次运行可能出现 SmartScreen 提示。
+
+## 粘贴文件路径
+
+在资源管理器 / Finder 中复制文件或文件夹后，在终端中粘贴（快捷键、中键、右键菜单）会输入其完整绝对路径（`src/clipfiles.rs`）：
+- Windows：读取剪贴板 `CF_HDROP`（`windows-sys`）；本地会话用双引号，SSH 会话用 POSIX 单引号。
+- macOS：读取 `NSPasteboard` 中的 `public.file-url`，回退 `NSFilenamesPboardType`（`objc`）；使用 POSIX 单引号。
+- 多个路径以空格分隔；剪贴板中没有文件时按普通文本粘贴；遵循括号粘贴模式。Linux 暂未实现。
