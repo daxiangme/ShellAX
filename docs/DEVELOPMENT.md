@@ -124,5 +124,21 @@ cargo build --profile dist --bin shellax --bin shellax-cli   # 发布构建，�
    `ShellAX-Setup-x64.exe`、`ShellAX-portable-x64.zip`、`ShellAX-macos-aarch64.dmg`、`ShellAX-macos-aarch64.zip`、`SHA256SUMS.txt`。
    也可以在 Actions 页面手动运行（workflow_dispatch），填一个已存在的标签。
 4. 应用内“检查更新”读取 GitHub Releases：正式版通道读 `releases/latest`，测试版通道读最新一条（含预发布）。
+5. 应用内下载并更新（`src/updater.rs`、`src/update_ui.rs`）依赖上面这些文件名，改名时要同步修改代码：
+   - 发现新版本后，设置 > 更新里点“下载更新”（或开启“自动下载更新”），后台经 `proxy::ureq_builder` 下载到
+     `<数据目录>/updates/<版本号>/`：Windows 下载 `ShellAX-Setup-x64.exe`，macOS 下载 `ShellAX-macos-aarch64.zip`
+     （release 地址里的 `.dmg` 自动换成 `.zip`，便于直接替换 .app）。
+   - 下载完成后用同一个 release 的 `SHA256SUMS.txt` 校验；自定义 `update_url` 的 manifest 带 `sha256` 字段时用该字段。
+     不一致会删除文件并提示原因。所以 **`SHA256SUMS.txt` 必须和安装包一起上传**。
+   - 下载记录写在 `<数据目录>/updates/pending.json`（版本号、文件路径、大小、时间），启动时若当前版本已不低于记录里的版本，
+     自动删除旧安装包和记录。
+   - “退出并更新”：
+     - Windows 安装版：以 `ShellAX-Setup-x64.exe /S /RESTART` 启动安装程序后退出。`installer.nsi` 会循环等待
+       旧的 `shellax.exe` 可删除（约 30 秒），静默安装到原目录，带 `/RESTART` 时安装结束后重新启动应用。
+       便携版（同目录没有 `Uninstall.exe`）只在资源管理器中显示安装包。
+     - macOS：用 `ditto -x -k` 解压 zip，生成一个小脚本等待当前进程退出，把旧 .app 挪开、复制新 .app、
+       `xattr -dr com.apple.quarantine`，再 `open` 新 .app；失败时恢复旧 .app 并在 Finder 中显示新 .app。
+       .app 所在目录不可写或解压失败时，直接在 Finder 中显示安装包，由用户手动安装。
+   - 只有从包含此功能的版本升级到更新版本时才会走这个流程。
 
 注意：macOS 包未签名、未公证；Windows 安装包未做代码签名，首次运行可能出现 SmartScreen 提示。
