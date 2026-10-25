@@ -1906,11 +1906,12 @@ pub enum ScriptGate {
 /// Bytes to send for a paste. Bracketed paste wraps the text and strips any embedded
 /// ESC so pasted content can't terminate the bracket early; otherwise newlines become CR.
 pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
-    let norm = text.replace("\r\n", "\r").replace('\n', "\r");
-    if bracketed {
-        let clean: String = norm.chars().filter(|&c| c != '\x1b').collect();
-        format!("\x1b[200~{clean}\x1b[201~").into_bytes()
-    } else { norm.into_bytes() }
+    // 统一换行为 \r，并去除除 Tab/换行外的控制字符（C0、DEL、C1、ESC），避免粘贴时被终端程序解释成乱码或按键序列
+    let norm: String = text.replace("\r\n", "\r").replace('\n', "\r").chars()
+        .filter(|&c| c == '\t' || c == '\r' || !(c.is_control()))
+        .filter(|&c| !matches!(c, '\u{feff}' | '\u{fffd}'))
+        .collect();
+    if bracketed { format!("\x1b[200~{norm}\x1b[201~").into_bytes() } else { norm.into_bytes() }
 }
 
 /// xterm mouse encoding. `button`: 0/1/2 = L/M/R, 3 = release (X10), 64/65 = wheel, +32 = motion,
@@ -2229,6 +2230,7 @@ mod tests {
     fn bracketed_paste_strips_esc() {
         assert_eq!(paste_bytes("a\nb", false), b"a\rb");
         assert_eq!(paste_bytes("x\x1b[201~rm -rf /\n", true), b"\x1b[200~x[201~rm -rf /\r\x1b[201~");
+        assert_eq!(paste_bytes("a\r\nb\x00\x08\x7f\u{9b}c\t中文😀", true), "\x1b[200~a\rbc\t中文😀\x1b[201~".as_bytes());
     }
     #[test]
     fn mouse_encoding() {

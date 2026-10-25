@@ -38,6 +38,7 @@ pub fn file_url_to_path(url: &str) -> Option<PathBuf> {
         i += 1;
     }
     let mut s = String::from_utf8(out).ok()?;
+    if !s.starts_with('/') || s.contains('\0') { return None; }
     if s.len() > 1 && s.ends_with('/') { s.pop(); }
     Some(PathBuf::from(s))
 }
@@ -91,22 +92,35 @@ mod imp {
         Some(std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned())
     }
 
+    unsafe fn types(pb: *mut Object) -> Vec<String> {
+        let arr: *mut Object = msg_send![pb, types];
+        if arr.is_null() { return Vec::new(); }
+        let n: usize = msg_send![arr, count];
+        (0..n).filter_map(|i| { let o: *mut Object = msg_send![arr, objectAtIndex: i]; to_string(o) }).collect()
+    }
+
+    /// 仅当剪贴板确实含有文件 URL（Finder 复制）时返回路径；普通文本复制一律返回 None，走文本粘贴。
     pub fn read() -> Option<Vec<PathBuf>> {
         unsafe {
             let pb: *mut Object = msg_send![class!(NSPasteboard), generalPasteboard];
             if pb.is_null() { return None; }
-            let items: *mut Object = msg_send![pb, pasteboardItems];
-            if items.is_null() { return None; }
-            let n: usize = msg_send![items, count];
-            let ty = nsstring("public.file-url");
+            let tys = types(pb);
+            let has_url = tys.iter().any(|t| t == "public.file-url");
+            let has_names = tys.iter().any(|t| t == "NSFilenamesPboardType");
+            if !has_url && !has_names { return None; }
             let mut out = Vec::new();
-            for i in 0..n {
-                let item: *mut Object = msg_send![items, objectAtIndex: i];
-                let s: *mut Object = msg_send![item, stringForType: ty];
-                if let Some(p) = to_string(s).and_then(|u| super::file_url_to_path(&u)) { out.push(p); }
+            if has_url {
+                let items: *mut Object = msg_send![pb, pasteboardItems];
+                if items.is_null() { return None; }
+                let n: usize = msg_send![items, count];
+                let ty = nsstring("public.file-url");
+                for i in 0..n {
+                    let item: *mut Object = msg_send![items, objectAtIndex: i];
+                    let s: *mut Object = msg_send![item, stringForType: ty];
+                    if let Some(p) = to_string(s).and_then(|u| super::file_url_to_path(&u)) { out.push(p); }
+                }
             }
-            if out.is_empty() {
-                // 旧式类型：NSFilenamesPboardType，内容为路径字符串数组
+            if out.is_empty() && has_names {
                 let arr: *mut Object = msg_send![pb, propertyListForType: nsstring("NSFilenamesPboardType")];
                 if !arr.is_null() {
                     let is_arr: bool = msg_send![arr, isKindOfClass: class!(NSArray)];
@@ -119,7 +133,8 @@ mod imp {
                     }
                 }
             }
-            Some(out)
+            out.retain(|p| p.is_absolute());
+            if out.is_empty() { None } else { Some(out) }
         }
     }
 }
@@ -139,6 +154,8 @@ mod tests {
         assert_eq!(quote(r"C:\a b", true), r#""C:\a b""#);
         assert_eq!(quote(r"C:\ab", true), r"C:\ab");
         assert_eq!(format(&[PathBuf::from("/x"), PathBuf::from("/y z")], false), "/x '/y z'");
+        assert!(file_url_to_path("hello").is_none());
+        assert!(file_url_to_path("file://host/x").is_none());
         assert_eq!(file_url_to_path("file:///Users/a/My%20Dir/").unwrap(), PathBuf::from("/Users/a/My Dir"));
     }
 }
