@@ -149,3 +149,7 @@ cargo build --profile dist --bin shellax --bin shellax-cli   # 发布构建，�
 - Windows：读取剪贴板 `CF_HDROP`（`windows-sys`）；本地会话用双引号，SSH 会话用 POSIX 单引号。
 - macOS：读取 `NSPasteboard` 中的 `public.file-url`，回退 `NSFilenamesPboardType`（`objc`）；使用 POSIX 单引号。
 - 多个路径以空格分隔；剪贴板中没有文件时按普通文本粘贴；遵循括号粘贴模式。Linux 暂未实现。
+
+## macOS 打包
+
+`release.yml` 中 macOS 作业：对 .app 做 ad-hoc 签名（`codesign --force --deep -s -` 并校验），用 `create-dmg` 生成带 Applications 快捷方式和图标布局的拖拽安装 dmg（失败重试，最终回退为 hdiutil + `Applications -> /Applications` 软链接），随后挂载 dmg 列出内容做校验。无 Developer ID，不做公证；首次打开需右键“打开”或 `xattr -dr com.apple.quarantine /Applications/ShellAX.app`。应用内更新使用 zip 包，替换后会自动去除隔离属性。

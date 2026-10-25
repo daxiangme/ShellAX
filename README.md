@@ -10,6 +10,13 @@ ShellAX 是用 Rust + GPUI 编写的跨平台终端 / SSH 客户端，内置面�
 - **AI 与 Agent**：内置 AI 对话（命令逐条审批执行、输出脱敏、按主机禁读输出）；外部 Agent（Claude Code / Codex / Grok 等）状态识别；`shellax-cli` hook 与策略服务，所有执行都经过权限引擎并写入审计日志；支持组织托管策略 `/etc/shellax/managed-policy.yaml`。
 - **界面**：亮 / 暗主题、主题导入（ShellAX TOML、iTerm2 `.itermcolors`、Alacritty 配色）、命令面板、右键上下文菜单（可自定义）、托盘、中英文界面、可选“减少动态效果”。
 
+## macOS 安装
+
+打开 `ShellAX-macos-aarch64.dmg`，把 ShellAX 拖到 Applications。应用仅做 ad-hoc 签名、未经 Apple 公证，首次打开若提示“无法验证开发者”：
+- 在“应用程序”中右键 ShellAX →“打开”；或
+- “系统设置 → 隐私与安全性”中点击“仍要打开”；或
+- 终端执行 `xattr -dr com.apple.quarantine /Applications/ShellAX.app`。
+
 ## 程序与目录
 - GUI：`shellax`（Windows 为 `shellax.exe`）；CLI：`shellax-cli`（hook、check、serve、hosts、exec、upload、download、play 等子命令）。
 - 配置：`~/.config/shellax/config.toml`（Windows：`%APPDATA%\ShellAX`）；数据：`~/.local/share/shellax`（Windows：`%LOCALAPPDATA%\shellax`）。

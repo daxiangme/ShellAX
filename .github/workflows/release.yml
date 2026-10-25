@@ -78,8 +78,42 @@ jobs:
             <key>NSHighResolutionCapable</key><true/>
           </dict></plist>
           PLIST
-          codesign --force --deep -s - "$APP" || true   # ad-hoc signature only (not notarized)
-          hdiutil create -volname ShellAX -srcfolder "$APP" -ov -format UDZO dist/ShellAX-macos-aarch64.dmg
+          # ad-hoc 签名（无 Developer ID，不做公证）；arm64 必须有一致的签名，否则会提示"已损坏"
+          xattr -cr "$APP"
+          codesign --force -s - "$APP/Contents/MacOS/shellax-cli"
+          codesign --force --deep -s - "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          # 拖拽安装布局：ShellAX.app + Applications 快捷方式
+          brew install create-dmg || true
+          DMG=dist/ShellAX-macos-aarch64.dmg
+          STAGE=$(mktemp -d); ditto "$APP" "$STAGE/ShellAX.app"
+          ok=0
+          for i in 1 2 3 4 5; do
+            rm -f "$DMG"
+            if command -v create-dmg >/dev/null && create-dmg --volname ShellAX \
+                 --window-pos 200 120 --window-size 600 380 --icon-size 110 \
+                 --icon ShellAX.app 160 180 --hide-extension ShellAX.app \
+                 --app-drop-link 440 180 --no-internet-enable --hdiutil-retries 10 \
+                 "$DMG" "$STAGE"; then ok=1; break; fi
+            echo "create-dmg 第 $i 次失败，稍后重试"; sleep 10
+          done
+          if [ $ok = 0 ]; then
+            echo "改用 hdiutil 生成（无窗口布局）"
+            ln -s /Applications "$STAGE/Applications"
+            for i in 1 2 3 4 5; do
+              rm -f "$DMG"
+              hdiutil create -volname ShellAX -srcfolder "$STAGE" -ov -format UDZO "$DMG" && ok=1 && break
+              sleep 10
+            done
+          fi
+          [ $ok = 1 ]
+          # 校验 dmg 内容
+          MNT=$(mktemp -d)
+          hdiutil attach -nobrowse -readonly -mountpoint "$MNT" "$DMG"
+          ls -la "$MNT"
+          test -d "$MNT/ShellAX.app" && test -L "$MNT/Applications"
+          codesign --verify --deep --strict "$MNT/ShellAX.app"
+          for i in 1 2 3 4 5; do hdiutil detach "$MNT" && break || sleep 5; done
           (cd dist && ditto -c -k --keepParent ShellAX.app ShellAX-macos-aarch64.zip)
       - uses: actions/upload-artifact@v4
         with:
@@ -110,8 +144,8 @@ jobs:
             - macOS Apple Silicon：`ShellAX-macos-aarch64.dmg` 或 `.zip`
 
             ### 注意 / Notes
-            - macOS 包未签名、未公证。首次打开请右键 →“打开”，或执行 `xattr -dr com.apple.quarantine /Applications/ShellAX.app`。
-              The macOS app is not signed or notarized: right-click → Open on first launch.
+            - macOS：打开 dmg 后把 ShellAX 拖到 Applications。应用仅做 ad-hoc 签名、未公证，首次打开若提示“无法验证”，请在“应用程序”里右键 ShellAX →“打开”，或到“系统设置 → 隐私与安全性”点“仍要打开”，或执行 `xattr -dr com.apple.quarantine /Applications/ShellAX.app`。
+              macOS: drag ShellAX to Applications. The app is ad-hoc signed, not notarized: on first launch right-click → Open, use System Settings → Privacy & Security → Open Anyway, or run `xattr -dr com.apple.quarantine /Applications/ShellAX.app`.
             - Windows 安装包未做代码签名，SmartScreen 可能提示“已保护你的电脑”，点“更多信息 → 仍要运行”。
               The Windows installer is unsigned; SmartScreen may warn on first run.
           files: out/*
