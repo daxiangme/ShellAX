@@ -390,3 +390,81 @@ fn structure_designer() {
         }
     });
 }
+
+/// SHELLAX_TEST_MSSQL_URL=sqlserver://sa:pass@127.0.0.1:1433/sxtest (the database is created if missing).
+#[test]
+#[ignore]
+fn mssql_end_to_end() {
+    let Some((mut c, pw)) = conn("SHELLAX_TEST_MSSQL_URL") else { eprintln!("SHELLAX_TEST_MSSQL_URL not set"); return };
+    let db = c.database.clone();
+    rt().block_on(async {
+        c.database.clear();
+        let m = driver::connect(&c, pw.clone(), None).await.unwrap();
+        ok(&m, "master", &format!("IF DB_ID(N'{db}') IS NULL CREATE DATABASE [{db}]")).await;
+        m.close().await.unwrap();
+        c.database = db.clone();
+        let d = driver::connect(&c, pw, None).await.unwrap();
+        assert!(d.server_version().await.unwrap().starts_with("16."));
+        assert!(d.databases().await.unwrap().contains(&db));
+        ok(&d, &db, "DROP TABLE IF EXISTS dbo.sx_child").await;
+        ok(&d, &db, "DROP TABLE IF EXISTS dbo.sx_t").await;
+        ok(&d, &db, "CREATE TABLE dbo.sx_t (id int IDENTITY(1,1) PRIMARY KEY, name nvarchar(50) NOT NULL DEFAULT N'x', price decimal(10,2), at datetime2, flag bit, uid uniqueidentifier, raw varbinary(8))").await;
+        ok(&d, &db, "CREATE UNIQUE INDEX ux_name ON dbo.sx_t (name)").await;
+        ok(&d, &db, "CREATE TABLE dbo.sx_child (id int PRIMARY KEY, t_id int CONSTRAINT fk_t REFERENCES dbo.sx_t(id) ON DELETE CASCADE)").await;
+        let r = d.execute(&db, "INSERT INTO dbo.sx_t (name, price, at, flag, uid, raw) VALUES (N'中文', 12.5, '2024-01-02 03:04:05', 1, '6F9619FF-8B86-D011-B42D-00C04FC964FF', 0x00FF), (N'b', NULL, NULL, 0, NULL, NULL)", false).await.unwrap();
+        assert_eq!(r[0].affected, 2, "{:?}", r[0].error);
+        assert_eq!(rows(&d, &db, None, "SELECT name, price, at, flag, uid, raw FROM dbo.sx_t ORDER BY id").await,
+            vec![vec![s("中文"), s("12.50"), s("2024-01-02 03:04:05"), s("1"), s("6F9619FF-8B86-D011-B42D-00C04FC964FF"), s("0x00FF")], vec![s("b"), None, None, s("0"), None, None]]);
+        let tables = d.tables(&db, Some("dbo")).await.unwrap();
+        assert!(tables.iter().any(|t| t.name == "sx_t"));
+        let cols = d.columns(&db, Some("dbo"), "sx_t").await.unwrap();
+        assert_eq!((cols[0].name.as_str(), cols[0].primary, cols[0].extra.as_str()), ("id", true, "identity"));
+        assert_eq!(cols[1].type_name, "nvarchar(50)");
+        assert_eq!(cols[2].type_name, "decimal(10,2)");
+        let (page, total) = d.page(&db, Some("dbo"), "sx_t", "", Some(("id", false)), 0).await.unwrap();
+        assert_eq!((page.rows.len(), total), (2, Some(2)));
+        let ix = d.indexes(&db, Some("dbo"), "sx_t").await.unwrap();
+        assert_eq!(ix[0].name, "ux_name");
+        let fk = d.foreign_keys(&db, Some("dbo"), "sx_child").await.unwrap();
+        assert_eq!((fk[0].name.as_str(), fk[0].on_delete.as_str()), ("fk_t", "CASCADE"));
+        let ddl = d.ddl(&db, Some("dbo"), "sx_t").await.unwrap();
+        assert!(ddl.contains("IDENTITY(1,1)") && ddl.contains("PRIMARY KEY"), "{ddl}");
+        // transaction rolls back on error
+        assert!(d.apply(&db, Some("dbo"), vec!["UPDATE dbo.sx_t SET name = N'z' WHERE id = 2".into(), "INSERT INTO dbo.sx_t (name) VALUES (N'中文')".into()]).await.is_err());
+        assert_eq!(rows(&d, &db, None, "SELECT name FROM dbo.sx_t WHERE id = 2").await, vec![vec![s("b")]]);
+        cancel_case(&d, &db, "WAITFOR DELAY '00:00:30'").await;
+        assert_eq!(rows(&d, &db, None, "SELECT 1").await, vec![vec![s("1")]]);
+        ok(&d, &db, "DROP TABLE dbo.sx_child").await;
+        ok(&d, &db, "DROP TABLE dbo.sx_t").await;
+        d.close().await.unwrap();
+    });
+}
+
+/// SHELLAX_TEST_CLICKHOUSE_URL=clickhouse://user:pass@127.0.0.1:8123/default
+#[test]
+#[ignore]
+fn clickhouse_end_to_end() {
+    let Some((c, pw)) = conn("SHELLAX_TEST_CLICKHOUSE_URL") else { eprintln!("SHELLAX_TEST_CLICKHOUSE_URL not set"); return };
+    rt().block_on(async {
+        let d = driver::connect(&c, pw, None).await.unwrap();
+        assert!(!d.server_version().await.unwrap().is_empty());
+        ok(&d, "", "CREATE DATABASE IF NOT EXISTS sxtest").await;
+        let db = "sxtest";
+        ok(&d, db, "DROP TABLE IF EXISTS sx_t").await;
+        ok(&d, db, "CREATE TABLE sx_t (id UInt32, name String, note Nullable(String), at DateTime) ENGINE = MergeTree ORDER BY id").await;
+        ok(&d, db, "INSERT INTO sx_t VALUES (1, 'a\\tb', NULL, '2024-01-02 03:04:05'), (2, '中文', 'x', '2024-01-02 03:04:05')").await;
+        assert_eq!(rows(&d, db, None, "SELECT id, name, note, at FROM sx_t ORDER BY id").await,
+            vec![vec![s("1"), s("a\tb"), None, s("2024-01-02 03:04:05")], vec![s("2"), s("中文"), s("x"), s("2024-01-02 03:04:05")]]);
+        assert!(d.databases().await.unwrap().contains(&"sxtest".to_string()));
+        assert!(d.tables(db, None).await.unwrap().iter().any(|t| t.name == "sx_t"));
+        let cols = d.columns(db, None, "sx_t").await.unwrap();
+        assert_eq!((cols[0].name.as_str(), cols[0].primary, cols[2].nullable), ("id", true, Some(true)));
+        let (page, total) = d.page(db, None, "sx_t", "", Some(("id", true)), 0).await.unwrap();
+        assert_eq!((page.rows[0][0].clone(), total), (s("2"), Some(2)));
+        assert!(d.ddl(db, None, "sx_t").await.unwrap().contains("MergeTree"));
+        cancel_case(&d, db, "SELECT sleepEachRow(1) FROM numbers(30) SETTINGS max_block_size = 1").await;
+        let e = d.execute(db, "SELECT nope", false).await.unwrap();
+        assert!(e[0].error.is_some());
+        ok(&d, db, "DROP TABLE sx_t").await;
+    });
+}

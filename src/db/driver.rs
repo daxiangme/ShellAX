@@ -66,6 +66,12 @@ pub async fn connect(c: &DbConn, password: Option<String>, endpoint: Option<(Str
             let o = SqliteConnectOptions::new().filename(&c.file).read_only(c.read_only).create_if_missing(false).busy_timeout(Duration::from_secs(5));
             Pools::Lite(SqlitePoolOptions::new().max_connections(2).acquire_timeout(timeout).connect_with(o).await?)
         }
+        Family::Mssql => return Ok(Arc::new(super::mssql::connect(c, password, host, port).await?)),
+        Family::Clickhouse => return Ok(Arc::new(super::clickhouse::connect(c, password, host, port).await?)),
+        #[cfg(feature = "duckdb")]
+        Family::Duckdb => return Ok(Arc::new(super::duck::connect(c).await?)),
+        #[cfg(not(feature = "duckdb"))]
+        Family::Duckdb => anyhow::bail!("{} driver is not available yet", c.kind.label()),
         Family::Other => anyhow::bail!("{} driver is not available yet", c.kind.label()),
     };
     Ok(Arc::new(SqlxDriver { kind: c.kind, pools }))

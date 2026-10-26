@@ -4,21 +4,25 @@ use crate::assets::Family;
 
 pub fn quote_ident(f: Family, s: &str) -> String {
     match f {
-        Family::Mysql => format!("`{}`", s.replace('`', "``")),
+        Family::Mysql | Family::Clickhouse => format!("`{}`", s.replace('`', "``")),
+        Family::Mssql => format!("[{}]", s.replace(']', "]]")),
         _ => format!("\"{}\"", s.replace('"', "\"\"")),
     }
 }
 
 pub fn quote_lit(f: Family, s: &str) -> String {
     let mut v = s.replace('\'', "''");
-    if f == Family::Mysql { v = v.replace('\\', "\\\\"); }
+    if matches!(f, Family::Mysql | Family::Clickhouse) { v = v.replace('\\', "\\\\"); }
+    if f == Family::Mssql { return format!("N'{v}'"); }
     format!("'{v}'")
 }
 
 /// `db.table` (MySQL), `schema.table` (PostgreSQL), `table` (SQLite).
 pub fn qualified(f: Family, db: &str, schema: Option<&str>, table: &str) -> String {
     match f {
-        Family::Mysql if !db.is_empty() => format!("{}.{}", quote_ident(f, db), quote_ident(f, table)),
+        Family::Mysql | Family::Clickhouse if !db.is_empty() => format!("{}.{}", quote_ident(f, db), quote_ident(f, table)),
+        Family::Mssql => format!("{}.{}", quote_ident(f, schema.filter(|s| !s.is_empty()).unwrap_or("dbo")), quote_ident(f, table)),
+        Family::Duckdb => match schema { Some(s) if !s.is_empty() => format!("{}.{}", quote_ident(f, s), quote_ident(f, table)), _ => quote_ident(f, table) },
         Family::Postgres => match schema { Some(s) if !s.is_empty() => format!("{}.{}", quote_ident(f, s), quote_ident(f, table)), _ => quote_ident(f, table) },
         _ => quote_ident(f, table),
     }
@@ -28,12 +32,20 @@ pub fn list_databases(f: Family) -> &'static str {
     match f {
         Family::Mysql => "SHOW DATABASES",
         Family::Postgres => "SELECT datname FROM pg_database WHERE NOT datistemplate AND datallowconn ORDER BY datname",
+        Family::Mssql => "SELECT name FROM sys.databases WHERE HAS_DBACCESS(name) = 1 ORDER BY name",
+        Family::Clickhouse => "SELECT name FROM system.databases ORDER BY name",
+        Family::Duckdb => "SELECT database_name FROM duckdb_databases() WHERE NOT internal ORDER BY database_name",
         _ => "SELECT name FROM pragma_database_list ORDER BY seq",
     }
 }
 
 pub fn list_schemas(f: Family) -> Option<&'static str> {
-    (f == Family::Postgres).then_some("SELECT nspname FROM pg_namespace WHERE nspname !~ '^pg_' AND nspname <> 'information_schema' ORDER BY nspname")
+    match f {
+        Family::Postgres => Some("SELECT nspname FROM pg_namespace WHERE nspname !~ '^pg_' AND nspname <> 'information_schema' ORDER BY nspname"),
+        Family::Mssql => Some("SELECT s.name FROM sys.schemas s WHERE s.schema_id < 16384 AND s.name NOT IN ('sys','INFORMATION_SCHEMA','guest') AND s.name NOT LIKE 'db[_]%' ORDER BY s.name"),
+        Family::Duckdb => Some("SELECT schema_name FROM information_schema.schemata WHERE catalog_name = current_database() AND schema_name NOT IN ('information_schema','pg_catalog') ORDER BY schema_name"),
+        _ => None,
+    }
 }
 
 /// Rows: (name, type) where type contains `VIEW` for views.
@@ -44,6 +56,9 @@ pub fn list_tables(f: Family, db: &str, schema: Option<&str>) -> String {
             "SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = {} \
              UNION ALL SELECT matviewname, 'MATERIALIZED VIEW' FROM pg_matviews WHERE schemaname = {} ORDER BY 1",
             quote_lit(f, schema.unwrap_or("public")), quote_lit(f, schema.unwrap_or("public"))),
+        Family::Mssql => format!("SELECT TABLE_NAME, TABLE_TYPE FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = {} ORDER BY TABLE_NAME", quote_lit(f, schema.unwrap_or("dbo"))),
+        Family::Clickhouse => format!("SELECT name, if(engine LIKE '%View', 'VIEW', 'TABLE') FROM system.tables WHERE database = {} ORDER BY name", quote_lit(f, db)),
+        Family::Duckdb => format!("SELECT table_name, table_type FROM information_schema.tables WHERE table_catalog = current_database() AND table_schema = {} ORDER BY table_name", quote_lit(f, schema.unwrap_or("main"))),
         _ => "SELECT name, type FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY name".into(),
     }
 }
@@ -66,6 +81,23 @@ pub fn list_columns(f: Family, db: &str, schema: Option<&str>, table: &str) -> S
                  LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
                  WHERE n.nspname = {s} AND c.relname = {t} AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum")
         }
+        Family::Mssql => format!(
+            "SELECT c.name, TYPE_NAME(c.user_type_id) + CASE WHEN TYPE_NAME(c.user_type_id) IN ('varchar','char','varbinary','binary') THEN '(' + IIF(c.max_length = -1, 'max', CAST(c.max_length AS varchar(10))) + ')' \
+             WHEN TYPE_NAME(c.user_type_id) IN ('nvarchar','nchar') THEN '(' + IIF(c.max_length = -1, 'max', CAST(c.max_length / 2 AS varchar(10))) + ')' \
+             WHEN TYPE_NAME(c.user_type_id) IN ('decimal','numeric') THEN '(' + CAST(c.precision AS varchar(5)) + ',' + CAST(c.scale AS varchar(5)) + ')' ELSE '' END, \
+             IIF(c.is_nullable = 1, 'YES', 'NO'), \
+             IIF(EXISTS (SELECT 1 FROM sys.index_columns ic JOIN sys.indexes i ON i.object_id = ic.object_id AND i.index_id = ic.index_id WHERE i.is_primary_key = 1 AND ic.object_id = c.object_id AND ic.column_id = c.column_id), 'PRI', ''), \
+             OBJECT_DEFINITION(c.default_object_id), CAST(ep.value AS nvarchar(4000)), IIF(c.is_identity = 1, 'identity', IIF(c.is_computed = 1, 'computed', '')) \
+             FROM sys.columns c LEFT JOIN sys.extended_properties ep ON ep.major_id = c.object_id AND ep.minor_id = c.column_id AND ep.name = 'MS_Description' \
+             WHERE c.object_id = OBJECT_ID({}) ORDER BY c.column_id", quote_lit(f, &qualified(f, db, schema, table))),
+        Family::Clickhouse => format!(
+            "SELECT name, type, if(type LIKE 'Nullable(%', 'YES', 'NO'), if(is_in_primary_key, 'PRI', ''), if(default_expression = '', NULL, default_expression), comment, default_kind \
+             FROM system.columns WHERE database = {} AND table = {} ORDER BY position", quote_lit(f, db), quote_lit(f, table)),
+        Family::Duckdb => format!(
+            "SELECT c.column_name, c.data_type, c.is_nullable, \
+             CASE WHEN EXISTS (SELECT 1 FROM duckdb_constraints() k WHERE k.constraint_type = 'PRIMARY KEY' AND k.schema_name = c.table_schema AND k.table_name = c.table_name AND list_contains(k.constraint_column_names, c.column_name)) THEN 'PRI' ELSE '' END, \
+             c.column_default, '', '' FROM information_schema.columns c WHERE c.table_catalog = current_database() AND c.table_schema = {} AND c.table_name = {} ORDER BY c.ordinal_position",
+            quote_lit(f, schema.unwrap_or("main")), quote_lit(f, table)),
         _ => format!(
             "SELECT name, type, CASE WHEN \"notnull\" = 1 THEN 'NO' ELSE 'YES' END, CASE WHEN pk > 0 THEN 'PRI' ELSE '' END, dflt_value, '', CASE hidden WHEN 2 THEN 'generated virtual' WHEN 3 THEN 'generated stored' ELSE '' END \
              FROM pragma_table_xinfo({}) ORDER BY cid", quote_lit(f, table)),
@@ -78,6 +110,12 @@ pub fn select_page(f: Family, table: &str, where_: &str, order: Option<(&str, bo
     let mut s = format!("SELECT * FROM {table}");
     if !where_.trim().is_empty() { s.push_str(" WHERE "); s.push_str(where_.trim()); }
     if let Some((col, desc)) = order { s.push_str(&format!(" ORDER BY {}{}", quote_ident(f, col), if desc { " DESC" } else { "" })); }
+    if f == Family::Mssql {
+        // OFFSET/FETCH needs an ORDER BY
+        if order.is_none() { s.push_str(" ORDER BY (SELECT NULL)"); }
+        s.push_str(&format!(" OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY"));
+        return s;
+    }
     s.push_str(&format!(" LIMIT {limit} OFFSET {offset}"));
     s
 }
@@ -87,7 +125,7 @@ pub fn count(table: &str, where_: &str) -> String {
 }
 
 /// Statement that switches the session's default database, where the engine has one.
-pub fn use_database(f: Family, db: &str) -> Option<String> { (f == Family::Mysql && !db.is_empty()).then(|| format!("USE {}", quote_ident(f, db))) }
+pub fn use_database(f: Family, db: &str) -> Option<String> { (matches!(f, Family::Mysql | Family::Mssql) && !db.is_empty()).then(|| format!("USE {}", quote_ident(f, db))) }
 
 #[cfg(test)]
 mod tests {
@@ -113,6 +151,10 @@ mod tests {
         assert!(list_tables(Family::Mysql, "x'y", None).contains("'x''y'"));
         assert_eq!(use_database(Family::Mysql, "a"), Some("USE `a`".into()));
         assert_eq!(use_database(Family::Postgres, "a"), None);
+        assert_eq!(select_page(Family::Mssql, "[dbo].[t]", "", None, 10, 20), "SELECT * FROM [dbo].[t] ORDER BY (SELECT NULL) OFFSET 20 ROWS FETCH NEXT 10 ROWS ONLY");
+        assert_eq!(qualified(Family::Mssql, "d", None, "a]b"), "[dbo].[a]]b]");
+        assert_eq!(quote_lit(Family::Mssql, "o'k"), "N'o''k'");
+        assert_eq!(qualified(Family::Clickhouse, "d", None, "t"), "`d`.`t`");
     }
 }
 
@@ -169,4 +211,19 @@ mod ddl_tests {
         let s = pg_create_table("\"public\".\"t\"", &cols, &[("t_pkey".into(), "PRIMARY KEY (id)".into())], &["CREATE INDEX t_name ON public.t USING btree (name)".into()]);
         assert_eq!(s, "CREATE TABLE \"public\".\"t\" (\n  \"id\" serial NOT NULL,\n  \"g\" integer GENERATED ALWAYS AS ((id * 2)) STORED,\n  \"name\" character varying(20),\n  CONSTRAINT \"t_pkey\" PRIMARY KEY (id)\n);\nCOMMENT ON COLUMN \"public\".\"t\".\"name\" IS 'it''s';\nCREATE INDEX t_name ON public.t USING btree (name);");
     }
+}
+
+/// `CREATE TABLE` text for SQL Server assembled from columns (no built-in DDL for tables).
+pub fn mssql_create_table(q: &str, cols: &[super::ColumnInfo]) -> String {
+    let f = Family::Mssql;
+    let mut lines: Vec<String> = cols.iter().map(|c| {
+        let mut l = format!("    {} {}", quote_ident(f, &c.name), c.type_name);
+        if c.extra == "identity" { l.push_str(" IDENTITY(1,1)"); }
+        if c.nullable == Some(false) { l.push_str(" NOT NULL"); }
+        if let Some(d) = &c.default { l.push_str(" DEFAULT "); l.push_str(d); }
+        l
+    }).collect();
+    let pk: Vec<String> = cols.iter().filter(|c| c.primary).map(|c| quote_ident(f, &c.name)).collect();
+    if !pk.is_empty() { lines.push(format!("    PRIMARY KEY ({})", pk.join(", "))); }
+    format!("CREATE TABLE {q} (\n{}\n);", lines.join(",\n"))
 }

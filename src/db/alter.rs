@@ -185,6 +185,12 @@ pub fn list_indexes(f: Family, db: &str, schema: Option<&str>, table: &str) -> S
                  CASE WHEN EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid = i.indexrelid) THEN 1 ELSE 0 END \
                  FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid WHERE i.indrelid = {q}::regclass AND NOT i.indisprimary ORDER BY 1")
         }
+        Family::Mssql => format!(
+            "SELECT i.name, CAST(i.is_unique AS int), STRING_AGG(c.name, CHAR(31)) WITHIN GROUP (ORDER BY ic.key_ordinal), CAST(i.is_unique_constraint AS int) \
+             FROM sys.indexes i JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 0 \
+             JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id \
+             WHERE i.object_id = OBJECT_ID({}) AND i.is_primary_key = 0 AND i.name IS NOT NULL GROUP BY i.name, i.is_unique, i.is_unique_constraint ORDER BY i.name",
+            quote_lit(f, &super::dialect::qualified(f, db, schema, table))),
         _ => format!(
             "SELECT il.name, il.\"unique\", (SELECT group_concat(name, char(31)) FROM (SELECT name FROM pragma_index_info(il.name) ORDER BY seqno)), 0 \
              FROM pragma_index_list({}) il WHERE il.origin <> 'pk' ORDER BY il.name", quote_lit(f, table)),
@@ -213,6 +219,16 @@ pub fn list_fks(f: Family, db: &str, schema: Option<&str>, table: &str) -> Strin
                  array_to_string(ARRAY(SELECT a.attname FROM unnest(c.confkey) WITH ORDINALITY u(n, o) JOIN pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = u.n ORDER BY u.o), chr(31)), \
                  {}, {} FROM pg_constraint c WHERE c.conrelid = {q}::regclass AND c.contype = 'f' ORDER BY 1", act("c.confdeltype"), act("c.confupdtype"))
         }
+        Family::Mssql => format!(
+            "SELECT fk.name, STRING_AGG(pc.name, CHAR(31)) WITHIN GROUP (ORDER BY fkc.constraint_column_id), \
+             MIN(QUOTENAME(OBJECT_SCHEMA_NAME(fk.referenced_object_id)) + '.' + QUOTENAME(OBJECT_NAME(fk.referenced_object_id))), \
+             STRING_AGG(rc.name, CHAR(31)) WITHIN GROUP (ORDER BY fkc.constraint_column_id), \
+             MIN(REPLACE(fk.delete_referential_action_desc, '_', ' ')), MIN(REPLACE(fk.update_referential_action_desc, '_', ' ')) \
+             FROM sys.foreign_keys fk JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id \
+             JOIN sys.columns pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id \
+             JOIN sys.columns rc ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id \
+             WHERE fk.parent_object_id = OBJECT_ID({}) GROUP BY fk.name ORDER BY 1",
+            quote_lit(f, &super::dialect::qualified(f, db, schema, table))),
         _ => format!(
             "SELECT 'fk_' || id, group_concat(\"from\", char(31)), '\"' || replace(\"table\", '\"', '\"\"') || '\"', group_concat(\"to\", char(31)), MIN(on_delete), MIN(on_update) \
              FROM (SELECT * FROM pragma_foreign_key_list({}) ORDER BY id, seq) GROUP BY id ORDER BY id", quote_lit(f, table)),

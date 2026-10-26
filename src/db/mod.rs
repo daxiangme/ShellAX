@@ -3,6 +3,10 @@
 //! talks to a driver crate directly.
 pub mod dialect;
 pub mod driver;
+pub mod mssql;
+pub mod clickhouse;
+#[cfg(feature = "duckdb")]
+pub mod duck;
 pub mod live;
 pub mod split;
 pub mod edit;
@@ -128,7 +132,12 @@ impl dyn SqlDriver {
     }
 
     pub async fn server_version(&self) -> Result<String> {
-        let q = match self.family() { Family::Mysql => "SELECT VERSION()", Family::Postgres => "SHOW server_version", _ => "SELECT sqlite_version()" };
+        let q = match self.family() {
+            Family::Mysql => "SELECT VERSION()", Family::Postgres => "SHOW server_version",
+            Family::Mssql => "SELECT CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(64))",
+            Family::Clickhouse => "SELECT version()", Family::Duckdb => "SELECT version()",
+            _ => "SELECT sqlite_version()",
+        };
         Ok(self.one("", q.into()).await?.first().unwrap_or_default().to_string())
     }
 
@@ -216,6 +225,18 @@ impl dyn SqlDriver {
                 let cons: Vec<(String, String)> = cons.rows.iter().map(|r| (r.first().cloned().flatten().unwrap_or_default(), r.get(1).cloned().flatten().unwrap_or_default())).collect();
                 Ok(dialect::pg_create_table(&q, &cols, &cons, &idx.col(0).collect::<Vec<_>>()))
             }
+            Family::Clickhouse => Ok(self.one(db, format!("SHOW CREATE TABLE {q}")).await?.first().unwrap_or_default().to_string() + ";"),
+            Family::Duckdb => {
+                let (s, t) = (dialect::quote_lit(f, schema.unwrap_or("main")), dialect::quote_lit(f, table));
+                let r = self.one(db, format!("SELECT sql FROM duckdb_tables() WHERE schema_name = {s} AND table_name = {t} UNION ALL SELECT sql FROM duckdb_views() WHERE schema_name = {s} AND view_name = {t} UNION ALL SELECT sql FROM duckdb_indexes() WHERE schema_name = {s} AND table_name = {t} AND sql IS NOT NULL")).await?;
+                Ok(r.col(0).map(|s| if s.trim_end().ends_with(';') { s } else { s + ";" }).collect::<Vec<_>>().join("\n\n"))
+            }
+            Family::Mssql => {
+                let def = self.one(db, format!("SELECT OBJECT_DEFINITION(OBJECT_ID({}))", dialect::quote_lit(f, &q))).await?.first().unwrap_or_default().to_string();
+                if !def.trim().is_empty() { return Ok(def.trim_end().to_string()); }
+                let cols = self.columns(db, schema, table).await?;
+                Ok(dialect::mssql_create_table(&q, &cols))
+            }
             _ => {
                 let r = self.one(db, format!("SELECT sql FROM sqlite_master WHERE tbl_name = {} AND sql IS NOT NULL ORDER BY type = 'index', name", dialect::quote_lit(f, table))).await?;
                 Ok(r.col(0).map(|s| s + ";").collect::<Vec<_>>().join("\n\n"))
@@ -224,6 +245,7 @@ impl dyn SqlDriver {
     }
 
     pub async fn indexes(&self, db: &str, schema: Option<&str>, table: &str) -> Result<Vec<alter::IndexDef>> {
+        if matches!(self.family(), Family::Clickhouse | Family::Duckdb) { return Ok(vec![]); }
         let r = self.one(db, alter::list_indexes(self.family(), db, schema, table)).await?;
         Ok(r.rows.iter().map(|row| {
             let g = |i: usize| row.get(i).cloned().flatten().unwrap_or_default();
@@ -232,6 +254,7 @@ impl dyn SqlDriver {
     }
 
     pub async fn foreign_keys(&self, db: &str, schema: Option<&str>, table: &str) -> Result<Vec<alter::FkDef>> {
+        if matches!(self.family(), Family::Clickhouse | Family::Duckdb) { return Ok(vec![]); }
         let r = self.one(db, alter::list_fks(self.family(), db, schema, table)).await?;
         Ok(r.rows.iter().map(|row| {
             let g = |i: usize| row.get(i).cloned().flatten().unwrap_or_default();

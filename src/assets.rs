@@ -24,7 +24,7 @@ pub enum DbKind {
 
 /// Wire protocol family: decides which driver adapter serves a kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Family { Mysql, Postgres, Sqlite, Other }
+pub enum Family { Mysql, Postgres, Sqlite, Mssql, Clickhouse, Duckdb, Other }
 
 impl DbKind {
     pub const ALL: [DbKind; 15] = [
@@ -55,6 +55,10 @@ impl DbKind {
             DbKind::Mysql | DbKind::Mariadb | DbKind::Starrocks | DbKind::Oceanbase => Family::Mysql,
             DbKind::Postgres | DbKind::Opengauss | DbKind::Kingbase => Family::Postgres,
             DbKind::Sqlite => Family::Sqlite,
+            DbKind::Sqlserver => Family::Mssql,
+            DbKind::Clickhouse => Family::Clickhouse,
+            #[cfg(feature = "duckdb")]
+            DbKind::Duckdb => Family::Duckdb,
             _ => Family::Other,
         }
     }
