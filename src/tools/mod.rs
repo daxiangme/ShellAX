@@ -15,6 +15,7 @@ pub mod num;
 pub mod text;
 pub mod time;
 pub mod pinyin;
+pub mod ws;
 
 /// 字段类型：输入与选项共用。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

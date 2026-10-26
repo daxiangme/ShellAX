@@ -105,3 +105,5 @@ On Windows the default fallback chain also lists the system fonts "Segoe UI Symb
 - base64 0.22, percent-encoding 2, hex 0.4, uuid 1 — MIT OR Apache-2.0
 - sqlformat 0.5 — MIT OR Apache-2.0; croner 4 — MIT; pulldown-cmark 0.13 — MIT
 - `src/tools/pinyin.rs` 首字母表依据 GB2312 一级汉字的拼音排序（标准字符集顺序）生成，未复制第三方代码或数据库。
+## tokio-tungstenite 0.28 / tungstenite 0.28 — MIT OR Apache-2.0 (dependency, unmodified; WebSocket 测试工具)
+- 工具箱图标 assets/icons/db/toolbox.svg — 本项目原创图形

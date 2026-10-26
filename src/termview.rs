@@ -602,7 +602,7 @@ pub struct SearchBar { pub query: String, pub cur: Option<(BPoint, BPoint)>, pub
 #[derive(Clone, Debug, PartialEq)]
 pub struct StepOutput { pub cmd: String, pub exit: Option<i32>, pub output: String, pub withheld: bool }
 
-pub enum TermEvent { Keyword(String, String), Explain, Agent(String, AgentState), LongDone(String, u64, i32), Audit(&'static str, String), CtxEditor(String), CtxCdTab(String), CtxAiExplain(String), CtxUseAi, Copied, Toast(String), RetryConnect, EditHost }
+pub enum TermEvent { Keyword(String, String), Explain, Agent(String, AgentState), LongDone(String, u64, i32), Audit(&'static str, String), CtxEditor(String), CtxCdTab(String), CtxAiExplain(String), CtxOpenTool(String, String), CtxUseAi, Copied, Toast(String), RetryConnect, EditHost }
 
 /// IME support (PRD 3.3: IME must work for agents too). Committed text goes to the PTY like typing;
 /// composition text is only drawn (never sent) until the IME commits it.
@@ -1883,13 +1883,16 @@ impl TermView {
             Act::OpenUrl(u) => cx.open_url(&u),
             Act::Search(q) => { self.search = Some(SearchBar { query: q.replace('\n', " "), cur: None, found: None }); self.search_step(false, cx); }
             Act::AiExplain(text) => cx.emit(TermEvent::CtxAiExplain(text)),
-            Act::PasteInput(text) => {
-                if let Some(s) = self.session.clone() { let one = text.replace(['\r', '\n'], " "); s.write(one.clone().into_bytes()); self.tracker.key(Key::Text(&one)); }
-            }
+            Act::OpenTool(id, text) => cx.emit(TermEvent::CtxOpenTool(id, text)),
+            Act::PasteInput(text) => self.insert_text(&text),
             Act::UseAiContext => cx.emit(TermEvent::CtxUseAi),
             Act::Download(_) | Act::Upload(_) => {}
         }
         cx.notify();
+    }
+    /// Type text into the input line as one line, without Enter.
+    pub fn insert_text(&mut self, text: &str) {
+        if let Some(s) = self.session.clone() { let one = text.replace(['\r', '\n'], " "); s.write(one.clone().into_bytes()); self.tracker.key(Key::Text(&one)); }
     }
     fn ctx_close(&mut self, cx: &mut Context<Self>) { if self.ctx_menu.take().is_some() { cx.notify(); } }
     pub fn ready(&self) -> bool { self.session.is_some() }
@@ -2519,13 +2522,14 @@ pub enum Embed {
     Log(Entity<crate::dock_view::LogView>),
     Mongo(Entity<crate::doc_view::DocView>),
     Gone(Entity<crate::kv_ui::GoneView>),
+    Tool(Entity<crate::tools_view::ToolView>),
 }
 
 impl Embed {
-    pub fn view(&self) -> gpui::AnyView { match self { Embed::Kv(v) => v.clone().into(), Embed::Dock(v) => v.clone().into(), Embed::Log(v) => v.clone().into(), Embed::Mongo(v) => v.clone().into(), Embed::Gone(v) => v.clone().into() } }
-    pub fn title(&self, cx: &gpui::App) -> String { match self { Embed::Kv(v) => v.read(cx).title.clone(), Embed::Dock(v) => v.read(cx).title.clone(), Embed::Log(v) => v.read(cx).title.clone(), Embed::Mongo(v) => v.read(cx).title.clone(), Embed::Gone(v) => v.read(cx).what.clone() } }
-    pub fn crumbs(&self, cx: &gpui::App) -> String { match self { Embed::Kv(v) => v.read(cx).crumbs(), Embed::Dock(v) => v.read(cx).crumbs(), Embed::Log(v) => v.read(cx).title.clone(), Embed::Mongo(v) => v.read(cx).crumbs(), Embed::Gone(v) => v.read(cx).what.clone() } }
-    pub fn badge(&self) -> &'static str { match self { Embed::Kv(_) => "Redis", Embed::Dock(_) | Embed::Log(_) => "Docker", Embed::Mongo(_) => "MongoDB", Embed::Gone(_) => "—" } }
+    pub fn view(&self) -> gpui::AnyView { match self { Embed::Kv(v) => v.clone().into(), Embed::Dock(v) => v.clone().into(), Embed::Log(v) => v.clone().into(), Embed::Mongo(v) => v.clone().into(), Embed::Gone(v) => v.clone().into(), Embed::Tool(v) => v.clone().into() } }
+    pub fn title(&self, cx: &gpui::App) -> String { match self { Embed::Kv(v) => v.read(cx).title.clone(), Embed::Dock(v) => v.read(cx).title.clone(), Embed::Log(v) => v.read(cx).title.clone(), Embed::Mongo(v) => v.read(cx).title.clone(), Embed::Gone(v) => v.read(cx).what.clone(), Embed::Tool(v) => v.read(cx).title.clone() } }
+    pub fn crumbs(&self, cx: &gpui::App) -> String { match self { Embed::Kv(v) => v.read(cx).crumbs(), Embed::Dock(v) => v.read(cx).crumbs(), Embed::Log(v) => v.read(cx).title.clone(), Embed::Mongo(v) => v.read(cx).crumbs(), Embed::Gone(v) => v.read(cx).what.clone(), Embed::Tool(v) => v.read(cx).title.clone() } }
+    pub fn badge(&self) -> &'static str { match self { Embed::Kv(_) => "Redis", Embed::Dock(_) | Embed::Log(_) => "Docker", Embed::Mongo(_) => "MongoDB", Embed::Gone(_) => "—", Embed::Tool(_) => t("tool.tools") } }
     /// Layout entry; `None` for a placeholder (the tab is dropped on save).
-    pub fn save(&self, cx: &gpui::App) -> Option<ssh_term_proto::session_store::PaneSave> { match self { Embed::Kv(v) => Some(v.read(cx).save()), Embed::Dock(v) => Some(v.read(cx).save()), Embed::Log(v) => Some(v.read(cx).save()), Embed::Mongo(v) => Some(v.read(cx).save()), Embed::Gone(v) => v.read(cx).save.clone() } }
+    pub fn save(&self, cx: &gpui::App) -> Option<ssh_term_proto::session_store::PaneSave> { match self { Embed::Kv(v) => Some(v.read(cx).save()), Embed::Dock(v) => Some(v.read(cx).save()), Embed::Log(v) => Some(v.read(cx).save()), Embed::Mongo(v) => Some(v.read(cx).save()), Embed::Gone(v) => v.read(cx).save.clone(), Embed::Tool(_) => None } }
 }

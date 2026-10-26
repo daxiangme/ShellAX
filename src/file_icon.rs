@@ -22,6 +22,7 @@ const FILES: &[(&str, &[u8])] = &[
     ("shellax/files/mark_exec.svg", include_bytes!("../assets/icons/files/mark_exec.svg")),
     ("shellax/db/docker.svg", include_bytes!("../assets/icons/db/docker.svg")),
     ("shellax/db/redis.svg", include_bytes!("../assets/icons/db/redis.svg")),
+    ("shellax/db/toolbox.svg", include_bytes!("../assets/icons/db/toolbox.svg")),
     ("shellax/db/generic.svg", include_bytes!("../assets/icons/db/generic.svg")),
     ("shellax/db/mysql.svg", include_bytes!("../assets/icons/db/mysql.svg")),
     ("shellax/db/postgres.svg", include_bytes!("../assets/icons/db/postgres.svg")),
