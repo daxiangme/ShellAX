@@ -83,7 +83,7 @@ impl DbKind {
     /// A driver is wired up in this build.
     pub fn driver_ready(self) -> bool { self.family() != Family::Other }
     /// Has schemas between database and tables (PostgreSQL family).
-    pub fn has_schemas(self) -> bool { self.family() == Family::Postgres }
+    pub fn has_schemas(self) -> bool { matches!(self.family(), Family::Postgres | Family::Mssql) }
 }
 
 /// `[[db]]` in config.toml. Secrets are never stored here: the password lives in the

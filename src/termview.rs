@@ -454,6 +454,8 @@ pub struct TermView {
     pub sftp: Option<Entity<crate::sftp_view::SftpView>>,
     /// Database tab (table browser / SQL editor) instead of a shell.
     pub db: Option<Entity<crate::db_view::DbView>>,
+    /// Redis / container / log view hosted instead of a shell.
+    pub embed: Option<Embed>,
     pub title: SharedString,
     pub spec: Spec,
     pub session: Option<Arc<Session>>,
@@ -569,7 +571,15 @@ impl TermView {
         me
     }
     /// Hosts an SFTP or database view rather than a shell.
-    pub fn embedded(&self) -> bool { self.sftp.is_some() || self.db.is_some() }
+    /// A leaf hosting a Redis, container or log view.
+    pub fn new_embed(e: Embed, history: Arc<Mutex<History>>, manifests: Arc<Vec<Manifest>>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let title = e.title(cx);
+        let mut me = Self::new(&title, Spec::Local, Err(anyhow::anyhow!("embed")), history, manifests, window, cx);
+        me.error = None;
+        me.embed = Some(e);
+        me
+    }
+    pub fn embedded(&self) -> bool { self.sftp.is_some() || self.db.is_some() || self.embed.is_some() }
     pub fn shown_title(&self) -> SharedString {
         if self.embedded() { return self.title.clone(); }
         match (&self.spec, self.title.rsplit_once(" · ")) {
@@ -645,7 +655,7 @@ impl TermView {
             selecting: false, scroll_drag: false, history, tracker: InputTracker::new(),
             born: Instant::now(), progress_tick: false, last_activity: Instant::now(), blink_running: false, software_gpu: std::env::var("SHELLAX_FORCE_BLINK").ok().map(|_| false), last_mouse_cell: None, mouse_down_btn: None,
             manifests, last_command: None, agent: None, agent_seen: Instant::now(), last_detect: Instant::now() - Duration::from_secs(5),
-            detect_scheduled: false, pending_paste: None, pending_cd: None, ai: None, daemon_id: None, resume_offer: None, clip_ask: None, pty_ask: None, pty_write_ok: false, search: None, last_agent: None, failed: None, exit_seen: 0, ai_inline_seq: 0, ai_inline: None, bell_until: None, cmd_started: None, ai_capture: None, ctx_menu: None, ctx_pending: None, ctx_confirm: None, ctx_denied: None, sftp: None, db: None, _subs: subs,
+            detect_scheduled: false, pending_paste: None, pending_cd: None, ai: None, daemon_id: None, resume_offer: None, clip_ask: None, pty_ask: None, pty_write_ok: false, search: None, last_agent: None, failed: None, exit_seen: 0, ai_inline_seq: 0, ai_inline: None, bell_until: None, cmd_started: None, ai_capture: None, ctx_menu: None, ctx_pending: None, ctx_confirm: None, ctx_denied: None, sftp: None, db: None, embed: None, _subs: subs,
         }
     }
 
@@ -657,6 +667,7 @@ impl TermView {
             Some(_) => (t("ui.connecting"), c(th.warning)),
             None if self.sftp.is_some() => ("SFTP", c(th.accent)),
             None if self.db.is_some() => ("DB", c(th.accent)),
+            None if self.embed.is_some() => (self.embed.as_ref().unwrap().badge(), c(th.accent)),
             None => (t("ui.connection_failed"), c(th.error)),
         }
     }
@@ -2052,6 +2063,9 @@ fn fanout(s: &Arc<Session>, bytes: Vec<u8>) {
 impl Render for TermView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
+        if let Some(e) = &self.embed {
+            return div().track_focus(&self.focus).flex_1().size_full().flex().flex_col().overflow_hidden().child(e.view());
+        }
         if let Some(v) = self.db.clone() {
             return div().track_focus(&self.focus).flex_1().size_full().flex().flex_col().overflow_hidden().child(v);
         }
@@ -2302,4 +2316,19 @@ mod tests {
         assert!(!paste(false, "v", true, false, false, true));
         assert!(!paste(true, "c", false, true, false, false));
     }
+}
+
+/// Non-terminal content a layout leaf can host.
+#[derive(Clone)]
+pub enum Embed {
+    Kv(Entity<crate::kv_view::KvView>),
+    Dock(Entity<crate::dock_view::DockView>),
+    Log(Entity<crate::dock_view::LogView>),
+}
+
+impl Embed {
+    pub fn view(&self) -> gpui::AnyView { match self { Embed::Kv(v) => v.clone().into(), Embed::Dock(v) => v.clone().into(), Embed::Log(v) => v.clone().into() } }
+    pub fn title(&self, cx: &gpui::App) -> String { match self { Embed::Kv(v) => v.read(cx).title.clone(), Embed::Dock(v) => v.read(cx).title.clone(), Embed::Log(v) => v.read(cx).title.clone() } }
+    pub fn crumbs(&self, cx: &gpui::App) -> String { match self { Embed::Kv(v) => v.read(cx).crumbs(), Embed::Dock(v) => v.read(cx).crumbs(), Embed::Log(v) => v.read(cx).title.clone() } }
+    pub fn badge(&self) -> &'static str { match self { Embed::Kv(_) => "Redis", Embed::Dock(_) | Embed::Log(_) => "Docker" } }
 }

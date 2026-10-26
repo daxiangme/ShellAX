@@ -14,6 +14,7 @@ mod db_ui;
 mod db_view;
 mod kv_view;
 mod dock_view;
+mod kv_ui;
 mod db_editor;
 mod tabs_ui;
 mod config;
@@ -178,7 +179,7 @@ enum Modal { Broadcast(Vec<String>), Snapshots, Recordings, QuickStart { dir: St
 
 struct Tab { layout: Node<Entity<TermView>>, focused: Entity<TermView>, /** custom name (PRD 5.23) */ name: Option<String> }
 
-pub(crate) enum Overlay { None, Palette(Entity<Palette>), Host(Entity<HostDialog>), Audit, Sftp, Port, HostTools(Entity<host_tools_view::HostToolsView>), Db(Entity<db_dialog::DbDialog>) }
+pub(crate) enum Overlay { None, Palette(Entity<Palette>), Host(Entity<HostDialog>), Audit, Sftp, Port, HostTools(Entity<host_tools_view::HostToolsView>), Db(Entity<db_dialog::DbDialog>), Asset(Entity<kv_ui::AssetDialog>) }
 
 /// Which right-hand card is open. AI, saved commands and history share one slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1803,7 +1804,7 @@ impl Render for Root {
                 .child({
                     // small monochrome kind icon: terminal / ssh / sftp
                     let v = panes[0].read(cx);
-                    let ic = if v.db.is_some() { IconName::Database } else if v.sftp.is_some() { IconName::FolderSync } else if matches!(v.spec, Spec::Ssh(_)) { IconName::Server } else { IconName::SquareTerminal };
+                    let ic = if matches!(v.embed, Some(termview::Embed::Kv(_))) { IconName::Database } else if v.embed.is_some() { IconName::Container } else if v.db.is_some() { IconName::Database } else if v.sftp.is_some() { IconName::FolderSync } else if matches!(v.spec, Spec::Ssh(_)) { IconName::Server } else { IconName::SquareTerminal };
                     icon(ic, 13., if active { c(th.subtext) } else { c(th.overlay1) })
                 })
                 .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.)).text_color(if active { c(th.text) } else { c(th.overlay1) }).when(active, |d| d.font_weight(FontWeight::MEDIUM))
@@ -1898,7 +1899,9 @@ impl Render for Root {
             Some(p) => {
                 let v = p.read(cx);
                 let (st, col) = v.status(&th);
-                if let Some(dbv) = &v.db {
+                if let Some(e) = &v.embed {
+                    (st, col, String::new(), SharedString::from(e.crumbs(cx)), String::new())
+                } else if let Some(dbv) = &v.db {
                     // database pane: connection › database › schema › table instead of terminal info
                     let crumbs = dbv.read(cx).crumbs();
                     (st, col, String::new(), SharedString::from(crumbs), String::new())
@@ -2054,6 +2057,7 @@ impl Render for Root {
             Overlay::Palette(p) => Some(div().absolute().top_0().left_0().size_full().child(p.clone()).into_any_element()),
             Overlay::Host(d) => Some(div().absolute().top_0().left_0().size_full().child(d.clone()).into_any_element()),
             Overlay::Db(d) => Some(div().absolute().top_0().left_0().size_full().child(d.clone()).into_any_element()),
+            Overlay::Asset(d) => Some(div().absolute().top_0().left_0().size_full().child(d.clone()).into_any_element()),
             Overlay::Audit => Some(self.audit_panel(cx)),
             Overlay::Sftp => Some(self.sftp_panel(cx)),
             Overlay::Port => Some(self.port_panel(cx)),

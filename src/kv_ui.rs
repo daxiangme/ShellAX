@@ -1,0 +1,274 @@
+//! Redis and container tool windows: saved connections / endpoints, their edit dialog,
+//! and opening Redis, container, log and exec tabs.
+use gpui::{div, prelude::*, px, AnyElement, Context, Entity, EventEmitter, FontWeight, SharedString, Window};
+use gpui_component::input::InputState;
+use gpui_component::switch::Switch;
+use ssh_term_proto::assets::{self, DockerEndpoint};
+use ssh_term_proto::i18n::t;
+
+use crate::activity::panel_title;
+use crate::config;
+use crate::dock_view::{DockEvent, DockView, LogView};
+use crate::kv_view::KvView;
+use crate::termview::{Embed, Spec, TermView};
+use crate::theme::{c, cur};
+use crate::ui::{self, icon, IconName};
+use crate::{Node, Overlay, Root, Tab};
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum AssetKind { Redis, Docker }
+
+pub enum AssetEvent { Saved, Close }
+
+/// New / edit dialog for a `[[redis]]` connection or a `[[docker]]` endpoint.
+pub struct AssetDialog {
+    kind: AssetKind,
+    id: Option<String>,
+    name: Entity<InputState>,
+    host: Entity<InputState>,
+    port: Entity<InputState>,
+    nodes: Entity<InputState>,
+    master: Entity<InputState>,
+    user: Entity<InputState>,
+    password: Entity<InputState>,
+    db: Entity<InputState>,
+    via: Entity<InputState>,
+    socket: Entity<InputState>,
+    group: Entity<InputState>,
+    mode: String,
+    tls: String,
+    production: bool,
+    read_only: bool,
+    hosts: Vec<String>,
+    error: Option<String>,
+}
+
+impl EventEmitter<AssetEvent> for AssetDialog {}
+
+impl AssetDialog {
+    pub fn new(kind: AssetKind, id: Option<String>, hosts: Vec<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let s = config::get();
+        let prod_tag = s.tags.production.clone();
+        let r = id.as_ref().and_then(|i| s.redis.iter().find(|x| &x.id == i)).cloned().unwrap_or_default();
+        let d = id.as_ref().and_then(|i| s.docker.iter().find(|x| &x.id == i)).cloned().unwrap_or_default();
+        let mk = |ph: &str, v: String, masked: bool, window: &mut Window, cx: &mut Context<Self>| { let ph = ph.to_string(); cx.new(|cx| InputState::new(window, cx).masked(masked).placeholder(ph).default_value(v)) };
+        let pw = if kind == AssetKind::Redis && id.is_some() { crate::secret_store().get(&r.password_secret()).map(|x| x.0).unwrap_or_default() } else { String::new() };
+        let redis = kind == AssetKind::Redis;
+        Self {
+            name: mk(&t("ui.name"), if redis { r.name.clone() } else { d.name.clone() }, false, window, cx),
+            host: mk("127.0.0.1", r.host.clone(), false, window, cx),
+            port: mk("6379", r.port.map(|p| p.to_string()).unwrap_or_default(), false, window, cx),
+            nodes: mk("10.0.0.2:6379, 10.0.0.3:6379", r.nodes.clone(), false, window, cx),
+            master: mk("mymaster", r.master.clone(), false, window, cx),
+            user: mk("default", r.user.clone(), false, window, cx),
+            password: mk(&t("ui.password"), pw, true, window, cx),
+            db: mk("0", if r.db == 0 { String::new() } else { r.db.to_string() }, false, window, cx),
+            via: mk(&t("kv.via_placeholder"), if redis { r.ssh_via.clone() } else { d.ssh_host.clone() }, false, window, cx),
+            socket: mk("/var/run/docker.sock", d.socket.clone(), false, window, cx),
+            group: mk(&t("ui.e_g_prod_test"), (if redis { r.group.clone() } else { d.group.clone() }).unwrap_or_default(), false, window, cx),
+            mode: if r.mode.is_empty() { "standalone".into() } else { r.mode.clone() },
+            tls: if r.tls.is_empty() { "disable".into() } else { r.tls.clone() },
+            production: (if redis { &r.tags } else { &d.tags }).contains(&prod_tag),
+            read_only: if redis { r.read_only } else { d.read_only },
+            hosts, error: None, kind, id,
+        }
+    }
+    fn v(e: &Entity<InputState>, cx: &Context<Self>) -> String { e.read(cx).value().trim().to_string() }
+
+    fn save(&mut self, cx: &mut Context<Self>) {
+        let prod_tag = config::get().tags.production.clone();
+        let group = Some(Self::v(&self.group, cx)).filter(|g| !g.is_empty());
+        let via = Self::v(&self.via, cx);
+        if !via.is_empty() && !self.hosts.contains(&via) { self.error = Some(t("kv.err_host").into()); cx.notify(); return; }
+        let id = self.id.clone().unwrap_or_else(assets::new_id);
+        let set_tags = |tags: &mut Vec<String>, on: bool| { tags.retain(|x| x != &prod_tag); if on { tags.push(prod_tag.clone()); } };
+        match self.kind {
+            AssetKind::Redis => {
+                let port = Self::v(&self.port, cx);
+                let port = if port.is_empty() { None } else { match port.parse() { Ok(p) => Some(p), Err(_) => { self.error = Some(t("kv.err_port").into()); cx.notify(); return; } } };
+                let db = Self::v(&self.db, cx).parse().unwrap_or(0);
+                let mut r = config::get().redis.iter().find(|x| x.id == id).cloned().unwrap_or_default();
+                r.id = id.clone(); r.name = Self::v(&self.name, cx); r.mode = self.mode.clone(); r.host = Self::v(&self.host, cx); r.port = port;
+                r.nodes = Self::v(&self.nodes, cx); r.master = Self::v(&self.master, cx); r.user = Self::v(&self.user, cx); r.db = db; r.tls = self.tls.clone();
+                r.ssh_via = via; r.group = group; r.read_only = self.read_only;
+                set_tags(&mut r.tags, self.production);
+                if r.host.is_empty() && r.nodes.is_empty() { self.error = Some(t("kv.err_host_empty").into()); cx.notify(); return; }
+                let pw = self.password.read(cx).value().to_string();
+                if pw.is_empty() { crate::secret_store().delete(&r.password_secret()); } else { let _ = crate::secret_store().set(&r.password_secret(), &pw); }
+                let _ = config::update(|s| { match s.redis.iter_mut().find(|x| x.id == r.id) { Some(x) => *x = r.clone(), None => s.redis.push(r.clone()) } let (a, b) = (&mut s.redis, &mut s.docker); assets::normalize_kv_docker(a, b); });
+            }
+            AssetKind::Docker => {
+                let mut d = config::get().docker.iter().find(|x| x.id == id).cloned().unwrap_or_default();
+                d.id = id; d.name = Self::v(&self.name, cx); d.endpoint = if via.is_empty() { "local".into() } else { "ssh".into() }; d.ssh_host = via;
+                d.socket = Self::v(&self.socket, cx); d.group = group; d.read_only = self.read_only;
+                set_tags(&mut d.tags, self.production);
+                let _ = config::update(|s| { match s.docker.iter_mut().find(|x| x.id == d.id) { Some(x) => *x = d.clone(), None => s.docker.push(d.clone()) } let (a, b) = (&mut s.redis, &mut s.docker); assets::normalize_kv_docker(a, b); });
+            }
+        }
+        cx.emit(AssetEvent::Saved);
+    }
+    fn delete(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.id.clone() else { return };
+        let _ = config::update(|s| { s.redis.retain(|x| x.id != id); s.docker.retain(|x| x.id != id); });
+        crate::secret_store().delete(&format!("redis:{id}:password"));
+        cx.emit(AssetEvent::Saved);
+    }
+}
+
+impl Render for AssetDialog {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let th = cur();
+        let label = |s: &str| div().w(px(96.)).flex_shrink_0().text_size(px(13.)).text_color(c(th.subtext)).child(s.to_string());
+        let line = |l: &str, el: AnyElement| div().flex().items_center().gap_3().child(label(l)).child(div().flex_1().min_w_0().child(el));
+        let mut form = div().p_5().flex().flex_col().gap_3().max_h(px(600.)).id("kv-form").overflow_y_scroll();
+        form = form.child(line(&t("ui.name"), ui::text_field(&self.name, false).into_any_element()));
+        if self.kind == AssetKind::Redis {
+            let modes: Vec<(String, String)> = ["standalone", "cluster", "sentinel"].iter().map(|m| (m.to_string(), t(&format!("kv.mode_{m}")).to_string())).collect();
+            let me = cx.entity().downgrade();
+            form = form.child(line(&t("kv.mode"), ui::segmented("kv-mode", &modes, &self.mode, move |v, _w, cx| { let _ = me.update(cx, |d, cx| { d.mode = v; cx.notify(); }); }).into_any_element()));
+            form = form.child(div().flex().items_center().gap_3().child(label(&t("ui.address")))
+                .child(div().flex_1().min_w_0().child(ui::text_field(&self.host, false))).child(div().w(px(90.)).child(ui::text_field(&self.port, false))));
+            if self.mode != "standalone" { form = form.child(line(&t("kv.nodes"), ui::text_field(&self.nodes, false).into_any_element())); }
+            if self.mode == "sentinel" { form = form.child(line(&t("kv.master"), ui::text_field(&self.master, false).into_any_element())); }
+            form = form.child(line(&t("kv.acl_user"), ui::text_field(&self.user, false).into_any_element()))
+                .child(line(&t("ui.password"), ui::text_field(&self.password, false).into_any_element()))
+                .child(line(&t("kv.db_index"), ui::text_field(&self.db, false).into_any_element()));
+            let tls: Vec<(String, String)> = ["disable", "require", "insecure"].iter().map(|m| (m.to_string(), t(&format!("kv.tls_{m}")).to_string())).collect();
+            let me = cx.entity().downgrade();
+            form = form.child(line("TLS", ui::segmented("kv-tls", &tls, &self.tls, move |v, _w, cx| { let _ = me.update(cx, |d, cx| { d.tls = v; cx.notify(); }); }).into_any_element()));
+        } else {
+            form = form.child(line(&t("kv.socket"), ui::text_field(&self.socket, false).into_any_element()));
+        }
+        form = form.child(line(&t("kv.via"), ui::text_field(&self.via, false).into_any_element()))
+            .child(div().pl(px(108.)).text_size(px(11.)).text_color(c(th.overlay0)).child(if self.hosts.is_empty() { t("kv.no_hosts").to_string() } else { format!("{} {}", t("kv.hosts"), self.hosts.join(", ")) }));
+        if self.kind == AssetKind::Redis && self.mode != "standalone" { form = form.child(div().pl(px(108.)).text_size(px(11.)).text_color(c(th.warning)).child(t("redis.err_cluster_ssh"))); }
+        form = form.child(line(&t("ui.group"), ui::text_field(&self.group, false).into_any_element()))
+            .child(div().flex().items_center().gap_3().child(label(&t("tag.production"))).child(Switch::new("kv-prod").checked(self.production).on_click(cx.listener(|d, on: &bool, _, cx| { d.production = *on; cx.notify(); }))))
+            .child(div().flex().items_center().gap_3().child(label(&t("db.read_only"))).child(Switch::new("kv-ro").checked(self.read_only).on_click(cx.listener(|d, on: &bool, _, cx| { d.read_only = *on; cx.notify(); }))));
+        if let Some(e) = &self.error { form = form.child(div().text_size(px(12.)).text_color(c(th.error)).child(e.clone())); }
+        let mut footer = div().px_5().py_3().flex().items_center().gap_2().border_t_1().border_color(c(th.surface0)).bg(c(th.mantle)).child(div().flex_1());
+        if self.id.is_some() { footer = footer.child(ui::button("kv-d-del", t("ui.delete"), 2).on_click(cx.listener(|d, _, _w, cx| d.delete(cx)))); }
+        footer = footer.child(ui::button("kv-d-cancel", t("ui.cancel"), 0).on_click(cx.listener(|_, _, _w, cx| cx.emit(AssetEvent::Close))))
+            .child(ui::button("kv-d-save", t("ui.save"), 1).on_click(cx.listener(|d, _, _w, cx| d.save(cx))));
+        let title: SharedString = match self.kind { AssetKind::Redis => t("kv.redis_conn").into(), AssetKind::Docker => t("kv.docker_ep").into() };
+        ui::modal(ui::card(580.)
+            .child(div().h(px(48.)).px_5().flex().items_center().gap_2().border_b_1().border_color(c(th.surface0))
+                .child(icon(if self.kind == AssetKind::Redis { IconName::Database } else { IconName::Container }, 16., c(th.accent)))
+                .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(title)))
+            .child(form).child(footer))
+    }
+}
+
+impl Root {
+    pub(crate) fn open_asset_dialog(&mut self, kind: AssetKind, id: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let hosts: Vec<String> = config::get().all_hosts().iter().map(|h| h.name.clone()).collect();
+        let d = cx.new(|cx| AssetDialog::new(kind, id, hosts, window, cx));
+        self._subs.push(cx.subscribe_in(&d, window, |this, _, ev: &AssetEvent, window, cx| {
+            if let AssetEvent::Saved = ev { this.log("asset.save", "redis/docker"); }
+            this.close_overlay(window, cx);
+        }));
+        self.overlay = Overlay::Asset(d);
+        cx.notify();
+    }
+
+    fn push_embed(&mut self, e: Embed, window: &mut Window, cx: &mut Context<Self>) {
+        let (h, m) = (self.history_for("local"), self.manifests.clone());
+        let pane = cx.new(|cx| TermView::new_embed(e, h, m, window, cx));
+        let fh = pane.read(cx).focus.clone();
+        self.tabs.push(Tab { layout: Node::Leaf(pane.clone()), focused: pane, name: None });
+        self.active = self.tabs.len() - 1;
+        self.leave_settings();
+        self.overlay = Overlay::None;
+        window.focus(&fh, cx);
+        cx.notify();
+    }
+
+    fn production_of(tags: &[String], group: &str) -> bool { let s = config::get(); assets::is_production(tags, group, &s.groups, &s.tags.production) }
+
+    pub(crate) fn open_redis_tab(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(conn) = config::get().redis.iter().find(|r| r.id == id).cloned() else { return };
+        let via = if conn.ssh_via.is_empty() { None } else {
+            match self.target_for(&conn.ssh_via) { Some(t) => Some((t, self.prompts.clone())), None => { self.toast(t("kv.err_host").into(), cx); return; } }
+        };
+        let pw = crate::secret_store().get(&conn.password_secret()).map(|x| x.0);
+        let prod = Self::production_of(&conn.tags, &conn.group_path());
+        let (rt, log) = (self.rt.handle().clone(), self.exec_log.clone());
+        let v = cx.new(|cx| KvView::new(conn, pw, via, prod, rt, log, window, cx));
+        self.push_embed(Embed::Kv(v), window, cx);
+    }
+
+    pub(crate) fn open_docker_tab(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ep) = config::get().docker.iter().find(|r| r.id == id).cloned() else { return };
+        let via = if !ep.is_ssh() { None } else {
+            match self.target_for(&ep.ssh_host) { Some(t) => Some((t, self.prompts.clone())), None => { self.toast(t("kv.err_host").into(), cx); return; } }
+        };
+        let prod = Self::production_of(&ep.tags, &ep.group_path());
+        let (rt, log) = (self.rt.handle().clone(), self.exec_log.clone());
+        let v = cx.new(|cx| DockView::new(ep.clone(), via, prod, rt, log, window, cx));
+        self._subs.push(cx.subscribe_in(&v, window, move |this, v, ev: &DockEvent, window, cx| match ev {
+            DockEvent::Logs(id, name) => {
+                let (Some(d), rt) = (v.read(cx).dock.clone(), v.read(cx).rt()) else { return };
+                let (id, name) = (id.clone(), name.clone());
+                let l = cx.new(|cx| LogView::new(d, rt, id, name, window, cx));
+                this.push_embed(Embed::Log(l), window, cx);
+            }
+            DockEvent::Exec(cid) => this.docker_exec(&ep, cid, window, cx),
+        }));
+        self.push_embed(Embed::Dock(v), window, cx);
+    }
+
+    /// Interactive shell in a container: a terminal tab (local or on the SSH host) running `docker exec -it`.
+    fn docker_exec(&mut self, ep: &DockerEndpoint, cid: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let spec = if ep.is_ssh() { match self.target_for(&ep.ssh_host) { Some(t) => Spec::Ssh(t), None => { self.toast(t("kv.err_host").into(), cx); return; } } } else { Spec::Local };
+        let socket = (!ep.socket.is_empty() && ep.socket != "/var/run/docker.sock").then_some(ep.socket.as_str());
+        let cmd = ssh_term_proto::dock::exec_command(cid, socket);
+        let pane = self.open_pane(spec, window, cx);
+        pane.update(cx, |v, cx| v.queue_cd(cmd, cx));
+        let fh = pane.read(cx).focus.clone();
+        self.tabs.push(Tab { layout: Node::Leaf(pane.clone()), focused: pane, name: Some(format!("exec {}", cid.chars().take(12).collect::<String>())) });
+        self.active = self.tabs.len() - 1;
+        self.leave_settings();
+        window.focus(&fh, cx);
+        cx.notify();
+    }
+
+    /// Tool window body for Redis or containers: saved entries grouped by group path.
+    pub(crate) fn asset_panel(&mut self, kind: AssetKind, cx: &mut Context<Self>) -> AnyElement {
+        let th = cur();
+        let s = config::get();
+        let items: Vec<(String, String, String, String, bool)> = match kind {
+            AssetKind::Redis => s.redis.iter().map(|r| (r.id.clone(), r.name.clone(), format!("{}{}", r.address(), if r.ssh_via.is_empty() { String::new() } else { format!(" ⇢ {}", r.ssh_via) }), r.group_path(), Self::production_of(&r.tags, &r.group_path()))).collect(),
+            AssetKind::Docker => s.docker.iter().map(|d| (d.id.clone(), d.name.clone(), if d.is_ssh() { format!("ssh ⇢ {}", d.ssh_host) } else { t("docker.local").to_string() }, d.group_path(), Self::production_of(&d.tags, &d.group_path()))).collect(),
+        };
+        let (title, ic) = match kind { AssetKind::Redis => (t("tool.redis"), IconName::Database), AssetKind::Docker => (t("tool.docker"), IconName::Container) };
+        let add = div().id("kv-add").size(px(22.)).rounded(px(5.)).flex().items_center().justify_center().cursor_pointer().hover(|d| d.bg(c(cur().surface0))).child(icon(IconName::Plus, 13., c(cur().overlay1)))
+            .on_click(cx.listener(move |this, _, w, cx| this.open_asset_dialog(kind, None, w, cx))).into_any_element();
+        let mut col = div().flex_1().min_h_0().flex().flex_col().child(panel_title(title, Some(add)));
+        if items.is_empty() {
+            let (msg, btn) = match kind { AssetKind::Redis => (t("kv.redis_empty"), t("kv.redis_conn")), AssetKind::Docker => (t("kv.docker_empty"), t("kv.docker_ep")) };
+            return col.child(div().p_3().flex().flex_col().gap_3().text_size(px(12.)).text_color(c(th.subtext)).child(msg)
+                .child(ui::button("kv-empty-add", btn, 1).on_click(cx.listener(move |this, _, w, cx| this.open_asset_dialog(kind, None, w, cx))))).into_any_element();
+        }
+        let mut sorted = items;
+        sorted.sort_by(|a, b| (a.3.clone(), a.1.to_lowercase()).cmp(&(b.3.clone(), b.1.to_lowercase())));
+        let mut list = div().id("kv-list").flex_1().min_h_0().overflow_y_scroll().pb_2().flex().flex_col();
+        let mut last: Option<String> = None;
+        for (i, (id, name, addr, group, prod)) in sorted.into_iter().enumerate() {
+            if last.as_ref() != Some(&group) && !group.is_empty() {
+                list = list.child(div().h(px(24.)).px_3().flex().items_center().gap_1().child(icon(IconName::Folder, 12., c(th.overlay1))).child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(group.clone())));
+            }
+            last = Some(group.clone());
+            let (oid, eid) = (id.clone(), id.clone());
+            list = list.child(div().id(("kv-it", i)).min_h(px(36.)).mx_1().px_2().rounded(px(6.)).flex().items_center().gap_2().cursor_pointer().hover(|d| d.bg(c(cur().surface0).opacity(0.7)))
+                .on_click(cx.listener(move |this, _, w, cx| match kind { AssetKind::Redis => this.open_redis_tab(&oid, w, cx), AssetKind::Docker => this.open_docker_tab(&oid, w, cx) }))
+                .child(icon(ic, 13., c(if prod { th.error } else { th.accent })))
+                .child(div().flex_1().min_w_0().flex().flex_col()
+                    .child(div().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(12.)).text_color(c(th.text)).child(name))
+                    .child(div().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(11.)).text_color(c(th.overlay0)).child(addr)))
+                .child(div().id(("kv-edit", i)).p_1().rounded(px(4.)).hover(|d| d.bg(c(cur().surface1))).child(icon(IconName::Pencil, 12., c(th.overlay1)))
+                    .on_click(cx.listener(move |this, _, w, cx| { cx.stop_propagation(); this.open_asset_dialog(kind, Some(eid.clone()), w, cx); }))));
+        }
+        col = col.child(list);
+        col.into_any_element()
+    }
+}
