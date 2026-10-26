@@ -1619,3 +1619,5 @@
 "aictx.dk_diagnose_q" = "Diagnose failing or restarting containers from their logs and resource usage, and give the fix."
 "aictx.dk_compose" = "Compose file"
 "aictx.dk_compose_q" = "Write a compose file that reproduces the running containers, with volumes, ports and restart policies."
+"ui.hist_popup" = "History dropdown"
+"ui.hist_popup.d" = "While typing at the prompt, list matching history commands under the cursor. Up/Down to choose, Enter or Tab to fill the line, Esc to close."

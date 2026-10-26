@@ -134,8 +134,9 @@ impl Default for Terminal { fn default() -> Self { Self { padding: f_pad(), show
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
-pub struct Suggest { pub enabled: bool, pub accept: String, pub local_history: bool, pub remote_history: bool, pub filter_patterns: Vec<String>, pub ai: bool }
-impl Default for Suggest { fn default() -> Self { Self { enabled: t(), accept: s_both(), local_history: t(), remote_history: t(), filter_patterns: vec!["(?i)vault +login".into()], ai: false } } }
+pub struct Suggest { pub enabled: bool, pub accept: String, pub local_history: bool, pub remote_history: bool, pub filter_patterns: Vec<String>, pub ai: bool, /// history dropdown under the cursor while typing
+    pub popup: bool }
+impl Default for Suggest { fn default() -> Self { Self { enabled: t(), accept: s_both(), local_history: t(), remote_history: t(), filter_patterns: vec!["(?i)vault +login".into()], ai: false, popup: t() } } }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]

@@ -163,6 +163,13 @@ impl History {
     pub fn len(&self) -> usize { self.entries.len() }
     pub fn is_empty(&self) -> bool { self.entries.is_empty() }
 
+    /// Dropdown candidates for `input`: prefix matches first, then substring, then fuzzy
+    /// (in-order characters); newest first inside each group, deduplicated, sensitive commands
+    /// and the input itself excluded. Each item carries the matched char ranges for highlighting.
+    pub fn matches(&self, input: &str, max: usize) -> Vec<Match> {
+        rank_matches(self.entries.iter().rev().map(|e| e.cmd.as_str()), input, max)
+    }
+
     /// Remaining text to suggest for `input`, newest matching entry wins.
     pub fn suggest(&self, input: &str) -> Option<String> {
         if input.trim().is_empty() { return None; }
@@ -170,6 +177,52 @@ impl History {
             .find(|e| e.cmd.len() > input.len() && e.cmd.starts_with(input))
             .map(|e| e.cmd[input.len()..].to_string())
     }
+}
+
+/// One dropdown candidate; `hl` are char-index ranges `[start, end)` of the matched text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Match { pub cmd: String, pub hl: Vec<(usize, usize)> }
+
+/// Rank `cmds` (newest first) against `input`. See [`History::matches`].
+pub fn rank_matches<'a>(cmds: impl Iterator<Item = &'a str>, input: &str, max: usize) -> Vec<Match> {
+    let q = input.trim_start();
+    if q.trim().is_empty() || max == 0 { return vec![]; }
+    let ql = q.to_lowercase();
+    let qn = q.chars().count();
+    let mut seen = std::collections::HashSet::new();
+    let (mut pre, mut sub, mut fuz) = (vec![], vec![], vec![]);
+    for cmd in cmds {
+        if cmd == q || cmd.trim().is_empty() || !seen.insert(cmd) || is_sensitive(cmd) { continue; }
+        if cmd.starts_with(q) { if pre.len() < max { pre.push(Match { cmd: cmd.into(), hl: vec![(0, qn)] }); } continue; }
+        let lower = cmd.to_lowercase();
+        // char-index search on the lowercased text (same char count for ASCII and most scripts)
+        if lower.chars().count() == cmd.chars().count() {
+            if let Some(b) = lower.find(&ql) {
+                let st = lower[..b].chars().count();
+                if sub.len() < max { sub.push(Match { cmd: cmd.into(), hl: vec![(st, st + qn)] }); }
+                continue;
+            }
+            if fuz.len() < max && qn >= 2 {
+                if let Some(hl) = fuzzy_ranges(&lower, &ql) { fuz.push(Match { cmd: cmd.into(), hl }); }
+            }
+        }
+        if pre.len() >= max { break; }
+    }
+    pre.into_iter().chain(sub).chain(fuz).take(max).collect()
+}
+
+/// In-order character match of `q` in `s` (both lowercased); merged char ranges.
+fn fuzzy_ranges(s: &str, q: &str) -> Option<Vec<(usize, usize)>> {
+    let mut want = q.chars().filter(|c| !c.is_whitespace()).peekable();
+    let mut out: Vec<(usize, usize)> = vec![];
+    for (i, ch) in s.chars().enumerate() {
+        let Some(&w) = want.peek() else { break };
+        if ch == w {
+            want.next();
+            match out.last_mut() { Some(r) if r.1 == i => r.1 = i + 1, _ => out.push((i, i + 1)) }
+        }
+    }
+    want.peek().is_none().then_some(out)
 }
 
 /// Heuristic filter for commands that likely contain secrets. Such commands are neither stored
@@ -300,6 +353,24 @@ mod tests {
         assert_eq!(t.submitted_input("Password: ", None), None);
     }
 
+
+    #[test]
+    fn dropdown_ranking() {
+        let cmds = ["git status", "ls -la", "git stash pop", "cat .gitignore", "grep it x", "git status", "export API_KEY=1"];
+        let m = rank_matches(cmds.iter().copied(), "git", 10);
+        let names: Vec<&str> = m.iter().map(|x| x.cmd.as_str()).collect();
+        // prefix (newest first, deduped) before substring before fuzzy
+        assert_eq!(names, ["git status", "git stash pop", "cat .gitignore", "grep it x"]);
+        assert_eq!(m[0].hl, vec![(0, 3)]);
+        assert_eq!(m[2].hl, vec![(5, 8)]);
+        assert_eq!(m[3].hl, vec![(0, 1), (5, 7)]);
+        // exact input excluded, case-insensitive substring, sensitive dropped, max respected
+        assert!(rank_matches(["ls"].iter().copied(), "ls", 10).is_empty());
+        assert_eq!(rank_matches(["Make build"].iter().copied(), "build", 10)[0].hl, vec![(5, 10)]);
+        assert!(rank_matches(cmds.iter().copied(), "api", 10).iter().all(|x| !x.cmd.contains("API_KEY")));
+        assert_eq!(rank_matches(cmds.iter().copied(), "s", 2).len(), 2);
+        assert!(rank_matches(cmds.iter().copied(), "  ", 10).is_empty());
+    }
 
     #[test]
     fn suggests_newest_prefix_match() {

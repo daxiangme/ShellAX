@@ -244,6 +244,7 @@ impl SettingsView {
             r(Terminal, t("ui.shell_integration_osc_133"), t("ui.inject_prompt_marks_into_bash"), Ctl::Choice("terminal.shell_integration", opts(&[("auto", t("ui.auto_inject")), ("off", t("ui.off"))]))),
 
             r(Suggest, t("ui.enable_suggestions"), "", Ctl::Toggle("suggest.enabled")),
+            r(Suggest, t("ui.hist_popup"), t("ui.hist_popup.d"), Ctl::Toggle("suggest.popup")),
             r(Suggest, t("ui.accept_key"), "", Ctl::Choice("suggest.accept", opts(&[("both", t("ui.or_tab")), ("right", t("ui.only")), ("tab", t("ui.tab_only"))]))),
             r(Suggest, t("ui.local_history"), t("ui.record_commands_typed_in_this"), Ctl::Toggle("suggest.local_history")),
             r(Suggest, t("ui.remote_history"), t("ui.read_remote_bash_history_and"), Ctl::Toggle("suggest.remote_history")),

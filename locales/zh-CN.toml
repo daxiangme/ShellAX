@@ -1619,3 +1619,5 @@
 "aictx.dk_diagnose_q" = "根据日志和资源占用诊断异常或反复重启的容器，并给出修复方法。"
 "aictx.dk_compose" = "生成 compose"
 "aictx.dk_compose_q" = "编写一个能复现当前运行容器的 compose 文件，包含卷、端口和重启策略。"
+"ui.hist_popup" = "历史命令下拉提示"
+"ui.hist_popup.d" = "在提示符输入时，在光标下方列出匹配的历史命令。上下键选择，回车或 Tab 填入当前行，Esc 关闭。"
