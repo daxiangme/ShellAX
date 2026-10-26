@@ -72,6 +72,83 @@ pub fn to_sql(f: Family, table: &str, cols: &[ColumnInfo], rows: &[Row]) -> Stri
     insert_statements(f, table, &header, rows, 100).into_iter().map(|s| s + ";\n").collect()
 }
 
+/// Rows mapped onto `cols` (the table's catalog columns, matched case-insensitively by
+/// `header`) as batched INSERTs with typed literals. Unknown columns are an error.
+pub fn import_statements(f: Family, table: &str, cols: &[ColumnInfo], header: &[String], rows: &[Row], batch: usize) -> Result<Vec<String>> {
+    let mut real: Vec<&ColumnInfo> = vec![];
+    for h in header {
+        match cols.iter().find(|c| c.name.eq_ignore_ascii_case(h)) { Some(c) => real.push(c), None => bail!(crate::i18n::tf("db.import_unknown_col", &[("col", h)])) }
+    }
+    let names = real.iter().map(|c| quote_ident(f, &c.name)).collect::<Vec<_>>().join(", ");
+    Ok(rows.chunks(batch.max(1)).map(|ch| {
+        let vals = ch.iter().map(|r| format!("({})", real.iter().enumerate().map(|(i, c)| super::edit::literal(f, &c.type_name, &r.get(i).cloned().flatten())).collect::<Vec<_>>().join(", "))).collect::<Vec<_>>().join(",\n  ");
+        format!("INSERT INTO {table} ({names}) VALUES\n  {vals}")
+    }).collect())
+}
+
+/// Incremental exporter for row streams: header / opening bracket on the first row (or at
+/// `finish` for an empty result), SQL in INSERT batches of 100.
+pub struct Writer<W: std::io::Write> {
+    out: W,
+    fmt: Format,
+    family: Family,
+    table: String,
+    cols: Vec<ColumnInfo>,
+    started: bool,
+    rows: u64,
+    batch: Vec<Row>,
+}
+
+impl<W: std::io::Write> Writer<W> {
+    /// `cols`: catalog columns used for names/types when they match the result's shape.
+    pub fn new(out: W, fmt: Format, family: Family, table: String, cols: Vec<ColumnInfo>) -> Self {
+        Self { out, fmt, family, table, cols, started: false, rows: 0, batch: vec![] }
+    }
+
+    fn start(&mut self, result_cols: &[ColumnInfo]) -> Result<()> {
+        if self.started { return Ok(()); }
+        self.started = true;
+        if !result_cols.is_empty() && (self.cols.len() != result_cols.len() || self.cols.iter().zip(result_cols).any(|(a, b)| a.name != b.name)) { self.cols = result_cols.to_vec(); }
+        match self.fmt {
+            Format::Csv => { let h = self.cols.iter().map(|c| csv_field(&c.name)).collect::<Vec<_>>().join(","); write!(self.out, "{h}\r\n")?; }
+            Format::Json => write!(self.out, "[")?,
+            Format::Sql => {}
+        }
+        Ok(())
+    }
+
+    pub fn row(&mut self, result_cols: &[ColumnInfo], r: &Row) -> Result<()> {
+        self.start(result_cols)?;
+        match self.fmt {
+            Format::Csv => { let l = r.iter().map(|v| v.as_deref().map(csv_field).unwrap_or_default()).collect::<Vec<_>>().join(","); write!(self.out, "{l}\r\n")?; }
+            Format::Json => {
+                let v = to_json(&self.cols, std::slice::from_ref(r));
+                let v: serde_json::Value = serde_json::from_str(&v)?;
+                let o = serde_json::to_string_pretty(&v[0])?;
+                write!(self.out, "{}\n  {}", if self.rows == 0 { "" } else { "," }, o.replace('\n', "\n  "))?;
+            }
+            Format::Sql => { self.batch.push(r.clone()); if self.batch.len() >= 100 { self.flush_sql()?; } }
+        }
+        self.rows += 1;
+        Ok(())
+    }
+
+    fn flush_sql(&mut self) -> Result<()> {
+        if self.batch.is_empty() { return Ok(()); }
+        let header: Vec<String> = self.cols.iter().map(|c| c.name.clone()).collect();
+        for s in insert_statements(self.family, &self.table, &header, &self.batch, 100) { write!(self.out, "{s};\n")?; }
+        self.batch.clear();
+        Ok(())
+    }
+
+    pub fn finish(mut self) -> Result<u64> {
+        self.start(&[])?;
+        match self.fmt { Format::Json => write!(self.out, "{}]\n", if self.rows == 0 { "" } else { "\n" })?, Format::Sql => self.flush_sql()?, Format::Csv => {} }
+        self.out.flush()?;
+        Ok(self.rows)
+    }
+}
+
 pub fn export(fmt: Format, f: Family, table: &str, cols: &[ColumnInfo], rows: &[Row]) -> String {
     match fmt { Format::Csv => to_csv(cols, rows), Format::Json => to_json(cols, rows), Format::Sql => to_sql(f, table, cols, rows) }
 }
@@ -157,5 +234,17 @@ mod tests {
         let s = insert_statements(Family::Mysql, "`t`", &["a".into(), "b".into()], &[vec![Some("1".into()), None], vec![Some("o'k".into())]], 1);
         assert_eq!(s, vec!["INSERT INTO `t` (`a`, `b`) VALUES\n  ('1', NULL)", "INSERT INTO `t` (`a`, `b`) VALUES\n  ('o''k', NULL)"]);
         assert_eq!(Format::from_path(std::path::Path::new("a.JSON")), Some(Format::Json));
+        for fmt in [Format::Csv, Format::Json, Format::Sql] {
+            let mut buf = vec![];
+            let mut w = Writer::new(&mut buf, fmt, Family::Mysql, "`t`".into(), cols());
+            for r in &rows { w.row(&cols(), r).unwrap(); }
+            assert_eq!(w.finish().unwrap(), 2);
+            assert_eq!(String::from_utf8(buf).unwrap().trim_end(), export(fmt, Family::Mysql, "`t`", &cols(), &rows).trim_end(), "{fmt:?}");
+        }
+        let empty = { let mut b = vec![]; Writer::new(&mut b, Format::Json, Family::Mysql, "t".into(), cols()).finish().unwrap(); String::from_utf8(b).unwrap() };
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&empty).unwrap(), serde_json::json!([]));
+        let st = import_statements(Family::Postgres, "t", &[ColumnInfo { name: "Id".into(), type_name: "integer".into(), ..Default::default() }], &["id".into()], &[vec![Some("1".into())], vec![None]], 10).unwrap();
+        assert_eq!(st, vec!["INSERT INTO t (\"Id\") VALUES\n  ('1'::integer),\n  (NULL)"]);
+        assert!(import_statements(Family::Postgres, "t", &[], &["x".into()], &[], 10).is_err());
     }
 }

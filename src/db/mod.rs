@@ -21,6 +21,9 @@ use anyhow::Result;
 
 use crate::assets::{DbKind, Family};
 
+/// Receives streamed rows: the result's columns and one row of full (unclipped) values.
+pub type Sink<'a> = &'a mut (dyn FnMut(&[ColumnInfo], Vec<Option<String>>) -> Result<()> + Send);
+
 pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 
 /// Rows kept per result set; the grid pages tables itself, ad-hoc queries are capped.
@@ -36,6 +39,9 @@ pub struct ColumnInfo {
     pub primary: bool,
     pub default: Option<String>,
     pub comment: String,
+    /// Engine notes: `auto_increment`, `identity always`, `identity by default`,
+    /// `generated stored`, `VIRTUAL GENERATED` (MySQL `EXTRA`)…
+    pub extra: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -105,6 +111,8 @@ pub trait SqlDriver: Send + Sync {
     fn run<'a>(&'a self, db: &'a str, stmts: Vec<String>, max_rows: usize, opts: &'a RunOpts) -> BoxFut<'a, Vec<ResultSet>>;
     /// Stop what `slot`'s request is running, from a separate session (MySQL `KILL QUERY`,
     /// PostgreSQL `pg_cancel_backend`, SQLite interrupt). Ok(false) = nothing was running.
+    /// Run one query, handing each row to `sink` as it arrives (exports of whole tables).
+    fn stream<'a>(&'a self, db: &'a str, sql: String, opts: &'a RunOpts, sink: Sink<'a>) -> BoxFut<'a, u64>;
     fn cancel<'a>(&'a self, db: &'a str, slot: &'a CancelSlot) -> BoxFut<'a, bool>;
     fn close(&self) -> BoxFut<'_, ()>;
 }
@@ -149,6 +157,7 @@ impl dyn SqlDriver {
                 primary: g(3).is_some_and(|k| k == "PRI"),
                 default: g(4),
                 comment: g(5).unwrap_or_default(),
+                extra: g(6).unwrap_or_default(),
             }
         }).collect())
     }
@@ -211,6 +220,27 @@ impl dyn SqlDriver {
                 Ok(r.col(0).map(|s| s + ";").collect::<Vec<_>>().join("\n\n"))
             }
         }
+    }
+
+    /// Write a whole table (optionally filtered / ordered) to `path` in `fmt`, streaming rows
+    /// as they arrive. Returns the row count. A failure removes the partial file.
+    pub async fn export_table(&self, db: &str, schema: Option<&str>, table: &str, where_: &str, order: Option<(&str, bool)>, fmt: export::Format, path: &std::path::Path, cancel: Option<Arc<CancelSlot>>) -> Result<u64> {
+        let f = self.family();
+        let q = dialect::qualified(f, db, schema, table);
+        let mut sql = format!("SELECT * FROM {q}");
+        if !where_.trim().is_empty() { sql.push_str(" WHERE "); sql.push_str(where_.trim()); }
+        if let Some((c, desc)) = order { sql.push_str(&format!(" ORDER BY {}{}", dialect::quote_ident(f, c), if desc { " DESC" } else { "" })); }
+        let meta = self.columns(db, schema, table).await.unwrap_or_default();
+        let file = std::fs::File::create(path)?;
+        let mut w = export::Writer::new(std::io::BufWriter::new(file), fmt, f, q, meta);
+        let opts = RunOpts { schema: schema.map(String::from), transaction: false, cancel };
+        let r = {
+            let mut sink = |cols: &[ColumnInfo], row: Vec<Option<String>>| w.row(cols, &row);
+            self.stream(db, sql, &opts, &mut sink).await
+        };
+        let r = r.and_then(|n| { w.finish()?; Ok(n) });
+        if r.is_err() { let _ = std::fs::remove_file(path); }
+        r
     }
 
     /// Run `stmts` as one transaction; the first error rolls everything back and is returned.

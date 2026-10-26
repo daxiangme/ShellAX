@@ -12,7 +12,7 @@ use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions, PgRow, PgSslMode};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions, SqliteRow};
 use sqlx::{AssertSqlSafe, Column, Connection, Either, Row, TypeInfo, ValueRef};
 
-use super::{dialect, split, BoxFut, CancelSlot, ColumnInfo, Driver, ResultSet, RunOpts, Session, SqlDriver};
+use super::{dialect, split, BoxFut, Sink, CancelSlot, ColumnInfo, Driver, ResultSet, RunOpts, Session, SqlDriver};
 use crate::assets::{DbConn, DbKind, Family};
 
 const POOL_MAX: u32 = 4;
@@ -75,43 +75,48 @@ async fn pg_pool(o: &PgConnectOptions, db: &str, timeout: Duration) -> Result<Pg
     Ok(PgPoolOptions::new().max_connections(POOL_MAX).acquire_timeout(timeout).connect_with(o.clone().database(db)).await?)
 }
 
-fn clip(mut s: String) -> String {
-    if s.len() > CELL_MAX { let mut e = CELL_MAX; while !s.is_char_boundary(e) { e -= 1; } s.truncate(e); s.push('…'); }
+fn clip(mut s: String, full: bool) -> String {
+    if !full && s.len() > CELL_MAX { let mut e = CELL_MAX; while !s.is_char_boundary(e) { e -= 1; } s.truncate(e); s.push('…'); }
     s
 }
-fn bytes_text(b: &[u8], ty: &str) -> String {
+/// Binary values are shown as `0x…` hex (a preview of 64 bytes unless `full`).
+fn bytes_text(b: &[u8], ty: &str, full: bool) -> String {
     let binary = ty.contains("BLOB") || ty.contains("BINARY") || ty.contains("BYTEA");
     match std::str::from_utf8(b) {
-        Ok(s) if !binary || !s.chars().any(|c| c.is_control() && c != '\n' && c != '\t' && c != '\r') => clip(s.to_string()),
+        Ok(s) if !binary || !s.chars().any(|c| c.is_control() && c != '\n' && c != '\t' && c != '\r') => clip(s.to_string(), full),
         _ => {
-            let hex: String = b.iter().take(64).map(|x| format!("{x:02X}")).collect();
-            format!("0x{hex}{}", if b.len() > 64 { format!("… ({} B)", b.len()) } else { String::new() })
+            let hex: String = b.iter().take(if full { usize::MAX } else { 64 }).map(|x| format!("{x:02X}")).collect();
+            format!("0x{hex}{}", if !full && b.len() > 64 { format!("… ({} B)", b.len()) } else { String::new() })
         }
     }
 }
 
-fn my_cell(r: &MySqlRow, i: usize) -> Option<String> {
+fn my_cell(r: &MySqlRow, i: usize, full: bool) -> Option<String> {
     let raw = r.try_get_raw(i).ok()?;
     if raw.is_null() { return None; }
     let ty = r.columns()[i].type_info().name().to_ascii_uppercase();
     let b: Vec<u8> = r.try_get_unchecked(i).ok()?;
-    Some(bytes_text(&b, &ty))
+    Some(bytes_text(&b, &ty, full))
 }
-fn pg_cell(r: &PgRow, i: usize) -> Option<String> {
+fn pg_cell(r: &PgRow, i: usize, full: bool) -> Option<String> {
     let raw = r.try_get_raw(i).ok()?;
     if raw.is_null() { return None; }
-    match raw.as_str() { Ok(s) => Some(clip(s.to_string())), Err(_) => raw.as_bytes().ok().map(|b| bytes_text(b, "BYTEA")) }
+    match raw.as_str() { Ok(s) => Some(clip(s.to_string(), full)), Err(_) => raw.as_bytes().ok().map(|b| bytes_text(b, "BYTEA", full)) }
 }
-fn lite_cell(r: &SqliteRow, i: usize) -> Option<String> {
+fn lite_cell(r: &SqliteRow, i: usize, full: bool) -> Option<String> {
     let raw = r.try_get_raw(i).ok()?;
     if raw.is_null() { return None; }
     let ty = raw.type_info().name().to_ascii_uppercase();
     match ty.as_str() {
         "INTEGER" => r.try_get_unchecked::<i64, _>(i).ok().map(|v| v.to_string()),
         "REAL" => r.try_get_unchecked::<f64, _>(i).ok().map(|v| v.to_string()),
-        "BLOB" => r.try_get_unchecked::<Vec<u8>, _>(i).ok().map(|b| bytes_text(&b, "BLOB")),
-        _ => r.try_get_unchecked::<String, _>(i).ok().map(clip),
+        "BLOB" => r.try_get_unchecked::<Vec<u8>, _>(i).ok().map(|b| bytes_text(&b, "BLOB", full)),
+        _ => r.try_get_unchecked::<String, _>(i).ok().map(|s| clip(s, full)),
     }
+}
+
+fn pg_search_path(schema: Option<&str>) -> String {
+    match schema.filter(|s| !s.is_empty()) { Some(s) => format!("SET search_path TO {}, public", dialect::quote_ident(Family::Postgres, s)), None => "SET search_path TO DEFAULT".into() }
 }
 
 fn columns_of<R: Row>(r: &R) -> Vec<ColumnInfo> {
@@ -132,7 +137,7 @@ macro_rules! run_one {
                     Either::Right(row) => {
                         if rs.columns.is_empty() { rs.columns = columns_of(&row); rs.returns_rows = true; }
                         if rs.rows.len() >= $max { rs.truncated = true; break; }
-                        rs.rows.push((0..row.columns().len()).map(|i| $cell(&row, i)).collect());
+                        rs.rows.push((0..row.columns().len()).map(|i| $cell(&row, i, false)).collect());
                     }
                 }
             }
@@ -160,6 +165,23 @@ macro_rules! run_all {
             sqlx::raw_sql(if ok { "COMMIT" } else { "ROLLBACK" }).execute(&mut *$conn).await?;
         }
         out
+    }};
+}
+
+/// Stream one query's rows into `sink` (full cell values), returning the row count.
+macro_rules! stream_one {
+    ($conn:expr, $sql:expr, $cell:path, $sink:expr) => {{
+        let mut n = 0u64;
+        let mut cols: Vec<ColumnInfo> = vec![];
+        let mut s = sqlx::raw_sql(AssertSqlSafe($sql)).fetch_many(&mut *$conn);
+        while let Some(item) = s.try_next().await? {
+            if let Either::Right(row) = item {
+                if cols.is_empty() { cols = columns_of(&row); }
+                $sink(&cols, (0..row.columns().len()).map(|i| $cell(&row, i, true)).collect())?;
+                n += 1;
+            }
+        }
+        n
     }};
 }
 
@@ -193,8 +215,7 @@ impl SqlDriver for SqlxDriver {
                     let p = self.pg_for(db).await?;
                     let mut c = p.acquire().await?;
                     // pooled sessions are reused: always (re)set the search path
-                    let sp = match opts.schema.as_deref().filter(|s| !s.is_empty()) { Some(s) => format!("SET search_path TO {}, public", dialect::quote_ident(Family::Postgres, s)), None => "SET search_path TO DEFAULT".into() };
-                    sqlx::raw_sql(AssertSqlSafe(sp)).execute(&mut *c).await?;
+                    sqlx::raw_sql(AssertSqlSafe(pg_search_path(opts.schema.as_deref()))).execute(&mut *c).await?;
                     if let Some(sl) = slot { let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(&mut *c).await?; sl.bind(Some(Session::Server(pid as u64))); }
                     let r = run_all!(c, stmts, max_rows, pg_cell, opts, "BEGIN");
                     r
@@ -208,6 +229,36 @@ impl SqlDriver for SqlxDriver {
             };
             if let Some(sl) = slot { sl.bind(None); }
             Ok(out)
+        })
+    }
+
+    fn stream<'a>(&'a self, db: &'a str, sql: String, opts: &'a RunOpts, sink: Sink<'a>) -> BoxFut<'a, u64> {
+        Box::pin(async move {
+            let slot = opts.cancel.as_deref();
+            let r: Result<u64> = async {
+                Ok(match &self.pools {
+                    Pools::My(p, _) => {
+                        let mut c = p.acquire().await?;
+                        if let Some(u) = dialect::use_database(Family::Mysql, db) { sqlx::raw_sql(AssertSqlSafe(u)).execute(&mut *c).await?; }
+                        if let Some(sl) = slot { let id: u64 = sqlx::query_scalar("SELECT CONNECTION_ID()").fetch_one(&mut *c).await?; sl.bind(Some(Session::Server(id))); }
+                        stream_one!(c, sql, my_cell, sink)
+                    }
+                    Pools::Pg { .. } => {
+                        let p = self.pg_for(db).await?;
+                        let mut c = p.acquire().await?;
+                        sqlx::raw_sql(AssertSqlSafe(pg_search_path(opts.schema.as_deref()))).execute(&mut *c).await?;
+                        if let Some(sl) = slot { let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(&mut *c).await?; sl.bind(Some(Session::Server(pid as u64))); }
+                        stream_one!(c, sql, pg_cell, sink)
+                    }
+                    Pools::Lite(p) => {
+                        let mut c = p.acquire().await?;
+                        if let Some(sl) = slot { let h = c.lock_handle().await?.as_raw_handle(); sl.bind(Some(Session::Sqlite(h.as_ptr() as usize))); }
+                        stream_one!(c, sql, lite_cell, sink)
+                    }
+                })
+            }.await;
+            if let Some(sl) = slot { sl.bind(None); if sl.requested() && r.is_err() { anyhow::bail!(crate::i18n::t("db.cancelled_by_user").to_string()); } }
+            r
         })
     }
 
