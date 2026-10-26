@@ -92,3 +92,4 @@ On Windows the default fallback chain also lists the system fonts "Segoe UI Symb
 ## sqlx 0.9 (sqlx-core / sqlx-mysql / sqlx-postgres / sqlx-sqlite) — MIT OR Apache-2.0 (dependency, unmodified; database drivers)
 ## libsqlite3-sys (bundled SQLite) — MIT; SQLite itself is public domain (dependency, unmodified)
 ## futures-util 0.3 — MIT OR Apache-2.0 (dependency, unmodified)
+## lsp-types 0.97 — MIT (dependency, unmodified; completion item types for the SQL editor)

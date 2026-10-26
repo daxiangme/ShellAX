@@ -7579,6 +7579,7 @@ dependencies = [
  "ksni",
  "libc",
  "libsqlite3-sys",
+ "lsp-types",
  "notify-rust",
  "objc",
  "portable-pty",

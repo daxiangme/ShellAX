@@ -184,9 +184,11 @@ impl dyn SqlDriver {
 impl dyn SqlDriver {
     /// Create statement for a table or view, as the server reports it (PostgreSQL tables
     /// are assembled from the catalog).
-    pub async fn ddl(&self, db: &str, schema: Option<&str>, table: &str, view: bool) -> Result<String> {
+    pub async fn ddl(&self, db: &str, schema: Option<&str>, table: &str) -> Result<String> {
         let f = self.family();
         let q = dialect::qualified(f, db, schema, table);
+        let relkind = if f == Family::Postgres { self.one(db, format!("SELECT relkind::text FROM pg_class WHERE oid = {}::regclass", dialect::quote_lit(f, &q))).await?.first().unwrap_or_default().to_string() } else { String::new() };
+        let view = relkind == "v" || relkind == "m";
         match f {
             Family::Mysql => {
                 let r = self.one(db, format!("SHOW CREATE TABLE {q}")).await?;
@@ -194,7 +196,7 @@ impl dyn SqlDriver {
             }
             Family::Postgres if view => {
                 let r = self.one(db, format!("SELECT pg_get_viewdef({}::regclass, true)", dialect::quote_lit(f, &q))).await?;
-                Ok(format!("CREATE OR REPLACE VIEW {q} AS\n{}", r.first().unwrap_or_default().trim_end()))
+                Ok(format!("CREATE {} {q} AS\n{}", if relkind == "m" { "MATERIALIZED VIEW" } else { "OR REPLACE VIEW" }, r.first().unwrap_or_default().trim_end()))
             }
             Family::Postgres => {
                 let lit = dialect::quote_lit(f, &q);

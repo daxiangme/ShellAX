@@ -12,6 +12,7 @@ mod activity;
 mod db_dialog;
 mod db_ui;
 mod db_view;
+mod db_editor;
 mod tabs_ui;
 mod config;
 mod host_dialog;
@@ -1891,9 +1892,15 @@ impl Render for Root {
             Some(p) => {
                 let v = p.read(cx);
                 let (st, col) = v.status(&th);
+                if let Some(dbv) = &v.db {
+                    // database pane: connection › database › schema › table instead of terminal info
+                    let crumbs = dbv.read(cx).crumbs();
+                    (st, col, String::new(), SharedString::from(crumbs), String::new())
+                } else {
                 let d = v.session.as_ref().map(|s| { let z = s.size(); format!("{}×{}", z.cols, z.rows) }).unwrap_or_default();
                 let n = v.history.lock().unwrap().len();
                 (st, col, d, shown_title(v), tf("main.history_n", &[("n", &n)]))
+                }
             }
             None => ("—", c(th.overlay0), String::new(), SharedString::from(""), String::new()),
         };
