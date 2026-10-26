@@ -92,18 +92,18 @@ impl Root {
     fn strip_btn(&self, id: impl Into<gpui::ElementId>, ic: IconName, tip: String, active: bool, badge: bool) -> gpui::Stateful<gpui::Div> {
         let th = cur();
         div().id(id).relative().size(px(32.)).rounded(px(8.)).flex().items_center().justify_center().cursor_pointer()
-            .when(active, |d| d.bg(c(th.accent).opacity(0.16)))
+            .when(active, |d| d.bg(c(th.accent).opacity(0.12)))
             .when(!active, |d| d.hover(|s| s.bg(c(cur().surface0))))
             .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
             .child(icon(ic, 17., if active { c(th.accent) } else { c(th.overlay1) }))
-            .when(active, |d| d.child(div().absolute().left(px(-4.)).top(px(8.)).w(px(3.)).h(px(16.)).rounded_full().bg(c(th.accent))))
             .when(badge, |d| d.child(div().absolute().top(px(4.)).right(px(4.)).size(px(6.)).rounded_full().bg(c(th.accent))))
     }
 
     /// The left activity strip: modules on top; AI, transfers, audit and settings at the bottom.
     pub(crate) fn activity_strip(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
-        let open = self.sidebar_visible && !matches!(self.sb_anim, Some((false, _)));
+        // layout follows `sidebar_visible` (stays true until a collapse animation ends) so icons never jump
+        let open = self.sidebar_visible;
         let mut col = div().id("activity").w(px(STRIP_W)).flex_shrink_0().h_full().flex().flex_col().items_center().gap(px(4.)).pb(px(8.));
         // no window head while the panel is collapsed: keep the top row draggable
         if !open { col = col.child(chrome::drag_region(div().id("act-drag")).h(px(chrome::TAB_H)).w_full().flex_shrink_0().window_control_area(gpui::WindowControlArea::Drag)); } else { col = col.pt(px(4.)); }

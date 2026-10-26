@@ -1956,11 +1956,14 @@ impl Render for Root {
             let panel: AnyElement = match self.sb_anim {
                 Some((show, seq)) => {
                     let w = self.sb_width;
-                    let dur = if show { motion::SIDEBAR_MS } else { motion::SIDEBAR_MS - 40 };
-                    let ease = move |t: f32| if show { 1. - (1. - t).powi(5) } else { t * t * t };
-                    div().h_full().flex_shrink_0().overflow_hidden().child(sb)
+                    // ease-out both ways; the inner box keeps its full width so content never reflows,
+                    // the outer box clips it while its width animates
+                    let dur = if show { motion::SIDEBAR_MS } else { motion::SIDEBAR_MS - 30 };
+                    let ease = |t: f32| 1. - (1. - t).powi(3);
+                    div().h_full().flex_shrink_0().overflow_hidden().w(px(if show { 0. } else { w }))
+                        .child(div().h_full().w(px(w)).flex().flex_col().child(sb))
                         .with_animation(("sb-anim", seq as usize), gpui::Animation::new(motion::ms(dur)).with_easing(ease),
-                            move |d, t| { let k = if show { t } else { 1. - t }; d.w(px(w * k)).opacity(k) }).into_any_element()
+                            move |d, t| { let k = if show { t } else { 1. - t }; d.w(px(w * k)).opacity(0.35 + 0.65 * k) }).into_any_element()
                 }
                 None => sb,
             };
