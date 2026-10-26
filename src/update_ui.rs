@@ -104,7 +104,6 @@ pub fn cancel() {
     if let Phase::Downloading { progress, .. } = &*PHASE.lock().unwrap() { progress.cancel.store(true, Ordering::Relaxed); }
 }
 
-pub fn retry() { if let Some(m) = last() { start(m, true); } }
 
 /// 人类可读的字节数。
 pub fn human(n: u64) -> String {

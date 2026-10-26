@@ -2171,18 +2171,16 @@ impl Render for TermView {
         if self.bell_until.is_some_and(|t| t > Instant::now()) {
             body = body.child(div().absolute().top_0().left_0().size_full().border_2().border_color(c(th.warning)).bg(c(th.warning).opacity(0.06)));
         }
-        let mut extras = div().h(px(28.)).px_3().flex().items_center().gap_2().bg(c(th.mantle)).text_size(px(12.));
-        let mut has_extra = false;
-        if let Some((name, st)) = self.agent_label() {
-            has_extra = true;
-            let col = match st { AgentState::Working => c(th.warning), AgentState::Blocked => c(th.error), AgentState::Idle => c(th.success), _ => c(th.overlay1) };
-            extras = extras.child(div().px_2().rounded_md().bg(col.opacity(0.18)).text_color(col).child(format!("{name} · {}", st.label())));
-        }
-        if let Some((cmd, code)) = self.failed.clone() {
-            has_extra = true;
-            extras = extras.child(div().flex_1()).child(div().id("explain-fail").px_2().rounded_md().cursor_pointer().bg(c(th.error).opacity(0.15)).text_color(c(th.error))
-                .child(tf("ai.explain_btn", &[("code", &code)]))
-                .on_click(cx.listener(move |_v, _, _w, cx| { let _ = &cmd; cx.emit(TermEvent::Explain); })));
+        // 命令失败时的“AI 解释”入口：浮在终端右下角，不占布局空间；智能体状态已显示在标签上
+        if let Some((_cmd, code)) = self.failed.clone() {
+            body = body.child(div().absolute().bottom(px(10.)).right(px(14.)).flex().items_center().gap_1().pl_2().pr_1().py(px(3.)).rounded_full()
+                .bg(c(th.base)).border_1().border_color(c(th.error).opacity(0.4)).shadow_md().text_size(px(12.))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(div().id("explain-fail").cursor_pointer().text_color(c(th.error)).hover(|s| s.underline())
+                    .child(tf("ai.explain_btn", &[("code", &code)]))
+                    .on_click(cx.listener(|_v, _, _w, cx| { cx.stop_propagation(); cx.emit(TermEvent::Explain); })))
+                .child(div().id("explain-fail-x").px_1().rounded_full().cursor_pointer().text_color(c(th.overlay1)).hover(|s| s.text_color(c(th.text))).child("×")
+                    .on_click(cx.listener(|v, _, _w, cx| { cx.stop_propagation(); v.failed = None; cx.notify(); }))));
         }
         div()
             .track_focus(&self.focus)
@@ -2204,7 +2202,6 @@ impl Render for TermView {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .flex_1().size_full().flex().flex_col().bg(c(scheme().bg).opacity(config::get().appearance.opacity.clamp(0.5, 1.0))).overflow_hidden()
-            .when(has_extra, |d| d.child(extras))
             .child(body)
     }
 }
