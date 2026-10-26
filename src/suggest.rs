@@ -203,7 +203,8 @@ pub fn rank_matches<'a>(cmds: impl Iterator<Item = &'a str>, input: &str, max: u
                 continue;
             }
             if fuz.len() < max && qn >= 2 {
-                if let Some(hl) = fuzzy_ranges(&lower, &ql) { fuz.push(Match { cmd: cmd.into(), hl }); }
+                // fuzzy hits stay in the list but only contiguous runs of 2+ chars are highlighted
+                if let Some(hl) = fuzzy_ranges(&lower, &ql) { fuz.push(Match { cmd: cmd.into(), hl: hl.into_iter().filter(|(a, b)| b - a >= 2).collect() }); }
             }
         }
         if pre.len() >= max { break; }
@@ -363,7 +364,7 @@ mod tests {
         assert_eq!(names, ["git status", "git stash pop", "cat .gitignore", "grep it x"]);
         assert_eq!(m[0].hl, vec![(0, 3)]);
         assert_eq!(m[2].hl, vec![(5, 8)]);
-        assert_eq!(m[3].hl, vec![(0, 1), (5, 7)]);
+        assert_eq!(m[3].hl, vec![(5, 7)]);
         // exact input excluded, case-insensitive substring, sensitive dropped, max respected
         assert!(rank_matches(["ls"].iter().copied(), "ls", 10).is_empty());
         assert_eq!(rank_matches(["Make build"].iter().copied(), "build", 10)[0].hl, vec![(5, 10)]);

@@ -466,7 +466,28 @@ const HIST_POP_ROW: f32 = 26.;
 /// Wait this long after the input changes before opening (avoids flashing while typing fast).
 const HIST_POP_DELAY_MS: u64 = 120;
 
-struct HistPop { input: String, items: Vec<ssh_term_proto::suggest::Match>, sel: usize, scroll: gpui::ScrollHandle }
+/// `sel`: None until the user picks a row with Up/Down (Enter then runs the typed line as is).
+struct HistPop { input: String, items: Vec<ssh_term_proto::suggest::Match>, sel: Option<usize>, scroll: gpui::ScrollHandle }
+
+/// What a key does while the history dropdown is open.
+#[derive(Debug, PartialEq, Eq)]
+enum PopKey { Select(usize), Accept(usize), Close, CloseAndPass, Pass }
+
+/// Key handling for the dropdown: nothing is selected when it opens; Up/Down select, Enter/Tab
+/// fill the selected row; Enter with nothing selected closes it and runs the typed line; Esc closes.
+fn pop_key(sel: Option<usize>, n: usize, key: &str) -> PopKey {
+    if n == 0 { return PopKey::Pass; }
+    match (key, sel) {
+        ("down", None) => PopKey::Select(0),
+        ("down", Some(i)) => PopKey::Select((i + 1) % n),
+        ("up", None) => PopKey::Select(n - 1),
+        ("up", Some(i)) => PopKey::Select((i + n - 1) % n),
+        ("enter" | "tab", Some(i)) => PopKey::Accept(i.min(n - 1)),
+        ("enter", None) => PopKey::CloseAndPass,
+        ("escape", _) => PopKey::Close,
+        _ => PopKey::Pass,
+    }
+}
 
 /// Char ranges → byte ranges of `s`.
 fn char_to_byte_ranges(s: &str, hl: &[(usize, usize)]) -> Vec<std::ops::Range<usize>> {
@@ -1005,7 +1026,7 @@ impl TermView {
         self.hist_pop_dismissed = None;
         if let Some(p) = self.hist_pop.as_mut() {
             let items = self.history.lock().unwrap().matches(&input, HIST_POP_MAX);
-            if items.is_empty() { self.hist_pop = None; } else { p.input = input; p.items = items; p.sel = 0; p.scroll.scroll_to_item(0); }
+            if items.is_empty() { self.hist_pop = None; } else { p.input = input; p.items = items; p.sel = None; p.scroll.scroll_to_item(0); }
             cx.notify();
             return;
         }
@@ -1019,7 +1040,7 @@ impl TermView {
                 if now != input || v.hist_pop_dismissed.as_deref() == Some(now.as_str()) { return; }
                 let items = v.hist_pop_items(&now);
                 if items.is_empty() { return; }
-                v.hist_pop = Some(HistPop { input: now, items, sel: 0, scroll: gpui::ScrollHandle::new() });
+                v.hist_pop = Some(HistPop { input: now, items, sel: None, scroll: gpui::ScrollHandle::new() });
                 cx.notify();
             });
         }).detach();
@@ -1044,13 +1065,13 @@ impl TermView {
     /// Keys while the dropdown is open. Returns true when consumed.
     fn hist_pop_key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
         let Some(p) = self.hist_pop.as_mut() else { return false };
-        let n = p.items.len();
-        match key {
-            "up" => { p.sel = (p.sel + n - 1) % n; p.scroll.scroll_to_item(p.sel); cx.notify(); true }
-            "down" => { p.sel = (p.sel + 1) % n; p.scroll.scroll_to_item(p.sel); cx.notify(); true }
-            "enter" | "tab" => { let i = p.sel; self.hist_pop_accept(i, cx); true }
-            "escape" => { self.hist_pop_dismissed = Some(p.input.clone()); self.hist_pop = None; cx.notify(); true }
-            _ => false,
+        match pop_key(p.sel, p.items.len(), key) {
+            PopKey::Select(i) => { p.sel = Some(i); p.scroll.scroll_to_item(i); cx.notify(); true }
+            PopKey::Accept(i) => { self.hist_pop_accept(i, cx); true }
+            PopKey::Close => { self.hist_pop_dismissed = Some(p.input.clone()); self.hist_pop = None; cx.notify(); true }
+            // close, then let the key reach the shell (runs the typed line)
+            PopKey::CloseAndPass => { self.hist_pop = None; cx.notify(); false }
+            PopKey::Pass => false,
         }
     }
     fn hist_pop_el(&self, window: &Window, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
@@ -1068,16 +1089,16 @@ impl TermView {
         let mono = SharedString::from(config::get().font.family.clone());
         let mut list = div().id("hist-pop-list").track_scroll(&p.scroll).max_h(px(rows as f32 * HIST_POP_ROW)).overflow_y_scroll().flex().flex_col();
         for (i, m) in p.items.iter().enumerate() {
-            let selected = i == p.sel;
+            let selected = p.sel == Some(i);
             let hl: Vec<(std::ops::Range<usize>, gpui::HighlightStyle)> = char_to_byte_ranges(&m.cmd, &m.hl).into_iter()
                 .map(|r| (r, gpui::HighlightStyle { color: Some(c(th.accent)), font_weight: Some(FontWeight::BOLD), ..Default::default() })).collect();
-            let text = gpui::StyledText::new(SharedString::from(m.cmd.clone())).with_highlights(if selected { vec![] } else { hl });
+            let text = gpui::StyledText::new(SharedString::from(m.cmd.clone())).with_highlights(hl);
             list = list.child(div().id(("hist-pop", i)).h(px(HIST_POP_ROW)).flex_shrink_0().px_2().mx_1().rounded_md().flex().items_center().gap_2().cursor_pointer()
-                .when(selected, |d| d.bg(c(th.accent)).text_color(gpui::white()))
-                .when(!selected, |d| d.text_color(c(th.text)).hover(|d| d.bg(c(cur().surface0))))
-                .on_hover(cx.listener(move |v, hovered: &bool, _, cx| { if *hovered { if let Some(p) = v.hist_pop.as_mut() { if p.sel != i { p.sel = i; cx.notify(); } } } }))
+                .text_color(c(th.text))
+                .when(selected, |d| d.bg(crate::theme::selected_bg()))
+                .when(!selected, |d| d.hover(|d| d.bg(crate::theme::hover_bg())))
                 .on_mouse_down(MouseButton::Left, cx.listener(move |v, _, _, cx| { cx.stop_propagation(); v.hist_pop_accept(i, cx); }))
-                .child(crate::ui::icon(crate::ui::IconName::Clock, 13., if selected { gpui::white() } else { c(th.overlay1) }))
+                .child(crate::ui::icon(crate::ui::IconName::Clock, 13., if selected { c(th.accent) } else { c(th.overlay1) }))
                 .child(div().min_w_0().flex_1().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(mono.clone()).text_size(px(13.)).child(text)));
         }
         let pop = div().occlude().min_w(px(260.)).max_w(px(640.)).py_1().rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.surface1)).shadow_lg()
@@ -2402,6 +2423,25 @@ pub fn play_sound() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hist_pop_keys() {
+        // nothing selected on open: Enter runs the typed line, Tab / Right go to the shell
+        assert_eq!(pop_key(None, 3, "enter"), PopKey::CloseAndPass);
+        assert_eq!(pop_key(None, 3, "tab"), PopKey::Pass);
+        assert_eq!(pop_key(None, 3, "right"), PopKey::Pass);
+        assert_eq!(pop_key(None, 3, "a"), PopKey::Pass);
+        // Up/Down select (wrapping), then Enter / Tab fill
+        assert_eq!(pop_key(None, 3, "down"), PopKey::Select(0));
+        assert_eq!(pop_key(None, 3, "up"), PopKey::Select(2));
+        assert_eq!(pop_key(Some(2), 3, "down"), PopKey::Select(0));
+        assert_eq!(pop_key(Some(0), 3, "up"), PopKey::Select(2));
+        assert_eq!(pop_key(Some(1), 3, "enter"), PopKey::Accept(1));
+        assert_eq!(pop_key(Some(1), 3, "tab"), PopKey::Accept(1));
+        assert_eq!(pop_key(Some(1), 3, "right"), PopKey::Pass);
+        assert_eq!(pop_key(None, 3, "escape"), PopKey::Close);
+        assert_eq!(pop_key(Some(1), 3, "escape"), PopKey::Close);
+        assert_eq!(pop_key(None, 0, "enter"), PopKey::Pass);
+    }
     #[test]
     fn hist_pop_highlight_ranges() {
         assert_eq!(char_to_byte_ranges("git 状态 x", &[(4, 6)]), vec![4..10]);
