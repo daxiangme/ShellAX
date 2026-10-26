@@ -72,19 +72,26 @@ impl Running {
     pub fn is_on(&self) -> bool { matches!(self.state(), State::Running { .. } | State::Starting) }
 
     /// Start on `conn`. Returns the bound port (useful when bind_port = 0).
-    pub async fn start(self: &Arc<Self>, conn: Arc<Conn>) -> Result<u16> {
+    pub async fn start(self: &Arc<Self>, conn: Arc<Conn>) -> Result<u16> { self.start_checked(conn, true).await }
+    /// Internal local tunnel: binds `bind_addr` on a port chosen by the OS (`bind_port` 0),
+    /// used by database connections that go through an SSH host.
+    pub async fn start_ephemeral(self: &Arc<Self>, conn: Arc<Conn>) -> Result<u16> {
+        anyhow::ensure!(self.spec.kind == Kind::L && self.spec.bind_port == 0, "ephemeral tunnels are local forwards on port 0");
+        self.start_checked(conn, false).await
+    }
+    async fn start_checked(self: &Arc<Self>, conn: Arc<Conn>, check: bool) -> Result<u16> {
         self.stop().await;
         *self.state.lock().unwrap() = State::Starting;
-        let r = self.start_inner(conn.clone()).await;
+        let r = self.start_inner(conn.clone(), check).await;
         match &r {
             Ok(p) => { *self.state.lock().unwrap() = State::Running { port: *p }; *self.conn.lock().unwrap() = Some(conn); }
             Err(e) => *self.state.lock().unwrap() = State::Error(format!("{e:#}")),
         }
         r
     }
-    async fn start_inner(self: &Arc<Self>, conn: Arc<Conn>) -> Result<u16> {
+    async fn start_inner(self: &Arc<Self>, conn: Arc<Conn>, check: bool) -> Result<u16> {
         let s = &self.spec;
-        s.validate()?;
+        if check { s.validate()?; }
         match s.kind {
             Kind::R => {
                 let p = conn.remote_forward(&s.bind_addr, s.bind_port as u32, &s.dest_host, s.dest_port).await?;

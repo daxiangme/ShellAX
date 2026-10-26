@@ -3,6 +3,7 @@
 //! talks to a driver crate directly.
 pub mod dialect;
 pub mod driver;
+pub mod live;
 pub mod split;
 
 use std::future::Future;

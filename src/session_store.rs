@@ -16,6 +16,8 @@ pub enum PaneSave {
     /// SFTP browser pane/tab (PRD 5.21): reopens on the same host and directories.
     /// `panes` (left, right) describes each pane's source; older files only have `target`.
     Sftp { target: SshTarget, #[serde(default)] local_dir: String, #[serde(default)] remote_dir: String, #[serde(default)] follow: bool, #[serde(default, skip_serializing_if = "Vec::is_empty")] panes: Vec<SftpSide> },
+    /// Database tab: a table browser (`table` set) or a SQL editor with its unsaved text.
+    Db { conn: String, #[serde(default)] database: String, #[serde(default, skip_serializing_if = "Option::is_none")] schema: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] table: Option<String>, #[serde(default, skip_serializing_if = "String::is_empty")] sql: String },
 }
 
 /// One pane of an SFTP view: `kind` is "local", "remote" or "empty".
@@ -30,7 +32,7 @@ pub struct SftpSide {
     pub dir: String,
 }
 impl PaneSave {
-    pub fn resume(&self) -> Option<&str> { match self { PaneSave::Local { resume, .. } | PaneSave::Ssh { resume, .. } => resume.as_deref(), PaneSave::Sftp { .. } => None } }
+    pub fn resume(&self) -> Option<&str> { match self { PaneSave::Local { resume, .. } | PaneSave::Ssh { resume, .. } => resume.as_deref(), PaneSave::Sftp { .. } | PaneSave::Db { .. } => None } }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

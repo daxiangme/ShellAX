@@ -134,7 +134,7 @@ impl Root {
             return;
         };
         let view = pane.read(cx);
-        if view.sftp.is_some() { self.toast(t("place.need_terminal").into(), cx); return; }
+        if view.embedded() { self.toast(t("place.need_terminal").into(), cx); return; }
         let host = self.place_host(&view.spec);
         let group = if host.is_empty() { String::new() } else { config::get().hosts.iter().find(|h| h.name == host).and_then(|h| h.group.clone()).unwrap_or_default() };
         match view.shell_cwd().filter(|p| !p.is_empty()) {
@@ -363,7 +363,7 @@ impl Root {
                 Some(s) if s.exited.load(Ordering::Acquire) => 0,
                 Some(s) if s.connected.load(Ordering::Acquire) => 2,
                 Some(_) => 1,
-                None if v.sftp.is_none() && v.error.is_some() => 3,
+                None if !v.embedded() && v.error.is_some() => 3,
                 None => 0,
             };
             (match &v.spec { Spec::Local => "local".to_string(), Spec::Ssh(t) => t.label() }, st)
@@ -748,7 +748,7 @@ impl Root {
         }
         let same = |p: &Entity<crate::termview::TermView>, cx: &Context<Self>| {
             let v = p.read(cx);
-            v.sftp.is_none() && match (&v.spec, &spec) { (Spec::Local, Spec::Local) => true, (Spec::Ssh(a), Spec::Ssh(b)) => a.label() == b.label(), _ => false }
+            !v.embedded() && match (&v.spec, &spec) { (Spec::Local, Spec::Local) => true, (Spec::Ssh(a), Spec::Ssh(b)) => a.label() == b.label(), _ => false }
         };
         let hit = self.tabs.iter().enumerate().find_map(|(i, t)| t.layout.leaves().into_iter().find(|p| same(p, cx)).map(|p| (i, p)));
         match hit {

@@ -9,7 +9,9 @@ use gpui::AnimationExt as _;
 mod filekind;
 mod sidebar;
 mod activity;
+mod db_dialog;
 mod db_ui;
+mod db_view;
 mod tabs_ui;
 mod config;
 mod host_dialog;
@@ -173,7 +175,7 @@ enum Modal { Broadcast(Vec<String>), Snapshots, Recordings, QuickStart { dir: St
 
 struct Tab { layout: Node<Entity<TermView>>, focused: Entity<TermView>, /** custom name (PRD 5.23) */ name: Option<String> }
 
-pub(crate) enum Overlay { None, Palette(Entity<Palette>), Host(Entity<HostDialog>), Audit, Sftp, Port, HostTools(Entity<host_tools_view::HostToolsView>) }
+pub(crate) enum Overlay { None, Palette(Entity<Palette>), Host(Entity<HostDialog>), Audit, Sftp, Port, HostTools(Entity<host_tools_view::HostToolsView>), Db(Entity<db_dialog::DbDialog>) }
 
 /// Which right-hand card is open. AI, saved commands and history share one slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -256,6 +258,7 @@ pub(crate) struct Root {
     bottom_h: f32,
     /// Execution log shown in the bottom tool window (database statements, …).
     exec_log: activity::ExecLog,
+    dbp: db_ui::DbPanel,
     /// Sidebar collapse/expand animation in flight: (expanding, seq).
     sb_anim: Option<(bool, u64)>,
     audit: Arc<AuditLog>,
@@ -658,7 +661,7 @@ impl Root {
     /// The session for a host (PRD 5.20): focused pane if it matches, else any pane on that host
     /// (its tab is activated), else a new tab.
     fn pane_for(&mut self, target: Option<SshTarget>, window: &mut Window, cx: &mut Context<Self>) -> Entity<TermView> {
-        let want = |v: &TermView| v.sftp.is_none() && match (&v.spec, &target) { (Spec::Local, None) => true, (Spec::Ssh(t), Some(r)) => t.pool_key() == r.pool_key(), _ => false };
+        let want = |v: &TermView| !v.embedded() && match (&v.spec, &target) { (Spec::Local, None) => true, (Spec::Ssh(t), Some(r)) => t.pool_key() == r.pool_key(), _ => false };
         if let Some(tab) = self.tabs.get(self.active) { if want(tab.focused.read(cx)) { let p = tab.focused.clone(); let fh = p.read(cx).focus.clone(); window.focus(&fh, cx); return p; } }
         let found = self.tabs.iter().enumerate().find_map(|(ti, tab)| tab.layout.leaves().into_iter().find(|p| want(p.read(cx))).map(|p| (ti, p)));
         if let Some((ti, p)) = found {
@@ -713,7 +716,7 @@ impl Root {
     /// After restore: an SFTP leaf saved with follow=on follows the first terminal in its tab.
     fn relink_follow(&self, layout: &Node<Entity<TermView>>, cx: &mut Context<Self>) {
         let leaves = layout.leaves();
-        let Some(term) = leaves.iter().find(|p| p.read(cx).sftp.is_none()).cloned() else { return };
+        let Some(term) = leaves.iter().find(|p| !p.read(cx).embedded()).cloned() else { return };
         let local = matches!(term.read(cx).spec, Spec::Local);
         for p in &leaves {
             if let Some(sv) = p.read(cx).sftp.clone() {
@@ -1127,6 +1130,7 @@ impl Root {
             Node::Leaf(v) => {
                 let v = v.read(cx);
                 if let Some(sv) = &v.sftp { return NodeSave::Leaf { pane: sv.read(cx).save() }; }
+                if let Some(dv) = &v.db { return NodeSave::Leaf { pane: dv.read(cx).save(cx) }; }
                 let resume = v.agent_label().map(|a| a.0).or(v.last_agent.clone()).and_then(|a| resume_command(&a)).map(str::to_string).or(v.resume_offer.clone());
                 let pane = match &v.spec {
                     Spec::Local => PaneSave::Local { cwd: v.session.as_ref().and_then(|s| s.cwd_probe.lock().unwrap().as_ref().and_then(|f| f())).unwrap_or_default(), daemon_id: v.daemon_id.clone(), resume },
@@ -1171,6 +1175,7 @@ impl Root {
                     v.update(cx, |v, _| { v.mode = SftpMode::Tab; v.follow.set(follow); });
                     r.sftp_pane(v, window, cx)
                 }
+                PaneSave::Db { conn, database, schema, table, sql } => r.db_pane(crate::db_view::Target { conn, database, schema, table }, sql, window, cx),
             }),
             NodeSave::Split { vertical, ratio, a, b } => Node::Split { dir: if *vertical { Dir::Vertical } else { Dir::Horizontal }, ratio: *ratio, a: Box::new(r.build_node(a, window, cx)), b: Box::new(r.build_node(b, window, cx)) },
         }
@@ -1644,7 +1649,7 @@ impl Root {
                     d = d.child(div().absolute().top_0().left_0().size_full().bg(c(th.bg))
                         .with_animation(("pane-in", p.entity_id().as_u64() as usize), gpui::Animation::new(motion::ms(motion::APPEAR_MS)).with_easing(gpui::ease_out_quint()), |d, t| d.opacity(1. - t)));
                 }
-                if !cx.has_active_drag() && p.read(cx).sftp.is_none() { d = d.child(self.pane_header(p, pg, cx)); }
+                if !cx.has_active_drag() && !p.read(cx).embedded() { d = d.child(self.pane_header(p, pg, cx)); }
                 if cx.has_active_drag() && self.tabs.len() > 1 {
                     // drop zones for a dragged tab: left/right quarter, top/bottom half of the middle (PRD US-03)
                     for (i, edge) in [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom].into_iter().enumerate() {
@@ -1791,7 +1796,7 @@ impl Render for Root {
                 .child({
                     // small monochrome kind icon: terminal / ssh / sftp
                     let v = panes[0].read(cx);
-                    let ic = if v.sftp.is_some() { IconName::FolderSync } else if matches!(v.spec, Spec::Ssh(_)) { IconName::Server } else { IconName::SquareTerminal };
+                    let ic = if v.db.is_some() { IconName::Database } else if v.sftp.is_some() { IconName::FolderSync } else if matches!(v.spec, Spec::Ssh(_)) { IconName::Server } else { IconName::SquareTerminal };
                     icon(ic, 13., if active { c(th.subtext) } else { c(th.overlay1) })
                 })
                 .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.)).text_color(if active { c(th.text) } else { c(th.overlay1) }).when(active, |d| d.font_weight(FontWeight::MEDIUM))
@@ -1804,7 +1809,7 @@ impl Render for Root {
             tabel = tabel.on_drag(drag, |d: &TabDrag, _, _, cx| cx.new(|_| d.clone()));
             // trailing slot: status dot (connecting / failed / disconnected) at rest, close × on hover or when active
             let (_, scol) = panes[0].read(cx).status(&th);
-            let show_dot = !active && panes[0].read(cx).sftp.is_none() && scol != c(th.success) && matches!(panes[0].read(cx).spec, Spec::Ssh(_));
+            let show_dot = !active && !panes[0].read(cx).embedded() && scol != c(th.success) && matches!(panes[0].read(cx).spec, Spec::Ssh(_));
             tabel = tabel.child(div().relative().size(px(18.)).flex_shrink_0()
                 .when(show_dot, |d| d.child(div().absolute().top(px(6.)).left(px(6.)).size(px(6.)).rounded_full().bg(scol).group_hover(tg.clone(), |s| s.invisible())))
                 .child(div().id(("close", i)).absolute().top_0().left_0().size(px(18.)).rounded_full().flex().items_center().justify_center()
@@ -1964,7 +1969,7 @@ impl Render for Root {
                 let k = &ev.keystroke;
                 let bare_tab = k.key == "tab" && !k.modifiers.control && !k.modifiers.alt && !k.modifiers.platform;
                 if bare_tab {
-                    if let Some(p) = this.tabs.get(this.active).and_then(|t| t.layout.leaves().into_iter().find(|p| p.read(cx).focus.is_focused(w) && p.read(cx).sftp.is_none())) {
+                    if let Some(p) = this.tabs.get(this.active).and_then(|t| t.layout.leaves().into_iter().find(|p| p.read(cx).focus.is_focused(w) && !p.read(cx).embedded())) {
                         p.update(cx, |v, cx| v.on_key(ev, w, cx));
                         cx.stop_propagation();
                         return;
@@ -2035,6 +2040,7 @@ impl Render for Root {
             Overlay::None => None,
             Overlay::Palette(p) => Some(div().absolute().top_0().left_0().size_full().child(p.clone()).into_any_element()),
             Overlay::Host(d) => Some(div().absolute().top_0().left_0().size_full().child(d.clone()).into_any_element()),
+            Overlay::Db(d) => Some(div().absolute().top_0().left_0().size_full().child(d.clone()).into_any_element()),
             Overlay::Audit => Some(self.audit_panel(cx)),
             Overlay::Sftp => Some(self.sftp_panel(cx)),
             Overlay::Port => Some(self.port_panel(cx)),
@@ -2291,7 +2297,7 @@ fn open_main(cx: &mut App, rt: Arc<tokio::runtime::Runtime>, themes: Vec<Arc<The
                     let mut root = Root {
                         rt, default_target, tabs: vec![], active: 0, themes, schemes, histories: HashMap::new(),
                         manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], deny_reason: None, policy_port: None, overlay: Overlay::None, settings: None, sftp_views: HashMap::new(), sftp_current: None, sftp_windows: vec![], drag_div: None, port_view: None, quit_confirm: false, modal: None, quit_ok: false, chat_view: None,
-                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, menu_last: (None, None), menu_ghost: None, menu_ghost_seq: 0, sb_menu_at: std::time::Instant::now(), sb_modal: None, tag_filter: vec![], tab_menu: None, tab_menu_at: std::time::Instant::now(), new_menu: None, new_menu_at: std::time::Instant::now(), new_menu_closed: std::time::Instant::now(), new_menu_collapsed: config::get().sidebar.collapsed.clone(), new_menu_sel: 0, new_menu_search: new_menu_search.clone(), tab_scroll: gpui::ScrollHandle::new(), tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), dock: SideDock::None, lib_search: lib_search.clone(), lib_group: String::new(), lib_hist_all: false, lib_editor: None, lib_vars: None, lib_confirm: None, lib_notice: String::new(), ai_width: { let w = config::get().sidebar.ai_width; if (280.0..=560.0).contains(&w) { w } else { config::AI_DOCK_W } }, host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: !config::get().sidebar.collapsed_panel(), sb_anim: None, tool: activity::Tool::from_id(&config::get().sidebar.tool), bottom_open: config::get().sidebar.bottom_open, bottom_tab: activity::Bottom::from_id(&config::get().sidebar.bottom_tab), bottom_h: config::get().sidebar.bottom_height.clamp(120., 600.), exec_log: Default::default(), audit, audit_verify: None, audit_filter: Default::default(),
+                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, menu_last: (None, None), menu_ghost: None, menu_ghost_seq: 0, sb_menu_at: std::time::Instant::now(), sb_modal: None, tag_filter: vec![], tab_menu: None, tab_menu_at: std::time::Instant::now(), new_menu: None, new_menu_at: std::time::Instant::now(), new_menu_closed: std::time::Instant::now(), new_menu_collapsed: config::get().sidebar.collapsed.clone(), new_menu_sel: 0, new_menu_search: new_menu_search.clone(), tab_scroll: gpui::ScrollHandle::new(), tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), dock: SideDock::None, lib_search: lib_search.clone(), lib_group: String::new(), lib_hist_all: false, lib_editor: None, lib_vars: None, lib_confirm: None, lib_notice: String::new(), ai_width: { let w = config::get().sidebar.ai_width; if (280.0..=560.0).contains(&w) { w } else { config::AI_DOCK_W } }, host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: !config::get().sidebar.collapsed_panel(), sb_anim: None, tool: activity::Tool::from_id(&config::get().sidebar.tool), bottom_open: config::get().sidebar.bottom_open, bottom_tab: activity::Bottom::from_id(&config::get().sidebar.bottom_tab), bottom_h: config::get().sidebar.bottom_height.clamp(120., 600.), exec_log: Default::default(), dbp: Default::default(), audit, audit_verify: None, audit_filter: Default::default(),
                         settings_dirty: vec![], toast: None, toast_out: false, toast_seq: 0, _subs: vec![],
                     };
                     crate::ctxmenu_view::init(root.rt.handle().clone(), root.prompts.clone());
@@ -2450,7 +2456,7 @@ fn open_main(cx: &mut App, rt: Arc<tokio::runtime::Runtime>, themes: Vec<Arc<The
                         let shift = k.modifiers.shift;
                         let _ = ent.update(cx, |this, cx| {
                             if !matches!(this.overlay, Overlay::None) || this.sb_modal.is_some() { return; }
-                            let Some(p) = this.tabs.get(this.active).and_then(|t| t.layout.leaves().into_iter().find(|p| p.read(cx).focus.is_focused(window) && p.read(cx).sftp.is_none())) else { return; };
+                            let Some(p) = this.tabs.get(this.active).and_then(|t| t.layout.leaves().into_iter().find(|p| p.read(cx).focus.is_focused(window) && !p.read(cx).embedded())) else { return; };
                             p.update(cx, |v, cx| v.inject_tab(shift, window, cx));
                             window.prevent_default();
                             cx.stop_propagation();

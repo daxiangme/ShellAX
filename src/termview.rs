@@ -452,6 +452,8 @@ impl Render for CursorLayer {
 pub struct TermView {
     /// SFTP browser hosted in this layout leaf (PRD 5.21 tab/split mode); no shell session then.
     pub sftp: Option<Entity<crate::sftp_view::SftpView>>,
+    /// Database tab (table browser / SQL editor) instead of a shell.
+    pub db: Option<Entity<crate::db_view::DbView>>,
     pub title: SharedString,
     pub spec: Spec,
     pub session: Option<Arc<Session>>,
@@ -557,8 +559,19 @@ impl TermView {
         me.sftp = Some(v);
         me
     }
+    /// A leaf that hosts a database view instead of a shell.
+    pub fn new_db(v: Entity<crate::db_view::DbView>, history: Arc<Mutex<History>>, manifests: Arc<Vec<Manifest>>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let title = v.read(cx).title.clone();
+        let mut me = Self::new(&title, Spec::Local, Err(anyhow::anyhow!("db")), history, manifests, window, cx);
+        me.error = None;
+        me._subs.push(cx.observe(&v, |me: &mut Self, v, cx| { let t = v.read(cx).title.clone(); if me.title.as_ref() != t.as_str() { me.title = t.into(); } cx.notify(); }));
+        me.db = Some(v);
+        me
+    }
+    /// Hosts an SFTP or database view rather than a shell.
+    pub fn embedded(&self) -> bool { self.sftp.is_some() || self.db.is_some() }
     pub fn shown_title(&self) -> SharedString {
-        if self.sftp.is_some() { return self.title.clone(); }
+        if self.embedded() { return self.title.clone(); }
         match (&self.spec, self.title.rsplit_once(" · ")) {
             (Spec::Local, Some((_, sh))) => tf("main.local_title", &[("shell", &sh)]).into(),
             _ => self.title.clone(),
@@ -632,7 +645,7 @@ impl TermView {
             selecting: false, scroll_drag: false, history, tracker: InputTracker::new(),
             born: Instant::now(), progress_tick: false, last_activity: Instant::now(), blink_running: false, software_gpu: std::env::var("SHELLAX_FORCE_BLINK").ok().map(|_| false), last_mouse_cell: None, mouse_down_btn: None,
             manifests, last_command: None, agent: None, agent_seen: Instant::now(), last_detect: Instant::now() - Duration::from_secs(5),
-            detect_scheduled: false, pending_paste: None, pending_cd: None, ai: None, daemon_id: None, resume_offer: None, clip_ask: None, pty_ask: None, pty_write_ok: false, search: None, last_agent: None, failed: None, exit_seen: 0, ai_inline_seq: 0, ai_inline: None, bell_until: None, cmd_started: None, ai_capture: None, ctx_menu: None, ctx_pending: None, ctx_confirm: None, ctx_denied: None, sftp: None, _subs: subs,
+            detect_scheduled: false, pending_paste: None, pending_cd: None, ai: None, daemon_id: None, resume_offer: None, clip_ask: None, pty_ask: None, pty_write_ok: false, search: None, last_agent: None, failed: None, exit_seen: 0, ai_inline_seq: 0, ai_inline: None, bell_until: None, cmd_started: None, ai_capture: None, ctx_menu: None, ctx_pending: None, ctx_confirm: None, ctx_denied: None, sftp: None, db: None, _subs: subs,
         }
     }
 
@@ -643,6 +656,7 @@ impl TermView {
             Some(s) if s.connected.load(Ordering::Acquire) => (t("ui.connected"), c(th.success)),
             Some(_) => (t("ui.connecting"), c(th.warning)),
             None if self.sftp.is_some() => ("SFTP", c(th.accent)),
+            None if self.db.is_some() => ("DB", c(th.accent)),
             None => (t("ui.connection_failed"), c(th.error)),
         }
     }
@@ -2038,6 +2052,9 @@ fn fanout(s: &Arc<Session>, bytes: Vec<u8>) {
 impl Render for TermView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
+        if let Some(v) = self.db.clone() {
+            return div().track_focus(&self.focus).flex_1().size_full().flex().flex_col().overflow_hidden().child(v);
+        }
         if let Some(v) = self.sftp.clone() {
             return div().track_focus(&self.focus).flex_1().size_full().flex().flex_col().overflow_hidden().child(v);
         }
@@ -2057,7 +2074,7 @@ impl Render for TermView {
                     .text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.error)).child(t("rec.indicator")));
             }
         }
-        let connecting = matches!(self.spec, Spec::Ssh(_)) && self.sftp.is_none() && self.session.as_ref().is_some_and(|s| !s.connected.load(Ordering::Acquire) && !s.exited.load(Ordering::Acquire) && s.conn_error.lock().unwrap().is_none());
+        let connecting = matches!(self.spec, Spec::Ssh(_)) && !self.embedded() && self.session.as_ref().is_some_and(|s| !s.connected.load(Ordering::Acquire) && !s.exited.load(Ordering::Acquire) && s.conn_error.lock().unwrap().is_none());
         if connecting {
             let delay = Duration::from_millis(crate::motion::PROGRESS_DELAY_MS);
             if self.born.elapsed() >= delay {
@@ -2078,7 +2095,7 @@ impl Render for TermView {
             }
         }
         let fail = self.error.clone().or_else(|| self.session.as_ref().and_then(|s| s.conn_error.lock().unwrap().clone()));
-        if let (Some(e), None) = (fail, &self.sftp) {
+        if let (Some(e), false) = (fail, self.embedded()) {
             let is_ssh = matches!(self.spec, Spec::Ssh(_));
             let mut actions = div().flex().items_center().gap_2().mt(px(12.))
                 .child(crate::ui::button("conn-retry", t("term.retry"), 1).on_click(cx.listener(|_, _, _, cx| cx.emit(TermEvent::RetryConnect))));
