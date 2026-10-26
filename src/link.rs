@@ -1,5 +1,5 @@
 //! `ssh://` / `sftp://` links (PRD 3.1 P2 "堡垒机拉起"): `shellax-cli ssh://user@host:2222`,
-//! `sftp://user@host/var/log`, and Xshell-style `-url ssh://…`. Passwords in URLs are never
+//! `sftp://user@host/var/log`, and the `-url ssh://…` form. Passwords in URLs are never
 //! used (dropped and reported); host keys are verified as for any other connection.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,7 +44,7 @@ pub fn parse(url: &str) -> Result<Link, String> {
     Ok(Link { kind, user, host, port, path, dropped_password: dropped })
 }
 
-/// Links on a command line: bare `ssh://…` / `sftp://…` arguments and Xshell's `-url <link>`.
+/// Links on a command line: bare `ssh://…` / `sftp://…` arguments and `-url <link>`.
 pub fn from_args(args: &[String]) -> Vec<String> {
     let mut out = vec![]; let mut it = args.iter().peekable();
     while let Some(a) = it.next() {

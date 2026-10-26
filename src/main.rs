@@ -2273,7 +2273,7 @@ fn main() {
     let (settings, load_err) = config::Settings::load();
     if let Some(e) = &load_err { eprintln!("{e}"); }
     config::install(settings);
-    // ssh:// / sftp:// links (and Xshell -url): hand them to a running instance if there is one
+    // ssh:// / sftp:// links (and -url): hand them to a running instance if there is one
     let links = ssh_term_proto::link::from_args(&std::env::args().collect::<Vec<_>>());
     if !links.is_empty() {
         if let Some(ep) = ssh_term_proto::policy_server::read_endpoint(&data_dir()).filter(|e| e.host.is_empty()) {

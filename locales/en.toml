@@ -391,7 +391,7 @@
 "ui.copy_on_select" = "Copy on select"
 "ui.copy_to_the_clipboard_on" = "Drag to select text. On mouse release, copy it and show “Copied”. Linux also writes the primary selection."
 "ui.credentials_keys" = "Credentials & keys"
-"ui.ctrl_shift_c_v_copy" = "Copy a selection with ⌘C on macOS, or Ctrl+C on Windows and Linux, and show “Copied”. Paste with ⌘V on macOS, or Ctrl+V on Windows and Linux. With no selection, Ctrl+C still interrupts. Ctrl+Shift+C / V still work; hold Shift to select locally in vim/htop."
+"ui.ctrl_shift_c_v_copy" = "Copy a selection with ⌘C on Mac, or Ctrl+C on Windows and Linux, and show “Copied”. Paste with ⌘V on Mac, or Ctrl+V on Windows and Linux. With no selection, Ctrl+C still interrupts. Ctrl+Shift+C / V still work; hold Shift to select locally in vim/htop."
 "ui.ctrl_shift_p_opens_the" = "Ctrl+Shift+P opens the command palette to search all actions and hosts"
 "ui.current_screen" = "Current screen"
 "ui.current_tab_is_not_an" = "(current tab is not an SSH session)"

@@ -391,7 +391,7 @@
 "ui.copy_on_select" = "选中即复制"
 "ui.copy_to_the_clipboard_on" = "拖选文字，松开鼠标后复制到剪贴板，并提示「复制成功」。Linux 始终写入主选区。"
 "ui.credentials_keys" = "凭据与密钥"
-"ui.ctrl_shift_c_v_copy" = "选中后复制：macOS 用 ⌘C，Windows / Linux 用 Ctrl+C，并提示「复制成功」。粘贴：macOS 用 ⌘V，Windows / Linux 用 Ctrl+V。没有选中时 Ctrl+C 仍中断程序。Ctrl+Shift+C / V 同样可用；按住 Shift 可在 vim/htop 中本地选择文本。"
+"ui.ctrl_shift_c_v_copy" = "选中后复制：Mac 用 ⌘C，Windows / Linux 用 Ctrl+C，并提示「复制成功」。粘贴：Mac 用 ⌘V，Windows / Linux 用 Ctrl+V。没有选中时 Ctrl+C 仍中断程序。Ctrl+Shift+C / V 同样可用；按住 Shift 可在 vim/htop 中本地选择文本。"
 "ui.ctrl_shift_p_opens_the" = "Ctrl+Shift+P 打开命令面板，可搜索所有操作与主机"
 "ui.current_screen" = "当前屏幕"
 "ui.current_tab_is_not_an" = "（当前标签不是 SSH 会话）"
