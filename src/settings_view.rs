@@ -98,6 +98,7 @@ pub struct SettingsView {
     notice: Option<String>,
     /// Newer release found by "Check now".
     update_found: Option<ssh_term_proto::update::Manifest>,
+    update_err_open: bool,
     // AI providers
     ai_sel: Option<String>,
     ai_key: Entity<InputState>,
@@ -172,7 +173,7 @@ impl SettingsView {
         let proxy_port = mk("7890", &saved.as_ref().map(|p| p.port.to_string()).unwrap_or_default(), window, cx);
         let proxy_user = mk(t("proxy.user"), &saved.as_ref().and_then(|p| p.user.as_ref()).map(|u| u.0.as_str()).unwrap_or(""), window, cx);
         let proxy_pass = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder(t("proxy.pass")).default_value(saved.as_ref().and_then(|p| p.user.as_ref()).map(|u| u.1.clone()).unwrap_or_default()));
-        let mut me = Self { cm_editor: None, cm_note: None, key_pass, key_import, theme_import, cat, search, inputs: HashMap::new(), errors: HashMap::new(), theme_swatch: crate::theme::load_all().iter().map(|t| (t.name.clone(), [t.base, t.crust, t.text, t.accent])).collect(), theme_names, scheme_names, new_rule, new_effect: Effect::Allow, tester, notice: None, update_found: None,
+        let mut me = Self { cm_editor: None, cm_note: None, key_pass, key_import, theme_import, cat, search, inputs: HashMap::new(), errors: HashMap::new(), theme_swatch: crate::theme::load_all().iter().map(|t| (t.name.clone(), [t.base, t.crust, t.text, t.accent])).collect(), theme_names, scheme_names, new_rule, new_effect: Effect::Allow, tester, notice: None, update_found: None, update_err_open: false,
             ai_sel: config::get().ai.default_provider().map(|p| p.id.clone()), ai_key, ai_keys: HashMap::new(), ai_note: None, ai_test: HashMap::new(), ai_testing: None, lang_seen: ssh_term_proto::i18n::current() as u8,
             ai_models: HashMap::new(), ai_dropdown: None, ai_model_search, ai_url_gen: 0,
             proxy_http, proxy_auth, proxy_host, proxy_port, proxy_user, proxy_pass, proxy_candidates: Vec::new(), proxy_bypass_suggest: String::new(), proxy_detecting: false, proxy_started: false, proxy_note: None,
@@ -940,74 +941,124 @@ impl SettingsView {
     }
 
     fn general_extra(&self, cx: &mut Context<Self>) -> AnyElement {
-        let th = cur();
-        div().flex().flex_col().child(Self::section_title(t("ui.updates")))
-            .child(div().text_size(px(12.)).text_color(c(th.subtext)).pb_2().child(tf("settings.update_source", &[("v", &ssh_term_proto::update::CURRENT), ("url", &config::get().general.update_source())])))
-            .child(div().flex().gap_2().child(ui::button("check-update", t("ui.check_now"), 0).on_click(cx.listener(|this, _, _w, cx| {
-                this.notice = Some(t("settings.update_checking").into());
-                this.update_found = None;
-                let g = config::get().general.clone();
-                cx.spawn(async move |this, cx| {
-                    let r = cx.background_executor().spawn(async move { g.check_update() }).await;
-                    let _ = this.update(cx, |v, cx| {
-                        match r {
-                            Ok(Some(m)) => { v.notice = Some(tf("main.update_available", &[("v", &m.version)])); v.update_found = Some(m); }
-                            Ok(None) => v.notice = Some(tf("settings.update_latest", &[("v", &ssh_term_proto::update::CURRENT)])),
-                            Err(e) => v.notice = Some(tf("settings.update_failed", &[("e", &format!("{e:#}"))])),
-                        }
-                        cx.notify();
-                    });
-                }).detach();
-                cx.notify();
-            }))))
-            .children(self.notice.clone().map(|n| div().pt_2().text_size(px(12.)).text_color(c(th.subtext)).child(n)))
-            .children(self.update_found.clone().map(|m| {
-                // release notes (trimmed) and a button that opens the download in the browser
-                let notes: String = m.notes.chars().take(1200).collect();
-                let url = m.url.clone();
-                div().pt_2().flex().flex_col().gap_2()
-                    .when(!notes.trim().is_empty(), |d| d.child(div().id("update-notes").max_h(px(200.)).overflow_y_scroll().p_2().rounded(px(6.)).bg(c(th.mantle)).border_1().border_color(c(th.surface1))
-                        .text_size(px(12.)).text_color(c(th.text)).whitespace_normal().child(notes)))
-                    .child(div().flex().gap_2()
-                        .when(ssh_term_proto::updater::downloadable(&m), |d| d.child(ui::button("dl-update", t("update.download"), 1).on_click(cx.listener(move |_, _, _w, cx| { crate::update_ui::start(m.clone(), true); cx.notify(); }))))
-                        .child(ui::button("open-update", t("settings.update_download"), 0).on_click(move |_, _w, cx| cx.open_url(&url))))
-            }))
-            .child(self.update_progress(cx))
-            .into_any_element()
-    }
-
-    /// 下载进度 / 失败原因 / 已下载记录。
-    fn update_progress(&self, cx: &mut Context<Self>) -> AnyElement {
         use ssh_term_proto::updater::Phase;
         use std::sync::atomic::Ordering;
         let th = cur();
-        let line = |s: String, col| div().text_size(px(12.)).text_color(col).child(s);
-        let row = div().pt_2().flex().items_center().gap_2().flex_wrap();
-        match crate::update_ui::phase() {
-            Phase::Idle => div().into_any_element(),
-            Phase::Downloading { version, progress } => {
-                let (done, total) = (progress.done.load(Ordering::Relaxed), progress.total.load(Ordering::Relaxed));
-                let pct = if total > 0 { format!("{}%", done * 100 / total) } else { "…".into() };
-                let size = if total > 0 { format!("{} / {}", crate::update_ui::human(done), crate::update_ui::human(total)) } else { crate::update_ui::human(done) };
-                let frac = if total > 0 { done as f32 / total as f32 } else { 0. };
-                div().pt_2().flex().flex_col().gap_2()
-                    .child(line(tf("update.downloading", &[("v", &version), ("p", &pct), ("s", &size)]), c(th.subtext)))
-                    .child(div().h(px(4.)).w_full().rounded_full().bg(c(th.surface1)).child(div().h_full().rounded_full().bg(c(th.accent)).w(gpui::relative(frac.clamp(0., 1.)))))
-                    .child(div().flex().child(ui::button("dl-cancel", t("ui.cancel"), 0).on_click(|_, _, _| crate::update_ui::cancel())))
-                    .into_any_element()
+        let g = config::get().general.clone();
+        let card = || div().w_full().p_4().rounded(px(ui::R_LG)).bg(c(th.mantle)).border_1().border_color(c(th.surface0)).flex().flex_col().gap_2();
+        let muted = |s: String| div().text_size(px(11.)).text_color(c(th.overlay1)).child(s);
+        let channel = if g.update_channel == "beta" { t("update.channel_beta") } else { t("update.channel_stable") };
+        let checked = crate::update_ui::last_checked().map(crate::update_ui::when).map_or_else(|| t("update.never_checked").to_string(), |w| tf("update.last_checked", &[("t", &w)]));
+        let source = if g.custom_update_url().is_some() { g.update_source() } else { "GitHub Releases".into() };
+        // 版本卡片
+        let version_card = card()
+            .child(div().flex().items_center().gap_2()
+                .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(tf("update.current", &[("v", &ssh_term_proto::update::CURRENT)])))
+                .child(div().px_2().py(px(1.)).rounded_full().bg(c(th.surface0)).text_size(px(11.)).text_color(c(th.subtext)).child(channel))
+                .child(div().flex_1())
+                .child(ui::button("check-update", t("ui.check_now"), 0).on_click(cx.listener(|this, _, _w, cx| {
+                    this.notice = Some(t("settings.update_checking").into());
+                    this.update_found = None;
+                    let g = config::get().general.clone();
+                    cx.spawn(async move |this, cx| {
+                        let r = cx.background_executor().spawn(async move { g.check_update() }).await;
+                        crate::update_ui::mark_checked();
+                        let _ = this.update(cx, |v, cx| {
+                            match r {
+                                Ok(Some(m)) => { v.notice = None; v.update_found = Some(m); }
+                                Ok(None) => v.notice = Some(tf("settings.update_latest", &[("v", &ssh_term_proto::update::CURRENT)])),
+                                Err(e) => v.notice = Some(tf("settings.update_failed", &[("e", &crate::update_ui::friendly(&format!("{e:#}")))])),
+                            }
+                            cx.notify();
+                        });
+                    }).detach();
+                    cx.notify();
+                }))))
+            .child(muted(checked))
+            .child(muted(tf("update.source", &[("s", &source)])))
+            .children(self.notice.clone().map(|n| div().text_size(px(12.)).text_color(c(th.subtext)).whitespace_normal().child(n)));
+
+        // 新版本卡片
+        let phase = crate::update_ui::phase();
+        let found = self.update_found.clone().or_else(|| crate::update_ui::offered()).or_else(|| match &phase {
+            Phase::Downloading { .. } | Phase::Failed { .. } => crate::update_ui::last(), _ => None });
+        let new_card = found.map(|m| {
+            let notes_url = format!("https://github.com/{}/releases/tag/v{}", ssh_term_proto::update::REPO, m.version.trim_start_matches('v'));
+            let browser_url = if m.url.is_empty() { notes_url.clone() } else { m.url.clone() };
+            let mut body = card()
+                .child(div().flex().items_center().gap_2()
+                    .child(ui::icon(ui::IconName::Download, 15., c(th.accent)))
+                    .child(div().px_2().py(px(1.)).rounded_full().bg(c(th.accent).opacity(0.15)).text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.accent)).child(tf("update.new_badge", &[("v", &m.version)])))
+                    .child(div().flex_1())
+                    .child(div().id("upd-notes").text_size(px(12.)).text_color(c(th.accent)).cursor_pointer().hover(|s| s.underline()).child(t("update.view_notes")).on_click(move |_, _w, cx| cx.open_url(&notes_url))));
+            let ready = crate::update_ui::ready_for(&m.version);
+            let mut action = div().flex().items_center().gap_3();
+            match (&phase, ready) {
+                (_, Some(rec)) => {
+                    action = action.child(ui::button("dl-install", t("update.quit_and_update"), 1).on_click(cx.listener(move |_, _, _w, cx| cx.emit(SettingsEvent::ApplyUpdate(rec.clone())))));
+                }
+                (Phase::Downloading { version, progress }, _) if *version == m.version => {
+                    let (done, total) = (progress.done.load(Ordering::Relaxed), progress.total.load(Ordering::Relaxed));
+                    let frac = if total > 0 { done as f32 / total as f32 } else { 0. };
+                    let pct = if total > 0 { format!("{}%", done * 100 / total) } else { "…".into() };
+                    let size = if total > 0 { format!("{} / {}", crate::update_ui::human(done), crate::update_ui::human(total)) } else { crate::update_ui::human(done) };
+                    let spd = crate::update_ui::speed(done).map(|b| format!(" · {}/s", crate::update_ui::human(b))).unwrap_or_default();
+                    body = body.child(div().flex().items_center().gap_2()
+                        .child(div().flex_1().h(px(6.)).rounded_full().bg(c(th.surface1)).child(div().h_full().rounded_full().bg(c(th.accent)).w(gpui::relative(frac.clamp(0., 1.)))))
+                        .child(div().text_size(px(12.)).text_color(c(th.subtext)).child(format!("{pct} · {size}{spd}"))));
+                    action = action.child(ui::button("dl-cancel", t("ui.cancel"), 0).on_click(|_, _, _| crate::update_ui::cancel()));
+                }
+                (Phase::Failed { version, error }, _) if *version == m.version => {
+                    let open = self.update_err_open;
+                    body = body.child(div().flex().items_start().gap_2()
+                        .child(ui::icon(ui::IconName::TriangleAlert, 14., c(th.error)))
+                        .child(div().flex_1().min_w_0().text_size(px(12.)).text_color(c(th.error)).whitespace_normal().child(crate::update_ui::friendly(error)))
+                        .child(div().id("upd-err-toggle").text_size(px(12.)).text_color(c(th.subtext)).cursor_pointer().hover(|s| s.underline())
+                            .child(if open { t("update.hide_details") } else { t("update.details") })
+                            .on_click(cx.listener(|this, _, _w, cx| { this.update_err_open = !this.update_err_open; cx.notify(); }))));
+                    if open {
+                        let full = error.clone();
+                        body = body.child(div().id("upd-err-full").w_full().max_h(px(160.)).overflow_y_scroll().p_2().rounded(px(ui::R_MD)).bg(c(th.base)).border_1().border_color(c(th.surface1))
+                            .text_size(px(11.)).font_family("monospace").text_color(c(th.subtext)).whitespace_normal().child(full.clone()))
+                            .child(div().flex().child(div().id("upd-err-copy").text_size(px(12.)).text_color(c(th.accent)).cursor_pointer().hover(|s| s.underline()).child(t("update.copy_details"))
+                                .on_click(move |_, _w, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(full.clone())))));
+                    }
+                    let mm = m.clone();
+                    action = action.child(ui::button("dl-retry", t("update.retry"), 1).on_click(cx.listener(move |this, _, _w, cx| { this.update_err_open = false; crate::update_ui::start(mm.clone(), true); cx.notify(); })));
+                }
+                _ if ssh_term_proto::updater::downloadable(&m) => {
+                    let mm = m.clone();
+                    action = action.child(ui::button("dl-update", t("update.download"), 1).on_click(cx.listener(move |_, _, _w, cx| { crate::update_ui::start(mm.clone(), true); cx.notify(); })));
+                }
+                _ => {}
             }
-            Phase::Failed { version, error } => row
-                .child(line(tf("update.download_failed", &[("v", &version), ("e", &error)]), c(th.error)))
-                .child(ui::button("dl-retry", t("update.retry"), 0).on_click(|_, _, _| crate::update_ui::retry()))
-                .into_any_element(),
+            action = action.child(div().id("upd-browser").text_size(px(12.)).text_color(c(th.subtext)).cursor_pointer().hover(|s| s.underline().text_color(c(th.accent)))
+                .child(t("update.open_in_browser")).on_click(move |_, _w, cx| cx.open_url(&browser_url)));
+            body.child(action)
+        });
+
+        // 已下载的安装包
+        let history = match &phase {
             Phase::Ready(rec) => {
                 let (r1, r2) = (rec.clone(), rec.file.clone());
-                row.child(line(tf("update.record", &[("v", &rec.version), ("s", &crate::update_ui::human(rec.size)), ("t", &crate::update_ui::when(rec.downloaded_at))]), c(th.text)))
-                    .child(ui::button("dl-install", t("update.install_now"), 1).on_click(cx.listener(move |_, _, _w, cx| cx.emit(SettingsEvent::ApplyUpdate(r1.clone())))))
-                    .child(ui::button("dl-reveal", t("update.show_in_folder"), 0).on_click(move |_, _, _| { let _ = ssh_term_proto::updater::reveal(&r2); }))
-                    .into_any_element()
+                Some(div().flex().flex_col().gap_1()
+                    .child(div().pt_2().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.subtext)).child(t("update.downloaded_title")))
+                    .child(div().w_full().px_3().py_2().rounded(px(ui::R_MD)).bg(c(th.mantle)).border_1().border_color(c(th.surface0)).flex().items_center().gap_3()
+                        .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(format!("v{}", rec.version.trim_start_matches('v'))))
+                        .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(crate::update_ui::human(rec.size)))
+                        .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(crate::update_ui::when(rec.downloaded_at)))
+                        .child(div().flex_1())
+                        .child(ui::button("dl-reveal", t("update.show_in_folder"), 3).on_click(move |_, _, _| { let _ = ssh_term_proto::updater::reveal(&r2); }))
+                        .child(ui::button("dl-install-h", t("update.install_now"), 0).on_click(cx.listener(move |_, _, _w, cx| cx.emit(SettingsEvent::ApplyUpdate(r1.clone())))))))
             }
-        }
+            _ => None,
+        };
+
+        div().flex().flex_col().gap_3().child(Self::section_title(t("ui.updates")))
+            .child(version_card)
+            .children(new_card)
+            .children(history)
+            .into_any_element()
     }
 
     fn scheme_preview(&self) -> AnyElement {

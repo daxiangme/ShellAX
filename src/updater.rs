@@ -66,7 +66,26 @@ pub fn sum_for(sums: &str, name: &str) -> Option<String> {
 }
 
 fn agent(url: &str, timeout: Duration) -> Result<ureq::Agent> {
-    Ok(crate::proxy::ureq_builder(url, ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(15)).timeout_read(timeout).redirects(10))?.build())
+    Ok(crate::proxy::ureq_builder_sys(url, ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(15)).timeout_read(timeout).redirects(10))?.build())
+}
+
+/// 网络请求最多尝试 3 次（间隔 1s、3s）；取消或校验失败不重试。
+fn retry<T>(p: Option<&Progress>, mut f: impl FnMut() -> Result<T>) -> Result<T> {
+    let mut last = None;
+    for (i, wait) in [0u64, 1, 3].into_iter().enumerate() {
+        if wait > 0 { std::thread::sleep(Duration::from_secs(wait)); }
+        if p.is_some_and(|p| p.cancel.load(Ordering::Relaxed)) { bail!("cancelled"); }
+        match f() {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                let s = format!("{e:#}");
+                if s.contains("cancelled") || s.contains("checksum mismatch") || s.contains("no entry for") || s.contains("HTTP 404") { return Err(e); }
+                eprintln!("update: attempt {} failed: {s}", i + 1);
+                last = Some(e);
+            }
+        }
+    }
+    Err(last.unwrap())
 }
 
 fn http_err(e: ureq::Error) -> anyhow::Error {
@@ -82,8 +101,8 @@ fn expected_sha(m: &Manifest, url: &str) -> Result<Option<String>> {
     let s = m.sha256.trim().to_ascii_lowercase();
     if !s.is_empty() && download_url(m) == m.url { return Ok(Some(s)); }
     let Some(su) = sums_url(url) else { return Ok(None) };
-    let body = agent(&su, Duration::from_secs(20))?.get(&su).set("User-Agent", &format!("shellax/{CURRENT}")).call().map_err(http_err)
-        .with_context(|| "SHA256SUMS.txt")?.into_string()?;
+    let body = retry(None, || Ok(agent(&su, Duration::from_secs(20))?.get(&su).set("User-Agent", &format!("shellax/{CURRENT}")).call().map_err(http_err)?.into_string()?))
+        .with_context(|| "SHA256SUMS.txt")?;
     sum_for(&body, &file_name(url)).map(Some).ok_or_else(|| anyhow!("SHA256SUMS.txt: no entry for {}", file_name(url)))
 }
 
@@ -97,29 +116,31 @@ pub fn download(m: &Manifest, data_dir: &Path, p: &Progress) -> Result<Record> {
     let dest = dir.join(&name);
     let part = dir.join(format!("{name}.part"));
     let expected = expected_sha(m, &url)?;
-    let r = agent(&url, Duration::from_secs(60))?.get(&url).set("User-Agent", &format!("shellax/{CURRENT}")).call().map_err(http_err)?;
-    let total = r.header("content-length").and_then(|v| v.parse().ok()).unwrap_or(0u64);
-    p.total.store(total, Ordering::Relaxed);
-    p.done.store(0, Ordering::Relaxed);
-    let res = (|| -> Result<(u64, String)> {
-        let mut f = std::fs::File::create(&part)?;
-        let mut rd = r.into_reader();
-        let mut h = Sha256::new();
-        let mut buf = vec![0u8; 64 * 1024];
-        let mut n = 0u64;
-        loop {
-            if p.cancel.load(Ordering::Relaxed) { bail!("cancelled"); }
-            let k = rd.read(&mut buf)?;
-            if k == 0 { break; }
-            f.write_all(&buf[..k])?;
-            h.update(&buf[..k]);
-            n += k as u64;
-            p.done.store(n, Ordering::Relaxed);
-        }
-        f.flush()?;
-        if total > 0 && n != total { bail!("incomplete download ({n} / {total} bytes)"); }
-        Ok((n, h.finalize().iter().map(|b| format!("{b:02x}")).collect()))
-    })();
+    let res = retry(Some(p), || {
+        let r = agent(&url, Duration::from_secs(60))?.get(&url).set("User-Agent", &format!("shellax/{CURRENT}")).call().map_err(http_err)?;
+        let total = r.header("content-length").and_then(|v| v.parse().ok()).unwrap_or(0u64);
+        p.total.store(total, Ordering::Relaxed);
+        p.done.store(0, Ordering::Relaxed);
+        (|| -> Result<(u64, String)> {
+            let mut f = std::fs::File::create(&part)?;
+            let mut rd = r.into_reader();
+            let mut h = Sha256::new();
+            let mut buf = vec![0u8; 64 * 1024];
+            let mut n = 0u64;
+            loop {
+                if p.cancel.load(Ordering::Relaxed) { bail!("cancelled"); }
+                let k = rd.read(&mut buf)?;
+                if k == 0 { break; }
+                f.write_all(&buf[..k])?;
+                h.update(&buf[..k]);
+                n += k as u64;
+                p.done.store(n, Ordering::Relaxed);
+            }
+            f.flush()?;
+            if total > 0 && n != total { bail!("incomplete download ({n} / {total} bytes)"); }
+            Ok((n, h.finalize().iter().map(|b| format!("{b:02x}")).collect()))
+        })()
+    });
     let (size, got) = match res { Ok(x) => x, Err(e) => { let _ = std::fs::remove_file(&part); return Err(e); } };
     if let Some(exp) = expected {
         if exp != got {

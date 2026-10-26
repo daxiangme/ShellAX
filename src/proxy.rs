@@ -151,8 +151,44 @@ fn system_proxy() -> (Vec<Candidate>, String) {
     (parse_system_server(&server), windows_bypass_to_globs(&over))
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn system_proxy() -> (Vec<Candidate>, String) {
+    let out = std::process::Command::new("/usr/sbin/scutil").arg("--proxy").output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+    (parse_scutil(&out), String::new())
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn system_proxy() -> (Vec<Candidate>, String) { (vec![], String::new()) }
+
+/// 解析 `scutil --proxy` 输出：依次取已启用的 HTTPS、SOCKS、HTTP 代理。
+pub fn parse_scutil(out: &str) -> Vec<Candidate> {
+    let kv: std::collections::HashMap<&str, &str> = out.lines().filter_map(|l| l.split_once(" : ")).map(|(k, v)| (k.trim(), v.trim())).collect();
+    let mut v = Vec::new();
+    for (pre, kind) in [("HTTPS", Kind::Http), ("SOCKS", Kind::Socks5), ("HTTP", Kind::Http)] {
+        if kv.get(format!("{pre}Enable").as_str()) != Some(&"1") { continue; }
+        let (Some(h), Some(p)) = (kv.get(format!("{pre}Proxy").as_str()), kv.get(format!("{pre}Port").as_str()).and_then(|p| p.parse().ok())) else { continue };
+        v.push(Candidate { kind, host: h.to_string(), port: p, user: None, source: DetectSource::System });
+    }
+    v
+}
+
+/// 应用未配置代理时使用的系统代理（系统设置，其次环境变量），ureq 语法。不探测端口。
+pub fn system_proxy_url() -> Option<String> {
+    let (sys, _) = system_proxy();
+    let (env, _) = from_env();
+    let c = sys.into_iter().chain(env).next()?;
+    let host = if c.host.contains(':') { format!("[{}]", c.host) } else { c.host };
+    Some(format!("{}://{host}:{}", match c.kind { Kind::Socks5 => "socks5", Kind::Http => "http" }, c.port))
+}
+
+/// 更新检查和下载用：应用代理优先，未设置时回退到系统代理。
+pub fn ureq_builder_sys(url: &str, b: ureq::AgentBuilder) -> Result<ureq::AgentBuilder> {
+    if URL.lock().unwrap().trim().is_empty() {
+        if let Some(u) = system_proxy_url() { if let Ok(p) = ureq::Proxy::new(&u) { return Ok(b.proxy(p)); } }
+        return Ok(b);
+    }
+    ureq_builder(url, b)
+}
 
 #[cfg(windows)]
 fn read_reg_sz(sub: &str, name: &str) -> Option<String> {
@@ -477,5 +513,16 @@ mod tests {
         assert_eq!(name[4] as usize, "example.com".len());
         let url = format_url(&Proxy { kind: Kind::Socks5, host: "127.0.0.1".into(), port: 7890, user: Some(("u".into(), "p".into())) });
         assert_eq!(parse(&url).unwrap().port, 7890);
+    }
+}
+
+#[cfg(test)]
+mod scutil_tests {
+    #[test]
+    fn scutil() {
+        let out = "<dictionary> {\n  HTTPEnable : 1\n  HTTPPort : 7890\n  HTTPProxy : 127.0.0.1\n  HTTPSEnable : 1\n  HTTPSPort : 7890\n  HTTPSProxy : 127.0.0.1\n  SOCKSEnable : 0\n}";
+        let v = super::parse_scutil(out);
+        assert_eq!(v.len(), 2);
+        assert_eq!((v[0].host.as_str(), v[0].port), ("127.0.0.1", 7890));
     }
 }

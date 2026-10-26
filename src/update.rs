@@ -44,7 +44,7 @@ pub fn url_for(template: &str, channel: &str) -> String {
 }
 
 fn get(url: &str) -> anyhow::Result<ureq::Response> {
-    let agent = crate::proxy::ureq_builder(url, ureq::AgentBuilder::new().timeout(Duration::from_secs(10)))?.build();
+    let agent = crate::proxy::ureq_builder_sys(url, ureq::AgentBuilder::new().timeout(Duration::from_secs(10)))?.build();
     match agent.get(url).set("User-Agent", &format!("shellax/{CURRENT}")).set("Accept", "application/vnd.github+json").call() {
         Ok(r) => Ok(r),
         Err(ureq::Error::Status(403 | 429, r)) if r.header("x-ratelimit-remaining") == Some("0") || r.status() == 429 =>
@@ -128,7 +128,7 @@ fn manifest_from_tag(tag: &str, os: &str, arch: &str) -> Option<Manifest> {
 }
 
 fn web_agent(url: &str, redirects: u32) -> anyhow::Result<ureq::Agent> {
-    Ok(crate::proxy::ureq_builder(url, ureq::AgentBuilder::new().timeout(Duration::from_secs(10)).redirects(redirects))?.build())
+    Ok(crate::proxy::ureq_builder_sys(url, ureq::AgentBuilder::new().timeout(Duration::from_secs(10)).redirects(redirects))?.build())
 }
 
 /// 网页请求的错误说明（保留状态码或底层原因，便于定位）。

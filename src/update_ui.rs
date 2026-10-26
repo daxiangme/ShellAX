@@ -42,6 +42,29 @@ pub fn ready_for(v: &str) -> Option<Record> {
     match &*PHASE.lock().unwrap() { Phase::Ready(r) if r.version == v && r.file.is_file() => Some(r.clone()), _ => None }
 }
 
+static STARTED: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+static CHECKED: Mutex<Option<i64>> = Mutex::new(None);
+/// 记录最近一次检查更新的时间。
+pub fn mark_checked() { *CHECKED.lock().unwrap() = Some(chrono::Utc::now().timestamp()); }
+pub fn last_checked() -> Option<i64> { *CHECKED.lock().unwrap() }
+/// 下载速度（字节/秒）。
+pub fn speed(done: u64) -> Option<u64> {
+    let t = (*STARTED.lock().unwrap())?.elapsed().as_secs_f64();
+    (t > 0.5).then(|| (done as f64 / t) as u64)
+}
+
+/// 把底层错误归类为一句简短的提示。
+pub fn friendly(err: &str) -> String {
+    let e = err.to_ascii_lowercase();
+    let key = if e.contains("checksum mismatch") { "update.err_checksum" }
+        else if e.contains("http 404") || e.contains("no entry for") { "update.err_missing" }
+        else if e.contains("http 403") || e.contains("http 429") { "update.err_limited" }
+        else if e.contains("no space") || e.contains("permission denied") || e.contains("os error 5") || e.contains("os error 112") { "update.err_disk" }
+        else if e.contains("tls") || e.contains("connect") || e.contains("dns") || e.contains("timed out") || e.contains("timeout") || e.contains("resolve") || e.contains("os error 10060") || e.contains("proxy") || e.contains("incomplete") || e.contains("reset") { "update.err_network" }
+        else { "update.err_generic" };
+    ssh_term_proto::i18n::t(key).to_string()
+}
+
 pub fn prompt() -> Option<Record> { PROMPT.lock().unwrap().clone() }
 pub fn dismiss_prompt() { *PROMPT.lock().unwrap() = None; bump(); }
 pub fn downloading() -> bool { matches!(*PHASE.lock().unwrap(), Phase::Downloading { .. }) }
@@ -62,6 +85,7 @@ pub fn start(m: Manifest, prompt: bool) {
         let progress = Arc::new(Progress::default());
         *ph = Phase::Downloading { version: m.version.clone(), progress: progress.clone() };
         *LAST.lock().unwrap() = Some(m.clone());
+        *STARTED.lock().unwrap() = Some(std::time::Instant::now());
         bump();
         std::thread::spawn(move || {
             let r = updater::download(&m, &crate::data_dir(), &progress);

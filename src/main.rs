@@ -1200,7 +1200,7 @@ impl Root {
                 let p = if total > 0 { format!("{}%", done * 100 / total) } else { "…".into() };
                 status = Some((tf("update.downloading", &[("v", &m.version), ("p", &p), ("s", &update_ui::human(done))]), false));
             }
-            Phase::Failed { version, error } if *version == m.version => status = Some((tf("update.download_failed", &[("v", &m.version), ("e", error)]), true)),
+            Phase::Failed { version, error } if *version == m.version => status = Some((update_ui::friendly(error), true)),
             _ => {}
         }
         let mut actions = div().flex().items_center().gap_2().justify_end()
@@ -2292,6 +2292,7 @@ fn open_main(cx: &mut App, rt: Arc<tokio::runtime::Runtime>, themes: Vec<Arc<The
                         let g = config::get().general.clone();
                         cx.spawn(async move |this, cx| {
                             let r = cx.background_executor().spawn(async move { g.check_update() }).await;
+                            update_ui::mark_checked();
                             match r {
                                 Ok(Some(m)) => { let _ = this.update(cx, |r, cx| {
                                     r.log("update.available", &m.version);
