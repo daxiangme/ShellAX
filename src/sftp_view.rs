@@ -167,15 +167,9 @@ fn default_local_dir() -> PathBuf {
 
 /// Saved host name for a target (sidebar name), else `user@host:port`.
 fn host_name(t: &SshTarget) -> String {
-    config_hosts().into_iter().find(|(_, x)| x.pool_key() == t.pool_key()).map(|(h, _)| h.name).unwrap_or_else(|| t.label())
+    config_hosts().iter().find(|(_, x)| x.pool_key() == t.pool_key()).map(|(h, _)| h.name.clone()).unwrap_or_else(|| t.label())
 }
-fn config_hosts() -> Vec<(HostEntry, SshTarget)> {
-    let s = crate::config::get();
-    let kh = s.known_hosts_path();
-    let all = s.all_hosts();
-    let o = s.ssh_opts();
-    all.iter().map(|h| (h.clone(), ssh_term_proto::hosts::resolve(h, &kh, &all, &o))).collect()
-}
+fn config_hosts() -> std::sync::Arc<Vec<(HostEntry, SshTarget)>> { crate::config::resolved_hosts() }
 
 /// Recursive local copy; returns the number of files copied.
 fn copy_tree(from: &Path, to: &Path) -> std::io::Result<usize> {
@@ -1012,7 +1006,7 @@ impl SftpView {
         let th = cur();
         let p = &self.panes[pi];
         let (ic, name) = match &p.src { Src::Remote(_) => (IconName::Server, p.label()), _ => (IconName::Monitor, p.label()) };
-        let tags = p.target().and_then(|t| config_hosts().into_iter().find(|(_, x)| x.pool_key() == t.pool_key())).map(|(h, _)| h.tags).unwrap_or_default();
+        let tags = p.target().and_then(|t| config_hosts().iter().find(|(_, x)| x.pool_key() == t.pool_key()).cloned()).map(|(h, _)| h.tags).unwrap_or_default();
         let s = crate::config::get();
         let filter_on = p.filter.is_some();
         div().h(px(40.)).flex_shrink_0().px_2().flex().items_center().gap_1().border_b_1().border_color(c(th.surface0))

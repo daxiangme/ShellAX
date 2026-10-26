@@ -493,12 +493,12 @@ impl Settings {
     /// then ~/.ssh/config (if enabled), defaults applied, production computed from tags.
     /// The sidebar shows only `self.hosts` (PRD 5.23).
     pub fn all_hosts(&self) -> Vec<HostEntry> {
-        use ssh_term_proto::hosts::{expand_tilde, load_ssh_config};
+        use ssh_term_proto::hosts::expand_tilde;
         let mut hosts: Vec<HostEntry> = self.hosts.clone();
         for h in &mut hosts { h.production = self.host_is_production(h); }
         let path = std::env::var("SHELLAX_SSH_CONFIG").unwrap_or_else(|_| self.ssh.ssh_config.clone());
         if self.ssh.read_ssh_config {
-            for h in load_ssh_config(&expand_tilde(&path)) { if !hosts.iter().any(|x| x.name == h.name) { hosts.push(h); } }
+            for h in ssh_config_cached(&expand_tilde(&path)).iter() { if !hosts.iter().any(|x| x.name == h.name) { hosts.push(h.clone()); } }
         }
         for h in &mut hosts {
             if h.user.is_none() && !self.ssh.default_user.is_empty() { h.user = Some(self.ssh.default_user.clone()); }
@@ -828,4 +828,45 @@ mod audit_dir_tests {
         assert_eq!(super::audit_dir(&super::s_auditdir()), std::path::PathBuf::from("/tmp/xdgx/shellax/audit"));
         assert_eq!(super::audit_dir("/var/aud"), std::path::PathBuf::from("/var/aud"));
     }
+}
+
+/// Parsed ~/.ssh/config, re-read only when its path or mtime changes (mtime checked at most
+/// every 2 s), so rendering the sidebar never touches the disk.
+struct SshCfgCache { path: PathBuf, mtime: Option<std::time::SystemTime>, checked: std::time::Instant, hosts: Arc<Vec<HostEntry>>, stamp: u64 }
+static SSH_CFG: std::sync::Mutex<Option<SshCfgCache>> = std::sync::Mutex::new(None);
+static SSH_CFG_STAMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn ssh_config_cached(path: &std::path::Path) -> Arc<Vec<HostEntry>> {
+    let mut g = SSH_CFG.lock().unwrap();
+    let now = std::time::Instant::now();
+    if let Some(c) = g.as_mut() {
+        if c.path == path {
+            if now.duration_since(c.checked) < std::time::Duration::from_secs(2) { return c.hosts.clone(); }
+            c.checked = now;
+            let m = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+            if m == c.mtime { return c.hosts.clone(); }
+        }
+    }
+    let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    let hosts = Arc::new(ssh_term_proto::hosts::load_ssh_config(path));
+    let stamp = SSH_CFG_STAMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    *g = Some(SshCfgCache { path: path.to_path_buf(), mtime, checked: now, hosts: hosts.clone(), stamp });
+    hosts
+}
+
+/// Every host resolved to a connection target, cached until settings or ~/.ssh/config change
+/// (sidebar, SFTP host picker).
+pub fn resolved_hosts() -> Arc<Vec<(HostEntry, ssh_term_proto::ssh::SshTarget)>> {
+    type R = Arc<Vec<(HostEntry, ssh_term_proto::ssh::SshTarget)>>;
+    static CACHE: std::sync::Mutex<Option<(u64, u64, R)>> = std::sync::Mutex::new(None);
+    let s = get();
+    let all = s.all_hosts(); // cheap now; also refreshes the ssh_config stamp
+    let key = (generation(), SSH_CFG.lock().unwrap().as_ref().map(|c| c.stamp).unwrap_or(0));
+    let mut g = CACHE.lock().unwrap();
+    if let Some((a, b, r)) = g.as_ref() { if (*a, *b) == key { return r.clone(); } }
+    let kh = s.known_hosts_path();
+    let o = s.ssh_opts();
+    let r: R = Arc::new(all.iter().map(|h| (h.clone(), ssh_term_proto::hosts::resolve(h, &kh, &all, &o))).collect());
+    *g = Some((key.0, key.1, r.clone()));
+    r
 }

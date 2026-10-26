@@ -1609,13 +1609,7 @@ impl Root {
         cx.notify();
     }
 
-    fn host_targets(&self) -> Vec<(HostEntry, SshTarget)> {
-        let s = config::get();
-        let kh = s.known_hosts_path();
-        let all = s.all_hosts();
-        let o = s.ssh_opts();
-        all.iter().map(|h| { let t = hosts::resolve(h, &kh, &all, &o); (h.clone(), t) }).collect()
-    }
+    fn host_targets(&self) -> Vec<(HostEntry, SshTarget)> { config::resolved_hosts().as_ref().clone() }
 
 }
 
