@@ -144,6 +144,107 @@ impl DbConn {
     }
 }
 
+/// `[[redis]]` in config.toml. The password lives in the secret store.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct RedisConn {
+    pub id: String,
+    pub name: String,
+    /// standalone | sentinel | cluster
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub mode: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub host: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// Extra seed nodes `host:port, …` (cluster) or the sentinels (sentinel mode).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub nodes: String,
+    /// Sentinel master name.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub master: String,
+    /// ACL user; empty = default user.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub user: String,
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    pub db: u32,
+    /// Namespace separator in the key tree; empty = ":".
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub separator: String,
+    /// "" = plain, "require" = TLS, "insecure" = TLS without certificate checks.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub tls: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub ssh_via: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub connect_timeout_secs: u64,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub note: String,
+}
+fn is_zero_u32(v: &u32) -> bool { *v == 0 }
+
+impl RedisConn {
+    pub fn password_secret(&self) -> String { format!("redis:{}:password", self.id) }
+    pub fn effective_port(&self) -> u16 { self.port.unwrap_or(if self.mode == "sentinel" { 26379 } else { 6379 }) }
+    pub fn sep(&self) -> &str { if self.separator.is_empty() { ":" } else { &self.separator } }
+    pub fn group_path(&self) -> String { self.group.as_deref().map(normalize).unwrap_or_default() }
+    pub fn connect_timeout(&self) -> std::time::Duration { std::time::Duration::from_secs(if self.connect_timeout_secs == 0 { 10 } else { self.connect_timeout_secs }) }
+    pub fn address(&self) -> String {
+        let mut s = String::new();
+        if !self.user.is_empty() { s.push_str(&self.user); s.push('@'); }
+        s.push_str(&format!("{}:{}", self.host, self.effective_port()));
+        if self.db != 0 { s.push_str(&format!("/{}", self.db)); }
+        s
+    }
+    /// All seed `(host, port)` pairs: the main address plus `nodes`.
+    pub fn seeds(&self) -> Vec<(String, u16)> {
+        let mut v = vec![];
+        if !self.host.is_empty() { v.push((self.host.clone(), self.effective_port())); }
+        for n in self.nodes.split([',', ' ', '\n']).map(str::trim).filter(|s| !s.is_empty()) {
+            let (h, p) = match n.rsplit_once(':') { Some((h, p)) => (h.trim_matches(['[', ']']).to_string(), p.parse().unwrap_or(6379)), None => (n.to_string(), 6379) };
+            if !v.contains(&(h.clone(), p)) { v.push((h, p)); }
+        }
+        v
+    }
+}
+
+/// `[[docker]]` in config.toml: the local engine or one reached over an SSH host.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct DockerEndpoint {
+    pub id: String,
+    pub name: String,
+    /// local | ssh
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub endpoint: String,
+    /// Sidebar SSH host name (endpoint = ssh).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub ssh_host: String,
+    /// Engine socket on that machine; empty = /var/run/docker.sock (local: platform default).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub socket: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub note: String,
+}
+
+impl DockerEndpoint {
+    pub fn is_ssh(&self) -> bool { self.endpoint == "ssh" }
+    pub fn socket_path(&self) -> &str { if self.socket.is_empty() { "/var/run/docker.sock" } else { &self.socket } }
+    pub fn group_path(&self) -> String { self.group.as_deref().map(normalize).unwrap_or_default() }
+}
+
 /// New random id: 12 lowercase hex chars.
 pub fn new_id() -> String {
     use rand::Rng;
@@ -349,4 +450,9 @@ mod tests {
         let back: DbConn = toml::from_str(&s).unwrap();
         assert_eq!(back, c);
     }
+}
+
+/// Tags of any asset in group `group` (own tags plus its groups' tags) include `prod_tag`.
+pub fn is_production(tags: &[String], group: &str, groups: &[GroupEntry], prod_tag: &str) -> bool {
+    tags.iter().any(|t| t == prod_tag) || groups.iter().any(|e| !group.is_empty() && crate::hosttree::under(group, &e.path) && e.tags.iter().any(|t| t == prod_tag))
 }

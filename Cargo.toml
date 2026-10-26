@@ -65,6 +65,18 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 libsqlite3-sys = { version = "0.37", default-features = false }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "mysql", "postgres", "sqlite-bundled", "chrono", "json"] }
+# Redis (BSD-3-Clause): async, TLS via rustls, cluster and sentinel
+redis = { version = "1.8", default-features = false, features = ["tokio-comp", "tokio-rustls-comp", "cluster-async", "sentinel"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+# Docker Engine API (Apache-2.0): local socket / named pipe, or HTTP through an SSH tunnel
+bollard = { version = "0.21", default-features = false, features = ["http", "pipe"] }
+# SQL Server TDS (MIT OR Apache-2.0)
+tiberius = { version = "0.13", default-features = false, features = ["tds73", "rustls", "chrono"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+# MongoDB (Apache-2.0)
+mongodb = { version = "3", default-features = false, features = ["compat-3-0-0", "rustls-tls", "dns-resolver"] }
+# DuckDB (MIT), optional: the bundled engine is a large C++ build
+duckdb = { version = "1", optional = true, features = ["bundled"] }
 
 # Distribution build (installer payload): `cargo build --profile dist`.
 # Kept separate from `release` so day-to-day release builds/tests stay fast.
@@ -76,6 +88,9 @@ opt-level = 3
 panic = "abort"
 strip = "symbols"
 debug = false
+
+[features]
+duckdb = ["dep:duckdb"]
 
 [dev-dependencies]
 zbus = { version = "5", default-features = false, features = ["tokio"] }

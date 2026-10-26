@@ -31,9 +31,7 @@ pub async fn open(c: &DbConn, password: Option<String>, via: Option<(SshTarget, 
     let mut endpoint = None;
     let mut via_label = None;
     if let Some((t, prompts)) = via.filter(|_| !c.kind.is_file()) {
-        let (conn, _) = ssh::connect_shared(&t, &prompts).await.with_context(|| format!("SSH {}", t.label()))?;
-        let r = Running::new(Spec { host: t.label(), kind: Kind::L, bind_addr: "127.0.0.1".into(), bind_port: 0, dest_host: c.host.clone(), dest_port: c.effective_port(), auto_start: false });
-        let port = r.start_ephemeral(conn).await.context("SSH tunnel")?;
+        let (r, port) = tunnel_to(&t, &prompts, &c.host, c.effective_port()).await?;
         endpoint = Some(("127.0.0.1".to_string(), port));
         via_label = Some(t.label());
         tunnel = Some(r);
@@ -44,4 +42,12 @@ pub async fn open(c: &DbConn, password: Option<String>, via: Option<(SshTarget, 
     };
     let version = driver.server_version().await.unwrap_or_default();
     Ok(Live { driver, version, via: via_label, tunnel })
+}
+
+/// Local 127.0.0.1 port forwarded through the (shared) SSH connection of `t` to `host:port`.
+pub async fn tunnel_to(t: &SshTarget, prompts: &Prompts, host: &str, port: u16) -> Result<(Arc<Running>, u16)> {
+    let (conn, _) = ssh::connect_shared(t, prompts).await.with_context(|| format!("SSH {}", t.label()))?;
+    let r = Running::new(Spec { host: t.label(), kind: Kind::L, bind_addr: "127.0.0.1".into(), bind_port: 0, dest_host: host.to_string(), dest_port: port, auto_start: false });
+    let p = r.start_ephemeral(conn).await.context("SSH tunnel")?;
+    Ok((r, p))
 }
