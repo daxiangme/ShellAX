@@ -2224,6 +2224,12 @@ pub fn play_sound() {
 mod tests {
     use super::*;
     #[test]
+    fn paste_bytes_are_utf8() {
+        let s = "计划已经写成任务书：/Users/x/docs/tasks/01.1-人物与场景视觉升级.md。";
+        assert_eq!(paste_bytes(s, false), s.as_bytes());
+        assert_eq!(paste_bytes(s, true), format!("\x1b[200~{s}\x1b[201~").into_bytes());
+    }
+    #[test]
     fn bracketed_paste_strips_esc() {
         assert_eq!(paste_bytes("a\nb", false), b"a\rb");
         assert_eq!(paste_bytes("x\x1b[201~rm -rf /\n", true), b"\x1b[200~x[201~rm -rf /\r\x1b[201~");

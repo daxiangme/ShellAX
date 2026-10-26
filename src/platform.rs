@@ -16,7 +16,39 @@ pub fn init_env() {
             if let Some(p) = std::env::var_os("LOCALAPPDATA") { std::env::set_var("XDG_DATA_HOME", p); }
         }
     }
+    // 从 Finder/Dock 启动的应用没有 LANG/LC_*，子进程（shell、pbpaste/pbcopy、Claude CLI 等）会退回
+    // 非 UTF-8 编码，中文在复制粘贴时被按 MacRoman 解码成乱码。启动时补上 UTF-8 locale，所有子进程继承。
+    #[cfg(not(windows))]
+    {
+        let get = |k: &str| std::env::var(k).ok();
+        for (k, v) in utf8_locale_fixes(get("LC_ALL"), get("LC_CTYPE"), get("LANG"), cfg!(target_os = "macos")) { std::env::set_var(k, v); }
+    }
     migrate_legacy();
+}
+
+fn is_utf8_locale(v: &str) -> bool {
+    let l = v.to_ascii_lowercase();
+    l.contains("utf-8") || l.contains("utf8")
+}
+
+/// 需要设置的环境变量，使字符类型 locale 为 UTF-8。已是 UTF-8 时返回空。
+pub fn utf8_locale_fixes(lc_all: Option<String>, lc_ctype: Option<String>, lang: Option<String>, macos: bool) -> Vec<(&'static str, String)> {
+    let nonempty = |v: Option<String>| v.filter(|s| !s.trim().is_empty());
+    let (lc_all, lc_ctype, lang) = (nonempty(lc_all), nonempty(lc_ctype), nonempty(lang));
+    // POSIX 优先级：LC_ALL > LC_CTYPE > LANG
+    let effective = lc_all.clone().or(lc_ctype.clone()).or(lang.clone());
+    if effective.as_deref().is_some_and(is_utf8_locale) { return vec![]; }
+    let fallback = if macos { "en_US.UTF-8" } else { "C.UTF-8" };
+    let mut out = vec![];
+    if lang.as_deref().is_none_or(|l| !is_utf8_locale(l)) {
+        // 保留语言部分，例如 zh_CN → zh_CN.UTF-8
+        let base = lang.as_deref().map(|l| l.split(['.', '@']).next().unwrap_or("")).filter(|b| b.contains('_')).map(|b| format!("{b}.UTF-8"));
+        out.push(("LANG", base.unwrap_or_else(|| fallback.to_string())));
+    }
+    let target = out.first().map(|x| x.1.clone()).or(lang).unwrap_or_else(|| fallback.to_string());
+    out.push(("LC_CTYPE", target));
+    if lc_all.is_some() { out.push(("LC_ALL", out[0].1.clone())); }
+    out
 }
 
 /// One-time move of the pre-rename directories (AgentShell → coossh → ShellAX): config and data dirs are
@@ -338,5 +370,18 @@ mod tests {
         if let Some(det) = super::detect_system_terminal_font(&installed) {
             assert!(!det.family.is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod locale_tests {
+    use super::utf8_locale_fixes as f;
+    #[test]
+    fn locale() {
+        assert!(f(None, None, Some("zh_CN.UTF-8".into()), true).is_empty());
+        assert_eq!(f(None, None, None, true), vec![("LANG", "en_US.UTF-8".to_string()), ("LC_CTYPE", "en_US.UTF-8".to_string())]);
+        assert_eq!(f(None, None, Some("zh_CN".into()), true)[0].1, "zh_CN.UTF-8");
+        assert_eq!(f(Some("C".into()), None, Some("en_US.UTF-8".into()), true), vec![("LC_CTYPE", "en_US.UTF-8".to_string()), ("LC_ALL", "en_US.UTF-8".to_string())]);
+        assert_eq!(f(None, None, None, false)[0].1, "C.UTF-8");
     }
 }
