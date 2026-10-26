@@ -90,6 +90,8 @@ type BPoint = (i32, usize);
 /// State shared by the pane and its two paint layers.
 #[derive(Default)]
 pub struct PaintState {
+    /// Debounces / freezes PTY resizes during animations and drags.
+    pub gate: crate::motion::SizeGate,
     pub cell_w: f32,
     pub origin: gpui::Point<Pixels>,
     pub bounds: Bounds<Pixels>,
@@ -168,7 +170,15 @@ impl Render for GridLayer {
                 s.origin = bounds.origin + point(px(pad), px(pad));
                 let cols = ((f32::from(bounds.size.width) - 2.0 * pad - reserve) / cw).floor().max(10.0) as usize;
                 let rows = ((f32::from(bounds.size.height) - 2.0 * pad) / line_h()).floor().max(3.0) as usize;
-                if let Some(s) = &session { s.resize(Size { cols, rows }); *s.cell_px.lock().unwrap() = (cw * window.scale_factor(), line_h() * window.scale_factor()); }
+                if let Some(sess) = &session {
+                    // one resize after animations / drags settle, not one per frame
+                    let cur = sess.size();
+                    if let Some((c2, r2)) = s.gate.poll((cols, rows), (cur.cols, cur.rows), crate::motion::layout_busy(), std::time::Instant::now()) {
+                        sess.resize(Size { cols: c2, rows: r2 });
+                    }
+                    if s.gate.waiting() { window.request_animation_frame(); }
+                    *sess.cell_px.lock().unwrap() = (cw * window.scale_factor(), line_h() * window.scale_factor());
+                }
                 session
             },
             move |bounds, session, window, cx| {
