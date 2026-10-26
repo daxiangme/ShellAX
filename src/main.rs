@@ -231,6 +231,13 @@ pub(crate) struct Root {
     /// tab right-click menu (tab index, position)
     tab_menu: Option<(usize, gpui::Point<gpui::Pixels>)>,
     tab_menu_at: std::time::Instant,
+    /// “+”新建菜单：锚点、打开/关闭时间、菜单内折叠的分组、键盘选中项、搜索框
+    new_menu: Option<gpui::Point<gpui::Pixels>>,
+    new_menu_at: std::time::Instant,
+    new_menu_closed: std::time::Instant,
+    new_menu_collapsed: Vec<String>,
+    new_menu_sel: usize,
+    new_menu_search: Entity<InputState>,
     tab_scroll: gpui::ScrollHandle,
     /// inline tab rename (tab index, input)
     tab_rename: Option<(usize, Entity<InputState>)>,
@@ -1826,7 +1833,12 @@ impl Render for Root {
             div().id("new-tab").size(px(28.)).flex_shrink_0().ml(px(2.)).rounded(px(7.)).on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()).flex().items_center().justify_center().cursor_pointer()
                 .hover(move |s| s.bg(hover_bg)).active(move |s| s.bg(pill_bg))
                 .tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(t("ui.new_tab")).build(w, cx))
-                .on_click(cx.listener(|this, _, w, cx| this.new_tab(Spec::Local, w, cx)))
+                .on_click(cx.listener(|this, ev: &gpui::ClickEvent, w, cx| {
+                    // 菜单刚被“点击外部”关闭（就是这次点击）时不再重新打开，实现开关切换
+                    if this.new_menu.is_some() || this.new_menu_closed.elapsed() < std::time::Duration::from_millis(250) { this.new_menu = None; cx.notify(); return; }
+                    let p = ev.position();
+                    this.open_new_menu(gpui::point(p.x - px(14.), p.y + px(18.)), w, cx);
+                }))
                 .child(icon(IconName::Plus, 15., c(th.overlay1))),
         ).child(chrome::drag_spacer("title-spacer").min_w(px(chrome::MIN_DRAG_W)).flex_shrink_0().flex_grow(1.));
         row = match win_ctl { Some(wc) => row.child(wc), None => row.pr(px(8.)) };
@@ -2112,6 +2124,7 @@ impl Render for Root {
         if let Some(m) = self.modal.clone() { root = root.child(self.render_modal(m, cx)); }
         if let Some(m) = self.sb_modal.clone() { root = root.child(self.sb_modal_el(m, cx)); }
         if let Some((i, pos)) = self.tab_menu { root = root.child(self.tab_menu_el(i, pos, cx)); }
+        if let Some(pos) = self.new_menu { root = root.child(self.new_menu_el(pos, cx)); }
         if let Some((gs, gt, seq)) = self.menu_ghost.clone() {
             if self.sb_menu.is_none() { if let Some(m) = gs { let el = self.sb_menu_el(m, cx); root = root.child(chrome::pop_out(("menu-out-sb", seq as usize), div().absolute().top_0().left_0().size_full().child(el))); } }
             if self.tab_menu.is_none() { if let Some((i, pos)) = gt { if i < self.tabs.len() { let el = self.tab_menu_el(i, pos, cx); root = root.child(chrome::pop_out(("menu-out-tab", seq as usize), div().absolute().top_0().left_0().size_full().child(el))); } } }
@@ -2248,17 +2261,19 @@ fn open_main(cx: &mut App, rt: Arc<tokio::runtime::Runtime>, themes: Vec<Arc<The
                     let _ = ssh::SECRETS.set(secret_store());
                     migrate_key_field_passwords();
                     let host_search = cx.new(|cx| InputState::new(window, cx).placeholder(t("ui.search_hosts")));
+                    let new_menu_search = cx.new(|cx| InputState::new(window, cx).placeholder(t("newmenu.search")));
                     let lib_search = cx.new(|cx| InputState::new(window, cx).placeholder(t("lib.search")));
                     let audit = audit_log();
                     let mut root = Root {
                         rt, default_target, tabs: vec![], active: 0, themes, schemes, histories: HashMap::new(),
                         manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], deny_reason: None, policy_port: None, overlay: Overlay::None, settings: None, sftp_views: HashMap::new(), sftp_current: None, sftp_windows: vec![], drag_div: None, port_view: None, quit_confirm: false, modal: None, quit_ok: false, chat_view: None,
-                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, menu_last: (None, None), menu_ghost: None, menu_ghost_seq: 0, sb_menu_at: std::time::Instant::now(), sb_modal: None, tag_filter: vec![], tab_menu: None, tab_menu_at: std::time::Instant::now(), tab_scroll: gpui::ScrollHandle::new(), tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), dock: SideDock::None, lib_search: lib_search.clone(), lib_group: String::new(), lib_hist_all: false, lib_editor: None, lib_vars: None, lib_confirm: None, lib_notice: String::new(), ai_width: { let w = config::get().sidebar.ai_width; if (280.0..=560.0).contains(&w) { w } else { config::AI_DOCK_W } }, host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: true, sb_anim: None, audit, audit_verify: None, audit_filter: Default::default(),
+                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, menu_last: (None, None), menu_ghost: None, menu_ghost_seq: 0, sb_menu_at: std::time::Instant::now(), sb_modal: None, tag_filter: vec![], tab_menu: None, tab_menu_at: std::time::Instant::now(), new_menu: None, new_menu_at: std::time::Instant::now(), new_menu_closed: std::time::Instant::now(), new_menu_collapsed: config::get().sidebar.collapsed.clone(), new_menu_sel: 0, new_menu_search: new_menu_search.clone(), tab_scroll: gpui::ScrollHandle::new(), tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), dock: SideDock::None, lib_search: lib_search.clone(), lib_group: String::new(), lib_hist_all: false, lib_editor: None, lib_vars: None, lib_confirm: None, lib_notice: String::new(), ai_width: { let w = config::get().sidebar.ai_width; if (280.0..=560.0).contains(&w) { w } else { config::AI_DOCK_W } }, host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: true, sb_anim: None, audit, audit_verify: None, audit_filter: Default::default(),
                         settings_dirty: vec![], toast: None, toast_out: false, toast_seq: 0, _subs: vec![],
                     };
                     crate::ctxmenu_view::init(root.rt.handle().clone(), root.prompts.clone());
                     root.apply_theme(window, cx);
                     root._subs.push(cx.observe_window_appearance(window, |this: &mut Root, w, cx| { this.apply_theme(w, cx); this.refresh_all(cx); }));
+                    root._subs.push(cx.subscribe_in(&new_menu_search, window, |this: &mut Root, _, ev: &InputEvent, _, cx| if matches!(ev, InputEvent::Change) { this.new_menu_sel = 0; cx.notify() }));
                     root._subs.push(cx.subscribe_in(&host_search, window, |_, _, ev: &InputEvent, _, cx| if matches!(ev, InputEvent::Change) { cx.notify() }));
                     root._subs.push(cx.subscribe_in(&lib_search, window, |_, _, ev: &InputEvent, _, cx| if matches!(ev, InputEvent::Change) { cx.notify() }));
                     cx.spawn(async move |this, cx| {

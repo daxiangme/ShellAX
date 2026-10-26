@@ -1215,3 +1215,7 @@
 "update.err_limited" = "下载失败：GitHub 访问受限，请稍后再试"
 "update.err_disk" = "下载失败：无法写入文件，请检查磁盘空间或权限"
 "update.err_generic" = "下载失败，请重试或在浏览器中下载"
+"newmenu.local" = "本地终端"
+"newmenu.new_host" = "新建连接"
+"newmenu.search" = "搜索连接…"
+"newmenu.no_match" = "没有匹配的连接"

@@ -1215,3 +1215,7 @@
 "update.err_limited" = "Download failed: GitHub is rate limiting. Try again later."
 "update.err_disk" = "Download failed: cannot write the file. Check disk space or permissions."
 "update.err_generic" = "Download failed. Retry or download in the browser."
+"newmenu.local" = "Local terminal"
+"newmenu.new_host" = "New connection"
+"newmenu.search" = "Search connections…"
+"newmenu.no_match" = "No matching connections"

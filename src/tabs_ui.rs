@@ -8,7 +8,7 @@ use ssh_term_proto::layout::Dir;
 use crate::termview::TermView;
 use crate::theme::{c, cur};
 use crate::ui::{self, icon, IconName};
-use crate::{chrome, Root, Tab};
+use crate::{chrome, config, Root, Spec, Tab};
 
 const CLOSED_MAX: usize = 10;
 
@@ -104,6 +104,124 @@ impl Root {
         cx.notify();
     }
 
+    pub(crate) fn open_new_menu(&mut self, pos: gpui::Point<gpui::Pixels>, w: &mut Window, cx: &mut Context<Self>) {
+        self.new_menu = Some(pos);
+        self.new_menu_at = std::time::Instant::now();
+        self.new_menu_sel = 0;
+        self.new_menu_search.update(cx, |s, cx| { s.set_value("", w, cx); s.focus(w, cx); });
+        cx.notify();
+    }
+
+    fn close_new_menu(&mut self, w: &mut Window, cx: &mut Context<Self>) {
+        self.new_menu = None;
+        self.new_menu_closed = std::time::Instant::now();
+        self.focus_active(w, cx);
+        cx.notify();
+    }
+
+    /// 菜单行：本地终端、分组 / 主机（与侧栏相同的目录树和顺序）、新建连接。
+    fn new_menu_items(&self, cx: &Context<Self>) -> Vec<NewItem> {
+        let s = config::get();
+        let q = ssh_term_proto::hosttree::parse_query(&self.new_menu_search.read(cx).value(), &s.tags.all());
+        let mut v = vec![NewItem::Local];
+        for r in ssh_term_proto::hosttree::rows(&s.hosts, &s.groups, &self.new_menu_collapsed, &q) {
+            v.push(match r {
+                ssh_term_proto::hosttree::Row::Group { path, name, depth, count, collapsed } => NewItem::Group { path, name, depth, count, collapsed },
+                ssh_term_proto::hosttree::Row::Host { index, depth } => NewItem::Host { index, depth },
+            });
+        }
+        v.push(NewItem::NewHost);
+        v
+    }
+
+    fn new_menu_activate(&mut self, item: NewItem, w: &mut Window, cx: &mut Context<Self>) {
+        match item {
+            NewItem::Local => { self.close_new_menu(w, cx); self.new_tab(Spec::Local, w, cx); }
+            NewItem::Group { path, .. } => {
+                if let Some(i) = self.new_menu_collapsed.iter().position(|c| *c == path) { self.new_menu_collapsed.remove(i); } else { self.new_menu_collapsed.push(path); }
+                cx.notify();
+            }
+            NewItem::Host { index, .. } => {
+                let name = config::get().hosts.get(index).map(|h| h.name.clone()).unwrap_or_default();
+                self.close_new_menu(w, cx);
+                match self.target_for(&name) { Some(t) => self.new_tab(Spec::Ssh(t), w, cx), None => self.toast(tf("sb.cannot_resolve", &[("name", &name)]), cx) }
+            }
+            NewItem::NewHost => { self.close_new_menu(w, cx); self.open_host_dialog(None, None, w, cx); }
+        }
+    }
+
+    pub(crate) fn new_menu_el(&self, pos: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) -> AnyElement {
+        let th = cur();
+        let s = config::get();
+        let items = self.new_menu_items(cx);
+        let sel = self.new_menu_sel.min(items.len().saturating_sub(1));
+        let searching = !self.new_menu_search.read(cx).value().trim().is_empty();
+        let row = |i: usize| div().id(("newm", i)).h(px(ui::H_DEFAULT)).px(px(10.)).rounded(px(ui::R_MD)).flex().items_center().gap_2().text_size(px(ui::FS_BODY)).text_color(c(th.text)).cursor_pointer()
+            .when(i == sel, |d| d.bg(c(th.surface0)))
+            .hover(|d| d.bg(c(cur().accent)).text_color(gpui::white()));
+        let mut list = div().id("newm-list").max_h(px(360.)).overflow_y_scroll().flex().flex_col();
+        let mut n_hosts = 0;
+        for (i, it) in items.iter().enumerate() {
+            let it2 = it.clone();
+            let click = cx.listener(move |this, _, w, cx| this.new_menu_activate(it2.clone(), w, cx));
+            match it {
+                NewItem::Local => {
+                    list = list.child(row(i).child(icon(IconName::SquareTerminal, 16., c(th.overlay1))).child(div().flex_1().child(t("newmenu.local")))
+                        .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(if cfg!(target_os = "macos") { "⌘T" } else { "Ctrl+T" })).on_click(click));
+                    if items.len() > 2 { list = list.child(ui::menu_sep()); }
+                }
+                NewItem::Group { name, depth, count, collapsed, .. } => {
+                    let tags = s.groups.iter().find(|g| matches!(it, NewItem::Group { path, .. } if *path == g.path)).map(|g| g.tags.clone()).unwrap_or_default();
+                    list = list.child(row(i).pl(px(10. + *depth as f32 * 14.)).text_color(c(th.subtext))
+                        .child(icon(if *collapsed { IconName::ChevronRight } else { IconName::ChevronDown }, 12., c(th.overlay1)))
+                        .child(icon(IconName::Folder, 14., c(th.accent)))
+                        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(gpui::FontWeight::MEDIUM).child(name.clone()))
+                        .children(tags.iter().take(3).map(|t| div().size(px(6.)).flex_shrink_0().rounded_full().bg(c(s.tags.rgb(t)))))
+                        .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(count.to_string()))
+                        .on_click(click));
+                }
+                NewItem::Host { index, depth } => {
+                    let Some(h) = s.hosts.get(*index) else { continue };
+                    n_hosts += 1;
+                    let addr = format!("{}{}", h.user.as_ref().map(|u| format!("{u}@")).unwrap_or_default(), h.host);
+                    list = list.child(row(i).pl(px(10. + *depth as f32 * 14. + if *depth > 0 { 12. } else { 0. })).tooltip({ let a = addr.clone(); move |w, cx| gpui_component::tooltip::Tooltip::new(a.clone()).build(w, cx) })
+                        .child(icon(IconName::Server, 14., c(th.overlay1)))
+                        .child(div().flex_shrink_0().max_w(px(180.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(h.name.clone()))
+                        .children(h.tags.iter().take(3).map(|t| div().size(px(6.)).flex_shrink_0().rounded_full().bg(c(s.tags.rgb(t)))))
+                        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(11.)).text_color(c(th.overlay0)).child(addr))
+                        .on_click(click));
+                }
+                NewItem::NewHost => {
+                    if searching && n_hosts == 0 { list = list.child(div().px(px(10.)).py_2().text_size(px(12.)).text_color(c(th.overlay0)).child(t("newmenu.no_match"))); }
+                    list = list.child(ui::menu_sep()).child(row(i).child(icon(IconName::Plus, 16., c(th.overlay1))).child(div().flex_1().child(t("newmenu.new_host"))).on_click(click));
+                }
+            }
+        }
+        let n = items.len();
+        let pop = ui::popover().id("new-menu").occlude().w(px(340.)).p(px(5.)).flex().flex_col().gap_1()
+            .on_mouse_down_out(cx.listener(|this, _, w, cx| {
+                if this.new_menu_at.elapsed() < std::time::Duration::from_millis(250) { return; }
+                this.close_new_menu(w, cx);
+            }))
+            .capture_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, w, cx| {
+                match ev.keystroke.key.as_str() {
+                    "down" => { this.new_menu_sel = (this.new_menu_sel + 1) % n.max(1); }
+                    "up" => { this.new_menu_sel = (this.new_menu_sel + n.max(1) - 1) % n.max(1); }
+                    "enter" => {
+                        let items = this.new_menu_items(cx);
+                        if let Some(it) = items.get(this.new_menu_sel.min(items.len().saturating_sub(1))).cloned() { this.new_menu_activate(it, w, cx); }
+                    }
+                    "escape" => this.close_new_menu(w, cx),
+                    _ => return,
+                }
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            .child(div().p(px(3.)).child(ui::search_field(&self.new_menu_search, false)))
+            .child(list);
+        gpui::deferred(gpui::anchored().position(pos).snap_to_window_with_margin(px(8.)).child(chrome::pop_in("new-menu-pop", pop))).with_priority(3).into_any_element()
+    }
+
     pub(crate) fn tab_menu_el(&self, i: usize, pos: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) -> AnyElement {
         let n = self.tabs.len();
         let mut list = ui::popover().id("tab-menu").occlude().min_w(px(220.)).p(px(5.)).flex().flex_col()
@@ -153,4 +271,13 @@ impl Root {
             .child(btn(2, IconName::X, t("ui.close_pane")).on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, _, w, cx| { cx.stop_propagation(); focus(this, &d, w, cx); this.close_pane(w, cx); cx.notify(); })))
             .into_any_element()
     }
+}
+
+/// “+”新建菜单中的一项。
+#[derive(Clone)]
+pub(crate) enum NewItem {
+    Local,
+    Group { path: String, name: String, depth: usize, count: usize, collapsed: bool },
+    Host { index: usize, depth: usize },
+    NewHost,
 }
