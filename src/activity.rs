@@ -131,7 +131,7 @@ impl Root {
         if !open { col = col.child(chrome::drag_region(div().id("act-drag")).h(px(chrome::TAB_H)).w_full().flex_shrink_0().window_control_area(gpui::WindowControlArea::Drag)); } else { col = col.pt(px(4.)); }
         for (i, tool) in Tool::TOP.into_iter().enumerate() {
             let tip = crate::sidebar::action_tip(tool.label(), &tool.action().binding());
-            col = col.child(self.strip_btn_with(("act", i), (tool == Tool::Redis).then_some("shellax/db/redis.svg"), tool.icon(), tip, open && self.tool == tool, false)
+            col = col.child(self.strip_btn_with(("act", i), match tool { Tool::Redis => Some("shellax/db/redis.svg"), Tool::Docker => Some("shellax/db/docker.svg"), _ => None }, tool.icon(), tip, open && self.tool == tool, false)
                 .on_click(cx.listener(move |this, _, _w, cx| this.select_tool(tool, _w, cx))));
         }
         let vib = if chrome::NATIVE_LIGHTS { 0.72 } else { 1.0 };
