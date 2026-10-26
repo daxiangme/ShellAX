@@ -1522,3 +1522,5 @@
 "kv.tls_require" = "Verify"
 "kv.via" = "Via SSH host"
 "kv.via_placeholder" = "Empty = direct / local"
+"kv.search_hosts" = "Search hosts"
+"kv.no_match" = "No matching host"

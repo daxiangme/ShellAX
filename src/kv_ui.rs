@@ -32,7 +32,7 @@ pub struct AssetDialog {
     user: Entity<InputState>,
     password: Entity<InputState>,
     db: Entity<InputState>,
-    via: Entity<InputState>,
+    via: Entity<crate::host_picker::HostPicker>,
     socket: Entity<InputState>,
     group: Entity<InputState>,
     mode: String,
@@ -63,7 +63,7 @@ impl AssetDialog {
             user: mk("default", r.user.clone(), false, window, cx),
             password: mk(&t("ui.password"), pw, true, window, cx),
             db: mk("0", if r.db == 0 { String::new() } else { r.db.to_string() }, false, window, cx),
-            via: mk(&t("kv.via_placeholder"), if redis { r.ssh_via.clone() } else { d.ssh_host.clone() }, false, window, cx),
+            via: { let (v, h) = (if redis { r.ssh_via.clone() } else { d.ssh_host.clone() }, hosts.clone()); cx.new(|cx| crate::host_picker::HostPicker::new("kv-via", v, h, window, cx)) },
             socket: mk("/var/run/docker.sock", d.socket.clone(), false, window, cx),
             group: mk(&t("ui.e_g_prod_test"), (if redis { r.group.clone() } else { d.group.clone() }).unwrap_or_default(), false, window, cx),
             mode: if r.mode.is_empty() { "standalone".into() } else { r.mode.clone() },
@@ -78,7 +78,7 @@ impl AssetDialog {
     fn save(&mut self, cx: &mut Context<Self>) {
         let prod_tag = config::get().tags.production.clone();
         let group = Some(Self::v(&self.group, cx)).filter(|g| !g.is_empty());
-        let via = Self::v(&self.via, cx);
+        let via = self.via.read(cx).value.clone();
         if !via.is_empty() && !self.hosts.contains(&via) { self.error = Some(t("kv.err_host").into()); cx.notify(); return; }
         let id = self.id.clone().unwrap_or_else(assets::new_id);
         let set_tags = |tags: &mut Vec<String>, on: bool| { tags.retain(|x| x != &prod_tag); if on { tags.push(prod_tag.clone()); } };
@@ -139,8 +139,8 @@ impl Render for AssetDialog {
         } else {
             form = form.child(line(&t("kv.socket"), ui::text_field(&self.socket, false).into_any_element()));
         }
-        form = form.child(line(&t("kv.via"), ui::text_field(&self.via, false).into_any_element()))
-            .child(div().pl(px(108.)).text_size(px(11.)).text_color(c(th.overlay0)).child(if self.hosts.is_empty() { t("kv.no_hosts").to_string() } else { format!("{} {}", t("kv.hosts"), self.hosts.join(", ")) }));
+        form = form.child(line(&t("kv.via"), self.via.clone().into_any_element()));
+        if self.hosts.is_empty() { form = form.child(div().pl(px(108.)).text_size(px(11.)).text_color(c(th.overlay0)).child(t("kv.no_hosts"))); }
         if self.kind == AssetKind::Redis && self.mode != "standalone" { form = form.child(div().pl(px(108.)).text_size(px(11.)).text_color(c(th.warning)).child(t("redis.err_cluster_ssh"))); }
         form = form.child(line(&t("ui.group"), ui::text_field(&self.group, false).into_any_element()))
             .child(div().flex().items_center().gap_3().child(label(&t("tag.production"))).child(Switch::new("kv-prod").checked(self.production).on_click(cx.listener(|d, on: &bool, _, cx| { d.production = *on; cx.notify(); }))))

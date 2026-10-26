@@ -32,9 +32,7 @@ pub struct DbDialog {
     uri: Entity<InputState>,
     tls: String,
     read_only: bool,
-    via: String,
-    via_menu: bool,
-    hosts: Vec<String>,
+    via: Entity<crate::host_picker::HostPicker>,
     targets: HashMap<String, SshTarget>,
     prompts: Prompts,
     rt: tokio::runtime::Handle,
@@ -66,9 +64,11 @@ impl DbDialog {
         name.update(cx, |s, cx| s.focus(window, cx));
         let mut subs = vec![];
         subs.push(cx.subscribe_in(&uri, window, |this: &mut Self, _, ev: &InputEvent, window, cx| { if matches!(ev, InputEvent::Change) { this.apply_uri(window, cx); } }));
+        let via = cx.new(|cx| crate::host_picker::HostPicker::new("db-via", e.ssh_via.clone(), hosts.clone(), window, cx));
+        subs.push(cx.subscribe(&via, |this: &mut Self, _, _: &crate::host_picker::HostChanged, cx| { this.test = None; cx.notify(); }));
         let tls = if e.tls.is_empty() { "prefer".to_string() } else { e.tls.clone() };
-        Self { kind: e.kind, name, host, port, user, password, database, file, group: group_in, uri, tls, read_only: e.read_only, via: e.ssh_via.clone(), via_menu: false,
-            hosts, targets, prompts, rt, error: None, test: None, test_task: None, editing: existing, _subs: subs }
+        Self { kind: e.kind, name, host, port, user, password, database, file, group: group_in, uri, tls, read_only: e.read_only, via,
+            targets, prompts, rt, error: None, test: None, test_task: None, editing: existing, _subs: subs }
     }
 
     fn v(e: &Entity<InputState>, cx: &Context<Self>) -> String { e.read(cx).value().trim().to_string() }
@@ -109,7 +109,7 @@ impl DbDialog {
             d.user = Self::v(&self.user, cx);
             d.database = Self::v(&self.database, cx);
             d.file.clear();
-            d.ssh_via = self.via.clone();
+            d.ssh_via = self.via.read(cx).value.clone();
             d.tls = if self.tls == "prefer" { String::new() } else { self.tls.clone() };
             if d.name.is_empty() { d.name = d.host.clone(); }
         }
@@ -195,25 +195,7 @@ impl Render for DbDialog {
             form = form.child(line(t("host.username"), ui::text_field(&self.user, false).into_any_element()));
             form = form.child(line(t("ui.password"), ui::text_field(&self.password, false).into_any_element()));
             form = form.child(line(t("db.database"), ui::text_field(&self.database, false).into_any_element()));
-            // SSH host
-            let via_label = if self.via.is_empty() { t("db.via_direct").to_string() } else { self.via.clone() };
-            let mut via_box = div().relative().flex_1().min_w_0()
-                .child(div().id("db-via").h(px(28.)).px_2().rounded(px(6.)).flex().items_center().gap_2().cursor_pointer().bg(c(th.mantle)).border_1().border_color(c(th.surface1))
-                    .on_click(cx.listener(|this, _, _w, cx| { this.via_menu = !this.via_menu; cx.notify(); }))
-                    .child(icon(if self.via.is_empty() { IconName::Plug } else { IconName::Waypoints }, 13., c(th.overlay1)))
-                    .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(12.)).child(via_label))
-                    .child(icon(IconName::ChevronDown, 12., c(th.overlay0))));
-            if self.via_menu {
-                let mut m = ui::popover().absolute().top(px(32.)).left_0().w_full().max_h(px(220.)).id("db-via-menu").overflow_y_scroll().py_1().flex().flex_col();
-                let mut opts = vec![String::new()];
-                opts.extend(self.hosts.iter().cloned());
-                for (i, h) in opts.into_iter().enumerate() {
-                    let lbl = if h.is_empty() { t("db.via_direct").to_string() } else { h.clone() };
-                    m = m.child(ui::menu_item(("db-via-o", i), None, lbl, true, false).on_click(cx.listener(move |this, _, _w, cx| { this.via = h.clone(); this.via_menu = false; this.test = None; cx.notify(); })));
-                }
-                via_box = via_box.child(gpui::deferred(m).with_priority(3));
-            }
-            form = form.child(div().flex().items_center().gap_3().child(label(t("db.via"))).child(via_box));
+            form = form.child(line(t("db.via"), self.via.clone().into_any_element()));
             let tls: Vec<(String, String)> = TLS_MODES.iter().map(|m| (m.to_string(), t(&format!("db.tls_{}", m.replace('-', "_"))).to_string())).collect();
             let me = cx.entity().downgrade();
             form = form.child(div().flex().items_center().gap_3().child(label("TLS"))

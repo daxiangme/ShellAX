@@ -1522,3 +1522,5 @@
 "kv.tls_require" = "校验证书"
 "kv.via" = "经由 SSH 主机"
 "kv.via_placeholder" = "留空为直连/本机"
+"kv.search_hosts" = "搜索主机"
+"kv.no_match" = "没有匹配的主机"

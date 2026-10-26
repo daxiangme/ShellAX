@@ -15,6 +15,7 @@ mod db_view;
 mod kv_view;
 mod dock_view;
 mod kv_ui;
+mod host_picker;
 mod db_editor;
 mod tabs_ui;
 mod config;
