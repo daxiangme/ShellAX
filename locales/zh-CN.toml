@@ -1413,3 +1413,7 @@
 "redis.err_exists" = "键 {key} 已存在"
 "redis.err_score" = "分值必须是数字"
 "redis.err_ttl" = "TTL 必须是正整数秒"
+"mongo.err_json" = "不是有效的 JSON"
+"mongo.err_object" = "需要一个 JSON 对象"
+"mongo.err_id_changed" = "编辑文档时不能修改 _id"
+"mongo.err_gone" = "该文档已不存在"

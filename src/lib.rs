@@ -25,6 +25,7 @@ pub mod assets;
 pub mod db;
 pub mod kv;
 pub mod dock;
+pub mod doc;
 pub mod update;
 pub mod updater;
 pub mod sftp;

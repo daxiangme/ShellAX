@@ -92,4 +92,11 @@ On Windows the default fallback chain also lists the system fonts "Segoe UI Symb
 ## sqlx 0.9 (sqlx-core / sqlx-mysql / sqlx-postgres / sqlx-sqlite) — MIT OR Apache-2.0 (dependency, unmodified; database drivers)
 ## libsqlite3-sys (bundled SQLite) — MIT; SQLite itself is public domain (dependency, unmodified)
 ## futures-util 0.3 — MIT OR Apache-2.0 (dependency, unmodified)
+## redis 1.8 (redis-rs) — BSD-3-Clause (dependency, unmodified; Redis client). Copyright (c) 2022 by redis-rs contributors; redistribution must retain this notice and the license conditions.
+## bollard 0.21 / bollard-stubs — Apache-2.0 (dependency, unmodified; Docker Engine API client)
+## tiberius 0.13 — MIT OR Apache-2.0 (dependency, unmodified; SQL Server TDS client)
+## tokio-util 0.7 — MIT (dependency, unmodified)
+## mongodb 3 — Apache-2.0; bson 2 — MIT (dependencies, unmodified; MongoDB client)
+## rustls 0.23 — Apache-2.0 OR ISC OR MIT (dependency, unmodified; TLS crypto provider selection)
+## duckdb 1.x / libduckdb-sys (bundled DuckDB, optional `duckdb` build feature) — MIT; DuckDB itself MIT, Copyright (c) DuckDB Foundation (dependency, unmodified)
 ## lsp-types 0.97 — MIT (dependency, unmodified; completion item types for the SQL editor)

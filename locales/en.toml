@@ -1413,3 +1413,7 @@
 "redis.err_exists" = "Key {key} already exists"
 "redis.err_score" = "Score must be a number"
 "redis.err_ttl" = "TTL must be a positive number of seconds"
+"mongo.err_json" = "Not valid JSON"
+"mongo.err_object" = "Expected a JSON object"
+"mongo.err_id_changed" = "_id cannot be changed when editing a document"
+"mongo.err_gone" = "The document no longer exists"

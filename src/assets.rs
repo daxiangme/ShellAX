@@ -266,6 +266,20 @@ pub fn normalize_dbs(dbs: &mut [DbConn]) -> bool {
     }
     changed
 }
+/// Fill missing / duplicate ids and empty names of `[[redis]]` and `[[docker]]` entries.
+pub fn normalize_kv_docker(rs: &mut [RedisConn], ds: &mut [DockerEndpoint]) -> bool {
+    let mut changed = false;
+    let mut seen = std::collections::HashSet::new();
+    for r in rs.iter_mut() {
+        if r.id.is_empty() || !seen.insert(r.id.clone()) { r.id = new_id(); seen.insert(r.id.clone()); changed = true; }
+        if r.name.trim().is_empty() { r.name = r.address(); changed = true; }
+    }
+    for d in ds.iter_mut() {
+        if d.id.is_empty() || !seen.insert(d.id.clone()) { d.id = new_id(); seen.insert(d.id.clone()); changed = true; }
+        if d.name.trim().is_empty() { d.name = if d.is_ssh() { d.ssh_host.clone() } else { "local".into() }; changed = true; }
+    }
+    changed
+}
 fn leaf_name(p: &str) -> String { p.rsplit(['/', '\\']).next().unwrap_or(p).to_string() }
 
 /// Parse `mysql://user:pass@host:3306/db`, `postgres://…`, `postgresql://…`, `sqlite:///path`

@@ -374,6 +374,10 @@ pub struct Settings {
     pub places: Vec<Place>,
     /// Database connections (`[[db]]`, v0.2): share the host group tree and tags.
     pub db: Vec<ssh_term_proto::assets::DbConn>,
+    /// Redis connections (`[[redis]]`, v0.2 PRD §6.4).
+    pub redis: Vec<ssh_term_proto::assets::RedisConn>,
+    /// Docker engines (`[[docker]]`, v0.2 PRD §6.5).
+    pub docker: Vec<ssh_term_proto::assets::DockerEndpoint>,
     /// legacy top-level keys (v0.5 files); folded into sections on load
     #[serde(skip_serializing)] pub theme: Option<String>,
     #[serde(skip_serializing)] pub known_hosts: Option<String>,
@@ -405,6 +409,7 @@ impl Settings {
         }
         ssh_term_proto::hosttree::ensure_groups(&s.hosts, &mut s.groups);
         ssh_term_proto::assets::normalize_dbs(&mut s.db);
+        ssh_term_proto::assets::normalize_kv_docker(&mut s.redis, &mut s.docker);
         ssh_term_proto::assets::ensure_asset_groups(&s.db, &mut s.groups);
         if s.sidebar.tool.is_empty() { s.sidebar.tool = "hosts".into(); }
         Ok(s)
@@ -702,6 +707,13 @@ mod tests {
         // ids are persisted so secrets stay attached after a reload
         let back = Settings::parse(&toml::to_string_pretty(&s).unwrap()).unwrap();
         assert_eq!(back.db, s.db);
+        let src = "[[redis]]\nname = \"cache\"\nhost = \"10.0.0.5\"\ndb = 2\ntags = [\"red\"]\n[[docker]]\nendpoint = \"ssh\"\nssh_host = \"web\"\n";
+        let mut s: Settings = toml::from_str(src).unwrap();
+        ssh_term_proto::assets::normalize_kv_docker(&mut s.redis, &mut s.docker);
+        assert_eq!((s.redis[0].db, s.redis[0].effective_port(), s.docker[0].name.as_str(), s.docker[0].socket_path()), (2, 6379, "web", "/var/run/docker.sock"));
+        assert!(ssh_term_proto::assets::is_production(&s.redis[0].tags, &s.redis[0].group_path(), &s.groups, "red"));
+        let back: Settings = toml::from_str(&toml::to_string(&s).unwrap()).unwrap();
+        assert_eq!((back.redis, back.docker), (s.redis.clone(), s.docker.clone()));
     }
     #[test]
     fn dotted_get_set_roundtrip() {
