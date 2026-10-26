@@ -12,6 +12,8 @@ mod activity;
 mod db_dialog;
 mod db_ui;
 mod db_view;
+mod kv_view;
+mod dock_view;
 mod db_editor;
 mod tabs_ui;
 mod config;
