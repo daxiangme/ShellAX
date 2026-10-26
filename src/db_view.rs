@@ -159,7 +159,16 @@ enum Ask {
 pub struct EditorResize;
 impl Render for EditorResize { fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement { div() } }
 
-const EDITOR_H: f32 = 220.;
+/// Default editor share of the query area's height (editor / results 50:50).
+pub const EDITOR_RATIO: f32 = 0.5;
+/// Smallest height either card may be dragged to.
+const SPLIT_MIN_PX: f32 = 60.;
+
+/// Editor share for a drag at `y` px from the top of an area `total` px high.
+pub fn split_ratio(y: f32, total: f32) -> f32 {
+    if total <= 2. * SPLIT_MIN_PX { return EDITOR_RATIO; }
+    (y.clamp(SPLIT_MIN_PX, total - SPLIT_MIN_PX) / total).clamp(0.05, 0.95)
+}
 
 /// Structure designer rows. `orig` is the server's definition (None = new).
 struct DCol { orig: Option<alter::ColDef>, name: Entity<InputState>, ty: Entity<InputState>, default: Entity<InputState>, comment: Entity<InputState>, nullable: bool, dropped: bool }
@@ -263,7 +272,7 @@ impl DbView {
         let (conn_name, read_only, production) = conn_meta(&target.conn);
         let mut me = Self { title: String::new(), target, conn_name, read_only, production, live: None, conn_err: None, rt, log, grid, where_in, applied_where: String::new(), total: None,
             sub: Sub::Data, table_cols: None, ddl: None, ddl_ed, pending_ddl: None, cell_in, sel: None, edit_note: None,
-            editor, editor_h: EDITOR_H, comp, hist: history::Store::load(), hist_in, save_in, results: vec![], result_ix: 0, pop: None, pop_closed: None, pending_sql: None, design: None, design_src: None, design_err: None, ask: None,
+            editor, editor_h: EDITOR_RATIO, comp, hist: history::Store::load(), hist_in, save_in, results: vec![], result_ix: 0, pop: None, pop_closed: None, pending_sql: None, design: None, design_src: None, design_err: None, ask: None,
             status: String::new(), error: None, busy: false, gen: 0, slot: None, _subs: subs };
         me.title = me.make_title();
         me
@@ -289,9 +298,10 @@ impl DbView {
     pub fn save(&self, cx: &App) -> PaneSave {
         let sql = if self.table_mode() { String::new() } else { self.editor.read(cx).value().to_string() };
         PaneSave::Db { conn: self.target.conn.clone(), database: self.target.database.clone(), schema: self.target.schema.clone(), table: self.target.table.clone(), sql,
-            editor_h: (!self.table_mode() && (self.editor_h - EDITOR_H).abs() >= 1.0).then_some(self.editor_h) }
+            editor_h: (!self.table_mode() && (self.editor_h - EDITOR_RATIO).abs() >= 0.01).then_some(self.editor_h) }
     }
-    pub fn set_editor_h(&mut self, h: f32) { self.editor_h = h.clamp(60., 2000.); }
+    /// Restore the saved editor share (a ratio; older pixel values are ignored → 50:50).
+    pub fn set_editor_h(&mut self, r: f32) { self.editor_h = if r > 0. && r < 1. { r.clamp(0.05, 0.95) } else { EDITOR_RATIO }; }
     fn reset_completion(&mut self, cx: &mut Context<Self>) {
         { let mut cc = self.comp.borrow_mut(); cc.asked.clear(); cc.cache = Default::default(); }
         self.load_tables(cx);
@@ -1389,25 +1399,39 @@ impl Render for DbView {
         } else {
             let h = self.editor_h;
             let card = |_d: gpui::Div| crate::card_layout::sub_card();
-            let editor = card(div()).h(px(h)).flex_shrink_0().text_size(px(crate::font_size()))
+            let editor = card(div()).flex_basis(px(0.)).flex_grow(h).min_h(px(SPLIT_MIN_PX)).flex_shrink_0().text_size(px(crate::font_size()))
                 .capture_key_down(cx.listener(|v, e: &gpui::KeyDownEvent, _w, cx| {
                     let k = &e.keystroke;
                     if k.key == "enter" && (k.modifiers.control || k.modifiers.platform) { v.run_sql(k.modifiers.shift, cx); cx.stop_propagation(); }
                 }))
-                .child(Editor::new(&self.editor).h(px(h)).bordered(false));
+                .child(Editor::new(&self.editor).h_full().bordered(false));
             let handle = div().id("dbv-split").h(px(crate::card_layout::CARD_PAD)).w_full().flex_shrink_0().cursor_row_resize().rounded(px(3.))
                 .hover(|d| d.bg(c(cur().accent).opacity(0.35)))
                 .on_drag(EditorResize, |d: &EditorResize, _, _, cx| cx.new(|_| d.clone()))
-                .on_click(cx.listener(|v, ev: &gpui::ClickEvent, _w, cx| if ev.click_count() >= 2 { v.editor_h = EDITOR_H; cx.notify(); }));
+                .on_click(cx.listener(|v, ev: &gpui::ClickEvent, _w, cx| if ev.click_count() >= 2 { v.editor_h = EDITOR_RATIO; cx.notify(); }));
             let body = div().id("dbv-qbody").flex_1().min_h_0().flex().flex_col().pt(px(crate::card_layout::CARD_PAD))
                 .on_drag_move(cx.listener(|v, ev: &gpui::DragMoveEvent<EditorResize>, _w, cx| {
-                    let total = f32::from(ev.bounds.size.height);
-                    let h = (f32::from(ev.event.position.y - ev.bounds.top())).clamp(60., (total - 80.).max(60.));
-                    if (h - v.editor_h).abs() >= 1.0 { v.editor_h = h; cx.notify(); }
+                    // area below the top padding, minus the 6px handle
+                    let pad = crate::card_layout::CARD_PAD;
+                    let total = f32::from(ev.bounds.size.height) - 2. * pad;
+                    let r = split_ratio(f32::from(ev.event.position.y - ev.bounds.top()) - pad, total);
+                    if (r - v.editor_h).abs() >= 0.002 { v.editor_h = r; cx.notify(); }
                 }))
-                .child(editor).child(handle).child(card(div()).flex_1().min_h_0().flex().flex_col().children(self.result_tabs(cx)).child(self.result_body()));
+                .child(editor).child(handle).child(card(div()).flex_basis(px(0.)).flex_grow(1. - h).min_h(px(SPLIT_MIN_PX)).flex().flex_col().children(self.result_tabs(cx)).child(self.result_body()));
             root = root.child(body);
         }
         root.children(self.pop_el(cx)).children(self.confirm_el(cx))
+    }
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::*;
+    #[test]
+    fn split_ratio_rules() {
+        assert_eq!(split_ratio(300., 600.), 0.5);
+        assert_eq!(split_ratio(0., 600.), 0.1);
+        assert_eq!(split_ratio(600., 600.), 0.9);
+        assert_eq!(split_ratio(50., 100.), EDITOR_RATIO);
     }
 }
