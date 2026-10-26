@@ -731,13 +731,16 @@ impl Root {
         for p in &leaves {
             if let Some(sv) = p.read(cx).sftp.clone() {
                 let on = sv.read(cx).follow.on;
-                sv.update(cx, |v, cx| { v.mode = SftpMode::Split; v.set_follow_source(Some((term.downgrade(), local)), on, cx) });
+                sv.update(cx, |v, cx| { v.mode = SftpMode::Tab; v.set_follow_source(Some((term.downgrade(), local)), on, cx) });
             }
         }
     }
     /// Open SFTP for `target` (default: focused/any SSH host) in `mode`. Popup reuses the per-host
     /// view; tab/split/window create a new view (several per host are allowed).
     fn open_sftp_mode(&mut self, target: Option<SshTarget>, mode: SftpMode, window: &mut Window, cx: &mut Context<Self>) {
+        // SFTP now opens only as a tab of the SFTP module; older modes in saved settings map here
+        let _ = mode;
+        let mode = SftpMode::Tab;
         // no host: left pane local, right pane offers "choose host" (no picker dialog)
         let Some(t) = target.or_else(|| self.ssh_target_for_tools(cx)) else {
             self.log("sftp.open", format!("host=- mode={}", mode.as_str()));
@@ -756,6 +759,9 @@ impl Root {
     }
     /// Move an existing view (state, selection, transfer queue kept: same entity) to `mode`.
     fn move_sftp(&mut self, v: Entity<sftp_view::SftpView>, mode: SftpMode, window: &mut Window, cx: &mut Context<Self>) {
+        let _ = mode;
+        let mode = SftpMode::Tab;
+        if v.read(cx).mode == mode { return; }
         let from = v.read(cx).mode;
         self.log("sftp.mode", format!("host={} from={} to={}", v.read(cx).target().map(|t| t.label()).unwrap_or_else(|| "-".into()), from.as_str(), mode.as_str()));
         self.detach_sftp(&v, window, cx);
@@ -1517,10 +1523,6 @@ impl Root {
             Action::ModePlan => self.set_mode(Mode::Plan, cx),
             Action::ModeAuto => self.set_mode(Mode::Auto, cx),
             Action::OpenSftp => { let m = SftpMode::parse(&config::get().session.sftp_mode); self.open_sftp_mode(None, m, window, cx) }
-            Action::OpenSftpPopup => self.open_sftp_mode(None, SftpMode::Popup, window, cx),
-            Action::OpenSftpTab => self.open_sftp_mode(None, SftpMode::Tab, window, cx),
-            Action::OpenSftpSplit => self.open_sftp_mode(None, SftpMode::Split, window, cx),
-            Action::OpenSftpWindow => self.open_sftp_mode(None, SftpMode::Window, window, cx),
             Action::OpenHostTools => {
                 let tg = self.focused_pane(window, cx).and_then(|p| match &p.read(cx).spec { Spec::Ssh(t) => Some(t.clone()), _ => None });
                 let (rt, pr) = (self.rt.handle().clone(), self.prompts.clone());

@@ -302,7 +302,6 @@ impl SettingsView {
             r(Audit, t("ui.log_manually_typed_commands"), t("ui.by_default_only_connections_permissions"), Ctl::Toggle("audit.log_commands")),
 
             r(Session, t("ui.persistent_sessions"), t("ui.resume_via_remote_tmux_after"), Ctl::Choice("session.persistent", opts(&[("off", t("ui.off")), ("tmux", "tmux")]))),
-            r(Session, t("sftp.default_mode"), t("sftp.default_mode.d"), Ctl::Choice("session.sftp_mode", opts(&[("popup", t("sftp.mode_popup")), ("tab", t("sftp.mode_tab")), ("split", t("sftp.mode_split")), ("window", t("sftp.mode_window"))]))),
             r(Session, t("sftp.follow_cwd"), t("sftp.follow_cwd.d"), Ctl::Toggle("session.sftp_follow_cwd")),
             r(Session, t("ui.local_daemon"), t("ui.local_daemon.d"), Ctl::Toggle("session.local_daemon")),
             r(Session, t("ui.restore_layout_on_startup"), "", Ctl::Toggle("session.restore_layout")),

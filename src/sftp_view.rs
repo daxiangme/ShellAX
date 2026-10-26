@@ -30,6 +30,7 @@ impl Render for DragPreview {
 }
 
 #[derive(Clone, Copy, PartialEq)]
+#[allow(dead_code)]
 pub enum DirAction { Right, Down, Close }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -44,6 +45,7 @@ pub enum SftpEvent {
     /// Move this view to another display mode (PRD 5.21); the entity (state, queue) is kept.
     Move(Mode),
     /// Split or close the pane that contains this SFTP view.
+    #[allow(dead_code)]
     Pane(DirAction),
     /// The title changed (a host connected / the source changed).
     Retitle,
@@ -912,22 +914,11 @@ fn icon_btn(id: (&'static str, usize), ic: IconName, enabled: bool) -> gpui::Sta
 }
 
 impl SftpView {
-    fn pane_actions(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let th = cur();
-        let btn = |i: usize, ic: IconName, tip: &'static str, act: DirAction| div().id(("sftp-pane", i)).size(px(24.)).rounded(px(R_MD)).flex().items_center().justify_center().cursor_pointer()
-            .hover(|d| d.bg(c(cur().surface1)))
-            .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip).build(w, cx))
-            .on_click(cx.listener(move |_, _, _, cx| cx.emit(SftpEvent::Pane(act))))
-            .child(icon(ic, 13., c(th.overlay1)));
-        div().flex().items_center().gap(px(2.)).pr_1()
-            .child(btn(0, IconName::Columns2, t("ui.split_left_right"), DirAction::Right))
-            .child(btn(1, IconName::Rows2, t("ui.split_top_bottom"), DirAction::Down))
-            .child(btn(2, IconName::X, t("ui.close_pane"), DirAction::Close))
-    }
     fn mode_bar(&self, cx: &mut Context<Self>) -> gpui::Div {
         let th = cur();
         let mut bar = div().flex().items_center().gap_1();
-        for (i, m) in Mode::ALL.into_iter().enumerate() {
+        // display-mode buttons removed: SFTP lives only in its module's tabs
+        for (i, m) in Mode::ALL.into_iter().enumerate().filter(|_| false) {
             let on = self.mode == m;
             let (ic, key) = match m { Mode::Popup => (IconName::Maximize, "sftp.mode_popup"), Mode::Tab => (IconName::PanelTop, "sftp.mode_tab"), Mode::Split => (IconName::Columns2, "sftp.mode_split"), Mode::Window => (IconName::ExternalLink, "sftp.mode_window") };
             bar = bar.child(div().id(("sftp-mode", i)).h(px(H_COMPACT)).px_2().rounded(px(R_MD)).flex().items_center().gap_1().cursor_pointer().text_size(px(FS_CAPTION))
@@ -1376,7 +1367,6 @@ impl Render for SftpView {
                 .child(icon(IconName::FolderSync, 16., c(th.accent)))
                 .child(div().text_size(px(FS_BODY)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("ui.sftp_files")))
                 .child(div().flex_1())
-                .when(matches!(self.mode, Mode::Tab | Mode::Split), |d| d.child(self.pane_actions(cx)))
                 .child(self.mode_bar(cx))
                 .when(popup, |d| d.child(div().id("sftp-close").size(px(H_DEFAULT)).rounded(px(R_MD)).flex().items_center().justify_center().cursor_pointer()
                     .hover(|d| d.bg(c(cur().surface0))).on_click(cx.listener(|_, _, _, cx| cx.emit(SftpEvent::Close)))
