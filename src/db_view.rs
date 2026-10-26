@@ -5,12 +5,12 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui::{div, prelude::*, px, App, Context, Entity, FontWeight, SharedString, WeakEntity, Window};
 use gpui_component::input::{Editor, EditorState, InputEvent, InputState};
 use gpui_component::table::{Column, ColumnSort, DataTable, TableDelegate, TableEvent, TableState};
-use ssh_term_proto::db::{self, dialect, edit, export, history, live::Live, split, CancelSlot, ColumnInfo, ResultSet, RunOpts};
+use ssh_term_proto::db::{self, alter, dialect, edit, export, history, live::Live, split, CancelSlot, ColumnInfo, ResultSet, RunOpts};
 use ssh_term_proto::i18n::{t, tf};
 use ssh_term_proto::session_store::PaneSave;
 
@@ -90,10 +90,11 @@ impl TableDelegate for Grid {
         col
     }
     fn perform_sort(&mut self, col: usize, sort: ColumnSort, _w: &mut Window, cx: &mut Context<TableState<Self>>) {
+        let prev = self.sort;
         self.sort = match sort { ColumnSort::Ascending => Some((col, false)), ColumnSort::Descending => Some((col, true)), ColumnSort::Default => None };
         if self.server_sort {
-            let (o, s) = (self.owner.clone(), self.sort);
-            cx.spawn(async move |_, cx| { let _ = o.update(cx, |v, cx| v.sort_changed(s, cx)); }).detach();
+            let o = self.owner.clone();
+            cx.spawn(async move |_, cx| { let _ = o.update(cx, |v, cx| v.sort_changed(prev, cx)); }).detach();
         } else {
             // ad-hoc result: sort what is loaded, NULLs first, numbers numerically
             let key = |v: &Option<String>| v.as_deref().map(|s| (s.parse::<f64>().ok(), s.to_string()));
@@ -135,8 +136,17 @@ pub enum Sub { Data, Structure, Ddl }
 #[derive(Clone, Copy, PartialEq)]
 enum Pop { Export, History, Saved }
 
+/// What to do once staged edits may be dropped.
+#[derive(Clone, Copy)]
+enum Next { Reload, Where, /// sort already changed; the previous one is restored on cancel
+    Sort(Option<(usize, bool)>) }
+
 /// Something waiting for the user's OK.
 enum Ask {
+    /// Staged edits would be lost.
+    Discard(Next),
+    /// Structure change statements.
+    Alter(Vec<String>),
     /// User SQL with a dangerous / production write; `stmt` is the one shown.
     Run { sql: String, stmt: String },
     /// Staged grid changes.
@@ -150,6 +160,21 @@ pub struct EditorResize;
 impl Render for EditorResize { fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement { div() } }
 
 const EDITOR_H: f32 = 220.;
+
+/// Structure designer rows. `orig` is the server's definition (None = new).
+struct DCol { orig: Option<alter::ColDef>, name: Entity<InputState>, ty: Entity<InputState>, default: Entity<InputState>, comment: Entity<InputState>, nullable: bool, dropped: bool }
+struct DIdx { orig: Option<alter::IndexDef>, name: Entity<InputState>, cols: Entity<InputState>, unique: bool, dropped: bool }
+struct DFk { orig: Option<alter::FkDef>, name: Entity<InputState>, cols: Entity<InputState>, ref_table: Entity<InputState>, ref_cols: Entity<InputState>, on_delete: Entity<InputState>, on_update: Entity<InputState>, dropped: bool }
+#[derive(Default)]
+struct Design { cols: Vec<DCol>, idx: Vec<DIdx>, fks: Vec<DFk> }
+
+type DesignSrc = (Vec<ColumnInfo>, Vec<alter::IndexDef>, Vec<alter::FkDef>);
+
+fn input(window: &mut Window, cx: &mut App, v: &str, ph: &str) -> Entity<InputState> {
+    let (v, ph) = (v.to_string(), ph.to_string());
+    cx.new(|cx| InputState::new(window, cx).placeholder(ph).default_value(v))
+}
+fn val(i: &Entity<InputState>, cx: &App) -> String { i.read(cx).value().trim().to_string() }
 
 /// What a pane shows.
 #[derive(Clone, Debug, PartialEq)]
@@ -190,6 +215,13 @@ pub struct DbView {
     results: Vec<ResultSet>,
     result_ix: usize,
     pop: Option<Pop>,
+    /// Popover just closed by a click outside: a click on its own button then must not reopen it.
+    pop_closed: Option<(Pop, Instant)>,
+    /// SQL loaded from a file, put into the editor at render (needs a window).
+    pending_sql: Option<String>,
+    design: Option<Design>,
+    design_src: Option<DesignSrc>,
+    design_err: Option<String>,
     ask: Option<Ask>,
     status: String,
     error: Option<String>,
@@ -219,7 +251,7 @@ impl DbView {
         let hist_in = cx.new(|cx| InputState::new(window, cx).placeholder(t("db.history_search")));
         let save_in = cx.new(|cx| InputState::new(window, cx).placeholder(t("db.saved_name")));
         let mut subs = vec![];
-        subs.push(cx.subscribe_in(&where_in, window, |this: &mut Self, _, ev: &InputEvent, _w, cx| { if let InputEvent::PressEnter { .. } = ev { this.apply_where(cx); } }));
+        subs.push(cx.subscribe_in(&where_in, window, |this: &mut Self, _, ev: &InputEvent, _w, cx| { if let InputEvent::PressEnter { .. } = ev { this.guarded(Next::Where, cx); } }));
         subs.push(cx.subscribe_in(&cell_in, window, |this: &mut Self, st, ev: &InputEvent, _w, cx| { if let InputEvent::PressEnter { .. } = ev { let v = st.read(cx).value().to_string(); this.stage(Some(v), cx); } }));
         subs.push(cx.subscribe_in(&save_in, window, |this: &mut Self, _, ev: &InputEvent, w, cx| { if let InputEvent::PressEnter { .. } = ev { this.save_query(w, cx); } }));
         subs.push(cx.subscribe_in(&hist_in, window, |_this: &mut Self, _, ev: &InputEvent, _w, cx| { if let InputEvent::Change = ev { cx.notify(); } }));
@@ -231,7 +263,7 @@ impl DbView {
         let (conn_name, read_only, production) = conn_meta(&target.conn);
         let mut me = Self { title: String::new(), target, conn_name, read_only, production, live: None, conn_err: None, rt, log, grid, where_in, applied_where: String::new(), total: None,
             sub: Sub::Data, table_cols: None, ddl: None, ddl_ed, pending_ddl: None, cell_in, sel: None, edit_note: None,
-            editor, editor_h: EDITOR_H, comp, hist: history::Store::load(), hist_in, save_in, results: vec![], result_ix: 0, pop: None, ask: None,
+            editor, editor_h: EDITOR_H, comp, hist: history::Store::load(), hist_in, save_in, results: vec![], result_ix: 0, pop: None, pop_closed: None, pending_sql: None, design: None, design_src: None, design_err: None, ask: None,
             status: String::new(), error: None, busy: false, gen: 0, slot: None, _subs: subs };
         me.title = me.make_title();
         me
@@ -256,7 +288,13 @@ impl DbView {
 
     pub fn save(&self, cx: &App) -> PaneSave {
         let sql = if self.table_mode() { String::new() } else { self.editor.read(cx).value().to_string() };
-        PaneSave::Db { conn: self.target.conn.clone(), database: self.target.database.clone(), schema: self.target.schema.clone(), table: self.target.table.clone(), sql }
+        PaneSave::Db { conn: self.target.conn.clone(), database: self.target.database.clone(), schema: self.target.schema.clone(), table: self.target.table.clone(), sql,
+            editor_h: (!self.table_mode() && (self.editor_h - EDITOR_H).abs() >= 1.0).then_some(self.editor_h) }
+    }
+    pub fn set_editor_h(&mut self, h: f32) { self.editor_h = h.clamp(60., 2000.); }
+    fn reset_completion(&mut self, cx: &mut Context<Self>) {
+        { let mut cc = self.comp.borrow_mut(); cc.asked.clear(); cc.cache = Default::default(); }
+        self.load_tables(cx);
     }
 
     /// Connection ready (or failed). Table mode loads the first page right away.
@@ -291,7 +329,20 @@ impl DbView {
         self.applied_where = self.where_in.read(cx).value().trim().to_string();
         self.load_page(true, cx);
     }
-    fn sort_changed(&mut self, _s: Option<(usize, bool)>, cx: &mut Context<Self>) { self.load_page(true, cx); }
+    fn sort_changed(&mut self, prev: Option<(usize, bool)>, cx: &mut Context<Self>) { self.guarded(Next::Sort(prev), cx); }
+    fn pending(&self, cx: &App) -> usize { if self.table_mode() { self.grid.read(cx).delegate().pending() } else { 0 } }
+    /// Reload / re-filter, asking first when staged edits would be lost.
+    fn guarded(&mut self, next: Next, cx: &mut Context<Self>) {
+        if self.pending(cx) > 0 { self.ask = Some(Ask::Discard(next)); cx.notify(); return; }
+        self.run_next(next, cx);
+    }
+    fn run_next(&mut self, next: Next, cx: &mut Context<Self>) {
+        match next { Next::Reload | Next::Sort(_) => self.load_page(true, cx), Next::Where => self.apply_where(cx) }
+    }
+    /// The discard question was declined: undo a sort change already shown in the grid.
+    fn keep_staged(&mut self, next: Next, cx: &mut Context<Self>) {
+        if let Next::Sort(prev) = next { self.grid.update(cx, |s, cx| { s.delegate_mut().sort = prev; s.refresh(cx); }); }
+    }
 
     /// Load the first page (`reset`) or the next one.
     pub fn load_page(&mut self, reset: bool, cx: &mut Context<Self>) {
@@ -396,6 +447,7 @@ impl DbView {
                             let detail = match (&rs.error, rs.returns_rows) { (Some(e), _) => e.clone(), (None, true) => tf("db.rows_ms", &[("n", &rs.rows.len()), ("ms", &rs.elapsed.as_millis())]), (None, false) => tf("db.affected_ms", &[("n", &rs.affected), ("ms", &rs.elapsed.as_millis())]) };
                             log_push(&v.log, &v.conn_name, &one_line(&rs.sql), rs.error.is_none(), detail);
                         }
+                        if sets.iter().any(|r| r.error.is_none() && split::is_ddl(&r.sql)) { v.reset_completion(cx); }
                         let failed = sets.iter().find_map(|r| r.error.clone());
                         v.record(&sql, failed.is_none(), ms as u64);
                         v.status = tf("db.done_n", &[("n", &sets.len()), ("ms", &ms)]);
@@ -578,19 +630,20 @@ impl DbView {
         let d = self.grid.read(cx).delegate();
         let key = |r: usize| edit::key_of(&d.cols, &pk, &d.rows[r]);
         let mut out = vec![];
-        for &r in &d.deleted { out.push(edit::to_sql(f, &q, &edit::Change::Delete { key: key(r) })); }
+        let sql = |c: &edit::Change| edit::to_sql_typed(f, &q, cols, c);
+        for &r in &d.deleted { out.push(sql(&edit::Change::Delete { key: key(r) })); }
         let mut by_row: BTreeMap<usize, Vec<(usize, Option<String>)>> = BTreeMap::new();
         for ((r, col), v) in &d.edits { by_row.entry(*r).or_default().push((*col, v.clone())); }
         for (r, mut set) in by_row {
             if d.deleted.contains(&r) { continue; }
             set.sort_by_key(|x| x.0);
             let set = set.into_iter().map(|(col, v)| (d.cols[col].name.clone(), v)).collect();
-            out.push(edit::to_sql(f, &q, &edit::Change::Update { key: key(r), set }));
+            out.push(sql(&edit::Change::Update { key: key(r), set }));
         }
         for m in &d.added {
             let mut values: Vec<(usize, Option<String>)> = m.iter().map(|(k, v)| (*k, v.clone())).collect();
             values.sort_by_key(|x| x.0);
-            out.push(edit::to_sql(f, &q, &edit::Change::Insert { values: values.into_iter().map(|(col, v)| (d.cols[col].name.clone(), v)).collect() }));
+            out.push(sql(&edit::Change::Insert { values: values.into_iter().map(|(col, v)| (d.cols[col].name.clone(), v)).collect() }));
         }
         Ok(out)
     }
@@ -624,6 +677,7 @@ impl DbView {
                 match r {
                     Ok(rows) => {
                         log_push(&v.log, &v.conn_name, &summary, true, tf("db.affected_ms", &[("n", &rows), ("ms", &ms)]));
+                        v.grid.update(cx, |s, _| s.delegate_mut().clear_staged());
                         v.load_page(true, cx);
                         v.status = tf("db.committed", &[("n", &n), ("rows", &rows)]);
                     }
@@ -644,6 +698,7 @@ impl DbView {
         self.pop = None;
         let f = self.live.as_ref().map(|l| l.driver.family()).unwrap_or(ssh_term_proto::assets::Family::Sqlite);
         let (cols, rows) = { let d = self.grid.read(cx).delegate(); (d.cols.clone(), d.rows.clone()) };
+        if let (Some(table), Some(live)) = (self.target.table.clone(), self.live.clone()) { return self.export_table(live, table, fmt, cx); }
         if cols.is_empty() { self.status = t("db.export_empty").into(); cx.notify(); return; }
         let base = self.target.table.clone().unwrap_or_else(|| "result".into());
         let q = match &self.target.table { Some(tb) => dialect::qualified(f, &self.target.database, self.target.schema.as_deref(), tb), None => dialect::quote_ident(f, "result") };
@@ -656,6 +711,30 @@ impl DbView {
             let r = std::fs::write(&path, text);
             let _ = this.update(cx, |v, cx| {
                 v.status = match r { Ok(()) => tf("db.exported", &[("n", &n), ("path", &path.display())]), Err(e) => tf("db.export_failed", &[("e", &e)]) };
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    /// Whole table (current filter and sort) streamed to a file; stoppable.
+    fn export_table(&mut self, live: Arc<Live>, table: String, fmt: export::Format, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_new_path(&home_dir(), Some(&format!("{table}.{}", fmt.ext())));
+        let (db, schema, where_) = (self.target.database.clone(), self.target.schema.clone(), self.applied_where.clone());
+        let order = { let d = self.grid.read(cx).delegate(); d.sort.and_then(|(i, desc)| d.cols.get(i).map(|c| (c.name.clone(), desc))) };
+        let rt = self.rt.clone();
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(path))) = rx.await else { return };
+            let slot = Arc::new(CancelSlot::default());
+            let Ok(gen) = this.update(cx, |v, cx| { v.gen += 1; v.busy = true; v.slot = Some(slot.clone()); v.status = t("db.exporting").into(); cx.notify(); v.gen }) else { return };
+            let p2 = path.clone();
+            let started = Instant::now();
+            let h = rt.spawn(async move { live.driver.export_table(&db, schema.as_deref(), &table, &where_, order.as_ref().map(|(c, d)| (c.as_str(), *d)), fmt, &p2, Some(slot)).await });
+            let r = h.await.map_err(anyhow::Error::from).and_then(|r| r);
+            let _ = this.update(cx, |v, cx| {
+                if v.gen != gen { return; }
+                v.busy = false;
+                v.slot = None;
+                v.status = match r { Ok(n) => tf("db.exported_ms", &[("n", &n), ("path", &path.display()), ("ms", &started.elapsed().as_millis())]), Err(e) => tf("db.export_failed", &[("e", &format!("{e:#}"))]) };
                 cx.notify();
             });
         }).detach();
@@ -691,15 +770,146 @@ impl DbView {
             None => return fail(self, t("db.import_format").into()),
         };
         let (header, rows) = match parsed { Ok(x) => x, Err(e) => return fail(self, format!("{e:#}")) };
-        // map file columns onto the table's (case-insensitive)
-        let cols: Vec<String> = match &self.table_cols { Some(Ok(c)) => c.iter().map(|c| c.name.clone()).collect(), _ => self.grid.read(cx).delegate().cols.iter().map(|c| c.name.clone()).collect() };
-        let mut real = vec![];
-        for h in &header {
-            match cols.iter().find(|c| c.eq_ignore_ascii_case(h)) { Some(c) => real.push(c.clone()), None => return fail(self, tf("db.import_unknown_col", &[("col", h)])) }
-        }
+        // file columns map onto the table's (case-insensitive); values typed by column
+        let cols: Vec<ColumnInfo> = match &self.table_cols { Some(Ok(c)) => c.clone(), _ => self.grid.read(cx).delegate().cols.clone() };
         let n = rows.len();
-        let stmts = export::insert_statements(f, &q, &real, &rows, 200);
+        let stmts = match export::import_statements(f, &q, &cols, &header, &rows, 200) { Ok(s) => s, Err(e) => return fail(self, format!("{e:#}")) };
         self.ask = Some(Ask::Import { stmts, rows: n, file });
+    }
+
+    fn open_sql(&mut self, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions { files: true, directories: false, multiple: false, prompt: None });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            let r = std::fs::read(&path).map(|b| String::from_utf8_lossy(&b).into_owned());
+            let _ = this.update(cx, |v, cx| {
+                match r { Ok(s) => { v.pending_sql = Some(s); v.status = path.display().to_string(); } Err(e) => v.error = Some(tf("db.open_failed", &[("e", &e)])) }
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    // ---- structure designer
+    fn start_design(&mut self, cx: &mut Context<Self>) {
+        let (Some(live), Some(table), Some(Ok(cols))) = (self.live.clone(), self.target.table.clone(), self.table_cols.clone()) else { return };
+        if self.read_only { self.design_err = Some(t("db.edit_read_only").into()); cx.notify(); return; }
+        let (db, schema) = (self.target.database.clone(), self.target.schema.clone());
+        self.design_err = None;
+        let h = self.rt.spawn(async move {
+            let ix = live.driver.indexes(&db, schema.as_deref(), &table).await?;
+            let fk = live.driver.foreign_keys(&db, schema.as_deref(), &table).await?;
+            anyhow::Ok((ix, fk))
+        });
+        cx.spawn(async move |this, cx| {
+            let r = h.await.map_err(anyhow::Error::from).and_then(|r| r);
+            let _ = this.update(cx, |v, cx| {
+                match r { Ok((ix, fk)) => v.design_src = Some((cols, ix, fk)), Err(e) => v.design_err = Some(format!("{e:#}")) }
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    fn build_design(&mut self, (cols, ix, fks): DesignSrc, window: &mut Window, cx: &mut Context<Self>) {
+        let f = self.live.as_ref().map(|l| l.driver.family()).unwrap_or(ssh_term_proto::assets::Family::Sqlite);
+        let mut d = Design::default();
+        for c in &cols { let def = alter::ColDef::from_info(f, c); d.cols.push(self.dcol(Some(def), window, cx)); }
+        for i in ix.into_iter().filter(|i| !i.constraint || !i.name.is_empty()) { d.idx.push(Self::didx(Some(i), window, cx)); }
+        for k in fks { d.fks.push(Self::dfk(Some(k), window, cx)); }
+        self.design = Some(d);
+    }
+    fn dcol(&self, def: Option<alter::ColDef>, window: &mut Window, cx: &mut App) -> DCol {
+        let e = def.clone().unwrap_or_default();
+        DCol { name: input(window, cx, &e.name, &t("db.ph_name")), ty: input(window, cx, &e.type_name, &t("db.ph_type")), default: input(window, cx, e.default.as_deref().unwrap_or(""), &t("db.ph_default")),
+            comment: input(window, cx, &e.comment, &t("db.ph_comment")), nullable: def.as_ref().is_none_or(|d| d.nullable), dropped: false, orig: def }
+    }
+    fn didx(def: Option<alter::IndexDef>, window: &mut Window, cx: &mut App) -> DIdx {
+        let e = def.clone().unwrap_or_default();
+        DIdx { name: input(window, cx, &e.name, &t("db.ph_name")), cols: input(window, cx, &e.columns.join(", "), &t("db.ph_columns")), unique: e.unique, dropped: false, orig: def }
+    }
+    fn dfk(def: Option<alter::FkDef>, window: &mut Window, cx: &mut App) -> DFk {
+        let e = def.clone().unwrap_or_default();
+        DFk { name: input(window, cx, &e.name, &t("db.ph_name")), cols: input(window, cx, &e.columns.join(", "), &t("db.ph_columns")), ref_table: input(window, cx, &e.ref_table, &t("db.ph_ref_table")),
+            ref_cols: input(window, cx, &e.ref_columns.join(", "), &t("db.ph_ref_cols")), on_delete: input(window, cx, &e.on_delete, &t("db.ph_on_delete")), on_update: input(window, cx, &e.on_update, &t("db.ph_on_update")), dropped: false, orig: def }
+    }
+
+    /// Edits in the designer as ALTER operations.
+    fn design_ops(&self, cx: &App) -> Result<Vec<alter::Op>, String> {
+        use alter::Op;
+        let Some(d) = &self.design else { return Ok(vec![]) };
+        let mut ops = vec![];
+        for c in &d.cols {
+            let def = alter::ColDef { name: val(&c.name, cx), type_name: val(&c.ty, cx), nullable: c.nullable, default: Some(val(&c.default, cx)).filter(|s| !s.is_empty()), comment: val(&c.comment, cx),
+                extra: c.orig.as_ref().map(|o| o.extra.clone()).unwrap_or_default() };
+            match (&c.orig, c.dropped) {
+                (None, true) => {}
+                (None, false) => ops.push(Op::AddColumn(def)),
+                (Some(o), true) => ops.push(Op::DropColumn(o.name.clone())),
+                (Some(o), false) if *o != def => ops.push(Op::ModifyColumn { old: o.clone(), new: def }),
+                _ => {}
+            }
+        }
+        for i in &d.idx {
+            let def = alter::IndexDef { name: val(&i.name, cx), columns: alter::parse_names(&val(&i.cols, cx)), unique: i.unique, constraint: i.orig.as_ref().is_some_and(|o| o.constraint) };
+            let changed = i.orig.as_ref().is_some_and(|o| o.name != def.name || o.columns != def.columns || o.unique != def.unique);
+            if let Some(o) = &i.orig { if i.dropped || changed { ops.push(Op::DropIndex(o.clone())); } }
+            if !i.dropped && (i.orig.is_none() || changed) { ops.push(Op::AddIndex(def)); }
+        }
+        for k in &d.fks {
+            let up = |i: &Entity<InputState>| val(i, cx).to_ascii_uppercase();
+            let (od, ou) = (up(&k.on_delete), up(&k.on_update));
+            for a in [&od, &ou] { if !a.is_empty() && !alter::FK_ACTIONS.contains(&a.as_str()) { return Err(tf("db.alter_err_fk_action", &[("a", a)])); } }
+            let def = alter::FkDef { name: val(&k.name, cx), columns: alter::parse_names(&val(&k.cols, cx)), ref_table: val(&k.ref_table, cx), ref_columns: alter::parse_names(&val(&k.ref_cols, cx)), on_delete: od, on_update: ou };
+            let changed = k.orig.as_ref().is_some_and(|o| *o != def);
+            if let Some(o) = &k.orig { if k.dropped || changed { ops.push(Op::DropFk(o.name.clone())); } }
+            if !k.dropped && (k.orig.is_none() || changed) { ops.push(Op::AddFk(def)); }
+        }
+        Ok(ops)
+    }
+
+    fn preview_design(&mut self, cx: &mut Context<Self>) {
+        let Some(live) = &self.live else { return };
+        let f = live.driver.family();
+        let q = dialect::qualified(f, &self.target.database, self.target.schema.as_deref(), self.target.table.as_deref().unwrap_or_default());
+        let r = self.design_ops(cx).and_then(|ops| if ops.is_empty() { Err(t("db.alter_none").to_string()) } else { alter::statements(f, &q, self.target.schema.as_deref(), &ops).map_err(|e| format!("{e:#}")) });
+        match r { Ok(stmts) => { self.design_err = None; self.ask = Some(Ask::Alter(stmts)); } Err(e) => self.design_err = Some(e) }
+        cx.notify();
+    }
+
+    fn apply_alter(&mut self, stmts: Vec<String>, cx: &mut Context<Self>) {
+        let Some(live) = self.live.clone() else { return };
+        self.ask = None;
+        self.busy = true;
+        self.status = t("db.altering").into();
+        let (db, schema) = (self.target.database.clone(), self.target.schema.clone());
+        let n = stmts.len();
+        let summary = one_line(&stmts.join("; "));
+        let h = self.rt.spawn(async move { live.driver.apply(&db, schema.as_deref(), stmts).await });
+        cx.spawn(async move |this, cx| {
+            let r = h.await.map_err(anyhow::Error::from).and_then(|r| r);
+            let _ = this.update(cx, |v, cx| {
+                v.busy = false;
+                match r {
+                    Ok(_) => {
+                        log_push(&v.log, &v.conn_name, &summary, true, String::new());
+                        v.status = tf("db.altered", &[("n", &n)]);
+                        v.design = None;
+                        v.table_cols = None;
+                        v.ddl = None;
+                        v.load_meta(cx);
+                        v.reset_completion(cx);
+                        v.load_page(true, cx);
+                    }
+                    Err(e) => {
+                        log_push(&v.log, &v.conn_name, &summary, false, format!("{e:#}"));
+                        v.design_err = Some(tf("db.alter_failed", &[("e", &format!("{e:#}"))]));
+                        v.status.clear();
+                    }
+                }
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
     }
 
     // ---- history / saved queries
@@ -738,6 +948,8 @@ impl DbView {
     }
 
     fn toggle_pop(&mut self, p: Pop, cx: &mut Context<Self>) {
+        // the mouse-down that closed it (outside the card) is this very click on its button
+        if self.pop.is_none() && self.pop_closed.is_some_and(|(q, at)| q == p && at.elapsed() < Duration::from_millis(300)) { self.pop_closed = None; return; }
         self.pop = if self.pop == Some(p) { None } else { Some(p) };
         if self.pop.is_some() { self.hist = history::Store::load(); }
         cx.notify();
@@ -771,20 +983,31 @@ impl DbView {
             })));
             row = row.child(div().w(px(6.)));
             if self.sub == Sub::Data {
-                row = row.child(Self::toolbar_btn("dbv-refresh", IconName::RefreshCw, None, "").on_click(cx.listener(|v, _, _w, cx| v.load_page(true, cx))))
+                row = row.child(Self::toolbar_btn("dbv-refresh", IconName::RefreshCw, None, "").on_click(cx.listener(|v, _, _w, cx| v.guarded(Next::Reload, cx))))
                     .child(div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.overlay1)).child("WHERE"))
                     .child(div().flex_1().min_w(px(120.)).child(ui::text_field(&self.where_in, false)))
-                    .child(ui::button("dbv-apply", t("db.apply"), 0).on_click(cx.listener(|v, _, _w, cx| v.apply_where(cx))));
+                    .child(ui::button("dbv-apply", t("db.apply"), 0).on_click(cx.listener(|v, _, _w, cx| v.guarded(Next::Where, cx))));
                 if !self.applied_where.is_empty() {
                     row = row.child(ui::button("dbv-clear", t("db.clear_filter"), 3).on_click(cx.listener(|v, _, window, cx| {
                         v.where_in.update(cx, |s, cx| s.set_value("", window, cx));
-                        v.apply_where(cx);
+                        v.guarded(Next::Where, cx);
                     })));
                 }
                 row = row.child(Self::toolbar_btn("dbv-export", IconName::ArrowDownToLine, Some(t("db.export").into()), "").on_click(cx.listener(|v, _, _w, cx| v.toggle_pop(Pop::Export, cx))))
                     .child(Self::toolbar_btn("dbv-import", IconName::ArrowUpFromLine, Some(t("db.import").into()), "").on_click(cx.listener(|v, _, _w, cx| v.import(cx))));
+                if self.busy && self.slot.is_some() { row = row.child(Self::toolbar_btn("dbv-tstop", IconName::Square, Some(t("db.stop").into()), "").on_click(cx.listener(|v, _, _w, cx| v.cancel(cx)))); }
             } else {
                 row = row.child(div().flex_1()).child(Self::toolbar_btn("dbv-meta-refresh", IconName::RefreshCw, None, "").on_click(cx.listener(|v, _, _w, cx| { if v.sub == Sub::Ddl { v.load_ddl(cx) } else { v.table_cols = None; v.load_meta(cx) } cx.notify(); })));
+                if self.sub == Sub::Structure && !self.read_only {
+                    row = row.child(if self.design.is_some() {
+                        div().flex().gap_1()
+                            .child(ui::button("dbv-design-cancel", t("ui.cancel"), 0).on_click(cx.listener(|v, _, _w, cx| { v.design = None; v.design_err = None; cx.notify(); })))
+                            .child(ui::button("dbv-design-apply", t("db.preview_apply"), 1).on_click(cx.listener(|v, _, _w, cx| v.preview_design(cx))))
+                            .into_any_element()
+                    } else {
+                        Self::toolbar_btn("dbv-design", IconName::Settings2, Some(t("db.design").into()), "").on_click(cx.listener(|v, _, _w, cx| v.start_design(cx))).into_any_element()
+                    });
+                }
                 if self.sub == Sub::Ddl {
                     row = row.child(Self::toolbar_btn("dbv-ddl-copy", IconName::Copy, Some(t("db.copy").into()), "").on_click(cx.listener(|v, _, _w, cx| {
                         if let Some(Ok(s)) = &v.ddl { cx.write_to_clipboard(gpui::ClipboardItem::new_string(s.clone())); v.status = t("db.copied").into(); cx.notify(); }
@@ -795,6 +1018,7 @@ impl DbView {
             row = row.child(if self.busy { Self::toolbar_btn("dbv-stop", IconName::Square, Some(t("db.stop").into()), "").on_click(cx.listener(|v, _, _w, cx| v.cancel(cx))) }
                     else { Self::toolbar_btn("dbv-run", IconName::Play, Some(t("db.run").into()), "").on_click(cx.listener(|v, _, _w, cx| v.run_sql(false, cx))) })
                 .child(Self::toolbar_btn("dbv-run-all", IconName::ListVideo, Some(t("db.run_all").into()), "").on_click(cx.listener(|v, _, _w, cx| v.run_sql(true, cx))))
+                .child(Self::toolbar_btn("dbv-open", IconName::FolderOpen, Some(t("db.open_sql").into()), "").on_click(cx.listener(|v, _, _w, cx| v.open_sql(cx))))
                 .child(Self::toolbar_btn("dbv-history", IconName::Clock, Some(t("db.history").into()), "").on_click(cx.listener(|v, _, _w, cx| v.toggle_pop(Pop::History, cx))))
                 .child(Self::toolbar_btn("dbv-saved", IconName::Bookmark, Some(t("db.saved").into()), "").on_click(cx.listener(|v, _, _w, cx| v.toggle_pop(Pop::Saved, cx))))
                 .child(Self::toolbar_btn("dbv-export", IconName::ArrowDownToLine, Some(t("db.export").into()), "").on_click(cx.listener(|v, _, _w, cx| v.toggle_pop(Pop::Export, cx))))
@@ -859,6 +1083,51 @@ impl DbView {
         list.into_any_element()
     }
 
+    fn design_el(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let th = cur();
+        let Some(d) = &self.design else { return div().into_any_element() };
+        let f = self.live.as_ref().map(|l| l.driver.family()).unwrap_or(ssh_term_proto::assets::Family::Sqlite);
+        let field = |i: &Entity<InputState>, w: f32| div().w(px(w)).flex_shrink_0().child(ui::text_field(i, false));
+        let flex_field = |i: &Entity<InputState>| div().flex_1().min_w(px(80.)).child(ui::text_field(i, false));
+        let check = |id: (&'static str, usize), on: bool, label: String| div().id(id).flex().items_center().gap_1().px_1().flex_shrink_0().cursor_pointer().text_size(px(11.)).text_color(c(th.subtext))
+            .child(div().size(px(14.)).rounded(px(3.)).border_1().border_color(c(th.surface2)).flex().items_center().justify_center().when(on, |d| d.bg(c(th.accent)).child(icon(IconName::Check, 10., gpui::white()))))
+            .child(label);
+        let drop_btn = |id: (&'static str, usize), dropped: bool| div().id(id).px_2().h(px(24.)).flex().items_center().rounded(px(5.)).cursor_pointer().flex_shrink_0().text_size(px(11.))
+            .text_color(if dropped { c(th.accent) } else { c(th.error) }).hover(|d| d.bg(c(cur().surface0))).child(if dropped { t("db.undo_drop") } else { t("db.drop") });
+        let section = |title: String| div().pt_3().pb_1().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.overlay1)).child(title);
+        let row = |dropped: bool, new: bool| div().py_1().flex().items_center().gap_1().when(dropped, |d| d.opacity(0.45)).when(new, |d| d.bg(c(th.success).opacity(0.08)));
+        let mut list = div().id("dbv-design").flex_1().min_h_0().overflow_y_scroll().px_3().pb_3().flex().flex_col().text_size(px(12.));
+        if let Some(e) = &self.design_err { list = list.child(div().pt_2().text_color(c(th.error)).child(e.clone())); }
+        if f == ssh_term_proto::assets::Family::Sqlite { list = list.child(div().pt_2().text_size(px(11.)).text_color(c(th.overlay0)).child(t("db.design_sqlite_note"))); }
+        list = list.child(section(t("db.design_cols").into()));
+        for (i, col) in d.cols.iter().enumerate() {
+            let locked = col.orig.as_ref().is_some_and(|o| o.generated());
+            let mut r = row(col.dropped, col.orig.is_none()).child(field(&col.name, 150.));
+            r = if locked { r.child(div().w(px(150.)).px_2().text_color(c(th.overlay1)).child(col.orig.as_ref().map(|o| o.type_name.clone()).unwrap_or_default())) } else { r.child(field(&col.ty, 150.)) };
+            r = r.child(check(("dbv-dn", i), col.nullable, t("db.nullable").into()).on_click(cx.listener(move |v, _, _w, cx| { if let Some(c) = v.design.as_mut().and_then(|d| d.cols.get_mut(i)) { c.nullable = !c.nullable; } cx.notify(); })))
+                .child(field(&col.default, 150.)).child(flex_field(&col.comment))
+                .child(drop_btn(("dbv-dd", i), col.dropped).on_click(cx.listener(move |v, _, _w, cx| { if let Some(d) = v.design.as_mut() { if d.cols[i].orig.is_none() { d.cols.remove(i); } else { d.cols[i].dropped = !d.cols[i].dropped; } } cx.notify(); })));
+            list = list.child(r);
+        }
+        list = list.child(div().pt_1().child(ui::button("dbv-add-col", t("db.add_col"), 0).on_click(cx.listener(|v, _, w, cx| { let c = v.dcol(None, w, cx); if let Some(d) = v.design.as_mut() { d.cols.push(c); } cx.notify(); }))));
+        list = list.child(section(t("db.design_indexes").into()));
+        for (i, ix) in d.idx.iter().enumerate() {
+            list = list.child(row(ix.dropped, ix.orig.is_none()).child(field(&ix.name, 180.)).child(flex_field(&ix.cols))
+                .child(check(("dbv-iu", i), ix.unique, t("db.unique").into()).on_click(cx.listener(move |v, _, _w, cx| { if let Some(x) = v.design.as_mut().and_then(|d| d.idx.get_mut(i)) { x.unique = !x.unique; } cx.notify(); })))
+                .child(drop_btn(("dbv-id", i), ix.dropped).on_click(cx.listener(move |v, _, _w, cx| { if let Some(d) = v.design.as_mut() { if d.idx[i].orig.is_none() { d.idx.remove(i); } else { d.idx[i].dropped = !d.idx[i].dropped; } } cx.notify(); }))));
+        }
+        list = list.child(div().pt_1().child(ui::button("dbv-add-idx", t("db.add_index"), 0).on_click(cx.listener(|v, _, w, cx| { let x = Self::didx(None, w, cx); if let Some(d) = v.design.as_mut() { d.idx.push(x); } cx.notify(); }))));
+        list = list.child(section(t("db.design_fks").into()));
+        for (i, k) in d.fks.iter().enumerate() {
+            list = list.child(row(k.dropped, k.orig.is_none()).child(field(&k.name, 140.)).child(field(&k.cols, 130.)).child(div().text_color(c(th.overlay0)).child("→"))
+                .child(field(&k.ref_table, 140.)).child(field(&k.ref_cols, 120.)).child(flex_field(&k.on_delete)).child(flex_field(&k.on_update))
+                .child(drop_btn(("dbv-fd", i), k.dropped).on_click(cx.listener(move |v, _, _w, cx| { if let Some(d) = v.design.as_mut() { if d.fks[i].orig.is_none() { d.fks.remove(i); } else { d.fks[i].dropped = !d.fks[i].dropped; } } cx.notify(); }))));
+        }
+        list = list.child(div().pt_1().child(ui::button("dbv-add-fk", t("db.add_fk"), 0).on_click(cx.listener(|v, _, w, cx| { let x = Self::dfk(None, w, cx); if let Some(d) = v.design.as_mut() { d.fks.push(x); } cx.notify(); }))));
+        list = list.child(div().pt_2().text_size(px(11.)).text_color(c(th.overlay0)).child(tf("db.design_hint", &[("actions", &alter::FK_ACTIONS.join(" / "))])));
+        list.into_any_element()
+    }
+
     fn ddl_el(&self) -> gpui::AnyElement {
         let th = cur();
         match &self.ddl {
@@ -872,13 +1141,13 @@ impl DbView {
         let p = self.pop?;
         let th = cur();
         let mut card = ui::popover().absolute().top(px(38.)).right(px(8.)).occlude().p_1().flex().flex_col().gap_1()
-            .on_mouse_down_out(cx.listener(|v, _, _w, cx| { v.pop = None; cx.notify(); }));
+            .on_mouse_down_out(cx.listener(|v, _, _w, cx| { v.pop_closed = v.pop.take().map(|p| (p, Instant::now())); cx.notify(); }));
         match p {
             Pop::Export => {
                 for (i, (fmt, label)) in [(export::Format::Csv, "CSV"), (export::Format::Json, "JSON"), (export::Format::Sql, "SQL INSERT")].into_iter().enumerate() {
                     card = card.child(ui::menu_item(("dbv-exp", i), None, label, true, false).on_click(cx.listener(move |v, _, _w, cx| v.export(fmt, cx))));
                 }
-                card = card.child(div().px_2().pb_1().text_size(px(11.)).text_color(c(th.overlay0)).child(t("db.export_note")));
+                card = card.child(div().px_2().pb_1().text_size(px(11.)).text_color(c(th.overlay0)).child(if self.table_mode() { t("db.export_note_table") } else { t("db.export_note") }));
             }
             Pop::History => {
                 card = card.w(px(480.)).max_h(px(420.)).child(div().p_1().child(ui::search_field(&self.hist_in, false)));
@@ -960,26 +1229,41 @@ impl DbView {
         }
     }
 
+    fn dismiss_ask(&mut self, cx: &mut Context<Self>) {
+        if let Some(Ask::Discard(next)) = self.ask.take() { self.keep_staged(next, cx); }
+        cx.notify();
+    }
+
     fn confirm_el(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let ask = self.ask.as_ref()?;
         let th = cur();
         let (msg, preview, ok_label) = match ask {
+            Ask::Discard(_) => (tf("db.confirm_discard", &[("n", &self.pending(cx))]), String::new(), t("db.discard").to_string()),
+            Ask::Alter(v) => {
+                let mysql = self.live.as_ref().is_some_and(|l| l.driver.family() == ssh_term_proto::assets::Family::Mysql);
+                let mut m = tf("db.confirm_alter", &[("n", &v.len())]);
+                if mysql { m.push('\n'); m.push_str(&t("db.alter_mysql_note")); }
+                (m, v.join(";\n") + ";", t("db.apply").to_string())
+            }
             Ask::Run { stmt, .. } => ((if self.production { t("db.confirm_prod") } else { t("db.confirm_danger") }).to_string(), stmt.clone(), t("db.confirm_run").to_string()),
             Ask::Commit(v) => (tf("db.confirm_commit", &[("n", &v.len())]), v.join(";\n"), t("db.commit").to_string()),
             Ask::Import { stmts, rows, file } => (tf("db.confirm_import", &[("n", rows), ("file", file), ("table", &self.target.table.clone().unwrap_or_default())]), stmts.first().cloned().unwrap_or_default(), t("db.import").to_string()),
         };
-        let preview: String = preview.chars().take(1200).collect();
+        let preview: String = preview.chars().take(if matches!(ask, Ask::Alter(_)) { 20000 } else { 1200 }).collect();
+        let show_pre = !preview.is_empty();
         Some(ui::modal(ui::card(520.)
             .child(div().p_5().flex().flex_col().gap_3()
                 .child(div().flex().items_center().gap_2().child(icon(IconName::TriangleAlert, 16., c(th.warning))).child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("db.confirm_title"))))
                 .child(div().text_size(px(12.)).text_color(c(th.subtext)).child(msg))
-                .child(div().id("dbv-cf-pre").max_h(px(240.)).overflow_y_scroll().p_2().rounded(px(6.)).bg(c(th.mantle)).font_family("monospace").text_size(px(12.)).text_color(c(th.text)).child(preview)))
+                .when(show_pre, |d| d.child(div().id("dbv-cf-pre").max_h(px(320.)).overflow_y_scroll().p_2().rounded(px(6.)).bg(c(th.mantle)).font_family("monospace").text_size(px(12.)).text_color(c(th.text)).whitespace_normal().child(preview))))
             .child(div().px_5().py_3().flex().justify_end().gap_2().border_t_1().border_color(c(th.surface0))
-                .child(ui::button("dbv-cf-no", t("ui.cancel"), 0).on_click(cx.listener(|v, _, _w, cx| { v.ask = None; cx.notify(); })))
+                .child(ui::button("dbv-cf-no", t("ui.cancel"), 0).on_click(cx.listener(|v, _, _w, cx| v.dismiss_ask(cx))))
                 .child(ui::button("dbv-cf-yes", ok_label, 2).on_click(cx.listener(|v, _, _w, cx| {
                     match v.ask.take() {
                         Some(Ask::Run { sql, .. }) => v.execute(sql, cx),
                         Some(Ask::Commit(stmts)) | Some(Ask::Import { stmts, .. }) => v.apply(stmts, cx),
+                        Some(Ask::Alter(stmts)) => v.apply_alter(stmts, cx),
+                        Some(Ask::Discard(next)) => { v.grid.update(cx, |s, _| s.delegate_mut().clear_staged()); v.run_next(next, cx); }
                         None => {}
                     }
                 }))))))
@@ -1007,12 +1291,20 @@ pub fn conn_meta(id: &str) -> (String, bool, bool) {
 impl Render for DbView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(s) = self.pending_ddl.take() { self.ddl_ed.update(cx, |e, cx| e.set_value(s, window, cx)); }
+        if let Some(s) = self.pending_sql.take() { self.editor.update(cx, |e, cx| { e.set_value(s, window, cx); e.focus(window, cx); }); }
+        if let Some(src) = self.design_src.take() { self.build_design(src, window, cx); }
         let th = cur();
-        let mut root = div().id("db-view").size_full().relative().flex().flex_col().bg(c(th.base)).text_color(c(th.text));
+        let mut root = div().id("db-view")
+            .capture_key_down(cx.listener(|v, e: &gpui::KeyDownEvent, _w, cx| {
+                if e.keystroke.key != "escape" { return; }
+                if v.ask.is_some() { v.dismiss_ask(cx); cx.stop_propagation(); } else if v.pop.take().is_some() { cx.notify(); cx.stop_propagation(); }
+            }))
+            .size_full().relative().flex().flex_col().bg(c(th.base)).text_color(c(th.text));
         root = root.child(self.header(cx));
         if self.table_mode() {
             let body: gpui::AnyElement = match self.sub {
-                Sub::Structure => self.structure_el(),
+                Sub::Structure if self.design.is_some() => self.design_el(cx),
+                Sub::Structure => match &self.design_err { Some(e) => div().flex_1().flex().flex_col().child(div().px_3().pt_2().text_size(px(12.)).text_color(c(th.error)).child(e.clone())).child(self.structure_el()).into_any_element(), None => self.structure_el() },
                 Sub::Ddl => self.ddl_el(),
                 Sub::Data => match (&self.conn_err, &self.error) {
                     (Some(e), _) | (None, Some(e)) => div().flex_1().p_3().text_size(px(12.)).text_color(c(th.error)).child(e.clone()).into_any_element(),

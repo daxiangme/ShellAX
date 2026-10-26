@@ -1176,7 +1176,11 @@ impl Root {
                     v.update(cx, |v, _| { v.mode = SftpMode::Tab; v.follow.set(follow); });
                     r.sftp_pane(v, window, cx)
                 }
-                PaneSave::Db { conn, database, schema, table, sql } => r.db_pane(crate::db_view::Target { conn, database, schema, table }, sql, window, cx),
+                PaneSave::Db { conn, database, schema, table, sql, editor_h } => {
+                    let p = r.db_pane(crate::db_view::Target { conn, database, schema, table }, sql, window, cx);
+                    if let (Some(h), Some(v)) = (editor_h, p.read(cx).db.clone()) { v.update(cx, |v, _| v.set_editor_h(h)); }
+                    p
+                }
             }),
             NodeSave::Split { vertical, ratio, a, b } => Node::Split { dir: if *vertical { Dir::Vertical } else { Dir::Horizontal }, ratio: *ratio, a: Box::new(r.build_node(a, window, cx)), b: Box::new(r.build_node(b, window, cx)) },
         }
