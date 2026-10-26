@@ -775,7 +775,7 @@ impl Root {
         // SFTP now opens only as a tab of the SFTP module; older modes in saved settings map here
         let _ = mode;
         let mode = SftpMode::Tab;
-        // no host: left pane local, right pane offers "choose host" (no picker dialog)
+        // no host: both panes show the remote host list
         let Some(t) = target.or_else(|| self.ssh_target_for_tools(cx)) else {
             self.log("sftp.open", format!("host=- mode={}", mode.as_str()));
             let v = self.new_sftp_view(None, None, None, vec![], window, cx);

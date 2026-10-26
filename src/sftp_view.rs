@@ -192,9 +192,9 @@ impl SftpView {
     /// Left pane local; right pane connects to `target` (or shows the "connect to host" state).
     /// Does not connect yet: set `initial_dir`, then call [`start`].
     pub fn new_deferred(target: Option<SshTarget>, rt: tokio::runtime::Handle, prompts: ssh::Prompts, _w: &mut Window, _cx: &mut Context<Self>) -> Self {
-        let mut me = Self { rt, prompts, panes: [Pane::new(Src::Local), Pane::new(Src::Empty)], active: 1, status: String::new(), error: false, edit: None, confirm_delete: None, editor: None, ticking: false, _subs: vec![], sync: None, ctx_menu: None, ops_menu: None, pending_edit: None, mode: Mode::Popup, follow_src: None, follow: Follow::new(false), follow_task: false, next_token: 0 };
+        let mut me = Self { rt, prompts, panes: [Pane::new(Src::Empty), Pane::new(Src::Empty)], active: 1, status: String::new(), error: false, edit: None, confirm_delete: None, editor: None, ticking: false, _subs: vec![], sync: None, ctx_menu: None, ops_menu: None, pending_edit: None, mode: Mode::Popup, follow_src: None, follow: Follow::new(false), follow_task: false, next_token: 0 };
         if let Some(t) = target { me.panes[1].src = Src::Remote(Box::new(me.new_remote(host_name(&t), t))); }
-        me.refresh_local(0);
+        // both panes start on the remote host list; 本地 in the picker switches a pane to local
         me
     }
     pub fn new(target: Option<SshTarget>, rt: tokio::runtime::Handle, prompts: ssh::Prompts, w: &mut Window, cx: &mut Context<Self>) -> Self {
