@@ -15,6 +15,8 @@ pub mod lex;
 pub mod complete;
 pub mod history;
 pub mod alter;
+pub mod objtree;
+pub mod saved;
 
 use std::future::Future;
 use std::pin::Pin;
