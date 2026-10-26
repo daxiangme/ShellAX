@@ -181,6 +181,7 @@ impl Root {
         let key = key.or_else(|| self.dbp.selected.clone()).or_else(|| config::get().db.first().map(|d| d.id.clone()));
         let Some(key) = key else { self.open_db_dialog(None, window, cx); return };
         let (id, db, schema) = key_parts(&key);
+        if Self::db_conn(&id).is_some_and(|c| c.kind == ssh_term_proto::assets::DbKind::Mongodb) { self.open_mongo_tab(&id, window, cx); return; }
         let db = db.or_else(|| Self::db_conn(&id).map(|c| c.database).filter(|d| !d.is_empty())).unwrap_or_default();
         let db = if db.is_empty() { Self::db_conn(&id).filter(|c| c.kind.is_file()).map(|_| "main".to_string()).unwrap_or_default() } else { db };
         self.open_db_tab(Target { conn: id, database: db, schema, table: None }, String::new(), window, cx);
@@ -307,7 +308,10 @@ impl Root {
         let k = id.clone();
         let k2 = id.clone();
         let mut row = row_base(SharedString::from(format!("dbc:{id}")), depth, sel)
-            .on_click(cx.listener(move |this, _, _w, cx| this.db_toggle(&k, cx)))
+            .on_click(cx.listener(move |this, _, w, cx| {
+                if Self::db_conn(&k).is_some_and(|c| c.kind == ssh_term_proto::assets::DbKind::Mongodb) { this.dbp.selected = Some(k.clone()); this.open_mongo_tab(&k, w, cx); return; }
+                this.db_toggle(&k, cx)
+            }))
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, e: &gpui::MouseDownEvent, _w, cx| { this.dbp.selected = Some(k2.clone()); this.dbp.menu = Some((k2.clone(), e.position)); cx.notify(); }))
             .child(chevron(open, true))
             .child(icon(IconName::Database, 13., c(if d.read_only { th.warning } else { th.accent })))
@@ -316,7 +320,7 @@ impl Root {
         if !d.ssh_via.is_empty() { row = row.child(icon(IconName::Waypoints, 11., c(th.overlay0))); }
         if let Some(col) = dot { row = row.child(div().size(px(6.)).rounded_full().bg(col)); }
         list = list.child(row);
-        if !open { return list; }
+        if !open || d.kind == ssh_term_proto::assets::DbKind::Mongodb { return list; }
         if let Some(e) = status_tip { return list.child(err_row(&e, depth + 1)); }
         if matches!(self.dbp.live.get(&id), Some(LiveState::Connecting)) { return list.child(note_row(t("db.connecting"), depth + 1)); }
         self.db_kid_rows(list, &id, depth + 1, row_base, chevron, cx)

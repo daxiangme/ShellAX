@@ -82,6 +82,8 @@ impl DbKind {
     pub fn is_file(self) -> bool { matches!(self, DbKind::Sqlite | DbKind::Duckdb) }
     /// A driver is wired up in this build.
     pub fn driver_ready(self) -> bool { self.family() != Family::Other }
+    /// Offered in the connection dialog: SQL drivers plus MongoDB (its own document tab).
+    pub fn dialog_ready(self) -> bool { self.driver_ready() || self == DbKind::Mongodb }
     /// Has schemas between database and tables (PostgreSQL family).
     pub fn has_schemas(self) -> bool { matches!(self.family(), Family::Postgres | Family::Mssql) }
 }
@@ -419,7 +421,7 @@ mod tests {
         for k in DbKind::ALL { assert_eq!(DbKind::from_id(k.id()), Some(k)); }
         assert_eq!(DbKind::Postgres.default_port(), Some(5432));
         assert!(DbKind::Sqlite.is_file() && DbKind::Sqlite.default_port().is_none());
-        assert!(DbKind::Mysql.driver_ready() && DbKind::Opengauss.driver_ready() && !DbKind::Mongodb.driver_ready());
+        assert!(DbKind::Mysql.driver_ready() && DbKind::Opengauss.driver_ready() && !DbKind::Mongodb.driver_ready() && DbKind::Mongodb.dialog_ready());
         let c = DbConn { kind: DbKind::Mysql, host: "h".into(), user: "u".into(), database: "d".into(), ..Default::default() };
         assert_eq!(c.address(), "u@h:3306/d");
     }

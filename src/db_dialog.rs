@@ -76,6 +76,18 @@ impl DbDialog {
     /// A pasted `scheme://user:pass@host:port/db` fills the form.
     fn apply_uri(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let raw = Self::v(&self.uri, cx);
+        let set = |e: &Entity<InputState>, v: String, window: &mut Window, cx: &mut Context<Self>| e.update(cx, |s, cx| s.set_value(v, window, cx));
+        if let Some((uri, user, pass, db)) = ssh_term_proto::doc::split_uri(&raw) {
+            // MongoDB keeps the whole URI (SRV, replica sets, options) in the host field.
+            self.kind = DbKind::Mongodb;
+            set(&self.host.clone(), uri, window, cx);
+            set(&self.port.clone(), String::new(), window, cx);
+            set(&self.user.clone(), user, window, cx);
+            set(&self.database.clone(), db, window, cx);
+            if let Some(p) = pass { set(&self.password.clone(), p, window, cx); }
+            cx.notify();
+            return;
+        }
         let Some((c, pass)) = assets::parse_uri(&raw) else { return };
         self.kind = c.kind;
         let set = |e: &Entity<InputState>, v: String, window: &mut Window, cx: &mut Context<Self>| e.update(cx, |s, cx| s.set_value(v, window, cx));
@@ -111,7 +123,11 @@ impl DbDialog {
             d.file.clear();
             d.ssh_via = self.via.read(cx).value.clone();
             d.tls = if self.tls == "prefer" { String::new() } else { self.tls.clone() };
-            if d.name.is_empty() { d.name = d.host.clone(); }
+            if d.kind == DbKind::Mongodb && d.host.contains("://") {
+                d.port = None;
+                d.ssh_via.clear(); // a URI may name several hosts / SRV records; tunnels only work for one standalone host
+            }
+            if d.name.is_empty() { d.name = ssh_term_proto::doc::split_uri(&d.host).map(|x| x.0.split_once("://").map(|y| y.1.split(['/', '?']).next().unwrap_or("").to_string()).unwrap_or_default()).unwrap_or_else(|| d.host.clone()); }
         }
         let g = Self::v(&self.group, cx);
         d.group = (!g.is_empty()).then(|| ssh_term_proto::outline::normalize(&g)).filter(|g| !g.is_empty());
@@ -139,13 +155,19 @@ impl DbDialog {
         let via = if d.ssh_via.is_empty() { None } else {
             match self.targets.get(&d.ssh_via) { Some(t) => Some((t.clone(), self.prompts.clone())), None => { self.test = Some(Some(Err(tf("db.via_missing", &[("host", &d.ssh_via)])))); cx.notify(); return; } }
         };
-        if !d.kind.driver_ready() { self.test = Some(Some(Err(tf("db.kind_unsupported", &[("kind", &d.kind.label())])))); cx.notify(); return; }
+        if !d.kind.dialog_ready() { self.test = Some(Some(Err(tf("db.kind_unsupported", &[("kind", &d.kind.label())])))); cx.notify(); return; }
         self.error = None;
         self.test = Some(None);
         let me = cx.entity().downgrade();
         let pw = (!pw.is_empty()).then_some(pw);
         let started = std::time::Instant::now();
         let h = self.rt.spawn(async move {
+            if d.kind == DbKind::Mongodb {
+                let m = ssh_term_proto::doc::Mongo::open(&d, pw, via).await?;
+                let r = (m.version.clone(), m.via.clone());
+                m.close().await;
+                return Ok::<_, anyhow::Error>(r);
+            }
             let l = ssh_term_proto::db::live::open(&d, pw, via).await?;
             let v = l.version.clone();
             let via = l.via.clone();
@@ -177,7 +199,7 @@ impl Render for DbDialog {
         let mut form = div().p_5().flex().flex_col().gap_3().max_h(px(600.)).id("db-form").overflow_y_scroll();
 
         // engine
-        let kinds: Vec<(String, String)> = DbKind::ALL.iter().filter(|k| k.driver_ready()).map(|k| (k.id().to_string(), k.label().to_string())).collect();
+        let kinds: Vec<(String, String)> = DbKind::ALL.iter().filter(|k| k.dialog_ready()).map(|k| (k.id().to_string(), k.label().to_string())).collect();
         let me = cx.entity().downgrade();
         form = form.child(div().flex().items_start().gap_3().child(label(t("db.kind")).pt_1())
             .child(div().flex_1().flex().flex_col().gap_1()

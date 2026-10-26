@@ -37,6 +37,16 @@ fn mongo_find_edit() {
         assert!(m.replace("sxtest", "people", &id, &j.to_string()).await.is_err());
         assert_eq!(m.delete("sxtest", "people", &id).await.unwrap(), 1);
         assert!(m.find("sxtest", "people", "{bad", "", "", 0).await.is_err());
+        coll.create_index(mongodb::IndexModel::builder().keys(mongodb::bson::doc! {"n": 1}).options(mongodb::options::IndexOptions::builder().unique(true).build()).build()).await.unwrap();
+        let ix = m.indexes("sxtest", "people").await.unwrap();
+        assert!(ix.iter().any(|i| i.name == "_id_") && ix.iter().any(|i| i.unique && i.keys.contains("\"n\"")));
+        let agg = m.aggregate("sxtest", "people", r#"[{"$match":{"n":{"$gte":10}}},{"$count":"c"}]"#, 100).await.unwrap();
+        assert_eq!(agg.len(), 1);
+        let path = std::env::temp_dir().join(format!("sx-mongo-{}.json", std::process::id()));
+        let n = m.export("sxtest", "people", r#"{"n":{"$lt":5}}"#, r#"{"n":1}"#, "", &path).await.unwrap();
+        let arr: Vec<serde_json::Value> = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!((n as usize, arr.len()), (arr.len(), 5));
+        let _ = std::fs::remove_file(&path);
         coll.drop().await.unwrap();
         m.close().await;
     });

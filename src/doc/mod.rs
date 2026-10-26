@@ -29,6 +29,34 @@ pub fn parse_doc(s: &str) -> Result<Document> {
     match Bson::try_from(v)? { Bson::Document(d) => Ok(d), _ => bail!(crate::i18n::t("mongo.err_object").to_string()) }
 }
 
+/// A pasted `mongodb://` / `mongodb+srv://` URI split for the connection form:
+/// (URI with credentials removed, user, password, database from the path).
+/// Credentials are kept out of the stored URI so the password stays in the secret store.
+pub fn split_uri(raw: &str) -> Option<(String, String, Option<String>, String)> {
+    let raw = raw.trim();
+    let (scheme, rest) = raw.split_once("://")?;
+    if scheme != "mongodb" && scheme != "mongodb+srv" { return None; }
+    let (auth, hosts) = match rest.rfind('@') { Some(i) if rest[..i].find('/').is_none() => (&rest[..i], &rest[i + 1..]), _ => ("", rest) };
+    if hosts.is_empty() { return None; }
+    let dec = |s: &str| percent_decode(s);
+    let (user, pass) = match auth.split_once(':') { Some((u, p)) => (dec(u), Some(dec(p))), None => (dec(auth), None) };
+    let path = hosts.split_once('/').map(|x| x.1).unwrap_or("");
+    let db = path.split('?').next().unwrap_or("").to_string();
+    Some((format!("{scheme}://{hosts}"), user, pass, db))
+}
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() && s.is_char_boundary(i + 3) {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) { out.push(v); i += 3; continue; }
+        }
+        out.push(b[i]); i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct IndexRow { pub name: String, pub keys: String, pub unique: bool, pub ttl: Option<u64> }
 
@@ -90,7 +118,7 @@ impl Mongo {
             let mut cred = mongodb::options::Credential::default();
             cred.username = Some(c.user.clone());
             cred.password = password.clone();
-            cred.source = Some(if c.database.is_empty() { "admin".into() } else { c.database.clone() });
+            cred.source = o.credential.as_ref().and_then(|x| x.source.clone()).or(Some(if c.database.is_empty() { "admin".into() } else { c.database.clone() }));
             o.credential = Some(cred);
         }
         if matches!(c.tls.as_str(), "require" | "verify-ca" | "verify-full") {
@@ -198,6 +226,14 @@ impl Mongo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn uris() {
+        let (u, user, pw, db) = split_uri("mongodb+srv://ad%40x:p%3Aw@cl0.example.net/shop?retryWrites=true&authSource=admin").unwrap();
+        assert_eq!((u.as_str(), user.as_str(), pw.as_deref(), db.as_str()), ("mongodb+srv://cl0.example.net/shop?retryWrites=true&authSource=admin", "ad@x", Some("p:w"), "shop"));
+        let (u, user, pw, db) = split_uri("mongodb://h1:27017,h2:27018/?replicaSet=rs0").unwrap();
+        assert_eq!((u.as_str(), user.as_str(), pw, db.as_str()), ("mongodb://h1:27017,h2:27018/?replicaSet=rs0", "", None, ""));
+        assert!(split_uri("mysql://a@b/c").is_none());
+    }
     #[test]
     fn pipelines() {
         let p = parse_pipeline(r#"[{"$match":{"a":1}},{"$limit":5}]"#).unwrap();
