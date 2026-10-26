@@ -21,6 +21,8 @@ pub mod ssh;
 pub mod platform;
 pub mod clipfiles;
 pub mod hosttree;
+pub mod assets;
+pub mod db;
 pub mod update;
 pub mod updater;
 pub mod sftp;

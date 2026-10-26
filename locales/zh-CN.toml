@@ -1219,3 +1219,4 @@
 "newmenu.new_host" = "新建连接"
 "newmenu.search" = "搜索连接…"
 "newmenu.no_match" = "没有匹配的连接"
+"db.err_read_only" = "只读连接拒绝执行该语句"

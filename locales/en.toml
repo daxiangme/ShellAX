@@ -1219,3 +1219,4 @@
 "newmenu.new_host" = "New connection"
 "newmenu.search" = "Search connections…"
 "newmenu.no_match" = "No matching connections"
+"db.err_read_only" = "Read-only connection refuses this statement"

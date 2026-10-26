@@ -60,6 +60,9 @@ getrandom = { version = "0.4", features = ["sys_rng"] }
 serde_yaml = "0.9"
 # Inline graphics: decode Kitty PNG payloads and build frames for gpui (MIT/Apache-2.0; already a gpui dependency)
 image = { version = "0.25", default-features = false, features = ["png"] }
+# Database connections (MIT OR Apache-2.0): MySQL/MariaDB, PostgreSQL, SQLite (bundled)
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "mysql", "postgres", "sqlite-bundled", "chrono", "json"] }
 
 # Distribution build (installer payload): `cargo build --profile dist`.
 # Kept separate from `release` so day-to-day release builds/tests stay fast.

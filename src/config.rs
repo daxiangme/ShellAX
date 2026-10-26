@@ -311,8 +311,20 @@ impl Tags {
 /// Sidebar state persisted across runs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
-pub struct Sidebar { pub collapsed: Vec<String>, /** px, 180–480 */ pub width: f32, /** px, 280–560; missing config uses AI_DOCK_W */ #[serde(default = "default_ai_width")] pub ai_width: f32 }
-impl Default for Sidebar { fn default() -> Self { Self { collapsed: vec![], width: SIDEBAR_W, ai_width: AI_DOCK_W } } }
+pub struct Sidebar {
+    pub collapsed: Vec<String>,
+    /** px, 180–480 */ pub width: f32,
+    /** px, 280–560; missing config uses AI_DOCK_W */ #[serde(default = "default_ai_width")] pub ai_width: f32,
+    /// Active tool window of the left activity strip (`hosts`, `sftp`, `database`, …).
+    pub tool: String,
+    /// Bottom tool window (transfers / logs) open, its height in px and active tab.
+    pub bottom_open: bool,
+    pub bottom_height: f32,
+    pub bottom_tab: String,
+}
+impl Default for Sidebar { fn default() -> Self { Self { collapsed: vec![], width: SIDEBAR_W, ai_width: AI_DOCK_W, tool: "hosts".into(), bottom_open: false, bottom_height: BOTTOM_H, bottom_tab: "transfers".into() } } }
+/// Default bottom tool window height.
+pub const BOTTOM_H: f32 = 220.0;
 /// Default sidebar width (double-click on its edge resets to this).
 pub const SIDEBAR_W: f32 = 248.0;
 /// Default AI dock width (double-click on its edge resets to this).
@@ -357,6 +369,8 @@ pub struct Settings {
     pub sidebar: Sidebar,
     /// Saved directories opened from the sidebar.
     pub places: Vec<Place>,
+    /// Database connections (`[[db]]`, v0.2): share the host group tree and tags.
+    pub db: Vec<ssh_term_proto::assets::DbConn>,
     /// legacy top-level keys (v0.5 files); folded into sections on load
     #[serde(skip_serializing)] pub theme: Option<String>,
     #[serde(skip_serializing)] pub known_hosts: Option<String>,
@@ -387,6 +401,9 @@ impl Settings {
             if let Some(rest) = t.strip_prefix("macOS ") { *t = rest.to_string(); }
         }
         ssh_term_proto::hosttree::ensure_groups(&s.hosts, &mut s.groups);
+        ssh_term_proto::assets::normalize_dbs(&mut s.db);
+        ssh_term_proto::assets::ensure_asset_groups(&s.db, &mut s.groups);
+        if s.sidebar.tool.is_empty() { s.sidebar.tool = "hosts".into(); }
         Ok(s)
     }
     pub fn load() -> (Settings, Option<String>) {
@@ -656,6 +673,32 @@ mod tests {
         // PRD 5.23: legacy production flag migrated to the production tag
         assert_eq!((s.hosts[0].production, s.hosts[0].tags.as_slice()), (false, &["red".to_string()][..]));
         assert!(s.all_hosts()[0].production && s.policy_ctx().prod_hosts.contains(&"prod".to_string()));
+    }
+    #[test]
+    fn v01_config_upgrades_to_asset_model() {
+        // a v0.1 file: hosts, groups and the old sidebar section only
+        let src = "[[hosts]]\nname = \"web\"\nhost = \"10.0.0.1\"\ngroup = \"prod\"\n[[groups]]\npath = \"prod\"\ntags = [\"red\"]\n[sidebar]\ncollapsed = [\"prod\"]\nwidth = 300.0\n";
+        let s = Settings::parse(src).unwrap();
+        assert!(s.db.is_empty());
+        assert_eq!((s.sidebar.tool.as_str(), s.sidebar.width, s.sidebar.ai_width, s.sidebar.bottom_open), ("hosts", 300.0, AI_DOCK_W, false));
+        assert_eq!(s.sidebar.collapsed, vec!["prod".to_string()]);
+        // writing it back and reading again is lossless and adds no [[db]] noise
+        let text = toml::to_string_pretty(&s).unwrap();
+        assert!(!text.contains("[[db]]"));
+        assert_eq!(Settings::parse(&text).unwrap(), s);
+    }
+    #[test]
+    fn db_assets_share_groups() {
+        let src = "[[groups]]\npath = \"prod\"\ntags = [\"red\"]\n[[db]]\nname = \"orders\"\nkind = \"mysql\"\nhost = \"10.0.3.12\"\nuser = \"app\"\ngroup = \"prod/east\"\nssh_via = \"web\"\n[[db]]\nkind = \"sqlite\"\nfile = \"/tmp/a.db\"\n";
+        let s = Settings::parse(src).unwrap();
+        assert_eq!(s.db.len(), 2);
+        assert!(s.groups.iter().any(|g| g.path == "prod/east"));
+        assert!(!s.db[0].id.is_empty() && s.db[0].id != s.db[1].id);
+        assert_eq!(s.db[1].name, "a.db");
+        assert!(ssh_term_proto::assets::db_is_production(&s.db[0], &s.groups, &s.tags.production));
+        // ids are persisted so secrets stay attached after a reload
+        let back = Settings::parse(&toml::to_string_pretty(&s).unwrap()).unwrap();
+        assert_eq!(back.db, s.db);
     }
     #[test]
     fn dotted_get_set_roundtrip() {

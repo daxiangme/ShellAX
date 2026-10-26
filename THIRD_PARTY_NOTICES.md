@@ -89,3 +89,6 @@ a fallback font for prompt icons (powerline, devicons, etc.). The icon sets it a
 (https://github.com/ryanoasis/nerd-fonts#license): Font Awesome (OFL-1.1), Material Design Icons (Apache-2.0),
 Octicons (MIT), Codicons (CC-BY-4.0), Powerline symbols (MIT), Font Logos (Unlicense), Pomicons (OFL-1.1), Weather Icons (OFL-1.1).
 On Windows the default fallback chain also lists the system fonts "Segoe UI Symbol", "Segoe Fluent Icons" and "Segoe MDL2 Assets" (not bundled).
+## sqlx 0.9 (sqlx-core / sqlx-mysql / sqlx-postgres / sqlx-sqlite) — MIT OR Apache-2.0 (dependency, unmodified; database drivers)
+## libsqlite3-sys (bundled SQLite) — MIT; SQLite itself is public domain (dependency, unmodified)
+## futures-util 0.3 — MIT OR Apache-2.0 (dependency, unmodified)
