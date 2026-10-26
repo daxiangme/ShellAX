@@ -329,7 +329,7 @@ impl Sidebar { /** left tool window starts collapsed */ pub fn collapsed_panel(&
 /// Default bottom tool window height.
 pub const BOTTOM_H: f32 = 220.0;
 /// Default sidebar width (double-click on its edge resets to this).
-pub const SIDEBAR_W: f32 = 248.0;
+pub const SIDEBAR_W: f32 = 260.0;
 /// Default AI dock width (double-click on its edge resets to this).
 pub const AI_DOCK_W: f32 = 380.0;
 fn default_ai_width() -> f32 { AI_DOCK_W }

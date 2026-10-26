@@ -1974,7 +1974,7 @@ impl Render for Root {
             let vib = if chrome::NATIVE_LIGHTS { 0.72 } else { 1.0 };
             content = content.child(div().h_full().flex_shrink_0().flex().flex_col()
                 .child(head.bg(c(th.crust).opacity(vib)).child(chrome::drag_spacer("sb-drag")))
-                .child(div().flex_1().min_h_0().flex().flex_row().child(strip).child(panel)));
+                .child(div().flex_1().min_h_0().flex().flex_row().child(strip).child(div().h_full().flex().flex_col().pb(px(CARD_GAP)).child(panel))));
         } else {
             content = content.child(strip);
         }

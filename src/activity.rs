@@ -124,18 +124,18 @@ impl Root {
             Tool::Database => {
                 let p = self.db_panel(window, cx);
                 let vib = if chrome::NATIVE_LIGHTS { 0.72 } else { 1.0 };
-                self.sb_frame(cx).bg(c(cur().crust).opacity(vib)).child(p).into_any_element()
+                self.sb_frame(cx).bg(c(crate::theme::scheme().bg).opacity(vib)).child(p).into_any_element()
             }
             Tool::Redis | Tool::Docker => {
                 let k = if self.tool == Tool::Redis { crate::kv_ui::AssetKind::Redis } else { crate::kv_ui::AssetKind::Docker };
                 let p = self.asset_panel(k, cx);
                 let vib = if chrome::NATIVE_LIGHTS { 0.72 } else { 1.0 };
-                self.sb_frame(cx).bg(c(cur().crust).opacity(vib)).child(p).into_any_element()
+                self.sb_frame(cx).bg(c(crate::theme::scheme().bg).opacity(vib)).child(p).into_any_element()
             }
             other => {
                 let body = self.empty_tool(other, cx);
                 let vib = if chrome::NATIVE_LIGHTS { 0.72 } else { 1.0 };
-                self.sb_frame(cx).bg(c(cur().crust).opacity(vib)).child(panel_title(other.label(), None)).child(body).into_any_element()
+                self.sb_frame(cx).bg(c(crate::theme::scheme().bg).opacity(vib)).child(panel_title(other.label(), None)).child(body).into_any_element()
             }
         }
     }
