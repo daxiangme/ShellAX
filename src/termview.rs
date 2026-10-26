@@ -456,6 +456,8 @@ pub struct TermView {
     pub db: Option<Entity<crate::db_view::DbView>>,
     /// Redis / container / log view hosted instead of a shell.
     pub embed: Option<Embed>,
+    /// Module workspace this pane belongs to when its content does not say (container shell).
+    pub ws: Option<crate::activity::Tool>,
     pub title: SharedString,
     pub spec: Spec,
     pub session: Option<Arc<Session>>,
@@ -655,7 +657,7 @@ impl TermView {
             selecting: false, scroll_drag: false, history, tracker: InputTracker::new(),
             born: Instant::now(), progress_tick: false, last_activity: Instant::now(), blink_running: false, software_gpu: std::env::var("SHELLAX_FORCE_BLINK").ok().map(|_| false), last_mouse_cell: None, mouse_down_btn: None,
             manifests, last_command: None, agent: None, agent_seen: Instant::now(), last_detect: Instant::now() - Duration::from_secs(5),
-            detect_scheduled: false, pending_paste: None, pending_cd: None, ai: None, daemon_id: None, resume_offer: None, clip_ask: None, pty_ask: None, pty_write_ok: false, search: None, last_agent: None, failed: None, exit_seen: 0, ai_inline_seq: 0, ai_inline: None, bell_until: None, cmd_started: None, ai_capture: None, ctx_menu: None, ctx_pending: None, ctx_confirm: None, ctx_denied: None, sftp: None, db: None, embed: None, _subs: subs,
+            detect_scheduled: false, pending_paste: None, pending_cd: None, ai: None, daemon_id: None, resume_offer: None, clip_ask: None, pty_ask: None, pty_write_ok: false, search: None, last_agent: None, failed: None, exit_seen: 0, ai_inline_seq: 0, ai_inline: None, bell_until: None, cmd_started: None, ai_capture: None, ctx_menu: None, ctx_pending: None, ctx_confirm: None, ctx_denied: None, sftp: None, db: None, embed: None, ws: None, _subs: subs,
         }
     }
 

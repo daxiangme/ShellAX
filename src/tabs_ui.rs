@@ -20,10 +20,12 @@ impl Root {
         let name = self.tabs[i].name.clone();
         self.closed_tabs.push((node, name));
         if self.closed_tabs.len() > CLOSED_MAX { self.closed_tabs.remove(0); }
+        let module = Self::tab_module(&self.tabs[i], cx);
         let tab = self.tabs.remove(i);
         for p in tab.layout.leaves() { self.end_pane(&p, cx); }
         if self.active > i || self.active >= self.tabs.len() { self.active = self.active.saturating_sub(1); }
         self.active = self.active.min(self.tabs.len().saturating_sub(1));
+        self.after_close(module, i, cx);
         self.log("tab.close", format!("index={i}"));
         self.focus_active(window, cx);
         cx.notify();

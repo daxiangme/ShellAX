@@ -177,7 +177,7 @@ impl Root {
     }
 
     /// Query tab for the selected tree node (its connection / database / schema).
-    fn db_new_query(&mut self, key: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn db_new_query(&mut self, key: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let key = key.or_else(|| self.dbp.selected.clone()).or_else(|| config::get().db.first().map(|d| d.id.clone()));
         let Some(key) = key else { self.open_db_dialog(None, window, cx); return };
         let (id, db, schema) = key_parts(&key);

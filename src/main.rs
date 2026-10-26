@@ -13,6 +13,7 @@ mod db_dialog;
 mod db_ui;
 mod db_view;
 mod kv_view;
+mod workspace;
 mod doc_view;
 mod dock_view;
 mod kv_ui;
@@ -179,7 +180,7 @@ enum Edge { Left, Right, Top, Bottom }
 #[derive(Clone)]
 enum Modal { Broadcast(Vec<String>), Snapshots, Recordings, QuickStart { dir: String } }
 
-struct Tab { layout: Node<Entity<TermView>>, focused: Entity<TermView>, /** custom name (PRD 5.23) */ name: Option<String> }
+pub(crate) struct Tab { layout: Node<Entity<TermView>>, focused: Entity<TermView>, /** custom name (PRD 5.23) */ name: Option<String> }
 
 pub(crate) enum Overlay { None, Palette(Entity<Palette>), Host(Entity<HostDialog>), Audit, Sftp, Port, HostTools(Entity<host_tools_view::HostToolsView>), Db(Entity<db_dialog::DbDialog>), Asset(Entity<kv_ui::AssetDialog>) }
 
@@ -267,6 +268,9 @@ pub(crate) struct Root {
     dbp: db_ui::DbPanel,
     /// Sidebar collapse/expand animation in flight: (expanding, seq).
     sb_anim: Option<(bool, u64)>,
+    /// Active tab last seen by `sync_workspace`, and the last active tab of each module.
+    ws_seen: Option<gpui::EntityId>,
+    ws_last: HashMap<&'static str, gpui::EntityId>,
     audit: Arc<AuditLog>,
     pub(crate) audit_verify: Option<Result<usize, (usize, String)>>,
     pub(crate) audit_filter: ssh_term_proto::audit::Filter,
@@ -1497,22 +1501,10 @@ impl Root {
             Action::SplitDown => self.split(Some(Dir::Horizontal), window, cx),
             Action::ClosePane => self.close_pane(window, cx),
             Action::NextTab | Action::PrevTab => {
-                // The settings tab is one stop in the cycle, between the last terminal and the first.
-                let n = self.tabs.len();
-                let forward = a == Action::NextTab;
-                if self.settings_active() {
-                    self.leave_settings();
-                    if n > 0 { self.active = if forward { 0 } else { n - 1 }; }
-                    self.focus_active(window, cx);
-                } else if n > 0 {
-                    let at_end = if forward { self.active + 1 >= n } else { self.active == 0 };
-                    if at_end && self.settings.is_some() {
-                        if let Some((_, on)) = &mut self.settings { *on = true; }
-                    } else {
-                        self.active = if forward { (self.active + 1) % n } else { (self.active + n - 1) % n };
-                    }
-                    if !self.settings_active() { self.focus_active(window, cx); }
-                }
+                // cycles inside the current module's tabs
+                if self.settings_active() { self.leave_settings(); }
+                self.cycle_ws_tab(a == Action::NextTab, cx);
+                self.focus_active(window, cx);
             }
             Action::CycleTheme => self.cycle_theme(window, cx),
             Action::ThemeSystem => { self.report(config::update(|s| s.appearance.theme = "system".into()), cx); self.apply_theme(window, cx); self.refresh_all(cx); }
@@ -1554,7 +1546,7 @@ impl Root {
             }
             Action::OpenAudit => { self.audit_verify = None; self.overlay = Overlay::Audit; }
             Action::ToolHosts | Action::ToolSftp | Action::ToolDatabase | Action::ToolRedis | Action::ToolDocker | Action::ToolPorts | Action::ToolSnippets => {
-                if let Some(t) = activity::Tool::from_action(a) { self.select_tool(t, cx); }
+                if let Some(t) = activity::Tool::from_action(a) { self.select_tool(t, window, cx); }
             }
             Action::ToggleBottomPanel => self.toggle_bottom(None, cx),
             Action::NewDbConnection => self.open_db_dialog(None, window, cx),
@@ -1721,6 +1713,7 @@ pub(crate) fn state_color(st: AgentState, th: &Theme) -> Hsla {
 
 impl Render for Root {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_workspace(cx);
         // live language switch: refresh placeholders of long-lived inputs
         let lang = ssh_term_proto::i18n::current() as u8;
         if self.lang_seen != lang {
@@ -1779,7 +1772,11 @@ impl Render for Root {
                 None => { let first = shown_title(panes[0].read(cx)); if panes.len() > 1 { format!("{first} +{}", panes.len() - 1).into() } else { first } }
             }
         }).collect();
+        let ws_mod = self.tool.workspace();
+        let mut shown = 0usize;
         for (i, t) in self.tabs.iter().enumerate() {
+            if Self::tab_module(t, cx) != ws_mod { continue; }
+            shown += 1;
             let active = i == self.active && !settings_on;
             let panes = t.layout.leaves();
             let nth = base_titles[..i].iter().filter(|x| **x == base_titles[i]).count();
@@ -1788,7 +1785,7 @@ impl Render for Root {
             let agent = panes.iter().filter_map(|p| p.read(cx).agent_label())
                 .max_by_key(|(_, st)| match st { AgentState::Blocked => 3, AgentState::Working => 2, AgentState::Idle => 1, _ => 0 });
             // hairline separator only between two inactive tabs
-            if i > 0 { tabbar = tabbar.child(gap(!active && (settings_on || i != self.active + 1))); }
+            if shown > 1 { tabbar = tabbar.child(gap(!active && (settings_on || i != self.active + 1))); }
             let tg = SharedString::from(format!("tab-g-{i}"));
             let mut tabel = div().id(("tab", i)).relative().group(tg.clone()).h(px(28.)).w(px(TAB_W)).flex_shrink(1.).min_w(px(TAB_MIN_W)).pl(px(10.)).pr(px(4.)).rounded(px(7.)).flex().items_center().gap(px(6.)).cursor_pointer()
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1871,6 +1868,8 @@ impl Render for Root {
                 .on_click(cx.listener(|this, ev: &gpui::ClickEvent, w, cx| {
                     // 菜单刚被“点击外部”关闭（就是这次点击）时不再重新打开，实现开关切换
                     if this.new_menu.is_some() || this.new_menu_closed.elapsed() < std::time::Duration::from_millis(250) { this.new_menu = None; cx.notify(); return; }
+                    // other modules: "+" opens that module's own kind of tab
+                    if this.new_module_tab(w, cx) { return; }
                     let p = ev.position();
                     this.open_new_menu(gpui::point(p.x - px(14.), p.y + px(18.)), w, cx);
                 }))
@@ -1881,16 +1880,9 @@ impl Render for Root {
         let workspace = if settings_on {
             settings_tab.unwrap().0.into_any_element()
         } else {
-            match self.tabs.get(self.active) {
+            match self.tabs.get(self.active).filter(|t| Self::tab_module(t, cx) == self.tool.workspace()) {
             Some(tab) => self.render_node(self.active, &tab.layout, vec![], &th, cx),
-            None => div().flex_1().size_full().flex().flex_col().items_center().justify_center().gap_3().bg(c(th.base))
-                .child(icon(IconName::SquareTerminal, 36., c(th.overlay0)))
-                .child(div().text_size(px(13.)).text_color(c(th.subtext)).child(t("ui.no_open_terminals")))
-                .child(div().flex().gap_2()
-                    .child(ui::button("empty-local", t("ui.open_local_terminal"), 1).on_click(cx.listener(|this, _, w, cx| this.new_tab(Spec::Local, w, cx))))
-                    .child(ui::button("empty-palette", t("ui.command_palette"), 0).on_click(cx.listener(|this, _, w, cx| this.open_palette(w, cx))))
-                    .when(!self.closed_tabs.is_empty(), |d| d.child(ui::button("empty-reopen", t("tab.reopen"), 0).on_click(cx.listener(|this, _, w, cx| this.reopen_closed(w, cx))))))
-                .into_any_element(),
+            None => self.ws_empty(cx),
             }
         };
         let cwd_bar = if settings_on { None } else { self.cwd_bar(window, cx) };
@@ -2324,7 +2316,7 @@ fn open_main(cx: &mut App, rt: Arc<tokio::runtime::Runtime>, themes: Vec<Arc<The
                     let mut root = Root {
                         rt, default_target, tabs: vec![], active: 0, themes, schemes, histories: HashMap::new(),
                         manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], deny_reason: None, policy_port: None, overlay: Overlay::None, settings: None, sftp_views: HashMap::new(), sftp_current: None, sftp_windows: vec![], drag_div: None, port_view: None, quit_confirm: false, modal: None, quit_ok: false, chat_view: None,
-                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, menu_last: (None, None), menu_ghost: None, menu_ghost_seq: 0, sb_menu_at: std::time::Instant::now(), sb_modal: None, tag_filter: vec![], tab_menu: None, tab_menu_at: std::time::Instant::now(), new_menu: None, new_menu_at: std::time::Instant::now(), new_menu_closed: std::time::Instant::now(), new_menu_collapsed: config::get().sidebar.collapsed.clone(), new_menu_sel: 0, new_menu_search: new_menu_search.clone(), tab_scroll: gpui::ScrollHandle::new(), tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), dock: SideDock::None, lib_search: lib_search.clone(), lib_group: String::new(), lib_hist_all: false, lib_editor: None, lib_vars: None, lib_confirm: None, lib_notice: String::new(), ai_width: { let w = config::get().sidebar.ai_width; if (280.0..=560.0).contains(&w) { w } else { config::AI_DOCK_W } }, host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: !config::get().sidebar.collapsed_panel(), sb_anim: None, tool: activity::Tool::from_id(&config::get().sidebar.tool), bottom_open: config::get().sidebar.bottom_open, bottom_tab: activity::Bottom::from_id(&config::get().sidebar.bottom_tab), bottom_h: config::get().sidebar.bottom_height.clamp(120., 600.), exec_log: Default::default(), dbp: Default::default(), audit, audit_verify: None, audit_filter: Default::default(),
+                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, menu_last: (None, None), menu_ghost: None, menu_ghost_seq: 0, sb_menu_at: std::time::Instant::now(), sb_modal: None, tag_filter: vec![], tab_menu: None, tab_menu_at: std::time::Instant::now(), new_menu: None, new_menu_at: std::time::Instant::now(), new_menu_closed: std::time::Instant::now(), new_menu_collapsed: config::get().sidebar.collapsed.clone(), new_menu_sel: 0, new_menu_search: new_menu_search.clone(), tab_scroll: gpui::ScrollHandle::new(), tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), dock: SideDock::None, lib_search: lib_search.clone(), lib_group: String::new(), lib_hist_all: false, lib_editor: None, lib_vars: None, lib_confirm: None, lib_notice: String::new(), ai_width: { let w = config::get().sidebar.ai_width; if (280.0..=560.0).contains(&w) { w } else { config::AI_DOCK_W } }, host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: !config::get().sidebar.collapsed_panel(), sb_anim: None, ws_seen: None, ws_last: HashMap::new(), tool: activity::Tool::from_id(&config::get().sidebar.tool), bottom_open: config::get().sidebar.bottom_open, bottom_tab: activity::Bottom::from_id(&config::get().sidebar.bottom_tab), bottom_h: config::get().sidebar.bottom_height.clamp(120., 600.), exec_log: Default::default(), dbp: Default::default(), audit, audit_verify: None, audit_filter: Default::default(),
                         settings_dirty: vec![], toast: None, toast_out: false, toast_seq: 0, _subs: vec![],
                     };
                     crate::ctxmenu_view::init(root.rt.handle().clone(), root.prompts.clone());

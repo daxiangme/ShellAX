@@ -194,7 +194,9 @@ impl Root {
     }
     /// Placeholder leaf for a saved tab whose connection was deleted.
     pub(crate) fn gone_pane(&mut self, what: String, save: Option<ssh_term_proto::session_store::PaneSave>, window: &mut Window, cx: &mut Context<Self>) -> Entity<TermView> {
-        let g = cx.new(|_| GoneView { what, save });
+        use ssh_term_proto::session_store::PaneSave as P;
+        let module = match &save { Some(P::Redis { .. }) => crate::activity::Tool::Redis, Some(P::Docker { .. } | P::DockerLogs { .. }) => crate::activity::Tool::Docker, Some(P::Mongo { .. } | P::Db { .. }) => crate::activity::Tool::Database, Some(P::Sftp { .. }) => crate::activity::Tool::Sftp, _ => crate::activity::Tool::Hosts };
+        let g = cx.new(|_| GoneView { what, save, module });
         self.embed_pane(Embed::Gone(g), window, cx)
     }
 
@@ -259,7 +261,7 @@ impl Root {
         let socket = (!ep.socket.is_empty() && ep.socket != "/var/run/docker.sock").then_some(ep.socket.as_str());
         let cmd = ssh_term_proto::dock::exec_command(cid, socket);
         let pane = self.open_pane(spec, window, cx);
-        pane.update(cx, |v, cx| v.queue_cd(cmd, cx));
+        pane.update(cx, |v, cx| { v.ws = Some(crate::activity::Tool::Docker); v.queue_cd(cmd, cx) });
         let fh = pane.read(cx).focus.clone();
         self.tabs.push(Tab { layout: Node::Leaf(pane.clone()), focused: pane, name: Some(format!("exec {}", cid.chars().take(12).collect::<String>())) });
         self.active = self.tabs.len() - 1;
@@ -312,7 +314,7 @@ impl Root {
 /// Shown for a restored tab whose saved connection no longer exists.
 /// Placeholder for a saved tab whose connection no longer exists; keeps the saved form so
 /// the next layout save does not drop it.
-pub struct GoneView { pub what: String, pub save: Option<ssh_term_proto::session_store::PaneSave> }
+pub struct GoneView { pub what: String, pub save: Option<ssh_term_proto::session_store::PaneSave>, pub module: crate::activity::Tool }
 impl Render for GoneView {
     fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();

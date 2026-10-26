@@ -69,11 +69,12 @@ impl Render for BottomResize { fn render(&mut self, _w: &mut Window, _cx: &mut C
 
 impl Root {
     /// Activity-strip click / Alt+N: switch module; on the active one, collapse or reopen its window.
-    pub(crate) fn select_tool(&mut self, tool: Tool, cx: &mut Context<Self>) {
+    pub(crate) fn select_tool(&mut self, tool: Tool, window: &mut Window, cx: &mut Context<Self>) {
         if tool == self.tool { self.toggle_sidebar(cx); } else {
             self.tool = tool;
             if !self.sidebar_visible { self.toggle_sidebar(cx); }
             let _ = config::update(|s| s.sidebar.tool = tool.id().into());
+            self.show_module(window, cx);
         }
         cx.notify();
     }
@@ -110,7 +111,7 @@ impl Root {
         for (i, tool) in Tool::TOP.into_iter().enumerate() {
             let tip = crate::sidebar::action_tip(tool.label(), &tool.action().binding());
             col = col.child(self.strip_btn(("act", i), tool.icon(), tip, open && self.tool == tool, false)
-                .on_click(cx.listener(move |this, _, _w, cx| this.select_tool(tool, cx))));
+                .on_click(cx.listener(move |this, _, _w, cx| this.select_tool(tool, _w, cx))));
         }
         col = col.child(div().flex_1());
         let busy = self.transfers_active(cx);
