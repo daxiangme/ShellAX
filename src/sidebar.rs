@@ -16,7 +16,7 @@ use crate::theme::{c, cur};
 use crate::ui::{self, icon, IconName};
 use crate::{chrome, config, HostDrag, Root};
 
-fn action_tip(label: &str, binding: &str) -> String {
+pub(crate) fn action_tip(label: &str, binding: &str) -> String {
     if binding.is_empty() { return label.to_string(); }
     let keys = binding.split('-').map(|p| if p.len() == 1 { p.to_uppercase() } else {
         let mut c = p.chars();
@@ -388,16 +388,7 @@ impl Root {
                 cx.notify();
             }))
             .child(icon(IconName::Plus, 15., c(th.text)));
-        let mut col = div().id("sidebar").relative().w(px(self.sb_width)).flex_shrink_0().h_full().flex().flex_col()
-            .on_drag_move(cx.listener(|this, ev: &gpui::DragMoveEvent<SbResize>, _w, cx| {
-                let w = (f32::from(ev.event.position.x - ev.bounds.left()) - 2.0).clamp(180.0, 480.0);
-                if (w - this.sb_width).abs() >= 1.0 { this.sb_width = w; cx.notify(); }
-            }));
-        // The 4px gap to the right of the sidebar is the resize hit area.
-        col = col.child(div().id("sb-resize").absolute().top_0().right(px(-4.)).w(px(4.)).h_full().cursor_col_resize()
-            .hover(|d| d.bg(c(cur().accent).opacity(0.35)))
-            .on_drag(SbResize, |d: &SbResize, _, _, cx| cx.new(|_| d.clone()))
-            .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _w, cx| if ev.click_count() >= 2 { this.sb_width = config::SIDEBAR_W; this.save_sb_width(); cx.notify(); })));
+        let mut col = self.sb_frame(cx);
         col = col.child(div().px(px(4.)).pb(px(2.)).flex().items_center().gap(px(4.)).child(search_box).child(plus));
 
         // ---- list
@@ -483,18 +474,29 @@ impl Root {
         col.bg(c(th.crust).opacity(vib)).child(list)
     }
 
+    /// Left tool-window frame: fixed width, resize handle on the right edge (double click resets).
+    pub(crate) fn sb_frame(&mut self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let col = div().id("sidebar").relative().w(px(self.sb_width)).flex_shrink_0().h_full().flex().flex_col()
+            .on_drag_move(cx.listener(|this, ev: &gpui::DragMoveEvent<SbResize>, _w, cx| {
+                let w = (f32::from(ev.event.position.x - ev.bounds.left()) - 2.0).clamp(180.0, 480.0);
+                if (w - this.sb_width).abs() >= 1.0 { this.sb_width = w; cx.notify(); }
+            }));
+        // The 4px gap to the right of the sidebar is the resize hit area.
+        col.child(div().id("sb-resize").absolute().top_0().right(px(-4.)).w(px(4.)).h_full().cursor_col_resize()
+            .hover(|d| d.bg(c(cur().accent).opacity(0.35)))
+            .on_drag(SbResize, |d: &SbResize, _, _, cx| cx.new(|_| d.clone()))
+            .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _w, cx| if ev.click_count() >= 2 { this.sb_width = config::SIDEBAR_W; this.save_sb_width(); cx.notify(); })))
+    }
+
     /// Session tools sit beside the terminal, not in the host list.
     pub(crate) fn tool_rail(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
-        let items: [(Action, &str, IconName); 10] = [
-            (Action::OpenSettings, t("ui.settings"), IconName::Settings),
-            (Action::OpenSftp, t("ui.sftp_files"), IconName::FolderSync),
-            (Action::OpenPortForward, t("ui.port_forwarding"), IconName::ArrowLeftRight),
-            (Action::OpenHostTools, t("hosttools.title"), IconName::ChartPie),
-            (Action::OpenSnippets, t("lib.snippets"), IconName::Code),
-            (Action::OpenHistory, t("lib.history"), IconName::Clock),
+        // Left activity strip owns the modules (hosts, SFTP, ports, snippets, audit, settings);
+        // this right strip holds the tool windows that work on the focused session.
+        let items: [(Action, &str, IconName); 5] = [
             (Action::OpenAi, "AI / Agent", IconName::Bot),
-            (Action::OpenAudit, t("ui.audit_log"), IconName::ScrollText),
+            (Action::OpenHostTools, t("hosttools.title"), IconName::ChartPie),
+            (Action::OpenHistory, t("lib.history"), IconName::Clock),
             (Action::CommandPalette, t("ui.command_palette"), IconName::Command),
             (Action::OpenAbout, t("ui.help_about"), IconName::CircleQuestionMark),
         ];
@@ -738,6 +740,12 @@ impl Root {
         // click must not be treated as a request for another tab (that used to pop the
         // "open again?" dialog). Opening a second tab stays available from the context menu.
         if double { let _ = label; return; }
+        // SFTP tool window: the same host tree, but a click opens the file browser
+        if self.tool == crate::activity::Tool::Sftp {
+            let mode = SftpMode::parse(&config::get().session.sftp_mode);
+            let target = match spec { Spec::Ssh(t) => Some(t), Spec::Local => None };
+            return self.open_sftp_mode(target, mode, window, cx);
+        }
         let same = |p: &Entity<crate::termview::TermView>, cx: &Context<Self>| {
             let v = p.read(cx);
             v.sftp.is_none() && match (&v.spec, &spec) { (Spec::Local, Spec::Local) => true, (Spec::Ssh(a), Spec::Ssh(b)) => a.label() == b.label(), _ => false }

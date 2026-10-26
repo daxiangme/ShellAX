@@ -321,8 +321,11 @@ pub struct Sidebar {
     pub bottom_open: bool,
     pub bottom_height: f32,
     pub bottom_tab: String,
+    /// Left tool window collapsed (activity strip only).
+    pub panel_hidden: bool,
 }
-impl Default for Sidebar { fn default() -> Self { Self { collapsed: vec![], width: SIDEBAR_W, ai_width: AI_DOCK_W, tool: "hosts".into(), bottom_open: false, bottom_height: BOTTOM_H, bottom_tab: "transfers".into() } } }
+impl Default for Sidebar { fn default() -> Self { Self { collapsed: vec![], width: SIDEBAR_W, ai_width: AI_DOCK_W, tool: "hosts".into(), bottom_open: false, bottom_height: BOTTOM_H, bottom_tab: "transfers".into(), panel_hidden: false } } }
+impl Sidebar { /** left tool window starts collapsed */ pub fn collapsed_panel(&self) -> bool { self.panel_hidden } }
 /// Default bottom tool window height.
 pub const BOTTOM_H: f32 = 220.0;
 /// Default sidebar width (double-click on its edge resets to this).

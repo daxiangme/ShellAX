@@ -608,7 +608,7 @@ impl SftpView {
         }, |v, n, cx| { v.start_worker(cx); v.set_status(tf("sftp.relay_queued", &[("n", &n)]), false) });
     }
     /// Remote panes with their transfer queues.
-    fn queues(&self) -> Vec<(usize, Queue)> { (0..2).filter_map(|i| self.panes[i].remote().map(|r| (i, r.queue.clone()))).collect() }
+    pub(crate) fn queues(&self) -> Vec<(usize, Queue)> { (0..2).filter_map(|i| self.panes[i].remote().map(|r| (i, r.queue.clone()))).collect() }
     fn start_worker(&mut self, cx: &mut Context<Self>) {
         for p in &self.panes { if let Some(r) = p.remote() { if let Some(s) = r.sess.clone() { r.queue.start(&self.rt, s, || {}); } } }
         if self.ticking { return; }

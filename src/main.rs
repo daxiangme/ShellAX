@@ -8,6 +8,8 @@ mod motion;
 use gpui::AnimationExt as _;
 mod filekind;
 mod sidebar;
+mod activity;
+mod db_ui;
 mod tabs_ui;
 mod config;
 mod host_dialog;
@@ -247,6 +249,13 @@ pub(crate) struct Root {
     host_os: Arc<Mutex<HashMap<String, String>>>,
     os_probing: HashSet<String>,
     sidebar_visible: bool,
+    /// Active module of the left activity strip.
+    tool: activity::Tool,
+    bottom_open: bool,
+    bottom_tab: activity::Bottom,
+    bottom_h: f32,
+    /// Execution log shown in the bottom tool window (database statements, …).
+    exec_log: activity::ExecLog,
     /// Sidebar collapse/expand animation in flight: (expanding, seq).
     sb_anim: Option<(bool, u64)>,
     audit: Arc<AuditLog>,
@@ -300,6 +309,7 @@ impl Root {
     /// resized once the animation has finished, not on every frame.
     pub(crate) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         let show = !self.sidebar_visible;
+        let _ = config::update(|s| s.sidebar.panel_hidden = !show);
         if motion::reduced() { self.sidebar_visible = show; self.sb_anim = None; cx.notify(); return; }
         let seq = self.sb_anim.map(|a| a.1 + 1).unwrap_or(1);
         self.sb_anim = Some((show, seq));
@@ -1523,6 +1533,11 @@ impl Root {
                 self.focus_active(window, cx);
             }
             Action::OpenAudit => { self.audit_verify = None; self.overlay = Overlay::Audit; }
+            Action::ToolHosts | Action::ToolSftp | Action::ToolDatabase | Action::ToolRedis | Action::ToolDocker | Action::ToolPorts | Action::ToolSnippets => {
+                if let Some(t) = activity::Tool::from_action(a) { self.select_tool(t, cx); }
+            }
+            Action::ToggleBottomPanel => self.toggle_bottom(None, cx),
+            Action::NewDbConnection => self.open_db_dialog(None, window, cx),
             Action::OpenAbout => self.open_settings(Cat::About, window, cx),
             Action::ClearHistory => {
                 for h in self.histories.values() { h.lock().unwrap().clear(); }
@@ -1697,7 +1712,7 @@ impl Render for Root {
         }
         let th = cur();
         let s = config::get();
-        if !cx.has_active_drag() { self.drag_div = None; self.save_sb_width(); self.save_ai_width(); }
+        if !cx.has_active_drag() { self.drag_div = None; self.save_sb_width(); self.save_ai_width(); self.save_bottom_h(); }
         self.probe_os(cx);
         // appearance.opacity: transparent window background, terminal area drawn with alpha
         let op = s.appearance.opacity.clamp(0.5, 1.0);
@@ -1900,30 +1915,33 @@ impl Render for Root {
                 .child(icon(IconName::Shield, 12., mode_col)).child(tf("main.perm_status", &[("mode", &mode.label())]))
                 .when(org.is_some(), |d| d.child(div().pl_1().child(t("main.org_badge")))));
 
-        let left = if self.sidebar_visible { px(0.) } else { px(CARD_GAP) };
-        // 顶层：侧栏（全高）| 右列 [标签栏 / 内容]
-        let mut content = div().flex_1().min_h_0().w_full().flex().flex_row().items_stretch().pl(left).gap(px(CARD_GAP));
+        // 顶层：活动图标栏 + 工具窗口（全高）| 右列 [标签栏 / 内容 / 底部工具窗口]
+        let mut content = div().flex_1().min_h_0().w_full().flex().flex_row().items_stretch().gap(px(CARD_GAP));
+        let strip = self.activity_strip(cx).into_any_element();
         if self.sidebar_visible {
-            let sb = self.sidebar(window, cx);
+            let sb = self.tool_panel(window, cx);
             // 侧栏顶部一行（与标签行同高，可拖动窗口）：红黄绿按钮风格时软件名在按钮右侧，否则靠左带小图标
             let name = div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).whitespace_nowrap().child("ShellAX");
             let mut head = chrome::drag_region(div().id("sb-chrome")).h(px(chrome::TAB_H)).flex_shrink_0().flex().items_center().overflow_hidden()
                 .window_control_area(gpui::WindowControlArea::Drag);
-            head = if mac { head.child(self.lights(window, cx)).child(name) } else { head.pl(px(8.)).gap(px(6.)).child(icon(IconName::SquareTerminal, 14., c(th.accent))).child(name) };
-            let sb: AnyElement = div().h_full().flex().flex_col()
-                .child(head.child(chrome::drag_spacer("sb-drag")))
-                .child(div().flex_1().min_h_0().flex().child(sb)).into_any_element();
-            content = match self.sb_anim {
+            head = if mac { head.child(self.lights(window, cx)).child(name) } else { head.pl(px(12.)).gap(px(6.)).child(icon(IconName::SquareTerminal, 14., c(th.accent))).child(name) };
+            let panel: AnyElement = match self.sb_anim {
                 Some((show, seq)) => {
                     let w = self.sb_width;
                     let dur = if show { motion::SIDEBAR_MS } else { motion::SIDEBAR_MS - 40 };
                     let ease = move |t: f32| if show { 1. - (1. - t).powi(5) } else { t * t * t };
-                    content.child(div().h_full().flex_shrink_0().overflow_hidden().child(sb)
+                    div().h_full().flex_shrink_0().overflow_hidden().child(sb)
                         .with_animation(("sb-anim", seq as usize), gpui::Animation::new(motion::ms(dur)).with_easing(ease),
-                            move |d, t| { let k = if show { t } else { 1. - t }; d.w(px(w * k)).opacity(k) }))
+                            move |d, t| { let k = if show { t } else { 1. - t }; d.w(px(w * k)).opacity(k) }).into_any_element()
                 }
-                None => content.child(sb),
+                None => sb,
             };
+            let vib = if chrome::NATIVE_LIGHTS { 0.72 } else { 1.0 };
+            content = content.child(div().h_full().flex_shrink_0().flex().flex_col()
+                .child(head.bg(c(th.crust).opacity(vib)).child(chrome::drag_spacer("sb-drag")))
+                .child(div().flex_1().min_h_0().flex().flex_row().child(strip).child(panel)));
+        } else {
+            content = content.child(strip);
         }
         let mut work = div().flex_1().min_w_0().min_h_0().flex().flex_row().gap(px(CARD_GAP)).child(center);
         work = match self.dock {
@@ -1933,7 +1951,13 @@ impl Render for Root {
         };
         let work_row = div().flex_1().min_h_0().w_full().flex().flex_row().items_stretch().pr(px(4.)).pb(px(CARD_GAP)).gap(px(CARD_GAP))
             .child(work).child(self.tool_rail(cx));
-        let right = div().flex_1().min_w_0().h_full().flex().flex_col().child(row).child(work_row);
+        let mut right = div().id("right-col").flex_1().min_w_0().h_full().flex().flex_col().child(row).child(work_row);
+        if self.bottom_open {
+            right = right.on_drag_move(cx.listener(|this, ev: &gpui::DragMoveEvent<activity::BottomResize>, _w, cx| {
+                let h = (f32::from(ev.bounds.bottom() - ev.event.position.y) - (CARD_GAP + 2.)).clamp(120., 600.);
+                if (h - this.bottom_h).abs() >= 1.0 { this.bottom_h = h; cx.notify(); }
+            })).child(div().w_full().pr(px(4.)).pb(px(CARD_GAP)).child(self.bottom_panel(cx)));
+        }
         let body = content.child(right);
         let mut root = div().size_full().relative().flex().flex_col().bg(theme::outer_bg().opacity(if chrome::NATIVE_LIGHTS { 0. } else { op })).font_family(theme::ui_font()).text_size(px(s.appearance.ui_font_size.clamp(10., 20.))).text_color(c(th.text))
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, w, cx| {
@@ -2267,7 +2291,7 @@ fn open_main(cx: &mut App, rt: Arc<tokio::runtime::Runtime>, themes: Vec<Arc<The
                     let mut root = Root {
                         rt, default_target, tabs: vec![], active: 0, themes, schemes, histories: HashMap::new(),
                         manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], deny_reason: None, policy_port: None, overlay: Overlay::None, settings: None, sftp_views: HashMap::new(), sftp_current: None, sftp_windows: vec![], drag_div: None, port_view: None, quit_confirm: false, modal: None, quit_ok: false, chat_view: None,
-                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, menu_last: (None, None), menu_ghost: None, menu_ghost_seq: 0, sb_menu_at: std::time::Instant::now(), sb_modal: None, tag_filter: vec![], tab_menu: None, tab_menu_at: std::time::Instant::now(), new_menu: None, new_menu_at: std::time::Instant::now(), new_menu_closed: std::time::Instant::now(), new_menu_collapsed: config::get().sidebar.collapsed.clone(), new_menu_sel: 0, new_menu_search: new_menu_search.clone(), tab_scroll: gpui::ScrollHandle::new(), tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), dock: SideDock::None, lib_search: lib_search.clone(), lib_group: String::new(), lib_hist_all: false, lib_editor: None, lib_vars: None, lib_confirm: None, lib_notice: String::new(), ai_width: { let w = config::get().sidebar.ai_width; if (280.0..=560.0).contains(&w) { w } else { config::AI_DOCK_W } }, host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: true, sb_anim: None, audit, audit_verify: None, audit_filter: Default::default(),
+                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, menu_last: (None, None), menu_ghost: None, menu_ghost_seq: 0, sb_menu_at: std::time::Instant::now(), sb_modal: None, tag_filter: vec![], tab_menu: None, tab_menu_at: std::time::Instant::now(), new_menu: None, new_menu_at: std::time::Instant::now(), new_menu_closed: std::time::Instant::now(), new_menu_collapsed: config::get().sidebar.collapsed.clone(), new_menu_sel: 0, new_menu_search: new_menu_search.clone(), tab_scroll: gpui::ScrollHandle::new(), tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), dock: SideDock::None, lib_search: lib_search.clone(), lib_group: String::new(), lib_hist_all: false, lib_editor: None, lib_vars: None, lib_confirm: None, lib_notice: String::new(), ai_width: { let w = config::get().sidebar.ai_width; if (280.0..=560.0).contains(&w) { w } else { config::AI_DOCK_W } }, host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: !config::get().sidebar.collapsed_panel(), sb_anim: None, tool: activity::Tool::from_id(&config::get().sidebar.tool), bottom_open: config::get().sidebar.bottom_open, bottom_tab: activity::Bottom::from_id(&config::get().sidebar.bottom_tab), bottom_h: config::get().sidebar.bottom_height.clamp(120., 600.), exec_log: Default::default(), audit, audit_verify: None, audit_filter: Default::default(),
                         settings_dirty: vec![], toast: None, toast_out: false, toast_seq: 0, _subs: vec![],
                     };
                     crate::ctxmenu_view::init(root.rt.handle().clone(), root.prompts.clone());
