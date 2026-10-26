@@ -1315,3 +1315,5 @@
 "db.tls_require" = "必须"
 "db.tls_verify_ca" = "校验 CA"
 "db.tls_verify_full" = "完整校验"
+"db.cancelled_by_user" = "已取消执行"
+"db.cancelling" = "正在取消…"

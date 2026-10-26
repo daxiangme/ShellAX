@@ -114,3 +114,47 @@ mod tests {
         assert_eq!(use_database(Family::Postgres, "a"), None);
     }
 }
+
+/// `CREATE TABLE` text for PostgreSQL, which has no single built-in for it: columns, then
+/// constraint definitions, then the indexes that do not back a constraint.
+pub fn pg_create_table(table: &str, cols: &[super::ColumnInfo], constraints: &[(String, String)], indexes: &[String]) -> String {
+    let f = Family::Postgres;
+    let mut lines: Vec<String> = cols.iter().map(|c| {
+        let mut l = format!("  {} {}", quote_ident(f, &c.name), c.type_name);
+        if let Some(d) = &c.default { l.push_str(&format!(" DEFAULT {d}")); }
+        if c.nullable == Some(false) { l.push_str(" NOT NULL"); }
+        l
+    }).collect();
+    lines.extend(constraints.iter().map(|(n, d)| format!("  CONSTRAINT {} {d}", quote_ident(f, n))));
+    let mut s = format!("CREATE TABLE {table} (\n{}\n);", lines.join(",\n"));
+    for c in cols.iter().filter(|c| !c.comment.is_empty()) {
+        s.push_str(&format!("\nCOMMENT ON COLUMN {table}.{} IS {};", quote_ident(f, &c.name), quote_lit(f, &c.comment)));
+    }
+    for i in indexes { s.push_str(&format!("\n{i};")); }
+    s
+}
+
+/// PostgreSQL: rows (name, definition) of a table's constraints, and its other indexes.
+pub fn pg_constraints(table_lit: &str) -> String {
+    format!("SELECT conname, pg_get_constraintdef(oid, true) FROM pg_constraint WHERE conrelid = {table_lit}::regclass AND contype IN ('p','u','f','c','x') ORDER BY contype = 'p' DESC, conname")
+}
+pub fn pg_indexes(table_lit: &str) -> String {
+    format!("SELECT pg_get_indexdef(i.indexrelid) FROM pg_index i WHERE i.indrelid = {table_lit}::regclass \
+             AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid = i.indexrelid) ORDER BY 1")
+}
+
+#[cfg(test)]
+mod ddl_tests {
+    use super::*;
+    use crate::db::ColumnInfo;
+
+    #[test]
+    fn pg_ddl() {
+        let cols = vec![
+            ColumnInfo { name: "id".into(), type_name: "integer".into(), nullable: Some(false), primary: true, default: Some("nextval('t_id_seq'::regclass)".into()), comment: String::new() },
+            ColumnInfo { name: "name".into(), type_name: "character varying(20)".into(), nullable: Some(true), comment: "it's".into(), ..Default::default() },
+        ];
+        let s = pg_create_table("\"public\".\"t\"", &cols, &[("t_pkey".into(), "PRIMARY KEY (id)".into())], &["CREATE INDEX t_name ON public.t USING btree (name)".into()]);
+        assert_eq!(s, "CREATE TABLE \"public\".\"t\" (\n  \"id\" integer DEFAULT nextval('t_id_seq'::regclass) NOT NULL,\n  \"name\" character varying(20),\n  CONSTRAINT \"t_pkey\" PRIMARY KEY (id)\n);\nCOMMENT ON COLUMN \"public\".\"t\".\"name\" IS 'it''s';\nCREATE INDEX t_name ON public.t USING btree (name);");
+    }
+}

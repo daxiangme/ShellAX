@@ -62,6 +62,7 @@ serde_yaml = "0.9"
 image = { version = "0.25", default-features = false, features = ["png"] }
 # Database connections (MIT OR Apache-2.0): MySQL/MariaDB, PostgreSQL, SQLite (bundled)
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+libsqlite3-sys = { version = "0.37", default-features = false }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "mysql", "postgres", "sqlite-bundled", "chrono", "json"] }
 
 # Distribution build (installer payload): `cargo build --profile dist`.

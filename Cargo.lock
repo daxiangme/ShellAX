@@ -7578,6 +7578,7 @@ dependencies = [
  "keyring",
  "ksni",
  "libc",
+ "libsqlite3-sys",
  "notify-rust",
  "objc",
  "portable-pty",

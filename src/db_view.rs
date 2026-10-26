@@ -7,7 +7,7 @@ use std::time::Instant;
 use gpui::{div, prelude::*, px, App, Context, Entity, FontWeight, SharedString, WeakEntity, Window};
 use gpui_component::input::{Editor, EditorState, InputEvent, InputState};
 use gpui_component::table::{Column, ColumnSort, DataTable, TableDelegate, TableState};
-use ssh_term_proto::db::{self, live::Live, split, ColumnInfo, ResultSet};
+use ssh_term_proto::db::{self, live::Live, split, CancelSlot, ColumnInfo, ResultSet, RunOpts};
 use ssh_term_proto::i18n::{t, tf};
 use ssh_term_proto::session_store::PaneSave;
 
@@ -130,6 +130,8 @@ pub struct DbView {
     busy: bool,
     /// Bumped per request; late answers of an older request are dropped.
     gen: u64,
+    /// The running query's cancel handle (query mode).
+    slot: Option<Arc<CancelSlot>>,
     _subs: Vec<gpui::Subscription>,
 }
 
@@ -144,7 +146,7 @@ impl DbView {
         subs.push(cx.subscribe_in(&where_in, window, |this: &mut Self, _, ev: &InputEvent, _w, cx| { if let InputEvent::PressEnter { .. } = ev { this.apply_where(cx); } }));
         let (conn_name, read_only, production) = conn_meta(&target.conn);
         let mut me = Self { title: String::new(), target, conn_name, read_only, production, live: None, conn_err: None, rt, log, grid, where_in, applied_where: String::new(), total: None,
-            editor, results: vec![], result_ix: 0, confirm: None, status: String::new(), error: None, busy: false, gen: 0, _subs: subs };
+            editor, results: vec![], result_ix: 0, confirm: None, status: String::new(), error: None, busy: false, gen: 0, slot: None, _subs: subs };
         me.title = me.make_title();
         me
     }
@@ -280,12 +282,16 @@ impl DbView {
         let (db, ro) = (self.target.database.clone(), self.read_only);
         let started = Instant::now();
         let s2 = sql.clone();
-        let h = self.rt.spawn(async move { live.driver.execute(&db, &s2, ro).await });
+        let slot = Arc::new(CancelSlot::default());
+        self.slot = Some(slot.clone());
+        let opts = RunOpts { schema: self.target.schema.clone(), transaction: false, cancel: Some(slot) };
+        let h = self.rt.spawn(async move { live.driver.execute_with(&db, &s2, ro, &opts).await });
         cx.spawn(async move |this, cx| {
             let r = h.await.map_err(anyhow::Error::from).and_then(|r| r);
             let _ = this.update(cx, |v, cx| {
                 if v.gen != gen { return; }
                 v.busy = false;
+                v.slot = None;
                 let ms = started.elapsed().as_millis();
                 match r {
                     Ok(sets) => {
@@ -318,8 +324,27 @@ impl DbView {
         self.grid.update(cx, |s, cx| { let d = s.delegate_mut(); d.sort = None; d.more = false; d.busy = false; d.set(rs.columns, rs.rows); s.refresh(cx); });
     }
 
+    /// Stop the running query on the server; the request then ends with a cancelled error.
+    /// When nothing could be stopped (no session yet, or the cancel failed) the UI just stops
+    /// waiting.
     fn cancel(&mut self, cx: &mut Context<Self>) {
-        // the statement keeps running server side; the UI stops waiting for it
+        if let (Some(slot), Some(live)) = (self.slot.clone(), self.live.clone()) {
+            self.status = t("db.cancelling").into();
+            let db = self.target.database.clone();
+            let gen = self.gen;
+            let h = self.rt.spawn(async move { live.driver.cancel(&db, &slot).await });
+            cx.spawn(async move |this, cx| {
+                let ok = matches!(h.await, Ok(Ok(true)));
+                if !ok { let _ = this.update(cx, |v, cx| if v.gen == gen && v.busy { v.drop_wait(cx) }); }
+            }).detach();
+            cx.notify();
+            return;
+        }
+        self.drop_wait(cx);
+    }
+
+    fn drop_wait(&mut self, cx: &mut Context<Self>) {
+        self.slot = None;
         self.gen += 1;
         self.busy = false;
         self.status = t("db.cancelled").into();

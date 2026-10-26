@@ -1315,3 +1315,5 @@
 "db.tls_require" = "Require"
 "db.tls_verify_ca" = "Verify CA"
 "db.tls_verify_full" = "Verify full"
+"db.cancelled_by_user" = "Cancelled"
+"db.cancelling" = "Cancelling…"

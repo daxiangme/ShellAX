@@ -10,9 +10,9 @@ use futures_util::TryStreamExt;
 use sqlx::mysql::{MySqlConnectOptions, MySqlPool, MySqlPoolOptions, MySqlRow, MySqlSslMode};
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions, PgRow, PgSslMode};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions, SqliteRow};
-use sqlx::{AssertSqlSafe, Column, Either, Row, TypeInfo, ValueRef};
+use sqlx::{AssertSqlSafe, Column, Connection, Either, Row, TypeInfo, ValueRef};
 
-use super::{dialect, split, BoxFut, ColumnInfo, Driver, ResultSet, SqlDriver};
+use super::{dialect, split, BoxFut, CancelSlot, ColumnInfo, Driver, ResultSet, RunOpts, Session, SqlDriver};
 use crate::assets::{DbConn, DbKind, Family};
 
 const POOL_MAX: u32 = 4;
@@ -20,7 +20,7 @@ const POOL_MAX: u32 = 4;
 const CELL_MAX: usize = 64 * 1024;
 
 enum Pools {
-    My(MySqlPool),
+    My(MySqlPool, MySqlConnectOptions),
     Pg { opts: PgConnectOptions, default_db: String, pools: tokio::sync::Mutex<HashMap<String, PgPool>>, timeout: Duration },
     Lite(SqlitePool),
 }
@@ -40,13 +40,14 @@ pub async fn connect(c: &DbConn, password: Option<String>, endpoint: Option<(Str
             o = o.ssl_mode(match c.tls.as_str() { "disable" => MySqlSslMode::Disabled, "require" => MySqlSslMode::Required, "verify-ca" => MySqlSslMode::VerifyCa, "verify-full" => MySqlSslMode::VerifyIdentity, _ => MySqlSslMode::Preferred });
             if !c.tls_ca.is_empty() { o = o.ssl_ca(&c.tls_ca); }
             let ro = c.read_only;
+            let o2 = o.clone();
             let pool = MySqlPoolOptions::new().max_connections(POOL_MAX).acquire_timeout(timeout)
                 .after_connect(move |conn, _| Box::pin(async move {
                     if ro { sqlx::raw_sql("SET SESSION TRANSACTION READ ONLY").execute(&mut *conn).await?; }
                     Ok(())
                 }))
                 .connect_with(o);
-            Pools::My(tokio::time::timeout(timeout, pool).await.context("timeout")??)
+            Pools::My(tokio::time::timeout(timeout, pool).await.context("timeout")??, o2)
         }
         Family::Postgres => {
             let mut o = PgConnectOptions::new_without_pgpass().host(&host).port(port).username(&c.user).application_name("ShellAX");
@@ -144,13 +145,19 @@ macro_rules! run_one {
 }
 
 macro_rules! run_all {
-    ($conn:expr, $stmts:expr, $max:expr, $cell:path) => {{
+    ($conn:expr, $stmts:expr, $max:expr, $cell:path, $opts:expr, $begin:expr) => {{
         let mut out = Vec::new();
+        if $opts.transaction { sqlx::raw_sql($begin).execute(&mut *$conn).await?; }
         for s in $stmts {
             let r = run_one!($conn, s, $max, $cell);
             let failed = r.error.is_some();
             out.push(r);
             if failed { break; }
+        }
+        if let Some(c) = &$opts.cancel { if c.requested() { if let Some(last) = out.last_mut() { if last.error.is_some() { last.error = Some(crate::i18n::t("db.cancelled_by_user").to_string()); } } } }
+        if $opts.transaction {
+            let ok = out.iter().all(|r: &ResultSet| r.error.is_none());
+            sqlx::raw_sql(if ok { "COMMIT" } else { "ROLLBACK" }).execute(&mut *$conn).await?;
         }
         out
     }};
@@ -171,31 +178,71 @@ impl SqlxDriver {
 impl SqlDriver for SqlxDriver {
     fn kind(&self) -> DbKind { self.kind }
 
-    fn run<'a>(&'a self, db: &'a str, stmts: Vec<String>, max_rows: usize) -> BoxFut<'a, Vec<ResultSet>> {
+    fn run<'a>(&'a self, db: &'a str, stmts: Vec<String>, max_rows: usize, opts: &'a RunOpts) -> BoxFut<'a, Vec<ResultSet>> {
         Box::pin(async move {
-            Ok(match &self.pools {
-                Pools::My(p) => {
+            let slot = opts.cancel.as_deref();
+            let out = match &self.pools {
+                Pools::My(p, _) => {
                     let mut c = p.acquire().await?;
                     if let Some(u) = dialect::use_database(Family::Mysql, db) { sqlx::raw_sql(AssertSqlSafe(u)).execute(&mut *c).await?; }
-                    run_all!(c, stmts, max_rows, my_cell)
+                    if let Some(sl) = slot { let id: u64 = sqlx::query_scalar("SELECT CONNECTION_ID()").fetch_one(&mut *c).await?; sl.bind(Some(Session::Server(id))); }
+                    let r = run_all!(c, stmts, max_rows, my_cell, opts, "START TRANSACTION");
+                    r
                 }
                 Pools::Pg { .. } => {
                     let p = self.pg_for(db).await?;
                     let mut c = p.acquire().await?;
-                    run_all!(c, stmts, max_rows, pg_cell)
+                    // pooled sessions are reused: always (re)set the search path
+                    let sp = match opts.schema.as_deref().filter(|s| !s.is_empty()) { Some(s) => format!("SET search_path TO {}, public", dialect::quote_ident(Family::Postgres, s)), None => "SET search_path TO DEFAULT".into() };
+                    sqlx::raw_sql(AssertSqlSafe(sp)).execute(&mut *c).await?;
+                    if let Some(sl) = slot { let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(&mut *c).await?; sl.bind(Some(Session::Server(pid as u64))); }
+                    let r = run_all!(c, stmts, max_rows, pg_cell, opts, "BEGIN");
+                    r
                 }
                 Pools::Lite(p) => {
                     let mut c = p.acquire().await?;
-                    run_all!(c, stmts, max_rows, lite_cell)
+                    if let Some(sl) = slot { let h = c.lock_handle().await?.as_raw_handle(); sl.bind(Some(Session::Sqlite(h.as_ptr() as usize))); }
+                    let r = run_all!(c, stmts, max_rows, lite_cell, opts, "BEGIN");
+                    r
                 }
-            })
+            };
+            if let Some(sl) = slot { sl.bind(None); }
+            Ok(out)
+        })
+    }
+
+    fn cancel<'a>(&'a self, db: &'a str, slot: &'a CancelSlot) -> BoxFut<'a, bool> {
+        Box::pin(async move {
+            // SQLite: interrupt in place, under the slot lock (the handle stays valid)
+            if let Pools::Lite(_) = &self.pools {
+                return Ok(slot.with_session(|s| match s {
+                    Some(Session::Sqlite(h)) => { unsafe { libsqlite3_sys::sqlite3_interrupt(h as *mut libsqlite3_sys::sqlite3) }; true }
+                    _ => false,
+                }));
+            }
+            let Some(Session::Server(id)) = slot.with_session(|s| s) else { return Ok(false) };
+            match &self.pools {
+                Pools::My(_, o) => {
+                    let mut c = sqlx::mysql::MySqlConnection::connect_with(o).await?;
+                    sqlx::raw_sql(AssertSqlSafe(format!("KILL QUERY {id}"))).execute(&mut c).await?;
+                    let _ = c.close().await;
+                }
+                Pools::Pg { opts, default_db, .. } => {
+                    let db = if db.is_empty() { default_db.as_str() } else { db };
+                    let mut c = sqlx::postgres::PgConnection::connect_with(&opts.clone().database(db)).await?;
+                    sqlx::raw_sql(AssertSqlSafe(format!("SELECT pg_cancel_backend({id})"))).execute(&mut c).await?;
+                    let _ = c.close().await;
+                }
+                Pools::Lite(_) => {}
+            }
+            Ok(true)
         })
     }
 
     fn close(&self) -> BoxFut<'_, ()> {
         Box::pin(async move {
             match &self.pools {
-                Pools::My(p) => p.close().await,
+                Pools::My(p, _) => p.close().await,
                 Pools::Pg { pools, .. } => { for p in pools.lock().await.values() { p.close().await; } }
                 Pools::Lite(p) => p.close().await,
             }
