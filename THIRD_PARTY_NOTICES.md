@@ -100,3 +100,8 @@ On Windows the default fallback chain also lists the system fonts "Segoe UI Symb
 ## rustls 0.23 — Apache-2.0 OR ISC OR MIT (dependency, unmodified; TLS crypto provider selection)
 ## duckdb 1.x / libduckdb-sys (bundled DuckDB, optional `duckdb` build feature) — MIT; DuckDB itself MIT, Copyright (c) DuckDB Foundation (dependency, unmodified)
 ## lsp-types 0.97 — MIT (dependency, unmodified; completion item types for the SQL editor)
+## 内置工具模块（`src/tools/`）依赖 — dependencies, unmodified
+- md-5 0.10, sha1 0.10, hmac 0.12, digest 0.10, aes 0.8, des 0.8, rabbit 0.4, cipher 0.4, cbc 0.1, ecb 0.1, ctr 0.9, cfb-mode 0.8, ofb 0.6 (RustCrypto) — MIT OR Apache-2.0
+- base64 0.22, percent-encoding 2, hex 0.4, uuid 1 — MIT OR Apache-2.0
+- sqlformat 0.5 — MIT OR Apache-2.0; croner 4 — MIT; pulldown-cmark 0.13 — MIT
+- `src/tools/pinyin.rs` 首字母表依据 GB2312 一级汉字的拼音排序（标准字符集顺序）生成，未复制第三方代码或数据库。
