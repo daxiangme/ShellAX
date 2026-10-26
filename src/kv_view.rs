@@ -368,6 +368,53 @@ impl KvView {
         cx.notify();
     }
 
+    pub fn ai_label(&self) -> String { format!("Redis · {}", self.conn.name) }
+    /// Assistant context: INFO excerpts, key count and a typed key sample; `deep` adds memory of
+    /// sampled keys, access frequency (LFU only) and the slow log. Read-only, SCAN-based.
+    pub fn ai_context(&self, deep: bool) -> Option<tokio::task::JoinHandle<String>> {
+        let kv = self.kv.clone()?;
+        let head = format!("Redis connection {}{}\n", self.conn.name, if self.production { " (PRODUCTION)" } else { "" });
+        Some(self.rt.spawn(async move {
+            let mut out = head;
+            const KEEP: [&str; 22] = ["redis_version", "redis_mode", "uptime_in_days", "connected_clients", "blocked_clients", "used_memory_human", "used_memory_peak_human",
+                "maxmemory_human", "maxmemory_policy", "mem_fragmentation_ratio", "evicted_keys", "expired_keys", "keyspace_hits", "keyspace_misses", "instantaneous_ops_per_sec",
+                "total_commands_processed", "rejected_connections", "role", "connected_slaves", "aof_enabled", "rdb_last_bgsave_status", "lazyfree_pending_objects"];
+            if let Ok(info) = kv.info().await {
+                for (_, k, v) in info.iter().filter(|(_, k, _)| KEEP.contains(&k.as_str()) || k.starts_with("db")) { out.push_str(&format!("{k}: {v}\n")); }
+            }
+            if let Ok(n) = kv.dbsize().await { out.push_str(&format!("keys: {n}\n")); }
+            let mut keys = vec![];
+            let mut cur = ssh_term_proto::kv::Cursor::default();
+            for _ in 0..20 { match kv.scan(cur, "*", None).await { Ok((k, c)) => { keys.extend(k); cur = c; if cur.done || keys.len() >= 200 { break; } } Err(_) => break } }
+            keys.truncate(200);
+            let mut kinds: std::collections::BTreeMap<String, usize> = Default::default();
+            let mut sample = String::new();
+            let mut mem: Vec<(u64, String, String)> = vec![];
+            for k in &keys {
+                let ty = kv.raw(&["TYPE".into(), k.clone()]).await.ok().and_then(|v| ssh_term_proto::kv::cmd::scalar(&v)).unwrap_or_default();
+                *kinds.entry(ty.clone()).or_default() += 1;
+                if sample.len() < 4000 { sample.push_str(&format!("{k} ({ty})\n")); }
+                if deep { if let Some(b) = kv.raw(&["MEMORY".into(), "USAGE".into(), k.clone()]).await.ok().and_then(|v| ssh_term_proto::kv::cmd::scalar(&v)).and_then(|s| s.parse::<u64>().ok()) { mem.push((b, k.clone(), ty)); } }
+            }
+            out.push_str(&format!("Type counts in a sample of {} keys: {:?}\nSample keys:\n{sample}", keys.len(), kinds));
+            if deep {
+                mem.sort_by(|a, b| b.0.cmp(&a.0));
+                out.push_str("Largest sampled keys (MEMORY USAGE bytes):\n");
+                for (b, k, ty) in mem.iter().take(15) { out.push_str(&format!("{k} ({ty}) {b}\n")); }
+                let mut freq = String::new();
+                for (_, k, _) in mem.iter().take(20) {
+                    match kv.raw(&["OBJECT".into(), "FREQ".into(), k.clone()]).await { Ok(v) => freq.push_str(&format!("{k} {}\n", ssh_term_proto::kv::cmd::scalar(&v).unwrap_or_default())), Err(_) => { freq = "unavailable (needs an LFU maxmemory-policy)\n".into(); break; } }
+                }
+                out.push_str(&format!("Access frequency (OBJECT FREQ):\n{freq}"));
+                if let Ok(sl) = kv.slowlog(15).await {
+                    out.push_str("Slow log (µs, command):\n");
+                    for e in sl { out.push_str(&format!("{} {}\n", e.micros, e.command.chars().take(200).collect::<String>())); }
+                }
+            }
+            crate::ai_ctx::cap(out, 16_000)
+        }))
+    }
+
     pub fn close(&mut self) { if let Some(kv) = self.kv.take() { self.rt.spawn(async move { kv.close().await }); } }
 }
 

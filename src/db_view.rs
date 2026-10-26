@@ -1293,6 +1293,63 @@ pub fn conn_meta(id: &str) -> (String, bool, bool) {
 }
 
 impl DbView {
+    pub fn ai_label(&self) -> String { format!("{} · {}", self.conn_name, self.target.database) }
+    /// Assistant context: schema of the current database (truncated); `deep` adds EXPLAIN of the
+    /// editor's SQL, indexes of the tables it names and slow-query statistics. Read-only.
+    pub fn ai_context(&self, deep: bool, cx: &gpui::App) -> Option<tokio::task::JoinHandle<String>> {
+        let live = self.live.clone()?;
+        let (db, schema) = (self.target.database.clone(), self.target.schema.clone());
+        let sql = if self.table_mode() { self.target.table.clone().map(|t| format!("SELECT * FROM {t}")).unwrap_or_default() } else { self.editor.read(cx).value().to_string() };
+        let head = format!("Engine: {:?} {}\nConnection: {} (database {db}{}){}{}\n", live.driver.kind(), live.version, self.conn_name,
+            schema.as_ref().map(|s| format!(", schema {s}")).unwrap_or_default(), if self.production { ", PRODUCTION" } else { "" }, if self.read_only { ", read-only" } else { "" });
+        Some(self.rt.spawn(async move {
+            use ssh_term_proto::assets::Family;
+            let mut out = head;
+            let tables = live.driver.tables(&db, schema.as_deref()).await.unwrap_or_default();
+            out.push_str(&format!("Tables ({}):\n", tables.len()));
+            let mut schema_txt = String::new();
+            for (i, tb) in tables.iter().enumerate() {
+                if i < 40 {
+                    let cols = live.driver.columns(&db, schema.as_deref(), &tb.name).await.unwrap_or_default();
+                    let cs: Vec<String> = cols.iter().map(|c| format!("{} {}{}", c.name, c.type_name, if c.primary { " PK" } else { "" })).collect();
+                    schema_txt.push_str(&format!("{}({})\n", tb.name, cs.join(", ")));
+                } else { schema_txt.push_str(&format!("{}\n", tb.name)); }
+                if schema_txt.len() > 12_000 { break; }
+            }
+            out.push_str(&crate::ai_ctx::cap(schema_txt, 12_000));
+            if deep {
+                let sql = sql.trim().trim_end_matches(';').to_string();
+                let fam = live.driver.family();
+                if !sql.is_empty() {
+                    out.push_str(&format!("\nCurrent SQL:\n{sql}\n"));
+                    let explain = match fam { Family::Sqlite => Some(format!("EXPLAIN QUERY PLAN {sql}")), Family::Mysql | Family::Postgres | Family::Clickhouse | Family::Duckdb => Some(format!("EXPLAIN {sql}")), _ => None };
+                    if let Some(e) = explain {
+                        match live.driver.execute(&db, &e, true).await { Ok(rs) => { for r in rs.iter().filter(|r| r.returns_rows) { out.push_str(&format!("EXPLAIN:\n{}\n", crate::ai_ctx::table_text(r, 60))); } } Err(err) => out.push_str(&format!("EXPLAIN failed: {err:#}\n")) }
+                    }
+                    let low = sql.to_lowercase();
+                    for tb in tables.iter().filter(|t| low.contains(&t.name.to_lowercase())).take(6) {
+                        if let Ok(ix) = live.driver.indexes(&db, schema.as_deref(), &tb.name).await {
+                            let l: Vec<String> = ix.iter().map(|i| format!("{}{}({})", i.name, if i.unique { " UNIQUE" } else { "" }, i.columns.join(", "))).collect();
+                            out.push_str(&format!("Indexes of {}: {}\n", tb.name, if l.is_empty() { "none".into() } else { l.join("; ") }));
+                        }
+                    }
+                }
+                let slow = match fam {
+                    Family::Mysql => Some("SELECT DIGEST_TEXT, COUNT_STAR, ROUND(AVG_TIMER_WAIT/1000000000, 2) AS avg_ms, SUM_ROWS_EXAMINED FROM performance_schema.events_statements_summary_by_digest WHERE DIGEST_TEXT IS NOT NULL ORDER BY SUM_TIMER_WAIT DESC LIMIT 10"),
+                    Family::Postgres => Some("SELECT query, calls, round(mean_exec_time::numeric, 2) AS mean_ms, rows FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 10"),
+                    _ => None,
+                };
+                if let Some(q) = slow {
+                    match live.driver.execute(&db, q, true).await {
+                        Ok(rs) => { for r in rs.iter().filter(|r| r.returns_rows) { out.push_str(&format!("Slow queries:\n{}\n", crate::ai_ctx::cap(crate::ai_ctx::table_text(r, 10), 4000))); } }
+                        Err(e) => out.push_str(&format!("Slow-query statistics unavailable: {}\n", format!("{e:#}").lines().next().unwrap_or_default())),
+                    }
+                }
+            }
+            out
+        }))
+    }
+
     /// Snippet insert from the snippets tool window: at the SQL editor's cursor.
     pub fn insert_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         let text = text.to_string();

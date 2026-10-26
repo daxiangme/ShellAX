@@ -2,6 +2,7 @@
 //! shellax prototype v5 UI: sidebar (host search / groups / function area), tabs with split
 //! panes, settings page, command palette, host dialog, tool panels, status bar.
 mod actions;
+mod ai_ctx;
 mod app_menu;
 mod chrome;
 mod motion;
@@ -562,8 +563,13 @@ impl Root {
                 self._subs.push(cx.subscribe_in(&v, window, |this, _, ev: &chat_view::ChatEvent, w, cx| match ev {
                     chat_view::ChatEvent::Close => { this.dock = SideDock::None; chat_view::set_dock_open(false); this.focus_active(w, cx); cx.notify(); }
                     chat_view::ChatEvent::Insert(cmd) => {
-                        // AI output is only inserted, never executed (the user presses Enter)
-                        if let Some(p) = this.tabs.get(this.active).map(|t| t.focused.clone()) { let cmd = cmd.clone(); p.update(cx, |t, cx| t.ai_insert_text(cmd, cx)); }
+                        // AI output is only inserted, never executed (the user runs it)
+                        match this.ai_target(cx) {
+                            ai_ctx::Target::Db(d) => { if let Some(d) = d.upgrade() { let cmd = cmd.clone(); d.update(cx, |v, cx| v.insert_text(&cmd, w, cx)); } }
+                            ai_ctx::Target::Redis(k) => { if let Some(k) = k.upgrade() { let cmd = cmd.clone(); k.update(cx, |v, cx| v.insert_console(&cmd, false, w, cx)); } }
+                            ai_ctx::Target::Docker(_) | ai_ctx::Target::Other => { cx.write_to_clipboard(gpui::ClipboardItem::new_string(cmd.clone())); this.toast(t("aictx.copied").to_string(), cx); }
+                            ai_ctx::Target::Terminal => { if let Some(p) = this.tabs.get(this.active).map(|t| t.focused.clone()) { let cmd = cmd.clone(); p.update(cx, |t, cx| t.ai_insert_text(cmd, cx)); } }
+                        }
                         this.log("ai.chat.insert", cmd);
                     }
                 }));

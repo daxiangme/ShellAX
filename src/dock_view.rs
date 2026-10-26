@@ -201,6 +201,34 @@ impl DockView {
     }
     pub fn close(&mut self) { if let Some(d) = self.dock.take() { d.close(); } }
 
+    pub fn ai_label(&self) -> String { format!("Docker · {}", self.ep.name) }
+    /// Assistant context: containers with state; `deep` adds CPU/memory samples and the recent
+    /// logs of failing or restarting containers. Read-only.
+    pub fn ai_context(&self, deep: bool) -> Option<tokio::task::JoinHandle<String>> {
+        let d = self.dock.clone()?;
+        let head = format!("Docker endpoint {} ({}, engine {}){}\n", self.ep.name, d.via.clone().unwrap_or_else(|| "local".into()), d.version, if self.production { " PRODUCTION" } else { "" });
+        Some(self.rt.spawn(async move {
+            let mut out = head;
+            let cs = d.containers().await.unwrap_or_default();
+            out.push_str("Containers (name | image | state | status | ports | compose project/service):\n");
+            for c in &cs { out.push_str(&format!("{} | {} | {} | {} | {} | {}\n", c.name, c.image, c.state, c.status, c.ports, match (&c.project, &c.service) { (Some(p), Some(s)) => format!("{p}/{s}"), _ => "-".into() })); }
+            if deep {
+                let running: Vec<&Container> = cs.iter().filter(|c| c.state == "running").take(20).collect();
+                let st = futures_util::future::join_all(running.iter().map(|c| d.stats(&c.id))).await;
+                out.push_str("Resource samples:\n");
+                for (c, s) in running.iter().zip(st) { if let Ok(s) = s { out.push_str(&format!("{} cpu {:.1}% mem {} / {}\n", c.name, s.cpu, dock::human_size(s.mem as i64), dock::human_size(s.limit as i64))); } }
+                let bad = |c: &Container| c.state == "restarting" || c.state == "dead" || c.status.contains("unhealthy") || (c.state == "exited" && !c.status.contains("(0)"));
+                for c in cs.iter().filter(|c| bad(c)).take(5) {
+                    let (tx, rx) = flume::unbounded();
+                    let _ = d.logs(&c.id, 60, false, true, tx).await;
+                    let lines: Vec<String> = rx.drain().collect();
+                    out.push_str(&format!("Recent logs of {} ({}):\n{}\n", c.name, c.status, crate::ai_ctx::cap(lines.join("\n"), 4000)));
+                }
+            }
+            crate::ai_ctx::cap(out, 20_000)
+        }))
+    }
+
     /// Stats view: sample every 3s while it is shown.
     fn start_stats(&mut self, cx: &mut Context<Self>) {
         self.stats_seq += 1;

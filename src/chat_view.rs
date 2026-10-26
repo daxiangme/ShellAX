@@ -166,6 +166,8 @@ pub struct ChatView {
     input: Entity<TextareaState>,
     pub source: Option<WeakEntity<TermView>>,
     with_context: bool,
+    /// Module the assistant talks about (terminal, database, Redis, containers).
+    pub target: crate::ai_ctx::Target,
     /// Fills the right-hand dock instead of a fixed-size dialog.
     pub docked: bool,
     busy: bool,
@@ -184,7 +186,7 @@ impl ChatView {
             InputEvent::Change => cx.notify(),
             _ => {}
         })];
-        Self { msgs: vec![], pending: None, input, source: None, with_context: true, docked: false, busy: false, turn: 0, scroll: ScrollHandle::new(), stop: Default::default(), _subs: subs }
+        Self { msgs: vec![], pending: None, input, source: None, with_context: true, target: Default::default(), docked: false, busy: false, turn: 0, scroll: ScrollHandle::new(), stop: Default::default(), _subs: subs }
     }
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) { self.input.update(cx, |s, cx| s.focus(window, cx)); }
     /// Attach later questions to this terminal. Turns context on if it was off.
@@ -196,9 +198,44 @@ impl ChatView {
         self.input.update(cx, |s, cx| s.set_value("", window, cx));
         self.send_text(q, cx);
     }
+    /// Follow the active module; a different target starts from its own context.
+    pub fn set_target(&mut self, t: crate::ai_ctx::Target, cx: &mut Context<Self>) {
+        if !self.target.same(&t) { self.target = t; cx.notify(); }
+    }
+    /// Ask about the current non-terminal module; `deep` adds the analysis probes.
+    pub fn ask_module(&mut self, q: String, deep: bool, cx: &mut Context<Self>) {
+        let cfg = config::get();
+        let Some(job) = self.with_context.then(|| self.target.gather(deep, cx)).flatten() else {
+            let content = if cfg.ai.redact { ssh_term_proto::ai::redact(&q).0 } else { q.clone() };
+            self.msgs.push(Msg { role: "user", text: q, note: None, plan: None });
+            self.run(crate::ai_ctx::full_prompt(self.target.system_prompt()), content, cx);
+            return;
+        };
+        let label = self.target.label(cx).unwrap_or_default();
+        let system = crate::ai_ctx::full_prompt(self.target.system_prompt());
+        self.msgs.push(Msg { role: "user", text: q.clone(), note: Some(tf("aictx.collecting", &[("t", &label)])), plan: None });
+        self.busy = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let ctx = job.await.unwrap_or_default();
+            let _ = this.update(cx, |v, cx| {
+                v.busy = false;
+                let cfg = config::get();
+                let (ctx, n1) = if cfg.ai.redact { ssh_term_proto::ai::redact(&ctx) } else { (ctx, 0) };
+                let (q_sent, n2) = if cfg.ai.redact { ssh_term_proto::ai::redact(&q) } else { (q.clone(), 0) };
+                if let Some(m) = v.msgs.last_mut() { m.note = Some(tf("chat.ctx_note", &[("host", &label), ("n", &ctx.chars().count()), ("r", &(n1 + n2))])); }
+                let content = format!("Context of {label} (redacted):\n```\n{ctx}\n```\n\n{q_sent}");
+                v.run(system, content, cx);
+            });
+        }).detach();
+    }
     fn send_text(&mut self, q: String, cx: &mut Context<Self>) {
+        self.send_deep(q, false, cx)
+    }
+    pub fn send_deep(&mut self, q: String, deep: bool, cx: &mut Context<Self>) {
         let cfg = config::get();
         if cfg.ai.enabled && !cfg.ai.first_send_ack { self.pending = Some(Pending::Ask(q)); cx.notify(); return; }
+        if !self.target.is_terminal() { return self.ask_module(q, deep, cx); }
         let (ctx, n_red, host) = match (self.with_context, self.source.as_ref().and_then(|w| w.upgrade())) {
             (true, Some(tv)) => { let (t, n, h, _) = tv.read(cx).chat_context(); (t, n, h) }
             _ => (String::new(), 0, String::new()),
@@ -207,7 +244,7 @@ impl ChatView {
         let content = if ctx.is_empty() { q_sent.clone() } else { format!("Terminal context from {host} (redacted):\n```\n{ctx}\n```\n\n{q_sent}") };
         let note = (!ctx.is_empty()).then(|| tf("chat.ctx_note", &[("host", &host), ("n", &ctx.chars().count()), ("r", &(n_red + n2))]));
         self.msgs.push(Msg { role: "user", text: q, note, plan: None });
-        self.run(ssh_term_proto::ai::CHAT_SYSTEM_PROMPT, content, cx);
+        self.run(ssh_term_proto::ai::CHAT_SYSTEM_PROMPT.to_string(), content, cx);
     }
     /// Explain selected terminal text (context menu "Explain with AI"); redaction / first-send notice apply.
     pub fn explain_text(&mut self, text: String, cx: &mut Context<Self>) {
@@ -221,7 +258,7 @@ impl ChatView {
         if cfg.ai.enabled && !cfg.ai.first_send_ack { self.pending = Some(Pending::Explain(cmd, code, out, host)); cx.notify(); return; }
         self.msgs.push(Msg { role: "user", text: tf("chat.explain_q", &[("cmd", &cmd), ("code", &code)]), note: Some(tf("chat.ctx_note", &[("host", &host), ("n", &out.chars().count()), ("r", &"✓")])), plan: None });
         let prompt = ssh_term_proto::ai::build_explain_prompt(&cmd, code, &host, &out);
-        self.run(ssh_term_proto::ai::EXPLAIN_SYSTEM_PROMPT, prompt, cx);
+        self.run(ssh_term_proto::ai::EXPLAIN_SYSTEM_PROMPT.to_string(), prompt, cx);
     }
 
     /// Start step-by-step execution of the commands in message `i` (in the source terminal).
@@ -274,10 +311,10 @@ impl ChatView {
         if self.busy || !config::get().ai.feed_back_results { return; }
         let _ = crate::audit_log().append("ai.exec.feedback", "user", &format!("chars={}", report.chars().count()));
         self.msgs.push(Msg { role: "user", text: report.clone(), note: Some(t("chat.feedback_note").to_string()), plan: None });
-        self.run(ssh_term_proto::ai::CHAT_SYSTEM_PROMPT, report, cx);
+        self.run(ssh_term_proto::ai::CHAT_SYSTEM_PROMPT.to_string(), report, cx);
     }
 
-    fn run(&mut self, system: &'static str, last_content: String, cx: &mut Context<Self>) {
+    fn run(&mut self, system: String, last_content: String, cx: &mut Context<Self>) {
         let cfg = config::get();
         let Some(provider) = cfg.ai.default_provider().cloned().filter(|_| cfg.ai.enabled) else {
             self.msgs.push(Msg { role: "assistant", text: t(if cfg.ai.enabled { "ai.no_provider" } else { "ai.disabled" }).into(), note: None, plan: None });
@@ -297,7 +334,7 @@ impl ChatView {
         let stop = self.stop.clone();
         let (tx, rx) = flume::unbounded::<Result<String, String>>();
         std::thread::spawn(move || {
-            let r = ssh_term_proto::ai::chat_stream(&provider, &key, system, &hist, |d| { let _ = tx.send(Ok(d.to_string())); !stop.load(std::sync::atomic::Ordering::Relaxed) });
+            let r = ssh_term_proto::ai::chat_stream(&provider, &key, &system, &hist, |d| { let _ = tx.send(Ok(d.to_string())); !stop.load(std::sync::atomic::Ordering::Relaxed) });
             if let Err(e) = r { let _ = tx.send(Err(format!("{e:#}"))); }
         });
         cx.spawn(async move |this, cx| {
@@ -453,9 +490,10 @@ impl Render for ChatView {
         if self.msgs.is_empty() { list = list.child(div().text_size(px(13.)).text_color(c(th.overlay1)).child(t("chat.empty"))); }
         let n = self.msgs.len();
         let view = cx.entity();
+        let term = self.target.is_terminal();
         for (i, m) in self.msgs.iter().enumerate() {
             let user = m.role == "user";
-            let cmds = if user { Vec::new() } else { code_commands(&m.text) };
+            let cmds = if user || !term { Vec::new() } else { code_commands(&m.text) };
             let streaming = self.busy && i + 1 == n;
             let waiting = streaming && m.text.is_empty();
             let plan_el = (!user && !streaming).then(|| self.plan_el(i, m, cx)).flatten();
@@ -473,8 +511,10 @@ impl Render for ChatView {
                     .stream_fade(streaming)
                     .selection_format(SelectionFormat::Plain)
                     .code_block_actions(move |block, _, _| {
-                        let cmds: Vec<String> = block.code().lines().filter_map(command_line).collect();
-                        let cmd = (cmds.len() == 1).then(|| cmds.into_iter().next().unwrap());
+                        let cmd = if term {
+                            let cmds: Vec<String> = block.code().lines().filter_map(command_line).collect();
+                            (cmds.len() == 1).then(|| cmds.into_iter().next().unwrap())
+                        } else { Some(block.code().trim_end().to_string()).filter(|s| !s.trim().is_empty()) };
                         let view = view.clone();
                         div().when_some(cmd, |d, cmd| d.child(
                             div().id("ins").size(px(22.)).rounded(px(6.)).flex().items_center().justify_center().cursor_pointer()
@@ -519,6 +559,8 @@ impl Render for ChatView {
         let attached = self.source.as_ref().and_then(|w| w.upgrade()).map(|v| v.read(cx).chat_context());
         let ctx_label: SharedString = if !ctx_on {
             t("chat.ctx_off").into()
+        } else if !term {
+            self.target.label(cx).map(|l| tf("aictx.ctx_label", &[("t", &l)])).unwrap_or_else(|| t("chat.ctx_empty").to_string()).into()
         } else {
             match attached.as_ref().map(|(_, _, host, kind)| (*kind, host.as_str())) {
                 Some(("screen", host)) => tf("chat.ctx_screen", &[("t", &host)]).into(),
@@ -547,6 +589,14 @@ impl Render for ChatView {
                     .hover(|d| d.bg(c(cur().surface0)).text_color(c(cur().text)))
                     .on_click(cx.listener(|v, _, _, cx| { if !v.busy { v.msgs.clear(); } cx.notify(); }))
                     .child(t("chat.clear"))))
+                .children(self.target.quick().iter().enumerate().map(|(k, (label, q, deep))| {
+                    let (q, deep) = (*q, *deep);
+                    div().id(("chat-quick", k)).h(px(28.)).px_2().rounded_full().flex().items_center().cursor_pointer()
+                        .text_size(px(12.)).text_color(c(th.overlay1)).border_1().border_color(c(th.surface1))
+                        .hover(|d| d.bg(c(cur().surface0)).text_color(c(cur().text)))
+                        .on_click(cx.listener(move |v, _, _, cx| { if !v.busy { v.send_deep(t(q).to_string(), deep, cx); } }))
+                        .child(t(label))
+                }))
                 .child(div().flex_1())
                 .child(div().id("chat-send").size(px(32.)).rounded_full().flex().items_center().justify_center()
                     .bg(send_bg)

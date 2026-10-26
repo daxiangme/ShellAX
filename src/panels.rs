@@ -126,9 +126,26 @@ impl Root {
     }
 
     /// Right-hand AI tool window: conversation fills the column, terminal stays visible.
+    /// What the built-in assistant talks about: the focused pane of the active tab.
+    pub(crate) fn ai_target(&self, cx: &gpui::App) -> crate::ai_ctx::Target {
+        use crate::ai_ctx::Target;
+        let Some(p) = self.tabs.get(self.active).map(|t| t.focused.clone()) else { return Target::Other };
+        let v = p.read(cx);
+        if let Some(d) = &v.db { return Target::Db(d.downgrade()); }
+        match &v.embed {
+            Some(crate::termview::Embed::Kv(k)) => Target::Redis(k.downgrade()),
+            Some(crate::termview::Embed::Dock(d)) => Target::Docker(d.downgrade()),
+            Some(_) => Target::Other,
+            None if v.sftp.is_some() => Target::Other,
+            None => Target::Terminal,
+        }
+    }
     pub(crate) fn ai_dock(&mut self, cx: &mut Context<Root>) -> AnyElement {
         let th = cur();
         let s = config::get();
+        let target = self.ai_target(cx);
+        let term = self.tool.workspace() == crate::activity::Tool::Hosts && target.is_terminal();
+        if let Some(v) = self.chat_view.clone() { v.update(cx, |c, cx| c.set_target(target, cx)); }
         let mut strip = div().px_3().py(px(6.)).flex().flex_wrap().items_center().gap_1().border_b_1().border_color(c(th.surface0));
         let mut n = 0usize;
         for (ti, tab) in self.tabs.iter().enumerate() {
@@ -147,7 +164,7 @@ impl Root {
             strip = strip.child(ui::button(("aidock-ql", k), q.name.clone(), 0).h(px(24.)).px_2().text_size(px(11.))
                 .on_click(cx.listener(move |this, _, w, cx| this.launch_agent(k, w, cx))));
         }
-        let mut body = div().flex_1().min_h_0().flex().flex_col().child(strip);
+        let mut body = div().flex_1().min_h_0().flex().flex_col().when(term, |d| d.child(strip));
         if let Some(v) = self.chat_view.clone() { body = body.child(div().flex_1().min_h_0().child(v)); }
         self.dock_frame("ai-dock", t("ui.built_in_ai_assistant").into(), IconName::Sparkles, body, cx)
     }
