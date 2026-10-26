@@ -3,9 +3,10 @@ use std::collections::HashSet;
 
 use gpui::{div, prelude::*, px, AnyElement, Context, Entity, FontWeight, SharedString, Window};
 use gpui_component::input::{InputEvent, InputState};
-use ssh_term_proto::i18n::t;
+use ssh_term_proto::i18n::{t, tf};
 use ssh_term_proto::tools::{self, ToolSpec};
 
+use crate::ext_ui::{ExtEvent, ExtManager};
 use crate::termview::Embed;
 use crate::theme::{c, cur};
 use crate::tools_view::{ToolEvent, ToolView};
@@ -15,10 +16,13 @@ use crate::{config, Root};
 const RECENT_MAX: usize = 8;
 
 #[derive(Default)]
-pub struct ToolsPanel { search: Option<Entity<InputState>>, collapsed: HashSet<String> }
+pub struct ToolsPanel { search: Option<Entity<InputState>>, collapsed: HashSet<String>, manage: bool }
 
-/// 某个工具当前可用的描述（内置）。
-pub fn spec_of(id: &str) -> Option<ToolSpec> { tools::builtin().into_iter().find(|s| s.id == id) }
+/// 内置工具加上已安装扩展包里的工具。
+pub fn all_tools() -> Vec<ToolSpec> { let mut v = tools::builtin(); v.extend(ssh_term_proto::ext::installed_tools()); v }
+
+/// 某个工具当前可用的描述（内置或已安装的扩展包）。
+pub fn spec_of(id: &str) -> Option<ToolSpec> { all_tools().into_iter().find(|s| s.id == id) }
 
 impl Root {
     pub(crate) fn tools_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -33,7 +37,19 @@ impl Root {
             }
         };
         let q = search.read(cx).value().to_string();
-        let all = tools::builtin();
+        let all = all_tools();
+        let extm = self.ext_manager(cx);
+        if self.toolsp.manage {
+            let back = div().id("tools-ext-back").size(px(20.)).flex().items_center().justify_center().rounded(px(4.)).cursor_pointer().hover(|s| s.bg(crate::theme::hover_bg()))
+                .tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(t("ext.back_to_tools")).build(w, cx))
+                .on_click(cx.listener(|this, _, _w, cx| { this.toolsp.manage = false; cx.notify(); }))
+                .child(icon(IconName::ChevronLeft, 13., c(cur().overlay1)));
+            return div().flex_1().min_h_0().flex().flex_col()
+                .child(crate::activity::panel_title(t("ext.title"), Some(back.into_any_element())))
+                .child(div().id("tools-ext").flex_1().min_h_0().overflow_y_scroll().px_2().pb_2().child(extm))
+                .into_any_element();
+        }
+        let placeholders = ssh_term_proto::ext::placeholders(&ssh_term_proto::ext::installed());
         let s = config::get();
         let favs = s.sidebar.tools_fav.clone();
         let recent = s.sidebar.tools_recent.clone();
@@ -56,6 +72,21 @@ impl Root {
                     .child(icon(if fav { IconName::Star } else { IconName::StarOff }, 12., if fav { c(cur().warning) } else { c(cur().overlay1) })))
                 .into_any_element()
         };
+        let ghost = |this: &Self, key: String, sp: &ToolSpec, cx: &mut Context<Self>| -> AnyElement {
+            let pack = sp.pack.clone();
+            let m = this.extm.as_ref().map(|e| e.read(cx));
+            let prog = m.and_then(|m| m.progress(&pack));
+            let busy = m.is_some_and(|m| m.busy(&pack));
+            let tip = tf("ext.needs_pack", &[("p", &ssh_term_proto::ext::pack_name(&pack))]);
+            div().id(SharedString::from(key)).h(px(26.)).mx_2().px_2().rounded(px(6.)).flex().items_center().gap_2()
+                .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+                .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(ui::FS_SECONDARY)).text_color(c(cur().overlay1)).opacity(0.6).child(sp.name.clone()))
+                .child(div().id(SharedString::from(format!("dl-{}-{}", sp.pack, sp.id))).px_1p5().h(px(18.)).flex().items_center().rounded(px(4.)).cursor_pointer()
+                    .text_size(px(ui::FS_CAPTION)).text_color(c(cur().accent)).hover(|s| s.bg(crate::theme::hover_bg()))
+                    .on_click(cx.listener(move |this, _, _w, cx| { cx.stop_propagation(); if let Some(e) = this.extm.clone() { e.update(cx, |m, cx| m.install(&pack, cx)); } }))
+                    .child(match prog { Some(p) => format!("{:.0}%", p * 100.), None if busy => t("ext.preparing").to_string(), None => t("ext.download").to_string() }))
+                .into_any_element()
+        };
         let head = |label: String, key: Option<String>, collapsed: bool, cx: &mut Context<Self>| {
             let k = key.clone();
             div().id(SharedString::from(format!("th-{}", key.clone().unwrap_or(label.clone())))).h(px(24.)).mx_2().px_1().mt_1().flex().items_center().gap_1().cursor_pointer()
@@ -69,6 +100,7 @@ impl Root {
             let hits: Vec<&ToolSpec> = all.iter().filter(|s| tools::matches(s, &q)).collect();
             if hits.is_empty() { list = list.child(div().p_3().text_size(px(ui::FS_SECONDARY)).text_color(c(th.overlay1)).child(t("tools.ui_no_match"))); }
             for sp in hits { let f = favs.contains(&sp.id); list = list.child(row(self, format!("q-{}", sp.id), sp, f, cx)); }
+            for sp in placeholders.iter().filter(|s| tools::matches(s, &q)) { list = list.child(ghost(self, format!("qg-{}", sp.id), sp, cx)); }
         } else {
             let sections: [(&str, Vec<String>); 2] = [("fav", favs.clone()), ("recent", recent.iter().filter(|r| !favs.contains(r)).cloned().collect())];
             for (key, ids) in sections {
@@ -80,17 +112,34 @@ impl Root {
             }
             for (cat, _) in tools::CATEGORIES {
                 let items: Vec<&ToolSpec> = all.iter().filter(|s| s.cat == *cat).collect();
-                if items.is_empty() { continue; }
+                let ghosts: Vec<&ToolSpec> = placeholders.iter().filter(|s| s.cat == *cat).collect();
+                if items.is_empty() && ghosts.is_empty() { continue; }
                 let collapsed = self.toolsp.collapsed.contains(*cat);
-                list = list.child(head(format!("{} · {}", tools::cat_label(cat), items.len()), Some(cat.to_string()), collapsed, cx));
-                if !collapsed { for sp in items { let f = favs.contains(&sp.id); list = list.child(row(self, format!("c-{}", sp.id), sp, f, cx)); } }
+                list = list.child(head(format!("{} · {}", tools::cat_label(cat), items.len() + ghosts.len()), Some(cat.to_string()), collapsed, cx));
+                if !collapsed {
+                    for sp in items { let f = favs.contains(&sp.id); list = list.child(row(self, format!("c-{}", sp.id), sp, f, cx)); }
+                    for sp in ghosts { list = list.child(ghost(self, format!("cg-{}", sp.id), sp, cx)); }
+                }
             }
         }
         div().flex_1().min_h_0().flex().flex_col()
-            .child(crate::activity::panel_title(t("tool.tools"), None))
+            .child(crate::activity::panel_title(t("tool.tools"), Some(div().id("tools-ext-open").size(px(20.)).flex().items_center().justify_center().rounded(px(4.)).cursor_pointer()
+                .hover(|s| s.bg(crate::theme::hover_bg()))
+                .tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(t("ext.title")).build(w, cx))
+                .on_click(cx.listener(|this, _, _w, cx| { this.toolsp.manage = true; cx.notify(); }))
+                .child(icon(IconName::Puzzle, 13., c(cur().overlay1))).into_any_element())))
             .child(ui::field_row().pb_1().child(ui::search_field(&search, false)))
             .child(list)
             .into_any_element()
+    }
+
+    /// 扩展管理实体（工具面板与设置页共用）。
+    pub(crate) fn ext_manager(&mut self, cx: &mut Context<Self>) -> Entity<ExtManager> {
+        if let Some(e) = &self.extm { return e.clone(); }
+        let e = cx.new(|_| ExtManager::new());
+        self._subs.push(cx.subscribe(&e, |_, _, _ev: &ExtEvent, cx| cx.notify()));
+        self.extm = Some(e.clone());
+        e
     }
 
     fn toggle_tool_fav(&mut self, id: &str, cx: &mut Context<Self>) {

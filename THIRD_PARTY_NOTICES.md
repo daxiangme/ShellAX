@@ -107,3 +107,5 @@ On Windows the default fallback chain also lists the system fonts "Segoe UI Symb
 - `src/tools/pinyin.rs` 首字母表依据 GB2312 一级汉字的拼音排序（标准字符集顺序）生成，未复制第三方代码或数据库。
 ## tokio-tungstenite 0.28 / tungstenite 0.28 — MIT OR Apache-2.0 (dependency, unmodified; WebSocket 测试工具)
 - 工具箱图标 assets/icons/db/toolbox.svg — 本项目原创图形
+## wasmi 1.x / wasmi_core / wasmi_ir / wasmi_collections — MIT OR Apache-2.0；wasmparser — Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT；string-interner — MIT OR Apache-2.0 (dependencies, unmodified; 扩展包 WebAssembly 解释器)
+## wat / wast / wasm-encoder / leb128fmt — Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT (仅开发依赖，用于单元测试，不随程序分发)

@@ -77,6 +77,9 @@ pub struct ToolSpec {
     /// 输入变化时自动运行。
     #[serde(default)]
     pub live: bool,
+    /// 所属扩展包 id；内置工具为空。
+    #[serde(default)]
+    pub pack: String,
 }
 
 /// 运行参数：字段 id → 文本值；文件字段为路径列表。
@@ -113,7 +116,7 @@ pub fn cat_label(id: &str) -> String {
 }
 
 fn spec(id: &str, cat: &str, kw: &str, inputs: Vec<Field>, options: Vec<Field>) -> ToolSpec {
-    ToolSpec { id: id.into(), cat: cat.into(), name: t(&format!("tools.{id}")).to_string(), desc: t(&format!("tools.{id}_desc")).to_string(), keywords: kw.into(), inputs, options, interactive: false, heavy: false, live: true }
+    ToolSpec { id: id.into(), cat: cat.into(), name: t(&format!("tools.{id}")).to_string(), desc: t(&format!("tools.{id}_desc")).to_string(), keywords: kw.into(), inputs, options, interactive: false, heavy: false, live: true, pack: String::new() }
 }
 
 /// 全部内置工具，按分类顺序。每次调用按当前语言生成文案（只在打开工具面板时调用）。

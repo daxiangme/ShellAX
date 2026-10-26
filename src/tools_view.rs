@@ -107,7 +107,8 @@ impl ToolView {
             if args.files.values().all(|v| v.is_empty()) && self.spec.inputs.iter().any(|f| matches!(f.kind, FieldKind::File | FieldKind::Files)) { return; }
             self.busy = true;
             cx.notify();
-            let task = cx.background_executor().spawn(async move { tools::run(&id, &args) });
+            let pack = self.spec.pack.clone();
+            let task = cx.background_executor().spawn(async move { if pack.is_empty() { tools::run(&id, &args) } else { ssh_term_proto::ext::run_installed(&pack, &id, &args) } });
             cx.spawn(async move |this, cx| {
                 let r = task.await;
                 let _ = this.update(cx, |v, cx| if v.seq == seq { v.busy = false; v.apply(r); cx.notify(); });

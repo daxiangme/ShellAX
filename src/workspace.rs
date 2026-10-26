@@ -176,7 +176,7 @@ impl Root {
                 buttons = buttons.child(ui::button("ws-docker-new", t("ws.docker_new"), 1).on_click(cx.listener(|this, _, w, cx| this.open_asset_dialog(crate::kv_ui::AssetKind::Docker, None, w, cx))));
             }
             Tool::Tools => {
-                let all = ssh_term_proto::tools::builtin();
+                let all = crate::tools_ui::all_tools();
                 let mut ids: Vec<String> = s.sidebar.tools_fav.iter().chain(&s.sidebar.tools_recent).cloned().collect();
                 ids.dedup();
                 if ids.is_empty() { ids = ["json", "timestamp", "base64", "url", "uuid", "password"].iter().map(|x| x.to_string()).collect(); }

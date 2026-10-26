@@ -21,17 +21,17 @@ use crate::theme::{c, cur};
 use crate::ui::{self, icon, IconName};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub enum Cat { General, Appearance, Terminal, Suggest, Ssh, Proxy, Credentials, Ai, Agents, Permissions, Tags, Audit, Session, Keys, Notify, ContextMenu, About }
+pub enum Cat { General, Appearance, Terminal, Suggest, Ssh, Proxy, Credentials, Ai, Agents, Permissions, Tags, Audit, Session, Keys, Notify, ContextMenu, Extensions, About }
 
 impl Cat {
-    pub const ALL: [Cat; 17] = [Cat::General, Cat::Appearance, Cat::Terminal, Cat::Suggest, Cat::Ssh, Cat::Proxy, Cat::Credentials, Cat::Ai, Cat::Agents,
-        Cat::Permissions, Cat::Tags, Cat::Audit, Cat::Session, Cat::Keys, Cat::Notify, Cat::ContextMenu, Cat::About];
+    pub const ALL: [Cat; 18] = [Cat::General, Cat::Appearance, Cat::Terminal, Cat::Suggest, Cat::Ssh, Cat::Proxy, Cat::Credentials, Cat::Ai, Cat::Agents,
+        Cat::Permissions, Cat::Tags, Cat::Audit, Cat::Session, Cat::Keys, Cat::Notify, Cat::ContextMenu, Cat::Extensions, Cat::About];
     pub fn name(self) -> &'static str {
         match self {
             Cat::General => t("ui.general"), Cat::Appearance => t("ui.appearance"), Cat::Terminal => t("ui.terminal"), Cat::Suggest => t("ui.suggestions"), Cat::Ssh => "SSH",
             Cat::Proxy => t("ui.proxy"),
             Cat::Credentials => t("ui.credentials_keys"), Cat::Ai => "AI", Cat::Agents => t("ui.external_agents"), Cat::Permissions => t("ui.permissions_security"), Cat::Tags => t("tag.tags"),
-            Cat::Audit => t("ui.audit"), Cat::Session => t("ui.sessions_layout"), Cat::Keys => t("ui.keyboard_shortcuts"), Cat::Notify => t("ui.notifications"), Cat::ContextMenu => t("cm.settings_title"), Cat::About => t("ui.about"),
+            Cat::Audit => t("ui.audit"), Cat::Session => t("ui.sessions_layout"), Cat::Keys => t("ui.keyboard_shortcuts"), Cat::Notify => t("ui.notifications"), Cat::ContextMenu => t("cm.settings_title"), Cat::Extensions => t("ext.title"), Cat::About => t("ui.about"),
         }
     }
     /// System Settings-style colored rounded-square icon background (PRD 5.22).
@@ -40,7 +40,7 @@ impl Cat {
             Cat::General => 0x8e8e93, Cat::Appearance => 0x5856d6, Cat::Terminal => 0x3a3a3c, Cat::Suggest => 0xffb300, Cat::Ssh => 0x007aff,
             Cat::Proxy => 0x5ac8fa,
             Cat::Credentials => 0xa2845e, Cat::Ai => 0xaf52de, Cat::Agents => 0x34c759, Cat::Permissions => 0xff3b30, Cat::Tags => 0xff9f0a, Cat::Audit => 0xff9500,
-            Cat::Session => 0x30b0c7, Cat::Keys => 0x636366, Cat::Notify => 0xff2d55, Cat::ContextMenu => 0x32ade6, Cat::About => 0x0a84ff,
+            Cat::Session => 0x30b0c7, Cat::Keys => 0x636366, Cat::Notify => 0xff2d55, Cat::ContextMenu => 0x32ade6, Cat::Extensions => 0x5e5ce6, Cat::About => 0x0a84ff,
         }
     }
     fn icon(self) -> IconName {
@@ -48,7 +48,7 @@ impl Cat {
             Cat::General => IconName::SlidersHorizontal, Cat::Appearance => IconName::Palette, Cat::Terminal => IconName::SquareTerminal,
             Cat::Suggest => IconName::Lightbulb, Cat::Ssh => IconName::Server, Cat::Proxy => IconName::Globe, Cat::Credentials => IconName::KeyRound, Cat::Ai => IconName::Sparkles,
             Cat::Agents => IconName::Bot, Cat::Permissions => IconName::ShieldCheck, Cat::Tags => IconName::Tag, Cat::Audit => IconName::ScrollText, Cat::Session => IconName::Layers,
-            Cat::Keys => IconName::Keyboard, Cat::Notify => IconName::Bell, Cat::ContextMenu => IconName::FileText, Cat::About => IconName::Info,
+            Cat::Keys => IconName::Keyboard, Cat::Notify => IconName::Bell, Cat::ContextMenu => IconName::FileText, Cat::Extensions => IconName::Puzzle, Cat::About => IconName::Info,
         }
     }
     fn desc(self) -> &'static str {
@@ -69,6 +69,7 @@ impl Cat {
             Cat::Keys => t("ui.app_shortcuts_type_e_g"),
             Cat::Notify => t("ui.desktop_notifications_and_sounds"),
             Cat::ContextMenu => t("cm.settings_desc"),
+            Cat::Extensions => t("ext.settings_desc"),
             Cat::About => t("ui.version_information_and_third_party"),
         }
     }
@@ -143,6 +144,8 @@ pub struct SettingsView {
     /// Click point used only when the button has not been measured yet.
     ai_menu_at: Option<gpui::Point<gpui::Pixels>>,
     ai_advanced: bool,
+    /// 扩展管理（由主窗口创建后注入，与工具面板共用）。
+    pub ext: Option<Entity<crate::ext_ui::ExtManager>>,
     _subs: Vec<Subscription>,
 }
 
@@ -180,7 +183,7 @@ impl SettingsView {
             font_dropdown: false, font_search, font_show_all: false, system_term_font,
             ai_add_dropdown: false, ai_template_dropdown: false,
             ai_add_anchor: Rc::new(Cell::new(None)), ai_tpl_anchor: Rc::new(Cell::new(None)), ai_menu_at: None,
-            ai_advanced: false, _subs: subs };
+            ai_advanced: false, ext: None, _subs: subs };
         if let Some(id) = me.ai_sel.clone() { me.load_models(&id, false, cx); }
         me.refresh_keys();
         if cat == Cat::Proxy { me.start_proxy_detect(false, cx); }
@@ -1300,6 +1303,7 @@ impl Render for SettingsView {
                 Cat::Suggest => Some(self.suggest_extra(cx)),
                 Cat::About => Some(self.about_extra()),
                 Cat::ContextMenu => Some(self.ctxmenu_extra(window, cx)),
+                Cat::Extensions => self.ext.clone().map(|e| e.into_any_element()),
                 Cat::Appearance => Some(self.appearance_extra(cx)),
                 Cat::General => Some(self.general_extra(cx)),
                 Cat::Ai => Some(self.ai_extra(window, cx)),

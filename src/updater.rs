@@ -114,10 +114,18 @@ pub fn download(m: &Manifest, data_dir: &Path, p: &Progress) -> Result<Record> {
     let dir = updates_dir(data_dir).join(&m.version);
     std::fs::create_dir_all(&dir)?;
     let dest = dir.join(&name);
-    let part = dir.join(format!("{name}.part"));
     let expected = expected_sha(m, &url)?;
+    let size = fetch_to(&url, &dest, expected.as_deref(), p)?;
+    let rec = Record { version: m.version.clone(), file: dest, size, downloaded_at: chrono::Utc::now().timestamp() };
+    save_record(data_dir, Some(&rec))?;
+    Ok(rec)
+}
+
+/// 下载到 `dest`（先写 `.part`，校验通过后改名），带重试、进度、取消与可选 SHA-256 校验。返回字节数。
+pub fn fetch_to(url: &str, dest: &Path, expected: Option<&str>, p: &Progress) -> Result<u64> {
+    let part = dest.with_file_name(format!("{}.part", dest.file_name().and_then(|n| n.to_str()).unwrap_or("download")));
     let res = retry(Some(p), || {
-        let r = agent(&url, Duration::from_secs(60))?.get(&url).set("User-Agent", &format!("shellax/{CURRENT}")).call().map_err(http_err)?;
+        let r = agent(url, Duration::from_secs(60))?.get(url).set("User-Agent", &format!("shellax/{CURRENT}")).call().map_err(http_err)?;
         let total = r.header("content-length").and_then(|v| v.parse().ok()).unwrap_or(0u64);
         p.total.store(total, Ordering::Relaxed);
         p.done.store(0, Ordering::Relaxed);
@@ -143,15 +151,19 @@ pub fn download(m: &Manifest, data_dir: &Path, p: &Progress) -> Result<Record> {
     });
     let (size, got) = match res { Ok(x) => x, Err(e) => { let _ = std::fs::remove_file(&part); return Err(e); } };
     if let Some(exp) = expected {
+        let exp = exp.trim().to_ascii_lowercase();
         if exp != got {
             let _ = std::fs::remove_file(&part);
             bail!("checksum mismatch (expected {exp}, got {got})");
         }
     }
-    std::fs::rename(&part, &dest)?;
-    let rec = Record { version: m.version.clone(), file: dest, size, downloaded_at: chrono::Utc::now().timestamp() };
-    save_record(data_dir, Some(&rec))?;
-    Ok(rec)
+    std::fs::rename(&part, dest)?;
+    Ok(size)
+}
+
+/// 小文件（索引 JSON 等）：走系统代理，最多重试 3 次。
+pub fn fetch_text(url: &str) -> Result<String> {
+    retry(None, || Ok(agent(url, Duration::from_secs(20))?.get(url).set("User-Agent", &format!("shellax/{CURRENT}")).call().map_err(http_err)?.into_string()?))
 }
 
 pub fn save_record(data_dir: &Path, rec: Option<&Record>) -> Result<()> {

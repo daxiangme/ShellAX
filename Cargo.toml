@@ -98,6 +98,7 @@ uuid = { version = "1", features = ["v4"] }
 pulldown-cmark = { version = "0.13.5", default-features = false, features = ["html"] }
 digest = "0.10"
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
+wasmi = { version = "1", default-features = false, features = ["std"] }
 
 # Distribution build (installer payload): `cargo build --profile dist`.
 # Kept separate from `release` so day-to-day release builds/tests stay fast.
@@ -114,6 +115,7 @@ debug = false
 duckdb = ["dep:duckdb"]
 
 [dev-dependencies]
+wat = "1"
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 # Windows cross-build: GPUI's DirectX backend precompiles HLSL only on a Windows host.
