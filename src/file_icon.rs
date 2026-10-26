@@ -20,6 +20,15 @@ const FILES: &[(&str, &[u8])] = &[
     ("shellax/files/mark_archive.svg", include_bytes!("../assets/icons/files/mark_archive.svg")),
     ("shellax/files/mark_image.svg", include_bytes!("../assets/icons/files/mark_image.svg")),
     ("shellax/files/mark_exec.svg", include_bytes!("../assets/icons/files/mark_exec.svg")),
+    ("shellax/db/redis.svg", include_bytes!("../assets/icons/db/redis.svg")),
+    ("shellax/db/generic.svg", include_bytes!("../assets/icons/db/generic.svg")),
+    ("shellax/db/mysql.svg", include_bytes!("../assets/icons/db/mysql.svg")),
+    ("shellax/db/postgres.svg", include_bytes!("../assets/icons/db/postgres.svg")),
+    ("shellax/db/sqlite.svg", include_bytes!("../assets/icons/db/sqlite.svg")),
+    ("shellax/db/sqlserver.svg", include_bytes!("../assets/icons/db/sqlserver.svg")),
+    ("shellax/db/clickhouse.svg", include_bytes!("../assets/icons/db/clickhouse.svg")),
+    ("shellax/db/duckdb.svg", include_bytes!("../assets/icons/db/duckdb.svg")),
+    ("shellax/db/mongodb.svg", include_bytes!("../assets/icons/db/mongodb.svg")),
 ];
 impl gpui::AssetSource for Assets {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
@@ -95,5 +104,53 @@ mod tests {
     fn layers_are_embedded() {
         use gpui::AssetSource;
         for (p, _) in FILES { assert!(Assets.load(p).unwrap().is_some()); }
+    }
+}
+
+/// Engine glyph path (our own single-color drawings under assets/icons/db).
+pub fn db_glyph_path(kind: &str) -> &'static str {
+    match kind {
+        "redis" => "shellax/db/redis.svg",
+        "mysql" | "mariadb" | "starrocks" | "oceanbase" => "shellax/db/mysql.svg",
+        "postgres" | "opengauss" | "kingbase" => "shellax/db/postgres.svg",
+        "sqlite" => "shellax/db/sqlite.svg",
+        "sqlserver" => "shellax/db/sqlserver.svg",
+        "clickhouse" => "shellax/db/clickhouse.svg",
+        "duckdb" => "shellax/db/duckdb.svg",
+        "mongodb" => "shellax/db/mongodb.svg",
+        _ => "shellax/db/generic.svg",
+    }
+}
+
+/// Tint used for an engine glyph while its connection is open.
+pub fn db_tint(kind: &str) -> gpui::Hsla {
+    rgb(match kind {
+        "redis" => 0xd9453a,
+        "mysql" | "mariadb" | "starrocks" | "oceanbase" => 0x2f8fb0,
+        "postgres" | "opengauss" | "kingbase" => 0x4a78b5,
+        "sqlite" => 0x3c95d6,
+        "sqlserver" => 0xc8463d,
+        "clickhouse" => 0xd9a816,
+        "duckdb" => 0xd6b31c,
+        "mongodb" => 0x4f9f45,
+        _ => 0x7c8aa5,
+    }).into()
+}
+
+/// Engine glyph element.
+pub fn db_glyph(kind: &str, size: f32, color: gpui::Hsla) -> gpui::Svg {
+    svg().path(db_glyph_path(kind)).size(px(size)).flex_shrink_0().text_color(color)
+}
+
+#[cfg(test)]
+mod db_glyph_tests {
+    use super::*;
+    #[test]
+    fn every_kind_has_an_embedded_glyph() {
+        for k in ssh_term_proto::assets::DbKind::ALL.iter().map(|k| k.id()).chain(["redis"]) {
+            let p = db_glyph_path(k);
+            assert!(FILES.iter().any(|(f, _)| *f == p), "{k}");
+        }
+        for (p, b) in FILES { assert!(std::str::from_utf8(b).unwrap().starts_with("<svg"), "{p}"); }
     }
 }

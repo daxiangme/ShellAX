@@ -106,12 +106,18 @@ impl Root {
     }
 
     pub(crate) fn strip_btn(&self, id: impl Into<gpui::ElementId>, ic: IconName, tip: String, active: bool, badge: bool) -> gpui::Stateful<gpui::Div> {
+        self.strip_btn_with(id, None, ic, tip, active, badge)
+    }
+    /// Strip button whose glyph is one of our own SVGs (`svg`) instead of a stock icon.
+    pub(crate) fn strip_btn_with(&self, id: impl Into<gpui::ElementId>, svg: Option<&'static str>, ic: IconName, tip: String, active: bool, badge: bool) -> gpui::Stateful<gpui::Div> {
         let th = cur();
+        let col = if active { c(th.accent) } else { c(th.overlay1) };
+        let glyph: gpui::AnyElement = match svg { Some(p) => gpui::svg().path(p).size(px(17.)).text_color(col).into_any_element(), None => icon(ic, 17., col).into_any_element() };
         div().id(id).relative().size(px(32.)).rounded(px(8.)).flex().items_center().justify_center().cursor_pointer()
             .when(active, |d| d.bg(c(th.accent).opacity(0.12)))
             .when(!active, |d| d.hover(|s| s.bg(c(cur().surface0))))
             .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
-            .child(icon(ic, 17., if active { c(th.accent) } else { c(th.overlay1) }))
+            .child(glyph)
             .when(badge, |d| d.child(div().absolute().top(px(4.)).right(px(4.)).size(px(6.)).rounded_full().bg(c(th.accent))))
     }
 
@@ -125,7 +131,7 @@ impl Root {
         if !open { col = col.child(chrome::drag_region(div().id("act-drag")).h(px(chrome::TAB_H)).w_full().flex_shrink_0().window_control_area(gpui::WindowControlArea::Drag)); } else { col = col.pt(px(4.)); }
         for (i, tool) in Tool::TOP.into_iter().enumerate() {
             let tip = crate::sidebar::action_tip(tool.label(), &tool.action().binding());
-            col = col.child(self.strip_btn(("act", i), tool.icon(), tip, open && self.tool == tool, false)
+            col = col.child(self.strip_btn_with(("act", i), (tool == Tool::Redis).then_some("shellax/db/redis.svg"), tool.icon(), tip, open && self.tool == tool, false)
                 .on_click(cx.listener(move |this, _, _w, cx| this.select_tool(tool, _w, cx))));
         }
         let vib = if chrome::NATIVE_LIGHTS { 0.72 } else { 1.0 };
