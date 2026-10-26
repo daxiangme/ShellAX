@@ -113,12 +113,20 @@ impl Root {
         dock = dock.child(div().h(px(40.)).px_3().flex_shrink_0().flex().items_center().gap_2().when(!collapsed, |d| d.border_b_1()).border_color(c(th.surface0))
             .child(icon(ic, 15., c(th.accent)))
             .child(div().flex_1().min_w_0().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(title))
-            .child(btn(min_id).on_click(cx.listener(move |this, _, _w, cx| { if !this.dock_min.remove(dock_id) { this.dock_min.insert(dock_id); } cx.notify(); }))
+            .child(btn(min_id).on_click(cx.listener(move |this, _, _w, cx| { if this.dock_min.remove(dock_id) { *this.dock_flip.entry(dock_id).or_default() += 1; } else { this.dock_min.insert(dock_id); } cx.notify(); }))
                 .child(icon(if collapsed { IconName::ChevronDown } else { IconName::ChevronUp }, 15., c(th.overlay1))))
             .child(btn(close_id).on_click(cx.listener(move |this, _, w, cx| this.close_dock(dock_id, w, cx)))
                 .child(icon(IconName::X, 16., c(th.overlay1)))));
         if collapsed { return dock.flex_shrink_0().into_any_element(); }
-        dock.child(div().flex_1().min_h_0().flex().flex_col().child(body)).into_any_element()
+        let body = div().flex_1().min_h_0().flex().flex_col().child(body);
+        match self.dock_flip.get(dock_id).copied() {
+            // re-expanded: short ease-out reveal (offset only; the column size does not change)
+            Some(n) if !crate::motion::reduced() => {
+                use gpui::AnimationExt;
+                dock.child(body.with_animation((dock_id, n as usize), gpui::Animation::new(crate::motion::ms(crate::motion::PANEL_CLOSE_MS)).with_easing(crate::motion::ease_out), |d, t| d.relative().top(px((1. - t) * -12.)))).into_any_element()
+            }
+            _ => dock.child(body).into_any_element(),
+        }
     }
 
     /// Right column: host status, AI and the snippets/history card stacked top to bottom.
@@ -134,7 +142,18 @@ impl Root {
             let id = if self.dock == crate::SideDock::Snippets { "snip-dock" } else { "hist-dock" };
             cards.push((id, self.library_dock(window, cx)));
         }
-        if cards.is_empty() { return None; }
+        if cards.is_empty() { self.dock_shown = false; return None; }
+        // first card in an empty column: slide the column in (terminal resizes once, at the end)
+        if !self.dock_shown && !crate::motion::reduced() {
+            let seq = self.dock_anim.map(|a| a.1 + 1).unwrap_or(1);
+            self.dock_anim = Some((true, seq));
+            crate::motion::hold(crate::motion::PANEL_OPEN_MS + 20);
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(crate::motion::ms(crate::motion::PANEL_OPEN_MS)).await;
+                let _ = this.update(cx, |r, cx| if r.dock_anim.is_some_and(|a| a == (true, seq)) { r.dock_anim = None; cx.notify(); });
+            }).detach();
+        }
+        self.dock_shown = true;
         let open: Vec<usize> = cards.iter().enumerate().filter(|(_, (id, _))| !self.dock_min.contains(id)).map(|(i, _)| i).collect();
         let split = self.dock_split.clamp(0.15, 0.85);
         let first_open = open.first().copied();
@@ -171,7 +190,10 @@ impl Root {
             .hover(|d| d.bg(c(cur().accent).opacity(0.35)))
             .on_drag(crate::sidebar::AiResize, |d: &crate::sidebar::AiResize, _, _, cx| cx.new(|_| d.clone()))
             .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _w, cx| if ev.click_count() >= 2 { this.ai_width = config::AI_DOCK_W; this.save_ai_width(); cx.notify(); })));
-        Some(col.into_any_element())
+        Some(match self.dock_anim {
+            Some((show, seq)) => crate::motion::slide(div().h_full().flex_shrink_0().w(px(self.ai_width)), ("dock-anim", seq as usize), col.into_any_element(), self.ai_width + 8., crate::motion::Edge::Right, show),
+            None => col.into_any_element(),
+        })
     }
 
     /// Right-hand AI tool window: conversation fills the column, terminal stays visible.

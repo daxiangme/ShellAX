@@ -241,6 +241,14 @@ pub(crate) struct Root {
     dock_min: HashSet<&'static str>,
     /// Share of the right column given to the top card when two or more are expanded.
     dock_split: f32,
+    /// Right-column slide: (showing, seq). While closing, the cards stay mounted until it ends.
+    dock_anim: Option<(bool, u64)>,
+    /// Column had cards on the previous render (to start the slide-in once).
+    dock_shown: bool,
+    /// Per-card expand counter, so a re-expanded card plays its reveal once.
+    dock_flip: HashMap<&'static str, u64>,
+    /// Bottom panel slide: (showing, seq).
+    bottom_anim: Option<(bool, u64)>,
     lib_search: Entity<InputState>,
     lib_group: String,
     lib_hist_all: bool,
@@ -337,10 +345,12 @@ impl Root {
         if motion::reduced() { self.sidebar_visible = show; self.sb_anim = None; cx.notify(); return; }
         let seq = self.sb_anim.map(|a| a.1 + 1).unwrap_or(1);
         self.sb_anim = Some((show, seq));
+        let dur = if show { motion::PANEL_OPEN_MS } else { motion::PANEL_CLOSE_MS };
+        motion::hold(dur + 20);
         if show { self.sidebar_visible = true; }
         cx.notify();
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(motion::ms(motion::SIDEBAR_MS)).await;
+            cx.background_executor().timer(motion::ms(dur)).await;
             let _ = this.update(cx, |r, cx| { if r.sb_anim.is_some_and(|a| a.1 == seq) { r.sb_anim = None; if !show { r.sidebar_visible = false; } cx.notify(); } });
         }).detach();
     }
@@ -388,10 +398,29 @@ impl Root {
             if self.dock_ai { self.close_dock("ai-dock", window, cx); } else { self.dock_min.remove("ai-dock"); self.open_chat(window, cx); }
             return;
         }
-        if self.dock == which { self.dock = SideDock::None; self.focus_active(window, cx); } else { self.dock = which; }
+        if self.dock == which { self.close_dock("lib-dock", window, cx); return; }
+        self.dock = which;
         cx.notify();
     }
     pub(crate) fn close_dock(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // closing the last card slides the whole column out first, then removes it
+        let left = [self.dock_ai && id != "ai-dock", self.dock_host.is_some() && id != "host-dock", self.dock != SideDock::None && !matches!(id, "snip-dock" | "hist-dock" | "lib-dock")];
+        if !left.iter().any(|x| *x) && !motion::reduced() {
+            if self.dock_anim.is_some_and(|a| !a.0) { return; }
+            let seq = self.dock_anim.map(|a| a.1 + 1).unwrap_or(1);
+            self.dock_anim = Some((false, seq));
+            motion::hold(motion::PANEL_CLOSE_MS + 20);
+            cx.notify();
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(motion::ms(motion::PANEL_CLOSE_MS)).await;
+                let _ = this.update_in(cx, |r, w, cx| if r.dock_anim.is_some_and(|a| a.1 == seq) {
+                    r.dock_anim = None;
+                    r.dock_ai = false; chat_view::set_dock_open(false); r.dock_host = None; r.dock = SideDock::None;
+                    r.focus_active(w, cx); cx.notify();
+                });
+            }).detach();
+            return;
+        }
         match id {
             "ai-dock" => { self.dock_ai = false; chat_view::set_dock_open(false); }
             "host-dock" => self.dock_host = None,
@@ -1982,15 +2011,10 @@ impl Render for Root {
             head = if mac { head.child(self.lights(window, cx)).child(name) } else { head.pl(px(12.)).gap(px(6.)).child(icon(IconName::SquareTerminal, 14., c(th.accent))).child(name) };
             let panel: AnyElement = match self.sb_anim {
                 Some((show, seq)) => {
+                    // the panel keeps its full width while it slides, so the terminal is laid out
+                    // once (before opening / after closing), not per frame
                     let w = self.sb_width;
-                    // ease-out both ways; the inner box keeps its full width so content never reflows,
-                    // the outer box clips it while its width animates
-                    let dur = if show { motion::SIDEBAR_MS } else { motion::SIDEBAR_MS - 30 };
-                    let ease = |t: f32| 1. - (1. - t).powi(3);
-                    div().h_full().flex_shrink_0().overflow_hidden().w(px(if show { 0. } else { w }))
-                        .child(div().h_full().w(px(w)).flex().flex_col().child(sb))
-                        .with_animation(("sb-anim", seq as usize), gpui::Animation::new(motion::ms(dur)).with_easing(ease),
-                            move |d, t| { let k = if show { t } else { 1. - t }; d.w(px(w * k)).opacity(0.35 + 0.65 * k) }).into_any_element()
+                    motion::slide(div().h_full().flex_shrink_0().w(px(w)), ("sb-anim", seq as usize), div().h_full().w(px(w)).flex().flex_col().child(sb).into_any_element(), w, motion::Edge::Left, show)
                 }
                 None => sb,
             };
@@ -2010,7 +2034,13 @@ impl Render for Root {
             right = right.on_drag_move(cx.listener(|this, ev: &gpui::DragMoveEvent<activity::BottomResize>, _w, cx| {
                 let h = (f32::from(ev.bounds.bottom() - ev.event.position.y) - (CARD_GAP + 2.)).clamp(120., 600.);
                 if (h - this.bottom_h).abs() >= 1.0 { this.bottom_h = h; cx.notify(); }
-            })).child(div().w_full().pr(px(crate::activity::STRIP_W + CARD_GAP)).pb(px(card_layout::EDGE_GAP)).child(self.bottom_panel(cx)));
+            })).child({
+                let panel = div().w_full().pr(px(crate::activity::STRIP_W + CARD_GAP)).pb(px(card_layout::EDGE_GAP)).child(self.bottom_panel(cx));
+                match self.bottom_anim {
+                    Some((show, seq)) => motion::slide(div().w_full().flex_shrink_0(), ("bottom-anim", seq as usize), panel.into_any_element(), self.bottom_h + 40., motion::Edge::Bottom, show),
+                    None => panel.into_any_element(),
+                }
+            });
         }
         let body = content.child(right);
         let mut root = div().size_full().relative().flex().flex_col().bg(theme::outer_bg().opacity(if chrome::NATIVE_LIGHTS { 0. } else { op })).font_family(theme::ui_font()).text_size(px(s.appearance.ui_font_size.clamp(10., 20.))).text_color(c(th.text))
@@ -2344,7 +2374,7 @@ fn open_main(cx: &mut App, rt: Arc<tokio::runtime::Runtime>, themes: Vec<Arc<The
                     let mut root = Root {
                         rt, default_target, tabs: vec![], active: 0, themes, schemes, histories: HashMap::new(),
                         manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], deny_reason: None, policy_port: None, overlay: Overlay::None, settings: None, sftp_views: HashMap::new(), sftp_current: None, sftp_windows: vec![], drag_div: None, port_view: None, quit_confirm: false, modal: None, quit_ok: false, chat_view: None,
-                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, menu_last: (None, None), menu_ghost: None, menu_ghost_seq: 0, sb_menu_at: std::time::Instant::now(), sb_modal: None, tag_filter: vec![], tab_menu: None, tab_menu_at: std::time::Instant::now(), new_menu: None, new_menu_at: std::time::Instant::now(), new_menu_closed: std::time::Instant::now(), new_menu_collapsed: config::get().sidebar.collapsed.clone(), new_menu_sel: 0, new_menu_search: new_menu_search.clone(), tab_scroll: gpui::ScrollHandle::new(), tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), dock: SideDock::None, dock_ai: false, dock_host: None, dock_min: HashSet::new(), dock_split: 0.5, lib_search: lib_search.clone(), lib_group: String::new(), lib_hist_all: false, lib_editor: None, lib_vars: None, lib_confirm: None, lib_notice: String::new(), ai_width: { let w = config::get().sidebar.ai_width; if (280.0..=560.0).contains(&w) { w } else { config::AI_DOCK_W } }, host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: !config::get().sidebar.collapsed_panel(), sb_anim: None, ws_seen: None, ws_last: HashMap::new(), tool: activity::Tool::from_id(&config::get().sidebar.tool), bottom_open: config::get().sidebar.bottom_open, bottom_tab: activity::Bottom::from_id(&config::get().sidebar.bottom_tab), bottom_h: config::get().sidebar.bottom_height.clamp(120., 600.), exec_log: Default::default(), dbp: Default::default(), audit, audit_verify: None, audit_filter: Default::default(),
+                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, menu_last: (None, None), menu_ghost: None, menu_ghost_seq: 0, sb_menu_at: std::time::Instant::now(), sb_modal: None, tag_filter: vec![], tab_menu: None, tab_menu_at: std::time::Instant::now(), new_menu: None, new_menu_at: std::time::Instant::now(), new_menu_closed: std::time::Instant::now(), new_menu_collapsed: config::get().sidebar.collapsed.clone(), new_menu_sel: 0, new_menu_search: new_menu_search.clone(), tab_scroll: gpui::ScrollHandle::new(), tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), dock: SideDock::None, dock_ai: false, dock_host: None, dock_min: HashSet::new(), dock_split: 0.5, dock_anim: None, dock_shown: false, dock_flip: HashMap::new(), bottom_anim: None, lib_search: lib_search.clone(), lib_group: String::new(), lib_hist_all: false, lib_editor: None, lib_vars: None, lib_confirm: None, lib_notice: String::new(), ai_width: { let w = config::get().sidebar.ai_width; if (280.0..=560.0).contains(&w) { w } else { config::AI_DOCK_W } }, host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: !config::get().sidebar.collapsed_panel(), sb_anim: None, ws_seen: None, ws_last: HashMap::new(), tool: activity::Tool::from_id(&config::get().sidebar.tool), bottom_open: config::get().sidebar.bottom_open, bottom_tab: activity::Bottom::from_id(&config::get().sidebar.bottom_tab), bottom_h: config::get().sidebar.bottom_height.clamp(120., 600.), exec_log: Default::default(), dbp: Default::default(), audit, audit_verify: None, audit_filter: Default::default(),
                         settings_dirty: vec![], toast: None, toast_out: false, toast_seq: 0, _subs: vec![],
                     };
                     crate::ctxmenu_view::init(root.rt.handle().clone(), root.prompts.clone());

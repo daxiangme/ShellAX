@@ -90,3 +90,20 @@ mod tests {
         assert_eq!(g.poll((90, 24), (90, 24), false, t0), None);
     }
 }
+
+/// Which edge a panel slides in from.
+#[derive(Clone, Copy)]
+pub enum Edge { Left, Right, Bottom }
+
+/// Slide a panel in/out inside a clipping box. The box keeps its full size for the whole
+/// animation, so nothing next to it is laid out again per frame; only the panel's paint offset
+/// moves. Callers add / remove the box (and resize terminals) once, at the start or end.
+pub fn slide(outer: gpui::Div, id: impl Into<gpui::ElementId>, el: gpui::AnyElement, dist: f32, edge: Edge, show: bool) -> gpui::AnyElement {
+    use gpui::{div, prelude::*, px, AnimationExt};
+    let dur = if show { PANEL_OPEN_MS } else { PANEL_CLOSE_MS };
+    let inner = match edge { Edge::Bottom => div().relative().w_full(), _ => div().relative().h_full() };
+    outer.overflow_hidden().child(inner.child(el).with_animation(id, gpui::Animation::new(ms(dur)).with_easing(ease_out), move |d, t| {
+        let off = (if show { 1. - t } else { t }) * dist;
+        match edge { Edge::Left => d.left(px(-off)), Edge::Right => d.left(px(off)), Edge::Bottom => d.top(px(off)) }
+    })).into_any_element()
+}

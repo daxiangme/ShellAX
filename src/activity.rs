@@ -80,12 +80,27 @@ impl Root {
     }
 
     pub(crate) fn toggle_bottom(&mut self, tab: Option<Bottom>, cx: &mut Context<Self>) {
-        match tab {
-            Some(t) if self.bottom_open && self.bottom_tab != t => self.bottom_tab = t,
-            Some(t) => { self.bottom_tab = t; self.bottom_open = !self.bottom_open; }
-            None => self.bottom_open = !self.bottom_open,
+        let was = self.bottom_open && !self.bottom_anim.is_some_and(|a| !a.0);
+        let open = match tab {
+            Some(t) if was && self.bottom_tab != t => { self.bottom_tab = t; true }
+            Some(t) => { self.bottom_tab = t; !was }
+            None => !was,
+        };
+        if open != was && !crate::motion::reduced() {
+            // slide; when closing the panel stays mounted until the slide ends
+            let seq = self.bottom_anim.map(|a| a.1 + 1).unwrap_or(1);
+            self.bottom_anim = Some((open, seq));
+            let dur = if open { crate::motion::PANEL_OPEN_MS } else { crate::motion::PANEL_CLOSE_MS };
+            crate::motion::hold(dur + 20);
+            if open { self.bottom_open = true; }
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(crate::motion::ms(dur)).await;
+                let _ = this.update(cx, |r, cx| if r.bottom_anim.is_some_and(|a| a.1 == seq) { r.bottom_anim = None; if !open { r.bottom_open = false; } cx.notify(); });
+            }).detach();
+        } else {
+            self.bottom_open = open;
         }
-        let (open, tab) = (self.bottom_open, self.bottom_tab.id());
+        let tab = self.bottom_tab.id();
         let _ = config::update(|s| { s.sidebar.bottom_open = open; s.sidebar.bottom_tab = tab.into(); });
         cx.notify();
     }
