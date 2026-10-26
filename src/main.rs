@@ -1902,7 +1902,7 @@ impl Render for Root {
             // GPUI 的 overflow_hidden 只按矩形裁剪，不按圆角裁剪：内容（终端、设置页、SFTP 等）若贴边
             // 绘制自己的背景就会盖住圆角。上下留出内边距，让四个圆角露出卡片自身的背景。
             .pt(px(CARD_INSET))
-            .when(cwd_bar.is_none(), |d| d.pb(px(if settings_on { CARD_INSET } else { 12. })))
+            .when(cwd_bar.is_none(), |d| d.pb(px(if settings_on || self.tool.workspace() != activity::Tool::Hosts { CARD_INSET } else { 12. })))
             .child(div().flex_1().min_h_0().overflow_hidden().flex().flex_col().child(workspace))
             .children(cwd_bar);
 

@@ -1568,3 +1568,4 @@
 "lib.copied_no_target" = "当前没有可插入的位置，已复制到剪贴板"
 "lib.module_scope" = "{module} 常用命令"
 "lib.module_terminal" = "终端"
+"db.clear_results" = "清空"

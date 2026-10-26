@@ -1568,3 +1568,4 @@
 "lib.copied_no_target" = "Nothing to insert into here, so it was copied to the clipboard"
 "lib.module_scope" = "Snippets for {module}"
 "lib.module_terminal" = "Terminal"
+"db.clear_results" = "Clear"

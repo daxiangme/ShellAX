@@ -1198,7 +1198,7 @@ impl DbView {
     }
 
     fn result_tabs(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        if self.results.len() < 2 { return None; }
+        if self.results.is_empty() { return None; }
         let th = cur();
         let mut row = div().h(px(28.)).px_2().flex().items_center().gap_1().flex_shrink_0().border_b_1().border_color(c(th.surface0)).id("dbv-rtabs").overflow_x_scroll();
         for (i, rs) in self.results.iter().enumerate() {
@@ -1211,6 +1211,10 @@ impl DbView {
                 .on_click(cx.listener(move |v, _, _w, cx| { v.result_ix = i; v.show_result(cx); cx.notify(); }))
                 .child(label));
         }
+        row = row.child(div().flex_1()).child(div().id("dbv-rclear").h(px(22.)).px_2().rounded(px(5.)).flex().items_center().gap_1().cursor_pointer().text_size(px(11.)).flex_shrink_0()
+            .text_color(c(th.overlay1)).hover(|d| d.bg(c(cur().surface0)))
+            .on_click(cx.listener(|v, _, _w, cx| { v.results.clear(); v.result_ix = 0; v.error = None; v.show_result(cx); cx.notify(); }))
+            .child(icon(IconName::Delete, 12., c(th.overlay1))).child(t("db.clear_results")));
         Some(row)
     }
 
@@ -1324,23 +1328,24 @@ impl Render for DbView {
             root = root.child(body);
         } else {
             let h = self.editor_h;
-            let editor = div().h(px(h)).flex_shrink_0()
+            let card = |d: gpui::Div| d.rounded(px(8.)).border_1().border_color(c(th.surface0)).overflow_hidden().bg(c(th.base));
+            let editor = card(div()).h(px(h)).flex_shrink_0().text_size(px(crate::font_size()))
                 .capture_key_down(cx.listener(|v, e: &gpui::KeyDownEvent, _w, cx| {
                     let k = &e.keystroke;
                     if k.key == "enter" && (k.modifiers.control || k.modifiers.platform) { v.run_sql(k.modifiers.shift, cx); cx.stop_propagation(); }
                 }))
                 .child(Editor::new(&self.editor).h(px(h)).bordered(false));
-            let handle = div().id("dbv-split").h(px(5.)).w_full().flex_shrink_0().cursor_row_resize().border_t_1().border_color(c(th.surface0))
+            let handle = div().id("dbv-split").h(px(6.)).w_full().flex_shrink_0().cursor_row_resize().rounded(px(3.))
                 .hover(|d| d.bg(c(cur().accent).opacity(0.35)))
                 .on_drag(EditorResize, |d: &EditorResize, _, _, cx| cx.new(|_| d.clone()))
                 .on_click(cx.listener(|v, ev: &gpui::ClickEvent, _w, cx| if ev.click_count() >= 2 { v.editor_h = EDITOR_H; cx.notify(); }));
-            let body = div().id("dbv-qbody").flex_1().min_h_0().flex().flex_col()
+            let body = div().id("dbv-qbody").flex_1().min_h_0().flex().flex_col().p(px(6.)).bg(c(th.mantle))
                 .on_drag_move(cx.listener(|v, ev: &gpui::DragMoveEvent<EditorResize>, _w, cx| {
                     let total = f32::from(ev.bounds.size.height);
                     let h = (f32::from(ev.event.position.y - ev.bounds.top())).clamp(60., (total - 80.).max(60.));
                     if (h - v.editor_h).abs() >= 1.0 { v.editor_h = h; cx.notify(); }
                 }))
-                .child(editor).child(handle).children(self.result_tabs(cx)).child(self.result_body());
+                .child(editor).child(handle).child(card(div()).flex_1().min_h_0().flex().flex_col().children(self.result_tabs(cx)).child(self.result_body()));
             root = root.child(body);
         }
         root = root.child(self.footer());
