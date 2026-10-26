@@ -3,6 +3,7 @@
 //! panes, settings page, command palette, host dialog, tool panels, status bar.
 mod actions;
 mod ai_ctx;
+mod card_layout;
 mod app_menu;
 mod chrome;
 mod motion;
@@ -1906,11 +1907,9 @@ impl Render for Root {
             }
         };
         let cwd_bar = if settings_on { None } else { self.cwd_bar(window, cx) };
-        let center = div().id("center").flex_1().min_w_0().min_h_0().flex().flex_col().rounded(px(10.)).overflow_hidden().bg(c(theme::scheme().bg))
-            // GPUI 的 overflow_hidden 只按矩形裁剪，不按圆角裁剪：内容（终端、设置页、SFTP 等）若贴边
-            // 绘制自己的背景就会盖住圆角。上下留出内边距，让四个圆角露出卡片自身的背景。
-            .pt(px(CARD_INSET))
-            .when(cwd_bar.is_none(), |d| d.pb(px(if settings_on || self.tool.workspace() != activity::Tool::Hosts { CARD_INSET } else { 12. })))
+        // 所有模块共用同一张内容卡片：四边内边距统一为 card_layout::CARD_PAD（也让圆角露出卡片背景）
+        let center = card_layout::content_card("center")
+            .when(cwd_bar.is_some(), |d| d.pb_0())
             .child(div().flex_1().min_h_0().overflow_hidden().flex().flex_col().child(workspace))
             .children(cwd_bar);
 
@@ -1922,8 +1921,9 @@ impl Render for Root {
                     (st, col, String::new(), SharedString::from(e.crumbs(cx)), String::new())
                 } else if let Some(dbv) = &v.db {
                     // database pane: connection › database › schema › table instead of terminal info
-                    let crumbs = dbv.read(cx).crumbs();
-                    (st, col, String::new(), SharedString::from(crumbs), String::new())
+                    // the pane's own status (rows loaded, time, server version) lives here, not in a footer strip
+                    let d = dbv.read(cx);
+                    (st, col, d.status_line(), SharedString::from(d.crumbs()), String::new())
                 } else {
                 let d = v.session.as_ref().map(|s| { let z = s.size(); format!("{}×{}", z.cols, z.rows) }).unwrap_or_default();
                 let n = v.history.lock().unwrap().len();
@@ -1982,7 +1982,7 @@ impl Render for Root {
             let vib = if chrome::NATIVE_LIGHTS { 0.72 } else { 1.0 };
             content = content.child(div().h_full().flex_shrink_0().flex().flex_col()
                 .child(head.bg(c(th.crust).opacity(vib)).child(chrome::drag_spacer("sb-drag")))
-                .child(div().flex_1().min_h_0().flex().flex_row().child(strip).child(div().h_full().flex().flex_col().pb(px(CARD_GAP)).child(panel))));
+                .child(div().flex_1().min_h_0().flex().flex_row().child(strip).child(div().h_full().flex().flex_col().pb(px(card_layout::EDGE_GAP)).child(panel))));
         } else {
             content = content.child(strip);
         }
@@ -1992,14 +1992,14 @@ impl Render for Root {
             SideDock::Snippets | SideDock::History => work.child(self.library_dock(window, cx)),
             SideDock::None => work,
         };
-        let work_row = div().flex_1().min_h_0().w_full().flex().flex_row().items_stretch().pr(px(4.)).pb(px(CARD_GAP)).gap(px(CARD_GAP))
+        let work_row = div().flex_1().min_h_0().w_full().flex().flex_row().items_stretch().pr(px(4.)).pb(px(card_layout::EDGE_GAP)).gap(px(CARD_GAP))
             .child(work).child(self.tool_rail(cx));
         let mut right = div().id("right-col").flex_1().min_w_0().h_full().flex().flex_col().child(row).child(work_row);
         if self.bottom_open {
             right = right.on_drag_move(cx.listener(|this, ev: &gpui::DragMoveEvent<activity::BottomResize>, _w, cx| {
                 let h = (f32::from(ev.bounds.bottom() - ev.event.position.y) - (CARD_GAP + 2.)).clamp(120., 600.);
                 if (h - this.bottom_h).abs() >= 1.0 { this.bottom_h = h; cx.notify(); }
-            })).child(div().w_full().pr(px(4.)).pb(px(CARD_GAP)).child(self.bottom_panel(cx)));
+            })).child(div().w_full().pr(px(4.)).pb(px(card_layout::EDGE_GAP)).child(self.bottom_panel(cx)));
         }
         let body = content.child(right);
         let mut root = div().size_full().relative().flex().flex_col().bg(theme::outer_bg().opacity(if chrome::NATIVE_LIGHTS { 0. } else { op })).font_family(theme::ui_font()).text_size(px(s.appearance.ui_font_size.clamp(10., 20.))).text_color(c(th.text))
@@ -2218,9 +2218,7 @@ impl Render for Root {
 
 /// 标签宽度：先在 TAB_W 与 TAB_MIN_W 之间压缩，再放不下就横向滚动。
 /// 终端卡片与外层之间的间距。
-const CARD_GAP: f32 = 6.;
-/// 卡片内容与卡片上下边缘的内边距，保证圆角不被内容盖住。
-const CARD_INSET: f32 = 8.;
+const CARD_GAP: f32 = card_layout::CARD_GAP;
 const TAB_W: f32 = 220.;
 const TAB_MIN_W: f32 = 110.;
 

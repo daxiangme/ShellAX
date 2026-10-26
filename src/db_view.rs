@@ -1188,13 +1188,16 @@ impl DbView {
         Some(card)
     }
 
-    fn footer(&self) -> impl IntoElement {
-        let th = cur();
-        let mut f = div().h(px(26.)).px_3().flex().items_center().gap_2().flex_shrink_0().border_t_1().border_color(c(th.surface0)).bg(c(th.mantle)).text_size(px(11.)).text_color(c(th.overlay1));
-        if self.busy { f = f.child(icon(IconName::LoaderCircle, 12., c(th.accent))); }
-        f = f.child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().child(self.status.clone()));
-        if let Some(l) = &self.live { if !l.version.is_empty() { f = f.child(div().whitespace_nowrap().child(l.version.chars().take(40).collect::<String>())); } if let Some(via) = &l.via { f = f.child(div().whitespace_nowrap().child(tf("db.via_host", &[("host", via)]))); } }
-        f
+    /// Status for the window status bar: rows loaded / elapsed, server version, tunnel host.
+    pub fn status_line(&self) -> String {
+        let mut parts: Vec<String> = vec![];
+        if self.busy { parts.push("…".into()); }
+        if !self.status.is_empty() { parts.push(self.status.to_string()); }
+        if let Some(l) = &self.live {
+            if !l.version.is_empty() { parts.push(l.version.chars().take(40).collect()); }
+            if let Some(via) = &l.via { parts.push(tf("db.via_host", &[("host", via)]).to_string()); }
+        }
+        parts.join(" · ")
     }
 
     fn result_tabs(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
@@ -1385,18 +1388,18 @@ impl Render for DbView {
             root = root.child(body);
         } else {
             let h = self.editor_h;
-            let card = |d: gpui::Div| d.rounded(px(8.)).border_1().border_color(c(th.surface0)).overflow_hidden().bg(c(th.base));
+            let card = |_d: gpui::Div| crate::card_layout::sub_card();
             let editor = card(div()).h(px(h)).flex_shrink_0().text_size(px(crate::font_size()))
                 .capture_key_down(cx.listener(|v, e: &gpui::KeyDownEvent, _w, cx| {
                     let k = &e.keystroke;
                     if k.key == "enter" && (k.modifiers.control || k.modifiers.platform) { v.run_sql(k.modifiers.shift, cx); cx.stop_propagation(); }
                 }))
                 .child(Editor::new(&self.editor).h(px(h)).bordered(false));
-            let handle = div().id("dbv-split").h(px(6.)).w_full().flex_shrink_0().cursor_row_resize().rounded(px(3.))
+            let handle = div().id("dbv-split").h(px(crate::card_layout::CARD_PAD)).w_full().flex_shrink_0().cursor_row_resize().rounded(px(3.))
                 .hover(|d| d.bg(c(cur().accent).opacity(0.35)))
                 .on_drag(EditorResize, |d: &EditorResize, _, _, cx| cx.new(|_| d.clone()))
                 .on_click(cx.listener(|v, ev: &gpui::ClickEvent, _w, cx| if ev.click_count() >= 2 { v.editor_h = EDITOR_H; cx.notify(); }));
-            let body = div().id("dbv-qbody").flex_1().min_h_0().flex().flex_col().p(px(6.)).bg(c(th.mantle))
+            let body = div().id("dbv-qbody").flex_1().min_h_0().flex().flex_col().pt(px(crate::card_layout::CARD_PAD))
                 .on_drag_move(cx.listener(|v, ev: &gpui::DragMoveEvent<EditorResize>, _w, cx| {
                     let total = f32::from(ev.bounds.size.height);
                     let h = (f32::from(ev.event.position.y - ev.bounds.top())).clamp(60., (total - 80.).max(60.));
@@ -1405,7 +1408,6 @@ impl Render for DbView {
                 .child(editor).child(handle).child(card(div()).flex_1().min_h_0().flex().flex_col().children(self.result_tabs(cx)).child(self.result_body()));
             root = root.child(body);
         }
-        root = root.child(self.footer());
         root.children(self.pop_el(cx)).children(self.confirm_el(cx))
     }
 }
