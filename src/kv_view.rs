@@ -335,6 +335,14 @@ impl KvView {
     }
 
     // ---- console
+    /// Snippet from the snippets tool window: into the console line; `run` sends it too.
+    pub fn insert_console(&mut self, text: &str, run: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.sub = Sub::Console;
+        let line = text.trim().to_string();
+        if run { self.console_in.update(cx, |s, cx| s.set_value("", window, cx)); self.console(line, cx); }
+        else { self.console_in.update(cx, |s, cx| { s.set_value(line, window, cx); s.focus(window, cx); }); }
+        cx.notify();
+    }
     fn console(&mut self, line: String, cx: &mut Context<Self>) {
         if line.is_empty() { return; }
         let args = match cmd::split_line(&line) { Ok(a) => a, Err(e) => { self.console_out.push((line, format!("(error) {e}"))); cx.notify(); return; } };

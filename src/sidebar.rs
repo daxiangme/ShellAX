@@ -491,10 +491,11 @@ impl Root {
     /// Session tools sit beside the terminal, not in the host list.
     pub(crate) fn tool_rail(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
-        // Left activity strip owns the modules (hosts, SFTP, ports, snippets, audit, settings);
+        // Left activity strip owns the modules (terminal, SFTP, database, Redis, Docker, ports);
         // this right strip holds the tool windows that work on the focused session.
-        let items: [(Action, &str, IconName); 5] = [
+        let items: [(Action, &str, IconName); 6] = [
             (Action::OpenAi, "AI / Agent", IconName::Bot),
+            (Action::OpenSnippets, t("lib.snippets"), IconName::Code),
             (Action::OpenHostTools, t("hosttools.title"), IconName::ChartPie),
             (Action::OpenHistory, t("lib.history"), IconName::Clock),
             (Action::CommandPalette, t("ui.command_palette"), IconName::Command),

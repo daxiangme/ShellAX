@@ -1288,6 +1288,15 @@ pub fn conn_meta(id: &str) -> (String, bool, bool) {
     }
 }
 
+impl DbView {
+    /// Snippet insert from the snippets tool window: at the SQL editor's cursor.
+    pub fn insert_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let text = text.to_string();
+        self.editor.update(cx, |e, cx| { e.insert(text, window, cx); e.focus(window, cx); });
+        cx.notify();
+    }
+}
+
 impl Render for DbView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(s) = self.pending_ddl.take() { self.ddl_ed.update(cx, |e, cx| e.set_value(s, window, cx)); }

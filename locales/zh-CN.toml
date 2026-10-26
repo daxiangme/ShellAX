@@ -1564,3 +1564,7 @@
 "ws.sftp_hint" = "双栏文件浏览：选择主机，或先打开再在其中选择主机。"
 "ws.sftp_open" = "打开文件浏览器"
 "ws.sftp_title" = "没有打开的文件浏览器"
+"lib.add_examples" = "添加示例"
+"lib.copied_no_target" = "当前没有可插入的位置，已复制到剪贴板"
+"lib.module_scope" = "{module} 常用命令"
+"lib.module_terminal" = "终端"

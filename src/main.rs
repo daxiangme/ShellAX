@@ -1545,7 +1545,7 @@ impl Root {
                 self.focus_active(window, cx);
             }
             Action::OpenAudit => { self.audit_verify = None; self.overlay = Overlay::Audit; }
-            Action::ToolHosts | Action::ToolSftp | Action::ToolDatabase | Action::ToolRedis | Action::ToolDocker | Action::ToolPorts | Action::ToolSnippets => {
+            Action::ToolHosts | Action::ToolSftp | Action::ToolDatabase | Action::ToolRedis | Action::ToolDocker | Action::ToolPorts => {
                 if let Some(t) = activity::Tool::from_action(a) { self.select_tool(t, window, cx); }
             }
             Action::ToggleBottomPanel => self.toggle_bottom(None, cx),

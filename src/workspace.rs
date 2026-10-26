@@ -15,7 +15,7 @@ use ssh_term_proto::sftp_mode::Mode as SftpMode;
 
 impl Tool {
     /// The workspace a module shows: port forwarding works on terminal sessions.
-    pub fn workspace(self) -> Tool { match self { Tool::Ports | Tool::Snippets => Tool::Hosts, t => t } }
+    pub fn workspace(self) -> Tool { match self { Tool::Ports => Tool::Hosts, t => t } }
 }
 
 /// Module a pane belongs to, from what it hosts (an explicit `ws` wins, e.g. a container shell).
@@ -94,6 +94,9 @@ impl Root {
         if let Some(&i) = same.iter().rev().find(|&&i| i < near).or(same.first()) { self.active = i; }
         self.ws_seen = self.tabs.get(self.active).map(Self::tab_key);
     }
+
+    /// Snippet module of the current workspace.
+    pub(crate) fn snippet_module(&self) -> &'static str { match self.tool.workspace() { Tool::Hosts => "terminal", t => t.id() } }
 
     /// "+" in the tab row outside the terminal module; false = terminal (use the new-tab menu).
     pub(crate) fn new_module_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {

@@ -11,6 +11,26 @@ pub struct Snippet {
     pub note: String,
     #[serde(default)]
     pub body: String,
+    /// Module the snippet belongs to: terminal | sftp | database | redis | docker.
+    /// Files written before modules existed load as terminal snippets.
+    #[serde(default = "terminal")]
+    pub module: String,
+}
+
+fn terminal() -> String { "terminal".into() }
+
+pub const MODULES: [&str; 5] = ["terminal", "sftp", "database", "redis", "docker"];
+
+/// Example snippets offered for a module that has none yet: (name, group, body).
+pub fn starters(module: &str) -> &'static [(&'static str, &'static str, &'static str)] {
+    match module {
+        "terminal" => &[("disk", "ops", "df -h"), ("listening ports", "ops", "ss -tlnp"), ("tail log", "ops", "tail -n 200 -f {{file}}"), ("top memory", "ops", "ps aux --sort=-%mem | head -n 15")],
+        "database" => &[("row count", "sql", "SELECT COUNT(*) FROM {{table}};"), ("latest rows", "sql", "SELECT * FROM {{table}} ORDER BY {{column}} DESC LIMIT 50;"), ("duplicates", "sql", "SELECT {{column}}, COUNT(*) FROM {{table}} GROUP BY {{column}} HAVING COUNT(*) > 1;")],
+        "redis" => &[("memory", "info", "INFO memory"), ("key type / ttl", "keys", "TYPE {{key}}"), ("scan prefix", "keys", "SCAN 0 MATCH {{prefix}}* COUNT 100"), ("slow log", "info", "SLOWLOG GET 20")],
+        "docker" => &[("containers", "docker", "docker ps -a"), ("logs", "docker", "docker logs --tail 200 -f {{container}}"), ("disk usage", "docker", "docker system df"), ("prune images", "docker", "docker image prune -f")],
+        "sftp" => &[("big files", "files", "find {{dir}} -type f -size +100M -exec ls -lh {} \\;"), ("dir sizes", "files", "du -sh {{dir}}/* | sort -h"), ("archive", "files", "tar czf {{name}}.tar.gz {{dir}}")],
+        _ => &[],
+    }
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -101,12 +121,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn old_files_load_as_terminal() {
+        let s: Store = toml::from_str("[[snippets]]\nid = \"x\"\nname = \"n\"\nbody = \"ls\"\n").unwrap();
+        assert_eq!(s.snippets[0].module, "terminal");
+        assert!(MODULES.iter().all(|m| !starters(m).is_empty()));
+    }
+
+    #[test]
     fn round_trip_fill_and_script_lines() {
         let dir = std::env::temp_dir().join(format!("shellax-snip-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("snippets.toml");
-        let item = Snippet { id: "a".into(), name: "磁盘".into(), group: "巡检".into(), note: "df".into(), body: "df -h {{path}}".into() };
+        let item = Snippet { id: "a".into(), name: "磁盘".into(), group: "巡检".into(), note: "df".into(), body: "df -h {{path}}".into(), module: "redis".into() };
         save_to(&p, &[item.clone()]).unwrap();
         let loaded = load_from(&p);
         assert_eq!(loaded, vec![item]);

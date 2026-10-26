@@ -1,6 +1,6 @@
 //! IDE-style tool-window shell (v0.2 PRD §3): the 40px activity strip on the far left, the
 //! per-module tool window it opens, and the bottom tool window (transfer queue, execution
-//! log). Clicking the active module's icon collapses its window; Alt+1…7 switch modules.
+//! log). Clicking the active module's icon collapses its window; Alt+1…6 switch modules.
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
@@ -16,30 +16,30 @@ use crate::{chrome, config, Root, SideDock};
 pub const STRIP_W: f32 = 40.;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Tool { Hosts, Sftp, Database, Redis, Docker, Ports, Snippets }
+pub enum Tool { Hosts, Sftp, Database, Redis, Docker, Ports }
 
 impl Tool {
-    pub const TOP: [Tool; 7] = [Tool::Hosts, Tool::Sftp, Tool::Database, Tool::Redis, Tool::Docker, Tool::Ports, Tool::Snippets];
+    pub const TOP: [Tool; 6] = [Tool::Hosts, Tool::Sftp, Tool::Database, Tool::Redis, Tool::Docker, Tool::Ports];
     pub fn id(self) -> &'static str {
-        match self { Tool::Hosts => "hosts", Tool::Sftp => "sftp", Tool::Database => "database", Tool::Redis => "redis", Tool::Docker => "docker", Tool::Ports => "ports", Tool::Snippets => "snippets" }
+        match self { Tool::Hosts => "hosts", Tool::Sftp => "sftp", Tool::Database => "database", Tool::Redis => "redis", Tool::Docker => "docker", Tool::Ports => "ports" }
     }
     pub fn from_id(s: &str) -> Tool { Tool::TOP.into_iter().find(|t| t.id() == s).unwrap_or(Tool::Hosts) }
     pub fn label(self) -> &'static str {
         match self {
             Tool::Hosts => t("tool.hosts"), Tool::Sftp => t("tool.sftp"), Tool::Database => t("tool.database"), Tool::Redis => t("tool.redis"),
-            Tool::Docker => t("tool.docker"), Tool::Ports => t("tool.ports"), Tool::Snippets => t("tool.snippets"),
+            Tool::Docker => t("tool.docker"), Tool::Ports => t("tool.ports"),
         }
     }
     pub fn icon(self) -> IconName {
         match self {
             Tool::Hosts => IconName::Server, Tool::Sftp => IconName::FolderSync, Tool::Database => IconName::Database, Tool::Redis => IconName::Layers,
-            Tool::Docker => IconName::Container, Tool::Ports => IconName::ArrowLeftRight, Tool::Snippets => IconName::Code,
+            Tool::Docker => IconName::Container, Tool::Ports => IconName::ArrowLeftRight,
         }
     }
     pub fn action(self) -> Action {
         match self {
             Tool::Hosts => Action::ToolHosts, Tool::Sftp => Action::ToolSftp, Tool::Database => Action::ToolDatabase, Tool::Redis => Action::ToolRedis,
-            Tool::Docker => Action::ToolDocker, Tool::Ports => Action::ToolPorts, Tool::Snippets => Action::ToolSnippets,
+            Tool::Docker => Action::ToolDocker, Tool::Ports => Action::ToolPorts,
         }
     }
     pub fn from_action(a: Action) -> Option<Tool> { Tool::TOP.into_iter().find(|t| t.action() == a) }
@@ -169,9 +169,6 @@ impl Root {
         card = match tool {
             Tool::Docker => card.child(full(ui::button("tool-docker-open", t("tool.docker_open"), 1)).on_click(cx.listener(|this, _, w, cx| this.run(Action::OpenHostTools, w, cx)))),
             Tool::Ports => card.child(full(ui::button("tool-ports-open", t("tool.ports_open"), 1)).on_click(cx.listener(|this, _, w, cx| this.run(Action::OpenPortForward, w, cx)))),
-            Tool::Snippets => card
-                .child(full(ui::button("tool-snip-open", t("tool.snippets_open"), 1)).on_click(cx.listener(|this, _, w, cx| this.run(Action::OpenSnippets, w, cx))))
-                .child(full(ui::button("tool-hist-open", t("lib.history"), 0)).on_click(cx.listener(|this, _, w, cx| this.run(Action::OpenHistory, w, cx)))),
             _ => card,
         };
         div().flex_1().min_h_0().flex().flex_col().child(card).into_any_element()
