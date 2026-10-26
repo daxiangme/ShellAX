@@ -14,6 +14,7 @@ mod sidebar;
 mod activity;
 mod db_dialog;
 mod db_ui;
+mod db_tree;
 mod db_view;
 mod kv_view;
 mod workspace;

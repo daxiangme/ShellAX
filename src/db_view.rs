@@ -240,7 +240,15 @@ pub struct DbView {
     /// The running query's cancel handle (query mode).
     slot: Option<Arc<CancelSlot>>,
     _subs: Vec<gpui::Subscription>,
+    /// Saved query file this editor belongs to (Ctrl+S writes it).
+    pub saved_file: Option<std::path::PathBuf>,
+    /// Open the structure designer once the columns have loaded.
+    pending_design: bool,
 }
+
+/// What the tree asked for when it opened a table tab.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Intent { Design, Export }
 
 impl DbView {
     pub fn new(target: Target, sql: String, rt: tokio::runtime::Handle, log: ExecLog, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -272,7 +280,7 @@ impl DbView {
         let (conn_name, read_only, production) = conn_meta(&target.conn);
         let mut me = Self { title: String::new(), target, conn_name, read_only, production, live: None, conn_err: None, rt, log, grid, where_in, applied_where: String::new(), total: None,
             sub: Sub::Data, table_cols: None, ddl: None, ddl_ed, pending_ddl: None, cell_in, sel: None, edit_note: None,
-            editor, editor_h: EDITOR_RATIO, comp, hist: history::Store::load(), hist_in, save_in, results: vec![], result_ix: 0, pop: None, pop_closed: None, pending_sql: None, design: None, design_src: None, design_err: None, ask: None,
+            editor, editor_h: EDITOR_RATIO, comp, hist: history::Store::load(), hist_in, save_in, results: vec![], result_ix: 0, pop: None, pop_closed: None, pending_sql: None, design: None, design_src: None, design_err: None, ask: None, saved_file: None, pending_design: false,
             status: String::new(), error: None, busy: false, gen: 0, slot: None, _subs: subs };
         me.title = me.make_title();
         me
@@ -520,7 +528,7 @@ impl DbView {
         let h = self.rt.spawn(async move { live.driver.columns(&db, schema.as_deref(), &table).await });
         cx.spawn(async move |this, cx| {
             let r = h.await.map_err(anyhow::Error::from).and_then(|r| r);
-            let _ = this.update(cx, |v, cx| { v.table_cols = Some(r.map_err(|e| format!("{e:#}"))); cx.notify(); });
+            let _ = this.update(cx, |v, cx| { v.table_cols = Some(r.map_err(|e| format!("{e:#}"))); if std::mem::take(&mut v.pending_design) { v.start_design(cx); } cx.notify(); });
         }).detach();
     }
 
@@ -798,6 +806,24 @@ impl DbView {
                 cx.notify();
             });
         }).detach();
+    }
+
+    /// Tree context-menu request on a table tab.
+    pub fn intent(&mut self, i: Intent, cx: &mut Context<Self>) {
+        match i {
+            Intent::Design => { self.sub = Sub::Structure; if matches!(self.table_cols, Some(Ok(_))) { self.start_design(cx); } else { self.pending_design = true; } }
+            Intent::Export => self.pop = Some(Pop::Export),
+        }
+        cx.notify();
+    }
+
+    /// Write the editor back to its saved query file.
+    fn save_file(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(p) = self.saved_file.clone() else { return false };
+        let text = self.editor.read(cx).value().to_string();
+        self.status = match std::fs::write(&p, text) { Ok(()) => tf("dbt.saved_file", &[("name", &p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default())]), Err(e) => tf("db.export_failed", &[("e", &e)]) };
+        cx.notify();
+        true
     }
 
     // ---- structure designer
@@ -1403,6 +1429,7 @@ impl Render for DbView {
                 .capture_key_down(cx.listener(|v, e: &gpui::KeyDownEvent, _w, cx| {
                     let k = &e.keystroke;
                     if k.key == "enter" && (k.modifiers.control || k.modifiers.platform) { v.run_sql(k.modifiers.shift, cx); cx.stop_propagation(); }
+                    if k.key == "s" && (k.modifiers.control || k.modifiers.platform) && !k.modifiers.shift && v.save_file(cx) { cx.stop_propagation(); }
                 }))
                 .child(Editor::new(&self.editor).h_full().bordered(false));
             let handle = div().id("dbv-split").h(px(crate::card_layout::CARD_PAD)).w_full().flex_shrink_0().cursor_row_resize().rounded(px(3.))

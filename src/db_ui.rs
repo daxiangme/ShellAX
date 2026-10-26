@@ -3,10 +3,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use gpui::{anchored, deferred, div, prelude::*, px, AnyElement, Context, Entity, MouseButton, Pixels, Point, SharedString, Window};
+use gpui::{div, prelude::*, px, AnyElement, Context, Entity, Pixels, Point, SharedString, Window};
 use gpui_component::input::InputState;
 use ssh_term_proto::assets::{self, DbConn, TreeRow};
-use ssh_term_proto::db::{live::Live, ObjKind};
+use ssh_term_proto::db::live::Live;
 use ssh_term_proto::i18n::{t, tf};
 
 use crate::activity::{log_push, panel_title};
@@ -20,32 +20,42 @@ use crate::{Node, Overlay, Root, Tab};
 
 pub enum LiveState { Connecting, Ready(Arc<Live>), Failed(String) }
 
-#[derive(Clone, Copy, PartialEq)]
-pub enum Kid { Database, Schema, Table, View }
+pub enum Kids { Loading, Ready(Vec<String>), Failed(String) }
 
-pub enum Kids { Loading, Ready(Vec<(String, Kid)>), Failed(String) }
-
-/// Tree keys: `<conn>`, `<conn>\x1f<db>`, `<conn>\x1f<db>\x1f<schema>`.
-const SEP: char = '\u{1f}';
+/// Tree keys: `<conn>`, `<conn>\x1f<db>`, `<conn>\x1f<db>\x1f<schema>`; an object group
+/// under a node is `<node>\x1e<group id>` (see `db_tree`).
+pub(crate) const SEP: char = '\u{1f}';
 
 #[derive(Default)]
 pub struct DbPanel {
     pub live: HashMap<String, LiveState>,
-    kids: HashMap<String, Kids>,
-    open: HashSet<String>,
+    /// Databases of a connection, schemas of a database.
+    pub(crate) kids: HashMap<String, Kids>,
+    /// Expanded nodes (connections, databases, schemas, object groups).
+    pub(crate) open: HashSet<String>,
+    /// Databases / schemas opened by the user (their object groups are loaded).
+    pub(crate) opened: HashSet<String>,
+    /// Members of an object group, by group key.
+    pub(crate) members: HashMap<String, Kids>,
+    /// Name filter per group key.
+    pub(crate) filters: HashMap<String, String>,
+    /// Inline editor: (group key, member being renamed or empty for a filter, input).
+    pub(crate) edit: Option<(String, Option<String>, Entity<InputState>)>,
+    /// Destructive menu entry waiting for a second click.
+    pub(crate) arm: Option<String>,
     collapsed_groups: Vec<String>,
-    selected: Option<String>,
+    pub(crate) selected: Option<String>,
     search: Option<Entity<InputState>>,
-    menu: Option<(String, Point<Pixels>)>,
+    pub(crate) menu: Option<(String, Point<Pixels>)>,
 }
 
-fn key_parts(key: &str) -> (String, Option<String>, Option<String>) {
+pub(crate) fn key_parts(key: &str) -> (String, Option<String>, Option<String>) {
     let mut it = key.split(SEP);
     (it.next().unwrap_or_default().to_string(), it.next().map(str::to_string), it.next().map(str::to_string))
 }
 
 impl Root {
-    fn db_conn(id: &str) -> Option<DbConn> { config::get().db.iter().find(|d| d.id == id).cloned() }
+    pub(crate) fn db_conn(id: &str) -> Option<DbConn> { config::get().db.iter().find(|d| d.id == id).cloned() }
 
     /// Connect (or reuse) `id`. Views waiting on it are updated when it settles.
     pub(crate) fn db_connect(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -80,60 +90,17 @@ impl Root {
         if let Some(LiveState::Ready(l)) = self.dbp.live.remove(id) { self.rt.spawn(async move { l.close().await; }); }
         self.dbp.kids.retain(|k, _| key_parts(k).0 != id);
         self.dbp.open.retain(|k| key_parts(k).0 != id);
+        self.dbp.opened.retain(|k| key_parts(k).0 != id);
+        self.dbp.members.retain(|k, _| key_parts(k).0 != id);
         for v in self.db_views(cx) { if v.read(cx).target.conn == id { v.update(cx, |v, cx| v.set_live(Err(t("db.disconnected").into()), cx)); } }
         cx.notify();
     }
 
-    fn db_ready(&self, id: &str) -> Option<Arc<Live>> { match self.dbp.live.get(id) { Some(LiveState::Ready(l)) => Some(l.clone()), _ => None } }
+    pub(crate) fn db_ready(&self, id: &str) -> Option<Arc<Live>> { match self.dbp.live.get(id) { Some(LiveState::Ready(l)) => Some(l.clone()), _ => None } }
 
     /// All database panes in all tabs.
     pub(crate) fn db_views(&self, cx: &gpui::App) -> Vec<Entity<DbView>> {
         self.tabs.iter().flat_map(|t| t.layout.leaves()).filter_map(|p| p.read(cx).db.clone()).collect()
-    }
-
-    /// Fetch children of a tree node.
-    fn db_load_kids(&mut self, key: &str, cx: &mut Context<Self>) {
-        let (id, db, schema) = key_parts(key);
-        let Some(live) = self.db_ready(&id) else { return };
-        let has_schemas = live.driver.kind().has_schemas();
-        self.dbp.kids.insert(key.into(), Kids::Loading);
-        let key = key.to_string();
-        let h = self.rt.spawn(async move {
-            let d = &live.driver;
-            Ok::<_, anyhow::Error>(match (db, schema) {
-                (None, _) => d.databases().await?.into_iter().map(|n| (n, Kid::Database)).collect::<Vec<_>>(),
-                (Some(db), None) if has_schemas => d.schemas(&db).await?.into_iter().map(|n| (n, Kid::Schema)).collect(),
-                (Some(db), s) => {
-                    let mut v: Vec<(String, Kid)> = d.tables(&db, s.as_deref()).await?.into_iter().map(|ti| (ti.name, if ti.kind == ObjKind::View { Kid::View } else { Kid::Table })).collect();
-                    v.sort_by(|a, b| (a.1 == Kid::View).cmp(&(b.1 == Kid::View)).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
-                    v
-                }
-            })
-        });
-        cx.spawn(async move |this, cx| {
-            let r = h.await.map_err(anyhow::Error::from).and_then(|r| r);
-            let _ = this.update(cx, |this, cx| { this.dbp.kids.insert(key, match r { Ok(v) => Kids::Ready(v), Err(e) => Kids::Failed(format!("{e:#}")) }); cx.notify(); });
-        }).detach();
-        cx.notify();
-    }
-
-    fn db_toggle(&mut self, key: &str, cx: &mut Context<Self>) {
-        self.dbp.selected = Some(key.into());
-        if !self.dbp.open.remove(key) {
-            self.dbp.open.insert(key.into());
-            let (id, ..) = key_parts(key);
-            if self.db_ready(&id).is_none() { self.db_connect(&id, cx); }
-            else if !matches!(self.dbp.kids.get(key), Some(Kids::Ready(_) | Kids::Loading)) { self.db_load_kids(key, cx); }
-        }
-        cx.notify();
-    }
-
-    fn db_refresh(&mut self, key: &str, cx: &mut Context<Self>) {
-        self.dbp.kids.retain(|k, _| k != key && !k.starts_with(&format!("{key}{SEP}")));
-        self.dbp.open.insert(key.into());
-        let (id, ..) = key_parts(key);
-        if matches!(self.dbp.live.get(&id), Some(LiveState::Failed(_))) { self.dbp.live.remove(&id); }
-        if self.db_ready(&id).is_none() { self.db_connect(&id, cx); } else { self.db_load_kids(key, cx); }
     }
 
     /// Open a table browser or a query tab for `target` (connects when needed).
@@ -210,27 +177,6 @@ impl Root {
         cx.notify();
     }
 
-    fn db_menu_el(&mut self, key: String, pos: Point<Pixels>, cx: &mut Context<Self>) -> AnyElement {
-        let (id, db, schema) = key_parts(&key);
-        let is_conn = db.is_none() && !key.starts_with("g:");
-        let connected = self.db_ready(&id).is_some();
-        let mut m = ui::popover().w(px(200.)).py_1().flex().flex_col();
-        let k = key.clone();
-        m = m.child(ui::menu_item("dbm-query", Some(IconName::SquareTerminal), t("db.new_query"), true, false).on_click(cx.listener(move |this, _, w, cx| { this.dbp.menu = None; this.db_new_query(Some(k.clone()), w, cx); })));
-        let k = key.clone();
-        m = m.child(ui::menu_item("dbm-refresh", Some(IconName::RefreshCw), t("db.refresh"), true, false).on_click(cx.listener(move |this, _, _w, cx| { this.dbp.menu = None; this.db_refresh(&k, cx); })));
-        if is_conn {
-            m = m.child(ui::menu_sep());
-            let i2 = id.clone();
-            m = m.child(if connected { ui::menu_item("dbm-dc", Some(IconName::Unplug), t("db.disconnect"), true, false).on_click(cx.listener(move |this, _, _w, cx| { this.dbp.menu = None; this.db_disconnect(&i2, cx); })) }
-                else { ui::menu_item("dbm-c", Some(IconName::Plug), t("db.connect"), true, false).on_click(cx.listener(move |this, _, _w, cx| { this.dbp.menu = None; this.dbp.live.remove(&i2); this.dbp.open.insert(i2.clone()); this.db_connect(&i2, cx); })) });
-            let i2 = id.clone();
-            m = m.child(ui::menu_item("dbm-edit", Some(IconName::Pencil), t("db.edit"), true, false).on_click(cx.listener(move |this, _, w, cx| { this.dbp.menu = None; this.open_db_dialog(Some(i2.clone()), w, cx); })));
-        }
-        let _ = schema;
-        deferred(anchored().position(pos).child(m.occlude().on_mouse_down_out(cx.listener(|this, _, _w, cx| { this.dbp.menu = None; cx.notify(); })))).with_priority(2).into_any_element()
-    }
-
     pub(crate) fn db_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
         if self.dbp.search.is_none() {
@@ -264,26 +210,22 @@ impl Root {
         let rows = assets::tree_rows(&s.groups, &self.dbp.collapsed_groups, &item_groups, &keep, false);
 
         let mut list = div().id("db-tree").flex_1().min_h_0().overflow_y_scroll().pb_2().flex().flex_col();
-        let indent = |d: usize| px(8. + d as f32 * 14.);
-        let row_base = |id: SharedString, depth: usize, selected: bool| div().id(id).h(px(26.)).pl(indent(depth)).pr_2().mx_1().rounded(px(6.)).flex().items_center().gap_1().cursor_pointer().flex_shrink_0()
-            .text_size(px(12.)).bg(if selected { c(cur().surface0) } else { gpui::transparent_black() }).hover(|d| d.bg(c(cur().surface0).opacity(0.7)));
-        let chevron = |open: bool, show: bool| div().w(px(12.)).flex_shrink_0().when(show, |d| d.child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 11., c(cur().overlay0))));
-
+        use crate::db_tree::{chev as chevron, row as row_base};
         for r in rows {
             match r {
                 TreeRow::Group { path, depth, count } => {
                     let open = !self.dbp.collapsed_groups.contains(&path);
                     let name = path.rsplit('/').next().unwrap_or(&path).to_string();
                     let p2 = path.clone();
-                    list = list.child(row_base(SharedString::from(format!("dbg:{path}")), depth, false)
+                    list = list.child(row_base(SharedString::from(format!("dbg:{path}")), depth, false).text_color(c(th.subtext))
                         .on_click(cx.listener(move |this, _, _w, cx| { let g = &mut this.dbp.collapsed_groups; if let Some(i) = g.iter().position(|x| *x == p2) { g.remove(i); } else { g.push(p2.clone()); } cx.notify(); }))
-                        .child(chevron(open, true)).child(icon(IconName::Folder, 13., c(th.overlay1)))
+                        .child(chevron(open, true)).child(icon(if open { IconName::FolderOpen } else { IconName::Folder }, 16., c(th.overlay1)))
                         .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_color(c(th.subtext)).child(name))
                         .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(count.to_string())));
                 }
                 TreeRow::Item { index, depth } => {
                     let d = &dbs[index];
-                    list = self.db_conn_rows(list, d, depth, &row_base, &chevron, cx);
+                    list = self.db_conn_rows(list, d, depth, cx);
                 }
             }
         }
@@ -292,83 +234,4 @@ impl Root {
         col.into_any_element()
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn db_conn_rows<R, C>(&mut self, mut list: gpui::Stateful<gpui::Div>, d: &DbConn, depth: usize, row_base: &R, chevron: &C, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div>
-    where R: Fn(SharedString, usize, bool) -> gpui::Stateful<gpui::Div>, C: Fn(bool, bool) -> gpui::Div {
-        let th = cur();
-        let id = d.id.clone();
-        let open = self.dbp.open.contains(&id);
-        let (dot, status_tip) = match self.dbp.live.get(&id) {
-            Some(LiveState::Ready(_)) => (Some(c(th.success)), None),
-            Some(LiveState::Connecting) => (Some(c(th.warning)), None),
-            Some(LiveState::Failed(e)) => (Some(c(th.error)), Some(e.clone())),
-            None => (None, None),
-        };
-        let sel = self.dbp.selected.as_deref() == Some(id.as_str());
-        let k = id.clone();
-        let k2 = id.clone();
-        let mut row = row_base(SharedString::from(format!("dbc:{id}")), depth, sel)
-            .on_click(cx.listener(move |this, _, w, cx| {
-                if Self::db_conn(&k).is_some_and(|c| c.kind == ssh_term_proto::assets::DbKind::Mongodb) { this.dbp.selected = Some(k.clone()); this.open_mongo_tab(&k, w, cx); return; }
-                this.db_toggle(&k, cx)
-            }))
-            .on_mouse_down(MouseButton::Right, cx.listener(move |this, e: &gpui::MouseDownEvent, _w, cx| { this.dbp.selected = Some(k2.clone()); this.dbp.menu = Some((k2.clone(), e.position)); cx.notify(); }))
-            .child(chevron(open, true))
-            .child(icon(IconName::Database, 13., c(if d.read_only { th.warning } else { th.accent })))
-            .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_color(c(th.text)).child(d.name.clone()))
-            .child(div().text_size(px(10.)).text_color(c(th.overlay0)).child(d.kind.label()));
-        if !d.ssh_via.is_empty() { row = row.child(icon(IconName::Waypoints, 11., c(th.overlay0))); }
-        if let Some(col) = dot { row = row.child(div().size(px(6.)).rounded_full().bg(col)); }
-        list = list.child(row);
-        if !open || d.kind == ssh_term_proto::assets::DbKind::Mongodb { return list; }
-        if let Some(e) = status_tip { return list.child(err_row(&e, depth + 1)); }
-        if matches!(self.dbp.live.get(&id), Some(LiveState::Connecting)) { return list.child(note_row(t("db.connecting"), depth + 1)); }
-        self.db_kid_rows(list, &id, depth + 1, row_base, chevron, cx)
-    }
-
-    fn db_kid_rows<R, C>(&mut self, mut list: gpui::Stateful<gpui::Div>, key: &str, depth: usize, row_base: &R, chevron: &C, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div>
-    where R: Fn(SharedString, usize, bool) -> gpui::Stateful<gpui::Div>, C: Fn(bool, bool) -> gpui::Div {
-        let th = cur();
-        let kids = match self.dbp.kids.get(key) {
-            None | Some(Kids::Loading) => return list.child(note_row(t("db.loading"), depth)),
-            Some(Kids::Failed(e)) => return list.child(err_row(e, depth)),
-            Some(Kids::Ready(v)) => v.clone(),
-        };
-        if kids.is_empty() { return list.child(note_row(t("db.no_objects"), depth)); }
-        let (id, db, schema) = key_parts(key);
-        for (name, kind) in kids {
-            let child_key = format!("{key}{SEP}{name}");
-            let sel = self.dbp.selected.as_deref() == Some(child_key.as_str());
-            let (ic, col) = match kind { Kid::Database => (IconName::Database, th.overlay1), Kid::Schema => (IconName::FolderTree, th.overlay1), Kid::Table => (IconName::Table, th.accent), Kid::View => (IconName::Eye, th.warning) };
-            let expandable = matches!(kind, Kid::Database | Kid::Schema);
-            let open = expandable && self.dbp.open.contains(&child_key);
-            let mut row = row_base(SharedString::from(format!("dbk:{child_key}")), depth, sel).child(chevron(open, expandable)).child(icon(ic, 13., c(col)))
-                .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_color(c(th.text)).child(name.clone()));
-            let ck = child_key.clone();
-            row = row.on_mouse_down(MouseButton::Right, cx.listener(move |this, e: &gpui::MouseDownEvent, _w, cx| { this.dbp.selected = Some(ck.clone()); this.dbp.menu = Some((ck.clone(), e.position)); cx.notify(); }));
-            if expandable {
-                let ck = child_key.clone();
-                row = row.on_click(cx.listener(move |this, _, _w, cx| this.db_toggle(&ck, cx)));
-            } else {
-                let ck = child_key.clone();
-                let target = Target { conn: id.clone(), database: db.clone().unwrap_or_default(), schema: schema.clone(), table: Some(name.clone()) };
-                row = row.on_click(cx.listener(move |this, e: &gpui::ClickEvent, w, cx| {
-                    this.dbp.selected = Some(ck.clone());
-                    if e.click_count() >= 2 { this.open_db_tab(target.clone(), String::new(), w, cx); }
-                    cx.notify();
-                }));
-            }
-            list = list.child(row);
-            if open { list = self.db_kid_rows(list, &child_key, depth + 1, row_base, chevron, cx); }
-        }
-        list
-    }
 }
-
-fn note_row(s: &str, depth: usize) -> gpui::Div {
-    div().h(px(24.)).pl(px(8. + depth as f32 * 14. + 14.)).flex().items_center().text_size(px(11.)).text_color(c(cur().overlay0)).child(s.to_string())
-}
-fn err_row(s: &str, depth: usize) -> gpui::Div {
-    div().pl(px(8. + depth as f32 * 14. + 14.)).pr_2().py_1().text_size(px(11.)).text_color(c(cur().error)).child(s.chars().take(300).collect::<String>())
-}
-
