@@ -1992,14 +1992,14 @@ impl Render for Root {
             SideDock::Snippets | SideDock::History => work.child(self.library_dock(window, cx)),
             SideDock::None => work,
         };
-        let work_row = div().flex_1().min_h_0().w_full().flex().flex_row().items_stretch().pr(px(4.)).pb(px(card_layout::EDGE_GAP)).gap(px(CARD_GAP))
+        let work_row = div().flex_1().min_h_0().w_full().flex().flex_row().items_stretch().pb(px(card_layout::EDGE_GAP)).gap(px(CARD_GAP))
             .child(work).child(self.tool_rail(cx));
         let mut right = div().id("right-col").flex_1().min_w_0().h_full().flex().flex_col().child(row).child(work_row);
         if self.bottom_open {
             right = right.on_drag_move(cx.listener(|this, ev: &gpui::DragMoveEvent<activity::BottomResize>, _w, cx| {
                 let h = (f32::from(ev.bounds.bottom() - ev.event.position.y) - (CARD_GAP + 2.)).clamp(120., 600.);
                 if (h - this.bottom_h).abs() >= 1.0 { this.bottom_h = h; cx.notify(); }
-            })).child(div().w_full().pr(px(4.)).pb(px(card_layout::EDGE_GAP)).child(self.bottom_panel(cx)));
+            })).child(div().w_full().pr(px(crate::activity::STRIP_W + CARD_GAP)).pb(px(card_layout::EDGE_GAP)).child(self.bottom_panel(cx)));
         }
         let body = content.child(right);
         let mut root = div().size_full().relative().flex().flex_col().bg(theme::outer_bg().opacity(if chrome::NATIVE_LIGHTS { 0. } else { op })).font_family(theme::ui_font()).text_size(px(s.appearance.ui_font_size.clamp(10., 20.))).text_color(c(th.text))
