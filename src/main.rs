@@ -184,7 +184,7 @@ enum Modal { Broadcast(Vec<String>), Snapshots, Recordings, QuickStart { dir: St
 
 pub(crate) struct Tab { layout: Node<Entity<TermView>>, focused: Entity<TermView>, /** custom name (PRD 5.23) */ name: Option<String> }
 
-pub(crate) enum Overlay { None, Palette(Entity<Palette>), Host(Entity<HostDialog>), Audit, Sftp, Port, HostTools(Entity<host_tools_view::HostToolsView>), Db(Entity<db_dialog::DbDialog>), Asset(Entity<kv_ui::AssetDialog>) }
+pub(crate) enum Overlay { None, Palette(Entity<Palette>), Host(Entity<HostDialog>), Audit, Sftp, Port, Db(Entity<db_dialog::DbDialog>), Asset(Entity<kv_ui::AssetDialog>) }
 
 /// Which right-hand card is open. AI, saved commands and history share one slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -232,6 +232,14 @@ pub(crate) struct Root {
     sb_width: f32,
     /// Right-hand card: AI, saved commands, or history. Only one is open.
     dock: SideDock,
+    /// AI assistant card open in the right column (independent of the library card).
+    dock_ai: bool,
+    /// Host status card open in the right column.
+    dock_host: Option<Entity<host_tools_view::HostToolsView>>,
+    /// Right-column cards collapsed to their title row.
+    dock_min: HashSet<&'static str>,
+    /// Share of the right column given to the top card when two or more are expanded.
+    dock_split: f32,
     lib_search: Entity<InputState>,
     lib_group: String,
     lib_hist_all: bool,
@@ -364,24 +372,42 @@ impl Root {
     }
 
     pub(crate) fn dock_is(&self, a: actions::Action) -> bool {
-        matches!((self.dock, a), (SideDock::Ai, actions::Action::OpenAi) | (SideDock::Snippets, actions::Action::OpenSnippets) | (SideDock::History, actions::Action::OpenHistory))
+        match a {
+            actions::Action::OpenAi => self.dock_ai,
+            actions::Action::OpenHostTools => self.dock_host.is_some(),
+            actions::Action::OpenSnippets => self.dock == SideDock::Snippets,
+            actions::Action::OpenHistory => self.dock == SideDock::History,
+            _ => false,
+        }
     }
 
+    /// Right-column cards open independently; snippets and history share one slot.
     fn toggle_dock(&mut self, which: SideDock, window: &mut Window, cx: &mut Context<Self>) {
-        if self.dock == which {
-            self.dock = SideDock::None;
-            chat_view::set_dock_open(false);
-            self.focus_active(window, cx);
-            cx.notify();
+        if which == SideDock::Ai {
+            if self.dock_ai { self.close_dock("ai-dock", window, cx); } else { self.dock_min.remove("ai-dock"); self.open_chat(window, cx); }
             return;
         }
-        self.dock = which;
-        if which == SideDock::Ai {
-            self.open_chat(window, cx);
-        } else {
-            chat_view::set_dock_open(false);
-            cx.notify();
+        if self.dock == which { self.dock = SideDock::None; self.focus_active(window, cx); } else { self.dock = which; }
+        cx.notify();
+    }
+    pub(crate) fn close_dock(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        match id {
+            "ai-dock" => { self.dock_ai = false; chat_view::set_dock_open(false); }
+            "host-dock" => self.dock_host = None,
+            _ => self.dock = SideDock::None,
         }
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+    fn toggle_host_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dock_host.is_some() { self.close_dock("host-dock", window, cx); return; }
+        let tg = self.focused_pane(window, cx).and_then(|p| match &p.read(cx).spec { Spec::Ssh(t) => Some(t.clone()), _ => None });
+        let (rt, pr) = (self.rt.handle().clone(), self.prompts.clone());
+        let v = cx.new(|cx| host_tools_view::HostToolsView::new(tg, rt, pr, cx));
+        self._subs.push(cx.subscribe_in(&v, window, |this, _, _ev: &host_tools_view::HostToolsEvent, w, cx| this.close_dock("host-dock", w, cx)));
+        self.dock_min.remove("host-dock");
+        self.dock_host = Some(v);
+        cx.notify();
     }
     fn open_pane(&mut self, spec: Spec, window: &mut Window, cx: &mut Context<Self>) -> Entity<TermView> {
         self.open_pane_with(spec, PaneInit::default(), window, cx)
@@ -562,7 +588,7 @@ impl Root {
             None => {
                 let v = cx.new(|cx| chat_view::ChatView::new(window, cx));
                 self._subs.push(cx.subscribe_in(&v, window, |this, _, ev: &chat_view::ChatEvent, w, cx| match ev {
-                    chat_view::ChatEvent::Close => { this.dock = SideDock::None; chat_view::set_dock_open(false); this.focus_active(w, cx); cx.notify(); }
+                    chat_view::ChatEvent::Close => this.close_dock("ai-dock", w, cx),
                     chat_view::ChatEvent::Insert(cmd) => {
                         // AI output is only inserted, never executed (the user runs it)
                         match this.ai_target(cx) {
@@ -579,7 +605,7 @@ impl Root {
             }
         };
         v.update(cx, |c, cx| { c.docked = true; if src.is_some() { c.source = src; } c.focus(window, cx); });
-        self.dock = SideDock::Ai;
+        self.dock_ai = true;
         chat_view::set_dock_open(true);
         cx.notify();
         v
@@ -1530,13 +1556,7 @@ impl Root {
             Action::ModePlan => self.set_mode(Mode::Plan, cx),
             Action::ModeAuto => self.set_mode(Mode::Auto, cx),
             Action::OpenSftp => { let m = SftpMode::parse(&config::get().session.sftp_mode); self.open_sftp_mode(None, m, window, cx) }
-            Action::OpenHostTools => {
-                let tg = self.focused_pane(window, cx).and_then(|p| match &p.read(cx).spec { Spec::Ssh(t) => Some(t.clone()), _ => None });
-                let (rt, pr) = (self.rt.handle().clone(), self.prompts.clone());
-                let v = cx.new(|cx| host_tools_view::HostToolsView::new(tg, rt, pr, cx));
-                self._subs.push(cx.subscribe_in(&v, window, |this, _, _ev: &host_tools_view::HostToolsEvent, w, cx| this.close_overlay(w, cx)));
-                self.overlay = Overlay::HostTools(v);
-            }
+            Action::OpenHostTools => self.toggle_host_dock(window, cx),
             Action::OpenPortForward => { let tg = self.ssh_target_for_tools(cx); let pv = self.port_view(window, cx); pv.update(cx, |v, _| if v.target.is_none() || tg.is_some() { v.target = tg }); self.overlay = Overlay::Port; }
             Action::OpenAi => self.toggle_dock(SideDock::Ai, window, cx),
             Action::OpenSnippets => self.toggle_dock(SideDock::Snippets, window, cx),
@@ -1987,11 +2007,7 @@ impl Render for Root {
             content = content.child(strip);
         }
         let mut work = div().flex_1().min_w_0().min_h_0().flex().flex_row().gap(px(CARD_GAP)).child(center);
-        work = match self.dock {
-            SideDock::Ai => work.child(self.ai_dock(cx)),
-            SideDock::Snippets | SideDock::History => work.child(self.library_dock(window, cx)),
-            SideDock::None => work,
-        };
+        if let Some(col) = self.dock_column(window, cx) { work = work.child(col); }
         let work_row = div().flex_1().min_h_0().w_full().flex().flex_row().items_stretch().pb(px(card_layout::EDGE_GAP)).gap(px(CARD_GAP))
             .child(work).child(self.tool_rail(cx));
         let mut right = div().id("right-col").flex_1().min_w_0().h_full().flex().flex_col().child(row).child(work_row);
@@ -2083,7 +2099,6 @@ impl Render for Root {
             Overlay::Audit => Some(self.audit_panel(cx)),
             Overlay::Sftp => Some(self.sftp_panel(cx)),
             Overlay::Port => Some(self.port_panel(cx)),
-            Overlay::HostTools(v) => Some(ui::modal(v.clone()).into_any_element()),
         };
         if let Some(o) = overlay { root = root.child(o); }
         if let Some(m) = host_menu { root = root.child(m); }
@@ -2334,7 +2349,7 @@ fn open_main(cx: &mut App, rt: Arc<tokio::runtime::Runtime>, themes: Vec<Arc<The
                     let mut root = Root {
                         rt, default_target, tabs: vec![], active: 0, themes, schemes, histories: HashMap::new(),
                         manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], deny_reason: None, policy_port: None, overlay: Overlay::None, settings: None, sftp_views: HashMap::new(), sftp_current: None, sftp_windows: vec![], drag_div: None, port_view: None, quit_confirm: false, modal: None, quit_ok: false, chat_view: None,
-                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, menu_last: (None, None), menu_ghost: None, menu_ghost_seq: 0, sb_menu_at: std::time::Instant::now(), sb_modal: None, tag_filter: vec![], tab_menu: None, tab_menu_at: std::time::Instant::now(), new_menu: None, new_menu_at: std::time::Instant::now(), new_menu_closed: std::time::Instant::now(), new_menu_collapsed: config::get().sidebar.collapsed.clone(), new_menu_sel: 0, new_menu_search: new_menu_search.clone(), tab_scroll: gpui::ScrollHandle::new(), tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), dock: SideDock::None, lib_search: lib_search.clone(), lib_group: String::new(), lib_hist_all: false, lib_editor: None, lib_vars: None, lib_confirm: None, lib_notice: String::new(), ai_width: { let w = config::get().sidebar.ai_width; if (280.0..=560.0).contains(&w) { w } else { config::AI_DOCK_W } }, host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: !config::get().sidebar.collapsed_panel(), sb_anim: None, ws_seen: None, ws_last: HashMap::new(), tool: activity::Tool::from_id(&config::get().sidebar.tool), bottom_open: config::get().sidebar.bottom_open, bottom_tab: activity::Bottom::from_id(&config::get().sidebar.bottom_tab), bottom_h: config::get().sidebar.bottom_height.clamp(120., 600.), exec_log: Default::default(), dbp: Default::default(), audit, audit_verify: None, audit_filter: Default::default(),
+                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, menu_last: (None, None), menu_ghost: None, menu_ghost_seq: 0, sb_menu_at: std::time::Instant::now(), sb_modal: None, tag_filter: vec![], tab_menu: None, tab_menu_at: std::time::Instant::now(), new_menu: None, new_menu_at: std::time::Instant::now(), new_menu_closed: std::time::Instant::now(), new_menu_collapsed: config::get().sidebar.collapsed.clone(), new_menu_sel: 0, new_menu_search: new_menu_search.clone(), tab_scroll: gpui::ScrollHandle::new(), tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), dock: SideDock::None, dock_ai: false, dock_host: None, dock_min: HashSet::new(), dock_split: 0.5, lib_search: lib_search.clone(), lib_group: String::new(), lib_hist_all: false, lib_editor: None, lib_vars: None, lib_confirm: None, lib_notice: String::new(), ai_width: { let w = config::get().sidebar.ai_width; if (280.0..=560.0).contains(&w) { w } else { config::AI_DOCK_W } }, host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: !config::get().sidebar.collapsed_panel(), sb_anim: None, ws_seen: None, ws_last: HashMap::new(), tool: activity::Tool::from_id(&config::get().sidebar.tool), bottom_open: config::get().sidebar.bottom_open, bottom_tab: activity::Bottom::from_id(&config::get().sidebar.bottom_tab), bottom_h: config::get().sidebar.bottom_height.clamp(120., 600.), exec_log: Default::default(), dbp: Default::default(), audit, audit_verify: None, audit_filter: Default::default(),
                         settings_dirty: vec![], toast: None, toast_out: false, toast_seq: 0, _subs: vec![],
                     };
                     crate::ctxmenu_view::init(root.rt.handle().clone(), root.prompts.clone());

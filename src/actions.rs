@@ -49,7 +49,7 @@ impl Action {
             Action::ModePlan => i("mode_plan", t("ui.permission_mode_plan_read_only"), t("ui.permissions"), "", I::Shield),
             Action::ModeAuto => i("mode_auto", t("ui.permission_mode_auto_low_risk"), t("ui.permissions"), "", I::Shield),
             Action::OpenSftp => i("sftp", t("ui.sftp_files"), t("ui.tools"), "", I::FolderSync),
-            Action::OpenHostTools => i("host_tools", t("hosttools.title"), t("ui.tools"), "", I::ChartPie),
+            Action::OpenHostTools => i("host_tools", t("hosttools.title"), t("ui.tools"), "", I::Monitor),
             Action::OpenSnippets => i("snippets", t("lib.snippets"), t("ui.tools"), "alt-7", I::Code),
             Action::OpenHistory => i("history_panel", t("lib.history"), t("ui.tools"), "", I::Clock),
             Action::OpenPortForward => i("port_forward", t("ui.port_forwarding"), t("ui.tools"), "", I::ArrowLeftRight),

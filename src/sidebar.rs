@@ -496,8 +496,8 @@ impl Root {
         let _ = th;
         let items: [(Action, &str, IconName); 6] = [
             (Action::OpenAi, "AI / Agent", IconName::Bot),
+            (Action::OpenHostTools, t("hosttools.title"), IconName::Monitor),
             (Action::OpenSnippets, t("lib.snippets"), IconName::Code),
-            (Action::OpenHostTools, t("hosttools.title"), IconName::ChartPie),
             (Action::OpenHistory, t("lib.history"), IconName::Clock),
             (Action::CommandPalette, t("ui.command_palette"), IconName::Command),
             (Action::OpenAbout, t("ui.help_about"), IconName::CircleQuestionMark),
