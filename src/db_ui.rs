@@ -18,7 +18,8 @@ use crate::theme::{c, cur};
 use crate::ui::{self, icon, IconName};
 use crate::{Node, Overlay, Root, Tab};
 
-pub enum LiveState { Connecting, Ready(Arc<Live>), Failed(String) }
+/// `Doc`: a MongoDB connection opened from the tree (it has no SQL driver).
+pub enum LiveState { Connecting, Ready(Arc<Live>), Doc(Arc<ssh_term_proto::doc::Mongo>), Failed(String) }
 
 pub enum Kids { Loading, Ready(Vec<String>), Failed(String) }
 
@@ -59,8 +60,9 @@ impl Root {
 
     /// Connect (or reuse) `id`. Views waiting on it are updated when it settles.
     pub(crate) fn db_connect(&mut self, id: &str, cx: &mut Context<Self>) {
-        if matches!(self.dbp.live.get(id), Some(LiveState::Connecting | LiveState::Ready(_))) { return; }
+        if matches!(self.dbp.live.get(id), Some(LiveState::Connecting | LiveState::Ready(_) | LiveState::Doc(_))) { return; }
         let Some(conn) = Self::db_conn(id) else { return };
+        if conn.kind == assets::DbKind::Mongodb { self.mongo_connect(conn, cx); return; }
         if !conn.kind.driver_ready() { self.dbp.live.insert(id.into(), LiveState::Failed(tf("db.kind_unsupported", &[("kind", &conn.kind.label())]))); cx.notify(); return; }
         let password = crate::secret_store().get(&conn.password_secret()).map(|x| x.0);
         let via = match Some(conn.ssh_via.as_str()).filter(|s| !s.is_empty()) {
@@ -87,7 +89,11 @@ impl Root {
     }
 
     pub(crate) fn db_disconnect(&mut self, id: &str, cx: &mut Context<Self>) {
-        if let Some(LiveState::Ready(l)) = self.dbp.live.remove(id) { self.rt.spawn(async move { l.close().await; }); }
+        match self.dbp.live.remove(id) {
+            Some(LiveState::Ready(l)) => { self.rt.spawn(async move { l.close().await; }); }
+            Some(LiveState::Doc(m)) => { self.rt.spawn(async move { m.close().await; }); }
+            _ => {}
+        }
         self.dbp.kids.retain(|k, _| key_parts(k).0 != id);
         self.dbp.open.retain(|k| key_parts(k).0 != id);
         self.dbp.opened.retain(|k| key_parts(k).0 != id);
@@ -95,6 +101,32 @@ impl Root {
         for v in self.db_views(cx) { if v.read(cx).target.conn == id { v.update(cx, |v, cx| v.set_live(Err(t("db.disconnected").into()), cx)); } }
         cx.notify();
     }
+
+    /// MongoDB connection for the tree: same states as the SQL ones, `Doc` once open.
+    fn mongo_connect(&mut self, conn: DbConn, cx: &mut Context<Self>) {
+        let id = conn.id.clone();
+        let via = if conn.host.contains("://") { Ok(None) } else { self.via_for(&conn.ssh_via) };
+        let via = match via { Ok(v) => v, Err(e) => { self.dbp.live.insert(id, LiveState::Failed(e)); cx.notify(); return; } };
+        let password = crate::secret_store().get(&conn.password_secret()).map(|x| x.0);
+        self.dbp.live.insert(id.clone(), LiveState::Connecting);
+        let name = conn.name.clone();
+        let h = self.rt.spawn(async move { ssh_term_proto::doc::Mongo::open(&conn, password, via).await });
+        cx.spawn(async move |this, cx| {
+            let r = h.await.map_err(anyhow::Error::from).and_then(|r| r);
+            let _ = this.update(cx, |this, cx| {
+                match r {
+                    Ok(m) => { log_push(&this.exec_log, &name, &t("db.connected"), true, m.version.clone()); this.dbp.live.insert(id.clone(), LiveState::Doc(Arc::new(m))); if this.dbp.open.contains(&id) { this.db_load_kids(&id, cx); } }
+                    Err(e) => { let m = format!("{e:#}"); log_push(&this.exec_log, &name, &t("db.connect_failed"), false, m.clone()); this.dbp.live.insert(id.clone(), LiveState::Failed(m)); }
+                }
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
+    }
+
+    pub(crate) fn db_mongo(&self, id: &str) -> Option<Arc<ssh_term_proto::doc::Mongo>> { match self.dbp.live.get(id) { Some(LiveState::Doc(m)) => Some(m.clone()), _ => None } }
+    /// Connected (SQL driver or MongoDB).
+    pub(crate) fn db_up(&self, id: &str) -> bool { matches!(self.dbp.live.get(id), Some(LiveState::Ready(_) | LiveState::Doc(_))) }
 
     pub(crate) fn db_ready(&self, id: &str) -> Option<Arc<Live>> { match self.dbp.live.get(id) { Some(LiveState::Ready(l)) => Some(l.clone()), _ => None } }
 

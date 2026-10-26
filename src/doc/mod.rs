@@ -140,6 +140,21 @@ impl Mongo {
     pub async fn databases(&self) -> Result<Vec<String>> { let mut v = self.client.list_database_names().await?; v.sort(); Ok(v) }
     pub async fn collections(&self, db: &str) -> Result<Vec<String>> { let mut v = self.client.database(db).list_collection_names().await?; v.sort(); Ok(v) }
 
+    /// Members of a tree group of database `db`: "collections", "views", "gridfs" (bucket names) or
+    /// "indexes" (`collection.index`).
+    pub async fn tree_group(&self, db: &str, group: &str) -> Result<Vec<String>> {
+        let mut cur = self.client.database(db).list_collections().await?;
+        let mut items = vec![];
+        while cur.advance().await? {
+            let s = cur.deserialize_current()?;
+            items.push((s.name, matches!(s.collection_type, mongodb::results::CollectionType::View)));
+        }
+        if group != "indexes" { return Ok(tree_names(&items, group)); }
+        let mut v = vec![];
+        for c in tree_names(&items, "collections") { for i in self.indexes(db, &c).await? { v.push(format!("{c}.{}", i.name)); } }
+        Ok(v)
+    }
+
     pub async fn find(&self, db: &str, coll: &str, filter: &str, sort: &str, projection: &str, skip: u64) -> Result<FindPage> {
         let (f, s, p) = (parse_doc(filter)?, parse_doc(sort)?, parse_doc(projection)?);
         let c = self.client.database(db).collection::<Document>(coll);
@@ -223,8 +238,29 @@ impl Mongo {
 }
 
 
+/// Split `listCollections` results (name, is view) into tree groups (sorted). GridFS buckets show as
+/// one entry (`fs`) in their own group instead of their `.files` / `.chunks` collections.
+pub fn tree_names(items: &[(String, bool)], group: &str) -> Vec<String> {
+    let gridfs = |n: &str| n.strip_suffix(".files").filter(|b| items.iter().any(|(x, _)| *x == format!("{b}.chunks"))).map(str::to_string);
+    let bucket = |n: &str| gridfs(n).is_some() || n.strip_suffix(".chunks").is_some_and(|b| items.iter().any(|(x, _)| *x == format!("{b}.files")));
+    let mut v: Vec<String> = match group {
+        "views" => items.iter().filter(|(_, view)| *view).map(|(n, _)| n.clone()).collect(),
+        "gridfs" => items.iter().filter_map(|(n, _)| gridfs(n)).collect(),
+        _ => items.iter().filter(|(n, view)| !*view && !bucket(n) && !n.starts_with("system.")).map(|(n, _)| n.clone()).collect(),
+    };
+    v.sort();
+    v
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tree_groups_split() {
+        let it: Vec<(String, bool)> = [("users", false), ("v_active", true), ("fs.files", false), ("fs.chunks", false), ("system.views", false), ("a.files", false)].iter().map(|(n, v)| (n.to_string(), *v)).collect();
+        assert_eq!(super::tree_names(&it, "collections"), vec!["a.files", "users"]);
+        assert_eq!(super::tree_names(&it, "views"), vec!["v_active"]);
+        assert_eq!(super::tree_names(&it, "gridfs"), vec!["fs"]);
+    }
     use super::*;
     #[test]
     fn uris() {

@@ -74,6 +74,17 @@ impl Root {
     /// Fetch databases of a connection or schemas of a database.
     pub(crate) fn db_load_kids(&mut self, key: &str, cx: &mut Context<Self>) {
         let (id, db, _) = key_parts(key);
+        if let Some(m) = self.db_mongo(&id) {
+            self.dbp.kids.insert(key.into(), Kids::Loading);
+            let key = key.to_string();
+            let h = self.rt.spawn(async move { m.databases().await });
+            cx.spawn(async move |this, cx| {
+                let r = h.await.map_err(anyhow::Error::from).and_then(|r| r);
+                let _ = this.update(cx, |this, cx| { this.dbp.kids.insert(key, match r { Ok(v) => Kids::Ready(v), Err(e) => Kids::Failed(format!("{e:#}")) }); cx.notify(); });
+            }).detach();
+            cx.notify();
+            return;
+        }
         let Some(live) = self.db_ready(&id) else { return };
         self.dbp.kids.insert(key.into(), Kids::Loading);
         let key = key.to_string();
@@ -92,6 +103,17 @@ impl Root {
         let Some((node, g)) = split_group(gk) else { return };
         if !g.from_catalog() { return; }
         let (id, db, schema) = key_parts(node);
+        if let Some(m) = self.db_mongo(&id) {
+            let Some(db) = db else { return };
+            self.dbp.members.insert(gk.into(), Kids::Loading);
+            let gk = gk.to_string();
+            let h = self.rt.spawn(async move { m.tree_group(&db, g.id()).await });
+            cx.spawn(async move |this, cx| {
+                let r = h.await.map_err(anyhow::Error::from).and_then(|r| r);
+                let _ = this.update(cx, |this, cx| { this.dbp.members.insert(gk, match r { Ok(v) => Kids::Ready(v), Err(e) => Kids::Failed(format!("{e:#}")) }); cx.notify(); });
+            }).detach();
+            return;
+        }
         let Some(live) = self.db_ready(&id) else { return };
         let db = db.unwrap_or_default();
         let Some(sql) = objtree::list_sql(live.driver.family(), g, &db, schema.as_deref()) else { self.dbp.members.insert(gk.into(), Kids::Ready(vec![])); return };
@@ -111,7 +133,7 @@ impl Root {
     pub(crate) fn db_open_conn(&mut self, id: &str, cx: &mut Context<Self>) {
         if matches!(self.dbp.live.get(id), Some(LiveState::Failed(_))) { self.dbp.live.remove(id); }
         self.dbp.open.insert(id.into());
-        if self.db_ready(id).is_some() { if !self.dbp.kids.contains_key(id) { self.db_load_kids(id, cx); } } else { self.db_connect(id, cx); }
+        if self.db_up(id) { if !self.dbp.kids.contains_key(id) { self.db_load_kids(id, cx); } } else { self.db_connect(id, cx); }
         cx.notify();
     }
 
@@ -152,7 +174,7 @@ impl Root {
         if split_group(key).is_some() { self.dbp.members.remove(key); self.dbp.open.insert(key.into()); self.db_load_group(key, cx); cx.notify(); return; }
         let (id, db, _) = key_parts(key);
         if db.is_none() {
-            if self.db_ready(&id).is_none() { self.db_open_conn(&id, cx); return; }
+            if !self.db_up(&id) { self.db_open_conn(&id, cx); return; }
             self.dbp.kids.remove(key);
             self.db_load_kids(key, cx);
             return;
@@ -169,6 +191,15 @@ impl Root {
     }
 
     fn db_open_object(&mut self, gk: &str, name: &str, intent: Option<Intent>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((node, g)) = split_group(gk) {
+            let (id, db, _) = key_parts(node);
+            if Self::db_kind(&id) == Some(DbKind::Mongodb) {
+                let coll = if g == Group::GridFs { format!("{name}.files") } else { name.to_string() };
+                let p = self.mongo_pane(&id, (db.unwrap_or_default(), coll, String::new(), String::new()), window, cx);
+                self.push_pane(p, window, cx);
+                return;
+            }
+        }
         let target = Self::table_target(gk, name);
         self.open_db_tab(target.clone(), String::new(), window, cx);
         if let Some(i) = intent {
@@ -281,7 +312,7 @@ impl Root {
         let th = cur();
         let id = d.id.clone();
         let state = self.dbp.live.get(&id);
-        let ready = matches!(state, Some(LiveState::Ready(_)));
+        let ready = matches!(state, Some(LiveState::Ready(_) | LiveState::Doc(_)));
         let open = ready && self.dbp.open.contains(&id);
         let dot = match state { Some(LiveState::Connecting) => Some(c(th.warning)), Some(LiveState::Failed(_)) => Some(c(th.error)), _ => None };
         let sel = self.dbp.selected.as_deref() == Some(id.as_str());
@@ -289,15 +320,14 @@ impl Root {
         let glyph_col = if ready { crate::file_icon::db_tint(kind.id()) } else { c(th.overlay0) };
         let (k, k2) = (id.clone(), id.clone());
         let mut r = row(SharedString::from(format!("dbc:{id}")), depth, sel)
-            .on_click(cx.listener(move |this, e: &ClickEvent, w, cx| {
+            .on_click(cx.listener(move |this, e: &ClickEvent, _w, cx| {
                 this.dbp.selected = Some(k.clone());
-                if kind == DbKind::Mongodb { if e.click_count() >= 2 { this.open_mongo_tab(&k, w, cx); } cx.notify(); return; }
-                if this.db_ready(&k).is_some() { this.db_toggle_expand(&k, cx); }
+                if this.db_up(&k) { this.db_toggle_expand(&k, cx); }
                 else if e.click_count() >= 2 { this.db_open_conn(&k, cx); }
                 cx.notify();
             }))
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, e: &MouseDownEvent, _w, cx| { this.dbp.selected = Some(k2.clone()); this.dbp.arm = None; this.dbp.menu = Some((k2.clone(), e.position)); cx.notify(); }))
-            .child(chev(open, kind != DbKind::Mongodb))
+            .child(chev(open, true))
             .child(crate::file_icon::db_glyph(kind.id(), ICON, glyph_col))
             .child(label(d.name.clone(), if ready { c(th.text) } else { c(th.subtext) }))
             .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(kind.label()));
@@ -393,7 +423,7 @@ impl Root {
                     this.dbp.selected = Some(k1.clone());
                     if e.click_count() >= 2 {
                         if g == Group::Queries { this.db_open_saved(&node1, &n1, w, cx); }
-                        else if g.opens_data() { this.db_open_object(&gk1, &n1, None, w, cx); }
+                        else if g.opens_data() || (matches!(g, Group::Collections | Group::GridFs) && Self::db_kind(&key_parts(&gk1).0) == Some(DbKind::Mongodb)) { this.db_open_object(&gk1, &n1, None, w, cx); }
                     }
                     cx.notify();
                 }))
@@ -426,7 +456,10 @@ impl Root {
                     m = m.child(ui::menu_sep());
                     { let (n, nm) = (node.clone(), name.clone()); item!("dbm-qdel", IconName::Trash, t("dbt.delete"), true, |this, w, cx| this.db_saved_op(&n, &nm, "del", w, cx)); }
                 }
-                Group::Tables | Group::Collections => {
+                Group::Collections | Group::GridFs => {
+                    { let (g2, nm) = (gk.clone(), name.clone()); item!("dbm-mopen", IconName::Table, t("dbt.open_data"), false, |this, w, cx| this.db_open_object(&g2, &nm, None, w, cx)); }
+                }
+                Group::Tables => {
                     { let (g2, nm) = (gk.clone(), name.clone()); item!("dbm-topen", IconName::Table, t("dbt.open_data"), false, |this, w, cx| this.db_open_object(&g2, &nm, None, w, cx)); }
                     { let (g2, nm) = (gk.clone(), name.clone()); item!("dbm-tdesign", IconName::PencilRuler, t("dbt.design"), false, |this, w, cx| this.db_open_object(&g2, &nm, Some(Intent::Design), w, cx)); }
                     { let (g2, nm) = (gk.clone(), name.clone()); item!("dbm-texport", IconName::Download, t("dbt.export"), false, |this, w, cx| this.db_open_object(&g2, &nm, Some(Intent::Export), w, cx)); }
@@ -438,6 +471,9 @@ impl Root {
                             if this.dbp.arm.as_deref() == Some(k2.as_str()) { close(this); this.db_truncate(&g2, &nm, cx); } else { this.dbp.arm = Some(k2.clone()); }
                             cx.notify();
                         })));
+                }
+                Group::Views if Self::db_kind(&key_parts(&node).0) == Some(DbKind::Mongodb) => {
+                    { let (g2, nm) = (gk.clone(), name.clone()); item!("dbm-mvopen", IconName::Table, t("dbt.open_data"), false, |this, w, cx| this.db_open_object(&g2, &nm, None, w, cx)); }
                 }
                 Group::Views | Group::MatViews => {
                     { let (g2, nm) = (gk.clone(), name.clone()); item!("dbm-vopen", IconName::Table, t("dbt.open_data"), false, |this, w, cx| this.db_open_object(&g2, &nm, None, w, cx)); }
@@ -462,7 +498,7 @@ impl Root {
         } else {
             let (id, db, _) = key_parts(&key);
             if db.is_none() {
-                let ready = self.db_ready(&id).is_some();
+                let ready = self.db_up(&id);
                 let busy = matches!(self.dbp.live.get(&id), Some(LiveState::Connecting));
                 if ready || busy { let i2 = id.clone(); item!("dbm-close", IconName::Unplug, t("dbt.close_conn"), false, |this, _w, cx| this.db_disconnect(&i2, cx)); }
                 else { let i2 = id.clone(); item!("dbm-open", IconName::Plug, t("dbt.open_conn"), false, |this, _w, cx| this.db_open_conn(&i2, cx)); }
@@ -476,7 +512,7 @@ impl Root {
             m = m.child(ui::menu_sep());
             { let k = key.clone(); item!("dbm-query", IconName::SquareTerminal, t("db.new_query"), false, |this, w, cx| this.db_new_query(Some(k.clone()), w, cx)); }
             { let k = key.clone(); item!("dbm-qnew2", IconName::FilePlus, t("dbt.new_saved"), false, |this, w, cx| this.db_new_saved(&k, w, cx)); }
-            if self.db_ready(&id).is_some() { let k = key.clone(); item!("dbm-refresh", IconName::RefreshCw, t("db.refresh"), false, |this, _w, cx| this.db_refresh(&k, cx)); }
+            if self.db_up(&id) { let k = key.clone(); item!("dbm-refresh", IconName::RefreshCw, t("db.refresh"), false, |this, _w, cx| this.db_refresh(&k, cx)); }
             if db.is_none() { let i2 = id.clone(); item!("dbm-edit", IconName::Pencil, t("db.edit"), false, |this, w, cx| this.open_db_dialog(Some(i2.clone()), w, cx)); }
         }
         deferred(anchored().position(pos).child(m.occlude().on_mouse_down_out(cx.listener(|this, _, _w, cx| { this.dbp.menu = None; this.dbp.arm = None; cx.notify(); })))).with_priority(2).into_any_element()
