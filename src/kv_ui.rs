@@ -171,7 +171,7 @@ impl Root {
         cx.notify();
     }
 
-    fn push_pane(&mut self, pane: Entity<TermView>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn push_pane(&mut self, pane: Entity<TermView>, window: &mut Window, cx: &mut Context<Self>) {
         let fh = pane.read(cx).focus.clone();
         self.tabs.push(Tab { layout: Node::Leaf(pane.clone()), focused: pane, name: None });
         self.active = self.tabs.len() - 1;
@@ -186,7 +186,7 @@ impl Root {
     }
     fn push_embed(&mut self, e: Embed, window: &mut Window, cx: &mut Context<Self>) { let p = self.embed_pane(e, window, cx); self.push_pane(p, window, cx); }
 
-    fn production_of(tags: &[String], group: &str) -> bool { let s = config::get(); assets::is_production(tags, group, &s.groups, &s.tags.production) }
+    pub(crate) fn production_of(tags: &[String], group: &str) -> bool { let s = config::get(); assets::is_production(tags, group, &s.groups, &s.tags.production) }
     /// SSH route to a saved host name ("" = none); Err when the host is gone.
     pub(crate) fn via_for(&self, host: &str) -> Result<Option<(ssh_term_proto::ssh::SshTarget, ssh_term_proto::ssh::Prompts)>, String> {
         if host.is_empty() { return Ok(None); }
@@ -210,6 +210,17 @@ impl Root {
         self.embed_pane(Embed::Kv(v), window, cx)
     }
     pub(crate) fn open_redis_tab(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) { let p = self.redis_pane(id, None, window, cx); self.push_pane(p, window, cx); }
+    /// Redis tab on logical database `db` (default: the connection's own).
+    pub(crate) fn redis_pane_on(&mut self, id: &str, db: Option<u32>, key: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Entity<TermView> {
+        let Some(mut conn) = config::get().redis.iter().find(|r| r.id == id).cloned() else { return self.redis_pane(id, key, window, cx) };
+        if let Some(n) = db { conn.db = n; }
+        let via = if conn.mode == "standalone" || conn.mode.is_empty() { self.via_for(&conn.ssh_via) } else { Ok(None) };
+        let pw = crate::secret_store().get(&conn.password_secret()).map(|x| x.0);
+        let prod = Self::production_of(&conn.tags, &conn.group_path());
+        let (rt, log) = (self.rt.handle().clone(), self.exec_log.clone());
+        let v = cx.new(|cx| KvView::new(conn, pw, via, key, prod, rt, log, window, cx));
+        self.embed_pane(Embed::Kv(v), window, cx)
+    }
 
     /// MongoDB tab for a saved DB connection; `start` = (database, collection, filter, sort).
     pub(crate) fn mongo_pane(&mut self, id: &str, start: (String, String, String, String), window: &mut Window, cx: &mut Context<Self>) -> Entity<TermView> {
@@ -286,6 +297,11 @@ impl Root {
             let (msg, btn) = match kind { AssetKind::Redis => (t("kv.redis_empty"), t("kv.redis_conn")), AssetKind::Docker => (t("kv.docker_empty"), t("kv.docker_ep")) };
             return col.child(div().p_3().flex().flex_col().gap_3().text_size(px(12.)).text_color(c(th.subtext)).child(msg)
                 .child(ui::button("kv-empty-add", btn, 1).on_click(cx.listener(move |this, _, w, cx| this.open_asset_dialog(kind, None, w, cx))))).into_any_element();
+        }
+        if kind == AssetKind::Redis {
+            col = col.child(self.kv_tree_list(cx));
+            if let Some((k, pos)) = self.kvp.menu.clone() { col = col.child(self.kv_menu_el(k, pos, cx)); }
+            return col.into_any_element();
         }
         let mut sorted = items;
         sorted.sort_by(|a, b| (a.3.clone(), a.1.to_lowercase()).cmp(&(b.3.clone(), b.1.to_lowercase())));

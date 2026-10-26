@@ -379,6 +379,16 @@ impl Kv {
         };
         Ok(parse_info(&text(&v)).into_iter().map(|(_, k, v)| (k, v)).collect())
     }
+    /// Number of logical databases (`CONFIG GET databases`; 16 when the server refuses, 1 in a cluster).
+    pub async fn database_count(&self) -> u32 {
+        if !self.nodes.is_empty() || self.is_cluster() { return 1; }
+        match self.q(&["CONFIG", "GET", "databases"]).await {
+            Ok(v) => list(v).get(1).map(text).and_then(|s| s.trim().parse().ok()).filter(|n| *n > 0).unwrap_or(16),
+            Err(_) => 16,
+        }
+    }
+    /// Key counts per database from `INFO keyspace`.
+    pub async fn keyspace(&self) -> Vec<(u32, u64)> { self.info_section("keyspace").await.map(|v| keyspace_counts(&v)).unwrap_or_default() }
     /// INFO of the server (first master in a cluster) as (section, key, value).
     pub async fn info(&self) -> Result<Vec<(String, String, String)>> {
         let v = if self.nodes.is_empty() { self.q(&["INFO", "everything"]).await.or(self.q(&["INFO"]).await)? } else {
@@ -407,6 +417,15 @@ impl Kv {
 pub struct SlowEntry { pub id: i64, pub at: i64, pub micros: i64, pub command: String, pub client: String }
 
 /// `# Section` / `key:value` lines into (section, key, value).
+/// `db3` → `keys=12,expires=0,…` pairs to (3, 12).
+pub fn keyspace_counts(v: &[(String, String)]) -> Vec<(u32, u64)> {
+    v.iter().filter_map(|(k, v)| {
+        let n = k.strip_prefix("db")?.parse().ok()?;
+        let keys = v.split(',').find_map(|p| p.strip_prefix("keys="))?.parse().ok()?;
+        Some((n, keys))
+    }).collect()
+}
+
 pub fn parse_info(s: &str) -> Vec<(String, String, String)> {
     let mut sec = String::new();
     let mut out = vec![];
@@ -435,6 +454,11 @@ pub fn hex_dump(b: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn keyspace() {
+        let v = vec![("db0".to_string(), "keys=12,expires=1,avg_ttl=0".to_string()), ("db3".into(), "keys=4,expires=0".into()), ("x".into(), "keys=1".into())];
+        assert_eq!(super::keyspace_counts(&v), vec![(0, 12), (3, 4)]);
+    }
     use super::*;
     #[test]
     fn info_parse() {

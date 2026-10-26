@@ -1671,3 +1671,5 @@
 "dbt.g_indexes" = "Indexes"
 "dbt.g_queries" = "Queries"
 "dbt.g_backups" = "Backups"
+"kvt.more" = "Only the first {n} keys are loaded"
+"kvt.open_tab" = "Open Redis tab"

@@ -1671,3 +1671,5 @@
 "dbt.g_indexes" = "索引"
 "dbt.g_queries" = "查询"
 "dbt.g_backups" = "备份"
+"kvt.more" = "仅加载前 {n} 个键"
+"kvt.open_tab" = "打开 Redis 标签页"
