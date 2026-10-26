@@ -8516,7 +8516,7 @@ dependencies = [
 
 [[package]]
 name = "ssh-term-proto"
-version = "0.1.19"
+version = "0.2.0-beta.1"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
