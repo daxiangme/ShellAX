@@ -9,6 +9,7 @@ mod chrome;
 mod motion;
 use gpui::AnimationExt as _;
 mod filekind;
+mod file_icon;
 mod sidebar;
 mod activity;
 mod db_dialog;
@@ -2267,7 +2268,7 @@ fn main() {
     let themes = theme::load_all();
     let schemes = theme::load_schemes(&themes);
     let default_target = if std::env::var("NO_SSH").is_ok() { None } else { env_target(&config::get().known_hosts_path()) };
-    gpui_platform::application().with_assets(gpui_kit_assets::AllAssets).run(move |cx: &mut App| {
+    gpui_platform::application().with_assets(file_icon::Assets).run(move |cx: &mut App| {
         gpui_component::init(cx);
         // macOS menu bar (no-op elsewhere): app / file / edit / view / window / help, with ⌘Q.
         app_menu::install(cx);

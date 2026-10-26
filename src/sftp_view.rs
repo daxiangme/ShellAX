@@ -1109,15 +1109,15 @@ impl SftpView {
             if shown > 2000 { break; }
             let selected = selected_on && (p.multi.contains(&i) || p.sel == Some(i));
             let drag = DragFile { pane: pi, path: p.path_of(&e.name), name: e.name.clone() };
-            let g = crate::filekind::glyph(&e.name, e.is_dir, e.mode, &crate::theme::scheme().ansi, dark, th.overlay1);
+            let cls = crate::file_icon::class(&e.name, e.is_dir, e.mode);
             let hidden = e.name.starts_with('.');
-            list = list.child(div().id(("sftp-row", pid(pi, i))).h(px(32.)).flex_shrink_0().px_3().flex().items_center().gap_2().text_size(px(FS_BODY)).text_color(c(th.text)).cursor_pointer()
+            list = list.child(div().id(("sftp-row", pid(pi, i))).h(px(26.)).flex_shrink_0().px_3().flex().items_center().gap_2().text_size(px(FS_BODY)).text_color(c(th.text)).cursor_pointer()
                 .when(hidden, |d| d.opacity(0.72))
                 .when(selected, |d| d.bg(c(th.accent).opacity(0.2))).when(!selected, |d| d.hover(|d| d.bg(c(cur().surface0))))
                 .on_click(cx.listener(move |v, ev: &gpui::ClickEvent, _, cx| { if ev.click_count() >= 2 { v.open(pi, i, cx) } else { v.select(pi, i, ev.modifiers()); cx.notify() } }))
                 .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |v, ev: &gpui::MouseDownEvent, _, cx| { v.open_ctx_menu(pi, i, ev.position, cx); cx.stop_propagation(); }))
                 .on_drag(drag, |d: &DragFile, _, _, cx| cx.new(|_| DragPreview(d.name.clone())))
-                .child(icon(g.icon, 16., c(g.color)))
+                .child(crate::file_icon::file_icon(cls, 18., dark))
                 .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(e.name.clone()))
                 .child(div().w(px(wt)).flex_shrink_0().px_1().overflow_hidden().whitespace_nowrap().text_size(px(FS_SECONDARY)).text_color(c(th.overlay0)).child(fmt_mtime(e.mtime)))
                 .child(div().w(px(ws)).flex_shrink_0().px_1().overflow_hidden().whitespace_nowrap().text_size(px(FS_SECONDARY)).text_color(c(th.overlay0)).child(if e.is_dir { "—".to_string() } else { human(e.size) }))
