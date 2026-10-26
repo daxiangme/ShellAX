@@ -134,8 +134,9 @@ impl Default for Terminal { fn default() -> Self { Self { padding: f_pad(), show
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
-pub struct Suggest { pub enabled: bool, pub accept: String, pub local_history: bool, pub remote_history: bool, pub filter_patterns: Vec<String>, pub ai: bool }
-impl Default for Suggest { fn default() -> Self { Self { enabled: t(), accept: s_both(), local_history: t(), remote_history: t(), filter_patterns: vec!["(?i)vault +login".into()], ai: false } } }
+pub struct Suggest { pub enabled: bool, pub accept: String, pub local_history: bool, pub remote_history: bool, pub filter_patterns: Vec<String>, pub ai: bool, /// history dropdown under the cursor while typing
+    pub popup: bool }
+impl Default for Suggest { fn default() -> Self { Self { enabled: t(), accept: s_both(), local_history: t(), remote_history: t(), filter_patterns: vec!["(?i)vault +login".into()], ai: false, popup: t() } } }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -311,10 +312,25 @@ impl Tags {
 /// Sidebar state persisted across runs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
-pub struct Sidebar { pub collapsed: Vec<String>, /** px, 180–480 */ pub width: f32, /** px, 280–560; missing config uses AI_DOCK_W */ #[serde(default = "default_ai_width")] pub ai_width: f32 }
-impl Default for Sidebar { fn default() -> Self { Self { collapsed: vec![], width: SIDEBAR_W, ai_width: AI_DOCK_W } } }
+pub struct Sidebar {
+    pub collapsed: Vec<String>,
+    /** px, 180–480 */ pub width: f32,
+    /** px, 280–560; missing config uses AI_DOCK_W */ #[serde(default = "default_ai_width")] pub ai_width: f32,
+    /// Active tool window of the left activity strip (`hosts`, `sftp`, `database`, …).
+    pub tool: String,
+    /// Bottom tool window (transfers / logs) open, its height in px and active tab.
+    pub bottom_open: bool,
+    pub bottom_height: f32,
+    pub bottom_tab: String,
+    /// Left tool window collapsed (activity strip only).
+    pub panel_hidden: bool,
+}
+impl Default for Sidebar { fn default() -> Self { Self { collapsed: vec![], width: SIDEBAR_W, ai_width: AI_DOCK_W, tool: "hosts".into(), bottom_open: false, bottom_height: BOTTOM_H, bottom_tab: "transfers".into(), panel_hidden: false } } }
+impl Sidebar { /** left tool window starts collapsed */ pub fn collapsed_panel(&self) -> bool { self.panel_hidden } }
+/// Default bottom tool window height.
+pub const BOTTOM_H: f32 = 220.0;
 /// Default sidebar width (double-click on its edge resets to this).
-pub const SIDEBAR_W: f32 = 248.0;
+pub const SIDEBAR_W: f32 = 260.0;
 /// Default AI dock width (double-click on its edge resets to this).
 pub const AI_DOCK_W: f32 = 380.0;
 fn default_ai_width() -> f32 { AI_DOCK_W }
@@ -350,13 +366,25 @@ pub struct Settings {
     /// action id -> keystroke, e.g. "split" = "ctrl-shift-d"; missing = default
     pub keys: std::collections::BTreeMap<String, String>,
     pub notify: Notify,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hosts: Vec<HostEntry>,
     /// Host tree groups (PRD 5.23), sidebar order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<ssh_term_proto::hosttree::GroupEntry>,
     pub tags: Tags,
     pub sidebar: Sidebar,
     /// Saved directories opened from the sidebar.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub places: Vec<Place>,
+    /// Database connections (`[[db]]`, v0.2): share the host group tree and tags.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub db: Vec<ssh_term_proto::assets::DbConn>,
+    /// Redis connections (`[[redis]]`, v0.2 PRD §6.4).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub redis: Vec<ssh_term_proto::assets::RedisConn>,
+    /// Docker engines (`[[docker]]`, v0.2 PRD §6.5).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub docker: Vec<ssh_term_proto::assets::DockerEndpoint>,
     /// legacy top-level keys (v0.5 files); folded into sections on load
     #[serde(skip_serializing)] pub theme: Option<String>,
     #[serde(skip_serializing)] pub known_hosts: Option<String>,
@@ -387,6 +415,10 @@ impl Settings {
             if let Some(rest) = t.strip_prefix("macOS ") { *t = rest.to_string(); }
         }
         ssh_term_proto::hosttree::ensure_groups(&s.hosts, &mut s.groups);
+        ssh_term_proto::assets::normalize_dbs(&mut s.db);
+        ssh_term_proto::assets::normalize_kv_docker(&mut s.redis, &mut s.docker);
+        ssh_term_proto::assets::ensure_asset_groups(&s.db, &mut s.groups);
+        if s.sidebar.tool.is_empty() { s.sidebar.tool = "hosts".into(); }
         Ok(s)
     }
     pub fn load() -> (Settings, Option<String>) {
@@ -461,12 +493,12 @@ impl Settings {
     /// then ~/.ssh/config (if enabled), defaults applied, production computed from tags.
     /// The sidebar shows only `self.hosts` (PRD 5.23).
     pub fn all_hosts(&self) -> Vec<HostEntry> {
-        use ssh_term_proto::hosts::{expand_tilde, load_ssh_config};
+        use ssh_term_proto::hosts::expand_tilde;
         let mut hosts: Vec<HostEntry> = self.hosts.clone();
         for h in &mut hosts { h.production = self.host_is_production(h); }
         let path = std::env::var("SHELLAX_SSH_CONFIG").unwrap_or_else(|_| self.ssh.ssh_config.clone());
         if self.ssh.read_ssh_config {
-            for h in load_ssh_config(&expand_tilde(&path)) { if !hosts.iter().any(|x| x.name == h.name) { hosts.push(h); } }
+            for h in ssh_config_cached(&expand_tilde(&path)).iter() { if !hosts.iter().any(|x| x.name == h.name) { hosts.push(h.clone()); } }
         }
         for h in &mut hosts {
             if h.user.is_none() && !self.ssh.default_user.is_empty() { h.user = Some(self.ssh.default_user.clone()); }
@@ -658,6 +690,39 @@ mod tests {
         assert!(s.all_hosts()[0].production && s.policy_ctx().prod_hosts.contains(&"prod".to_string()));
     }
     #[test]
+    fn v01_config_upgrades_to_asset_model() {
+        // a v0.1 file: hosts, groups and the old sidebar section only
+        let src = "[[hosts]]\nname = \"web\"\nhost = \"10.0.0.1\"\ngroup = \"prod\"\n[[groups]]\npath = \"prod\"\ntags = [\"red\"]\n[sidebar]\ncollapsed = [\"prod\"]\nwidth = 300.0\n";
+        let s = Settings::parse(src).unwrap();
+        assert!(s.db.is_empty());
+        assert_eq!((s.sidebar.tool.as_str(), s.sidebar.width, s.sidebar.ai_width, s.sidebar.bottom_open), ("hosts", 300.0, AI_DOCK_W, false));
+        assert_eq!(s.sidebar.collapsed, vec!["prod".to_string()]);
+        // writing it back and reading again is lossless and adds no [[db]] noise
+        let text = toml::to_string_pretty(&s).unwrap();
+        assert!(!text.contains("[[db]]"));
+        assert_eq!(Settings::parse(&text).unwrap(), s);
+    }
+    #[test]
+    fn db_assets_share_groups() {
+        let src = "[[groups]]\npath = \"prod\"\ntags = [\"red\"]\n[[db]]\nname = \"orders\"\nkind = \"mysql\"\nhost = \"10.0.3.12\"\nuser = \"app\"\ngroup = \"prod/east\"\nssh_via = \"web\"\n[[db]]\nkind = \"sqlite\"\nfile = \"/tmp/a.db\"\n";
+        let s = Settings::parse(src).unwrap();
+        assert_eq!(s.db.len(), 2);
+        assert!(s.groups.iter().any(|g| g.path == "prod/east"));
+        assert!(!s.db[0].id.is_empty() && s.db[0].id != s.db[1].id);
+        assert_eq!(s.db[1].name, "a.db");
+        assert!(ssh_term_proto::assets::db_is_production(&s.db[0], &s.groups, &s.tags.production));
+        // ids are persisted so secrets stay attached after a reload
+        let back = Settings::parse(&toml::to_string_pretty(&s).unwrap()).unwrap();
+        assert_eq!(back.db, s.db);
+        let src = "[[redis]]\nname = \"cache\"\nhost = \"10.0.0.5\"\ndb = 2\ntags = [\"red\"]\n[[docker]]\nendpoint = \"ssh\"\nssh_host = \"web\"\n";
+        let mut s: Settings = toml::from_str(src).unwrap();
+        ssh_term_proto::assets::normalize_kv_docker(&mut s.redis, &mut s.docker);
+        assert_eq!((s.redis[0].db, s.redis[0].effective_port(), s.docker[0].name.as_str(), s.docker[0].socket_path()), (2, 6379, "web", "/var/run/docker.sock"));
+        assert!(ssh_term_proto::assets::is_production(&s.redis[0].tags, &s.redis[0].group_path(), &s.groups, "red"));
+        let back: Settings = toml::from_str(&toml::to_string(&s).unwrap()).unwrap();
+        assert_eq!((back.redis, back.docker), (s.redis.clone(), s.docker.clone()));
+    }
+    #[test]
     fn dotted_get_set_roundtrip() {
         let mut s = Settings::default();
         s.set("terminal.copy_on_select", toml::Value::Boolean(true)).unwrap();
@@ -708,7 +773,8 @@ mod tests {
         s.set("appearance.opacity", toml::Value::Float(0.82f32 as f64)).unwrap();
         let out = tidy_floats(&toml::to_string_pretty(&s).unwrap());
         assert!(out.contains("opacity = 0.82\n"), "{out}");
-        assert!(out.contains("line_height = 1.4\n"), "{out}");
+        // line_height is a multiplier of the font metrics (default 1.0)
+        assert!(out.contains("line_height = 1.0\n"), "{out}");
         assert_eq!(Settings::parse(&out).unwrap(), s);
     }
 
@@ -762,4 +828,45 @@ mod audit_dir_tests {
         assert_eq!(super::audit_dir(&super::s_auditdir()), std::path::PathBuf::from("/tmp/xdgx/shellax/audit"));
         assert_eq!(super::audit_dir("/var/aud"), std::path::PathBuf::from("/var/aud"));
     }
+}
+
+/// Parsed ~/.ssh/config, re-read only when its path or mtime changes (mtime checked at most
+/// every 2 s), so rendering the sidebar never touches the disk.
+struct SshCfgCache { path: PathBuf, mtime: Option<std::time::SystemTime>, checked: std::time::Instant, hosts: Arc<Vec<HostEntry>>, stamp: u64 }
+static SSH_CFG: std::sync::Mutex<Option<SshCfgCache>> = std::sync::Mutex::new(None);
+static SSH_CFG_STAMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn ssh_config_cached(path: &std::path::Path) -> Arc<Vec<HostEntry>> {
+    let mut g = SSH_CFG.lock().unwrap();
+    let now = std::time::Instant::now();
+    if let Some(c) = g.as_mut() {
+        if c.path == path {
+            if now.duration_since(c.checked) < std::time::Duration::from_secs(2) { return c.hosts.clone(); }
+            c.checked = now;
+            let m = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+            if m == c.mtime { return c.hosts.clone(); }
+        }
+    }
+    let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    let hosts = Arc::new(ssh_term_proto::hosts::load_ssh_config(path));
+    let stamp = SSH_CFG_STAMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    *g = Some(SshCfgCache { path: path.to_path_buf(), mtime, checked: now, hosts: hosts.clone(), stamp });
+    hosts
+}
+
+/// Every host resolved to a connection target, cached until settings or ~/.ssh/config change
+/// (sidebar, SFTP host picker).
+pub fn resolved_hosts() -> Arc<Vec<(HostEntry, ssh_term_proto::ssh::SshTarget)>> {
+    type R = Arc<Vec<(HostEntry, ssh_term_proto::ssh::SshTarget)>>;
+    static CACHE: std::sync::Mutex<Option<(u64, u64, R)>> = std::sync::Mutex::new(None);
+    let s = get();
+    let all = s.all_hosts(); // cheap now; also refreshes the ssh_config stamp
+    let key = (generation(), SSH_CFG.lock().unwrap().as_ref().map(|c| c.stamp).unwrap_or(0));
+    let mut g = CACHE.lock().unwrap();
+    if let Some((a, b, r)) = g.as_ref() { if (*a, *b) == key { return r.clone(); } }
+    let kh = s.known_hosts_path();
+    let o = s.ssh_opts();
+    let r: R = Arc::new(all.iter().map(|h| (h.clone(), ssh_term_proto::hosts::resolve(h, &kh, &all, &o))).collect());
+    *g = Some((key.0, key.1, r.clone()));
+    r
 }

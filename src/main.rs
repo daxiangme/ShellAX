@@ -2,12 +2,28 @@
 //! shellax prototype v5 UI: sidebar (host search / groups / function area), tabs with split
 //! panes, settings page, command palette, host dialog, tool panels, status bar.
 mod actions;
+mod ai_ctx;
+mod card_layout;
 mod app_menu;
 mod chrome;
 mod motion;
 use gpui::AnimationExt as _;
 mod filekind;
+mod file_icon;
 mod sidebar;
+mod activity;
+mod db_dialog;
+mod db_ui;
+mod db_tree;
+mod kv_tree;
+mod db_view;
+mod kv_view;
+mod workspace;
+mod doc_view;
+mod dock_view;
+mod kv_ui;
+mod host_picker;
+mod db_editor;
 mod tabs_ui;
 mod config;
 mod host_dialog;
@@ -169,9 +185,9 @@ enum Edge { Left, Right, Top, Bottom }
 #[derive(Clone)]
 enum Modal { Broadcast(Vec<String>), Snapshots, Recordings, QuickStart { dir: String } }
 
-struct Tab { layout: Node<Entity<TermView>>, focused: Entity<TermView>, /** custom name (PRD 5.23) */ name: Option<String> }
+pub(crate) struct Tab { layout: Node<Entity<TermView>>, focused: Entity<TermView>, /** custom name (PRD 5.23) */ name: Option<String> }
 
-pub(crate) enum Overlay { None, Palette(Entity<Palette>), Host(Entity<HostDialog>), Audit, Sftp, Port, HostTools(Entity<host_tools_view::HostToolsView>) }
+pub(crate) enum Overlay { None, Palette(Entity<Palette>), Host(Entity<HostDialog>), Audit, Sftp, Port, Db(Entity<db_dialog::DbDialog>), Asset(Entity<kv_ui::AssetDialog>) }
 
 /// Which right-hand card is open. AI, saved commands and history share one slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -219,6 +235,22 @@ pub(crate) struct Root {
     sb_width: f32,
     /// Right-hand card: AI, saved commands, or history. Only one is open.
     dock: SideDock,
+    /// AI assistant card open in the right column (independent of the library card).
+    dock_ai: bool,
+    /// Host status card open in the right column.
+    dock_host: Option<Entity<host_tools_view::HostToolsView>>,
+    /// Right-column cards collapsed to their title row.
+    dock_min: HashSet<&'static str>,
+    /// Share of the right column given to the top card when two or more are expanded.
+    dock_split: f32,
+    /// Right-column slide: (showing, seq). While closing, the cards stay mounted until it ends.
+    dock_anim: Option<(bool, u64)>,
+    /// Column had cards on the previous render (to start the slide-in once).
+    dock_shown: bool,
+    /// Per-card expand counter, so a re-expanded card plays its reveal once.
+    dock_flip: HashMap<&'static str, u64>,
+    /// Bottom panel slide: (showing, seq).
+    bottom_anim: Option<(bool, u64)>,
     lib_search: Entity<InputState>,
     lib_group: String,
     lib_hist_all: bool,
@@ -247,8 +279,20 @@ pub(crate) struct Root {
     host_os: Arc<Mutex<HashMap<String, String>>>,
     os_probing: HashSet<String>,
     sidebar_visible: bool,
+    /// Active module of the left activity strip.
+    tool: activity::Tool,
+    bottom_open: bool,
+    bottom_tab: activity::Bottom,
+    bottom_h: f32,
+    /// Execution log shown in the bottom tool window (database statements, …).
+    exec_log: activity::ExecLog,
+    dbp: db_ui::DbPanel,
+    kvp: kv_tree::KvPanel,
     /// Sidebar collapse/expand animation in flight: (expanding, seq).
     sb_anim: Option<(bool, u64)>,
+    /// Active tab last seen by `sync_workspace`, and the last active tab of each module.
+    ws_seen: Option<gpui::EntityId>,
+    ws_last: HashMap<&'static str, gpui::EntityId>,
     audit: Arc<AuditLog>,
     pub(crate) audit_verify: Option<Result<usize, (usize, String)>>,
     pub(crate) audit_filter: ssh_term_proto::audit::Filter,
@@ -300,13 +344,16 @@ impl Root {
     /// resized once the animation has finished, not on every frame.
     pub(crate) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         let show = !self.sidebar_visible;
+        let _ = config::update(|s| s.sidebar.panel_hidden = !show);
         if motion::reduced() { self.sidebar_visible = show; self.sb_anim = None; cx.notify(); return; }
         let seq = self.sb_anim.map(|a| a.1 + 1).unwrap_or(1);
         self.sb_anim = Some((show, seq));
+        let dur = if show { motion::PANEL_OPEN_MS } else { motion::PANEL_CLOSE_MS };
+        motion::hold(dur + 20);
         if show { self.sidebar_visible = true; }
         cx.notify();
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(motion::ms(motion::SIDEBAR_MS)).await;
+            cx.background_executor().timer(motion::ms(dur)).await;
             let _ = this.update(cx, |r, cx| { if r.sb_anim.is_some_and(|a| a.1 == seq) { r.sb_anim = None; if !show { r.sidebar_visible = false; } cx.notify(); } });
         }).detach();
     }
@@ -339,24 +386,61 @@ impl Root {
     }
 
     pub(crate) fn dock_is(&self, a: actions::Action) -> bool {
-        matches!((self.dock, a), (SideDock::Ai, actions::Action::OpenAi) | (SideDock::Snippets, actions::Action::OpenSnippets) | (SideDock::History, actions::Action::OpenHistory))
+        match a {
+            actions::Action::OpenAi => self.dock_ai,
+            actions::Action::OpenHostTools => self.dock_host.is_some(),
+            actions::Action::OpenSnippets => self.dock == SideDock::Snippets,
+            actions::Action::OpenHistory => self.dock == SideDock::History,
+            _ => false,
+        }
     }
 
+    /// Right-column cards open independently; snippets and history share one slot.
     fn toggle_dock(&mut self, which: SideDock, window: &mut Window, cx: &mut Context<Self>) {
-        if self.dock == which {
-            self.dock = SideDock::None;
-            chat_view::set_dock_open(false);
-            self.focus_active(window, cx);
-            cx.notify();
+        if which == SideDock::Ai {
+            if self.dock_ai { self.close_dock("ai-dock", window, cx); } else { self.dock_min.remove("ai-dock"); self.open_chat(window, cx); }
             return;
         }
+        if self.dock == which { self.close_dock("lib-dock", window, cx); return; }
         self.dock = which;
-        if which == SideDock::Ai {
-            self.open_chat(window, cx);
-        } else {
-            chat_view::set_dock_open(false);
+        cx.notify();
+    }
+    pub(crate) fn close_dock(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // closing the last card slides the whole column out first, then removes it
+        let left = [self.dock_ai && id != "ai-dock", self.dock_host.is_some() && id != "host-dock", self.dock != SideDock::None && !matches!(id, "snip-dock" | "hist-dock" | "lib-dock")];
+        if !left.iter().any(|x| *x) && !motion::reduced() {
+            if self.dock_anim.is_some_and(|a| !a.0) { return; }
+            let seq = self.dock_anim.map(|a| a.1 + 1).unwrap_or(1);
+            self.dock_anim = Some((false, seq));
+            motion::hold(motion::PANEL_CLOSE_MS + 20);
             cx.notify();
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(motion::ms(motion::PANEL_CLOSE_MS)).await;
+                let _ = this.update_in(cx, |r, w, cx| if r.dock_anim.is_some_and(|a| a.1 == seq) {
+                    r.dock_anim = None;
+                    r.dock_ai = false; chat_view::set_dock_open(false); r.dock_host = None; r.dock = SideDock::None;
+                    r.focus_active(w, cx); cx.notify();
+                });
+            }).detach();
+            return;
         }
+        match id {
+            "ai-dock" => { self.dock_ai = false; chat_view::set_dock_open(false); }
+            "host-dock" => self.dock_host = None,
+            _ => self.dock = SideDock::None,
+        }
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+    fn toggle_host_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dock_host.is_some() { self.close_dock("host-dock", window, cx); return; }
+        let tg = self.focused_pane(window, cx).and_then(|p| match &p.read(cx).spec { Spec::Ssh(t) => Some(t.clone()), _ => None });
+        let (rt, pr) = (self.rt.handle().clone(), self.prompts.clone());
+        let v = cx.new(|cx| host_tools_view::HostToolsView::new(tg, rt, pr, cx));
+        self._subs.push(cx.subscribe_in(&v, window, |this, _, _ev: &host_tools_view::HostToolsEvent, w, cx| this.close_dock("host-dock", w, cx)));
+        self.dock_min.remove("host-dock");
+        self.dock_host = Some(v);
+        cx.notify();
     }
     fn open_pane(&mut self, spec: Spec, window: &mut Window, cx: &mut Context<Self>) -> Entity<TermView> {
         self.open_pane_with(spec, PaneInit::default(), window, cx)
@@ -537,10 +621,15 @@ impl Root {
             None => {
                 let v = cx.new(|cx| chat_view::ChatView::new(window, cx));
                 self._subs.push(cx.subscribe_in(&v, window, |this, _, ev: &chat_view::ChatEvent, w, cx| match ev {
-                    chat_view::ChatEvent::Close => { this.dock = SideDock::None; chat_view::set_dock_open(false); this.focus_active(w, cx); cx.notify(); }
+                    chat_view::ChatEvent::Close => this.close_dock("ai-dock", w, cx),
                     chat_view::ChatEvent::Insert(cmd) => {
-                        // AI output is only inserted, never executed (the user presses Enter)
-                        if let Some(p) = this.tabs.get(this.active).map(|t| t.focused.clone()) { let cmd = cmd.clone(); p.update(cx, |t, cx| t.ai_insert_text(cmd, cx)); }
+                        // AI output is only inserted, never executed (the user runs it)
+                        match this.ai_target(cx) {
+                            ai_ctx::Target::Db(d) => { if let Some(d) = d.upgrade() { let cmd = cmd.clone(); d.update(cx, |v, cx| v.insert_text(&cmd, w, cx)); } }
+                            ai_ctx::Target::Redis(k) => { if let Some(k) = k.upgrade() { let cmd = cmd.clone(); k.update(cx, |v, cx| v.insert_console(&cmd, false, w, cx)); } }
+                            ai_ctx::Target::Docker(_) | ai_ctx::Target::Other => { cx.write_to_clipboard(gpui::ClipboardItem::new_string(cmd.clone())); this.toast(t("aictx.copied").to_string(), cx); }
+                            ai_ctx::Target::Terminal => { if let Some(p) = this.tabs.get(this.active).map(|t| t.focused.clone()) { let cmd = cmd.clone(); p.update(cx, |t, cx| t.ai_insert_text(cmd, cx)); } }
+                        }
                         this.log("ai.chat.insert", cmd);
                     }
                 }));
@@ -549,7 +638,7 @@ impl Root {
             }
         };
         v.update(cx, |c, cx| { c.docked = true; if src.is_some() { c.source = src; } c.focus(window, cx); });
-        self.dock = SideDock::Ai;
+        self.dock_ai = true;
         chat_view::set_dock_open(true);
         cx.notify();
         v
@@ -648,7 +737,7 @@ impl Root {
     /// The session for a host (PRD 5.20): focused pane if it matches, else any pane on that host
     /// (its tab is activated), else a new tab.
     fn pane_for(&mut self, target: Option<SshTarget>, window: &mut Window, cx: &mut Context<Self>) -> Entity<TermView> {
-        let want = |v: &TermView| v.sftp.is_none() && match (&v.spec, &target) { (Spec::Local, None) => true, (Spec::Ssh(t), Some(r)) => t.pool_key() == r.pool_key(), _ => false };
+        let want = |v: &TermView| !v.embedded() && match (&v.spec, &target) { (Spec::Local, None) => true, (Spec::Ssh(t), Some(r)) => t.pool_key() == r.pool_key(), _ => false };
         if let Some(tab) = self.tabs.get(self.active) { if want(tab.focused.read(cx)) { let p = tab.focused.clone(); let fh = p.read(cx).focus.clone(); window.focus(&fh, cx); return p; } }
         let found = self.tabs.iter().enumerate().find_map(|(ti, tab)| tab.layout.leaves().into_iter().find(|p| want(p.read(cx))).map(|p| (ti, p)));
         if let Some((ti, p)) = found {
@@ -703,19 +792,22 @@ impl Root {
     /// After restore: an SFTP leaf saved with follow=on follows the first terminal in its tab.
     fn relink_follow(&self, layout: &Node<Entity<TermView>>, cx: &mut Context<Self>) {
         let leaves = layout.leaves();
-        let Some(term) = leaves.iter().find(|p| p.read(cx).sftp.is_none()).cloned() else { return };
+        let Some(term) = leaves.iter().find(|p| !p.read(cx).embedded()).cloned() else { return };
         let local = matches!(term.read(cx).spec, Spec::Local);
         for p in &leaves {
             if let Some(sv) = p.read(cx).sftp.clone() {
                 let on = sv.read(cx).follow.on;
-                sv.update(cx, |v, cx| { v.mode = SftpMode::Split; v.set_follow_source(Some((term.downgrade(), local)), on, cx) });
+                sv.update(cx, |v, cx| { v.mode = SftpMode::Tab; v.set_follow_source(Some((term.downgrade(), local)), on, cx) });
             }
         }
     }
     /// Open SFTP for `target` (default: focused/any SSH host) in `mode`. Popup reuses the per-host
     /// view; tab/split/window create a new view (several per host are allowed).
     fn open_sftp_mode(&mut self, target: Option<SshTarget>, mode: SftpMode, window: &mut Window, cx: &mut Context<Self>) {
-        // no host: left pane local, right pane offers "choose host" (no picker dialog)
+        // SFTP now opens only as a tab of the SFTP module; older modes in saved settings map here
+        let _ = mode;
+        let mode = SftpMode::Tab;
+        // no host: both panes show the remote host list
         let Some(t) = target.or_else(|| self.ssh_target_for_tools(cx)) else {
             self.log("sftp.open", format!("host=- mode={}", mode.as_str()));
             let v = self.new_sftp_view(None, None, None, vec![], window, cx);
@@ -733,6 +825,9 @@ impl Root {
     }
     /// Move an existing view (state, selection, transfer queue kept: same entity) to `mode`.
     fn move_sftp(&mut self, v: Entity<sftp_view::SftpView>, mode: SftpMode, window: &mut Window, cx: &mut Context<Self>) {
+        let _ = mode;
+        let mode = SftpMode::Tab;
+        if v.read(cx).mode == mode { return; }
         let from = v.read(cx).mode;
         self.log("sftp.mode", format!("host={} from={} to={}", v.read(cx).target().map(|t| t.label()).unwrap_or_else(|| "-".into()), from.as_str(), mode.as_str()));
         self.detach_sftp(&v, window, cx);
@@ -1117,6 +1212,8 @@ impl Root {
             Node::Leaf(v) => {
                 let v = v.read(cx);
                 if let Some(sv) = &v.sftp { return NodeSave::Leaf { pane: sv.read(cx).save() }; }
+                if let Some(dv) = &v.db { return NodeSave::Leaf { pane: dv.read(cx).save(cx) }; }
+                if let Some(e) = &v.embed { if let Some(pane) = e.save(cx) { return NodeSave::Leaf { pane }; } }
                 let resume = v.agent_label().map(|a| a.0).or(v.last_agent.clone()).and_then(|a| resume_command(&a)).map(str::to_string).or(v.resume_offer.clone());
                 let pane = match &v.spec {
                     Spec::Local => PaneSave::Local { cwd: v.session.as_ref().and_then(|s| s.cwd_probe.lock().unwrap().as_ref().and_then(|f| f())).unwrap_or_default(), daemon_id: v.daemon_id.clone(), resume },
@@ -1161,6 +1258,15 @@ impl Root {
                     v.update(cx, |v, _| { v.mode = SftpMode::Tab; v.follow.set(follow); });
                     r.sftp_pane(v, window, cx)
                 }
+                PaneSave::Db { conn, database, schema, table, sql, editor_h } => {
+                    let p = r.db_pane(crate::db_view::Target { conn, database, schema, table }, sql, window, cx);
+                    if let (Some(h), Some(v)) = (editor_h, p.read(cx).db.clone()) { v.update(cx, |v, _| v.set_editor_h(h)); }
+                    p
+                }
+                PaneSave::Redis { conn, key } => r.redis_pane(&conn, key, window, cx),
+                PaneSave::Docker { endpoint } => r.docker_pane(&endpoint, window, cx),
+                PaneSave::DockerLogs { endpoint, container, name } => r.docker_logs_pane(&endpoint, container, name, window, cx),
+                PaneSave::Mongo { conn, database, collection, filter, sort } => r.mongo_pane(&conn, (database, collection, filter, sort), window, cx),
             }),
             NodeSave::Split { vertical, ratio, a, b } => Node::Split { dir: if *vertical { Dir::Vertical } else { Dir::Horizontal }, ratio: *ratio, a: Box::new(r.build_node(a, window, cx)), b: Box::new(r.build_node(b, window, cx)) },
         }
@@ -1457,6 +1563,10 @@ impl Root {
     }
 
     fn run(&mut self, a: Action, window: &mut Window, cx: &mut Context<Self>) {
+        // a module showing its empty state has no tab of its own: tab / pane actions must not
+        // reach the hidden tab of another module
+        if matches!(a, Action::SplitAuto | Action::SplitRight | Action::SplitDown | Action::ClosePane | Action::ToggleBroadcast | Action::ToggleRecording | Action::ClearHistory | Action::LaunchAgent1 | Action::LaunchAgent2 | Action::LaunchAgent3)
+            && !self.settings_active() && !self.active_in_ws(cx) { return; }
         match a {
             Action::CommandPalette => self.open_palette(window, cx),
             Action::OpenSettings => self.open_settings(Cat::General, window, cx),
@@ -1467,22 +1577,10 @@ impl Root {
             Action::SplitDown => self.split(Some(Dir::Horizontal), window, cx),
             Action::ClosePane => self.close_pane(window, cx),
             Action::NextTab | Action::PrevTab => {
-                // The settings tab is one stop in the cycle, between the last terminal and the first.
-                let n = self.tabs.len();
-                let forward = a == Action::NextTab;
-                if self.settings_active() {
-                    self.leave_settings();
-                    if n > 0 { self.active = if forward { 0 } else { n - 1 }; }
-                    self.focus_active(window, cx);
-                } else if n > 0 {
-                    let at_end = if forward { self.active + 1 >= n } else { self.active == 0 };
-                    if at_end && self.settings.is_some() {
-                        if let Some((_, on)) = &mut self.settings { *on = true; }
-                    } else {
-                        self.active = if forward { (self.active + 1) % n } else { (self.active + n - 1) % n };
-                    }
-                    if !self.settings_active() { self.focus_active(window, cx); }
-                }
+                // cycles inside the current module's tabs
+                if self.settings_active() { self.leave_settings(); }
+                self.cycle_ws_tab(a == Action::NextTab, cx);
+                self.focus_active(window, cx);
             }
             Action::CycleTheme => self.cycle_theme(window, cx),
             Action::ThemeSystem => { self.report(config::update(|s| s.appearance.theme = "system".into()), cx); self.apply_theme(window, cx); self.refresh_all(cx); }
@@ -1491,17 +1589,7 @@ impl Root {
             Action::ModePlan => self.set_mode(Mode::Plan, cx),
             Action::ModeAuto => self.set_mode(Mode::Auto, cx),
             Action::OpenSftp => { let m = SftpMode::parse(&config::get().session.sftp_mode); self.open_sftp_mode(None, m, window, cx) }
-            Action::OpenSftpPopup => self.open_sftp_mode(None, SftpMode::Popup, window, cx),
-            Action::OpenSftpTab => self.open_sftp_mode(None, SftpMode::Tab, window, cx),
-            Action::OpenSftpSplit => self.open_sftp_mode(None, SftpMode::Split, window, cx),
-            Action::OpenSftpWindow => self.open_sftp_mode(None, SftpMode::Window, window, cx),
-            Action::OpenHostTools => {
-                let tg = self.focused_pane(window, cx).and_then(|p| match &p.read(cx).spec { Spec::Ssh(t) => Some(t.clone()), _ => None });
-                let (rt, pr) = (self.rt.handle().clone(), self.prompts.clone());
-                let v = cx.new(|cx| host_tools_view::HostToolsView::new(tg, rt, pr, cx));
-                self._subs.push(cx.subscribe_in(&v, window, |this, _, _ev: &host_tools_view::HostToolsEvent, w, cx| this.close_overlay(w, cx)));
-                self.overlay = Overlay::HostTools(v);
-            }
+            Action::OpenHostTools => self.toggle_host_dock(window, cx),
             Action::OpenPortForward => { let tg = self.ssh_target_for_tools(cx); let pv = self.port_view(window, cx); pv.update(cx, |v, _| if v.target.is_none() || tg.is_some() { v.target = tg }); self.overlay = Overlay::Port; }
             Action::OpenAi => self.toggle_dock(SideDock::Ai, window, cx),
             Action::OpenSnippets => self.toggle_dock(SideDock::Snippets, window, cx),
@@ -1523,6 +1611,11 @@ impl Root {
                 self.focus_active(window, cx);
             }
             Action::OpenAudit => { self.audit_verify = None; self.overlay = Overlay::Audit; }
+            Action::ToolHosts | Action::ToolSftp | Action::ToolDatabase | Action::ToolRedis | Action::ToolDocker | Action::ToolPorts => {
+                if let Some(t) = activity::Tool::from_action(a) { self.select_tool(t, window, cx); }
+            }
+            Action::ToggleBottomPanel => self.toggle_bottom(None, cx),
+            Action::NewDbConnection => self.open_db_dialog(None, window, cx),
             Action::OpenAbout => self.open_settings(Cat::About, window, cx),
             Action::ClearHistory => {
                 for h in self.histories.values() { h.lock().unwrap().clear(); }
@@ -1548,13 +1641,7 @@ impl Root {
         cx.notify();
     }
 
-    fn host_targets(&self) -> Vec<(HostEntry, SshTarget)> {
-        let s = config::get();
-        let kh = s.known_hosts_path();
-        let all = s.all_hosts();
-        let o = s.ssh_opts();
-        all.iter().map(|h| { let t = hosts::resolve(h, &kh, &all, &o); (h.clone(), t) }).collect()
-    }
+    fn host_targets(&self) -> Vec<(HostEntry, SshTarget)> { config::resolved_hosts().as_ref().clone() }
 
 }
 
@@ -1629,7 +1716,7 @@ impl Root {
                     d = d.child(div().absolute().top_0().left_0().size_full().bg(c(th.bg))
                         .with_animation(("pane-in", p.entity_id().as_u64() as usize), gpui::Animation::new(motion::ms(motion::APPEAR_MS)).with_easing(gpui::ease_out_quint()), |d, t| d.opacity(1. - t)));
                 }
-                if !cx.has_active_drag() && p.read(cx).sftp.is_none() { d = d.child(self.pane_header(p, pg, cx)); }
+                if !cx.has_active_drag() && !p.read(cx).embedded() { d = d.child(self.pane_header(p, pg, cx)); }
                 if cx.has_active_drag() && self.tabs.len() > 1 {
                     // drop zones for a dragged tab: left/right quarter, top/bottom half of the middle (PRD US-03)
                     for (i, edge) in [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom].into_iter().enumerate() {
@@ -1686,6 +1773,7 @@ pub(crate) fn state_color(st: AgentState, th: &Theme) -> Hsla {
 
 impl Render for Root {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_workspace(cx);
         // live language switch: refresh placeholders of long-lived inputs
         let lang = ssh_term_proto::i18n::current() as u8;
         if self.lang_seen != lang {
@@ -1697,7 +1785,7 @@ impl Render for Root {
         }
         let th = cur();
         let s = config::get();
-        if !cx.has_active_drag() { self.drag_div = None; self.save_sb_width(); self.save_ai_width(); }
+        if !cx.has_active_drag() { self.drag_div = None; self.save_sb_width(); self.save_ai_width(); self.save_bottom_h(); }
         self.probe_os(cx);
         // appearance.opacity: transparent window background, terminal area drawn with alpha
         let op = s.appearance.opacity.clamp(0.5, 1.0);
@@ -1744,7 +1832,11 @@ impl Render for Root {
                 None => { let first = shown_title(panes[0].read(cx)); if panes.len() > 1 { format!("{first} +{}", panes.len() - 1).into() } else { first } }
             }
         }).collect();
+        let ws_mod = self.tool.workspace();
+        let mut shown = 0usize;
         for (i, t) in self.tabs.iter().enumerate() {
+            if Self::tab_module(t, cx) != ws_mod { continue; }
+            shown += 1;
             let active = i == self.active && !settings_on;
             let panes = t.layout.leaves();
             let nth = base_titles[..i].iter().filter(|x| **x == base_titles[i]).count();
@@ -1753,7 +1845,7 @@ impl Render for Root {
             let agent = panes.iter().filter_map(|p| p.read(cx).agent_label())
                 .max_by_key(|(_, st)| match st { AgentState::Blocked => 3, AgentState::Working => 2, AgentState::Idle => 1, _ => 0 });
             // hairline separator only between two inactive tabs
-            if i > 0 { tabbar = tabbar.child(gap(!active && (settings_on || i != self.active + 1))); }
+            if shown > 1 { tabbar = tabbar.child(gap(!active && (settings_on || i != self.active + 1))); }
             let tg = SharedString::from(format!("tab-g-{i}"));
             let mut tabel = div().id(("tab", i)).relative().group(tg.clone()).h(px(28.)).w(px(TAB_W)).flex_shrink(1.).min_w(px(TAB_MIN_W)).pl(px(10.)).pr(px(4.)).rounded(px(7.)).flex().items_center().gap(px(6.)).cursor_pointer()
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1776,7 +1868,7 @@ impl Render for Root {
                 .child({
                     // small monochrome kind icon: terminal / ssh / sftp
                     let v = panes[0].read(cx);
-                    let ic = if v.sftp.is_some() { IconName::FolderSync } else if matches!(v.spec, Spec::Ssh(_)) { IconName::Server } else { IconName::SquareTerminal };
+                    let ic = if matches!(v.embed, Some(termview::Embed::Kv(_))) { IconName::Database } else if v.embed.is_some() { IconName::Container } else if v.db.is_some() { IconName::Database } else if v.sftp.is_some() { IconName::FolderSync } else if matches!(v.spec, Spec::Ssh(_)) { IconName::Server } else { IconName::SquareTerminal };
                     icon(ic, 13., if active { c(th.subtext) } else { c(th.overlay1) })
                 })
                 .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.)).text_color(if active { c(th.text) } else { c(th.overlay1) }).when(active, |d| d.font_weight(FontWeight::MEDIUM))
@@ -1789,7 +1881,7 @@ impl Render for Root {
             tabel = tabel.on_drag(drag, |d: &TabDrag, _, _, cx| cx.new(|_| d.clone()));
             // trailing slot: status dot (connecting / failed / disconnected) at rest, close × on hover or when active
             let (_, scol) = panes[0].read(cx).status(&th);
-            let show_dot = !active && panes[0].read(cx).sftp.is_none() && scol != c(th.success) && matches!(panes[0].read(cx).spec, Spec::Ssh(_));
+            let show_dot = !active && !panes[0].read(cx).embedded() && scol != c(th.success) && matches!(panes[0].read(cx).spec, Spec::Ssh(_));
             tabel = tabel.child(div().relative().size(px(18.)).flex_shrink_0()
                 .when(show_dot, |d| d.child(div().absolute().top(px(6.)).left(px(6.)).size(px(6.)).rounded_full().bg(scol).group_hover(tg.clone(), |s| s.invisible())))
                 .child(div().id(("close", i)).absolute().top_0().left_0().size(px(18.)).rounded_full().flex().items_center().justify_center()
@@ -1836,34 +1928,35 @@ impl Render for Root {
                 .on_click(cx.listener(|this, ev: &gpui::ClickEvent, w, cx| {
                     // 菜单刚被“点击外部”关闭（就是这次点击）时不再重新打开，实现开关切换
                     if this.new_menu.is_some() || this.new_menu_closed.elapsed() < std::time::Duration::from_millis(250) { this.new_menu = None; cx.notify(); return; }
+                    // other modules: "+" opens that module's own kind of tab
+                    if this.new_module_tab(w, cx) { return; }
                     let p = ev.position();
                     this.open_new_menu(gpui::point(p.x - px(14.), p.y + px(18.)), w, cx);
                 }))
                 .child(icon(IconName::Plus, 15., c(th.overlay1))),
         ).child(chrome::drag_spacer("title-spacer").min_w(px(chrome::MIN_DRAG_W)).flex_shrink_0().flex_grow(1.));
+        // settings: a gear at the right end of the title row, just before the window buttons
+        let gear_on = self.settings_active();
+        row = row.child(div().id("title-settings").size(px(28.)).flex_shrink_0().mr(px(4.)).rounded(px(7.)).flex().items_center().justify_center().cursor_pointer()
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .when(gear_on, |d| d.bg(c(th.accent).opacity(0.12))).when(!gear_on, |d| d.hover(move |s| s.bg(hover_bg)))
+            .tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(crate::sidebar::action_tip(t("ui.settings"), &Action::OpenSettings.binding())).build(w, cx))
+            .on_click(cx.listener(|this, _, w, cx| this.run(Action::OpenSettings, w, cx)))
+            .child(icon(IconName::Settings, 15., if gear_on { c(th.accent) } else { c(th.overlay1) })));
         row = match win_ctl { Some(wc) => row.child(wc), None => row.pr(px(8.)) };
 
         let workspace = if settings_on {
             settings_tab.unwrap().0.into_any_element()
         } else {
-            match self.tabs.get(self.active) {
+            match self.tabs.get(self.active).filter(|t| Self::tab_module(t, cx) == self.tool.workspace()) {
             Some(tab) => self.render_node(self.active, &tab.layout, vec![], &th, cx),
-            None => div().flex_1().size_full().flex().flex_col().items_center().justify_center().gap_3().bg(c(th.base))
-                .child(icon(IconName::SquareTerminal, 36., c(th.overlay0)))
-                .child(div().text_size(px(13.)).text_color(c(th.subtext)).child(t("ui.no_open_terminals")))
-                .child(div().flex().gap_2()
-                    .child(ui::button("empty-local", t("ui.open_local_terminal"), 1).on_click(cx.listener(|this, _, w, cx| this.new_tab(Spec::Local, w, cx))))
-                    .child(ui::button("empty-palette", t("ui.command_palette"), 0).on_click(cx.listener(|this, _, w, cx| this.open_palette(w, cx))))
-                    .when(!self.closed_tabs.is_empty(), |d| d.child(ui::button("empty-reopen", t("tab.reopen"), 0).on_click(cx.listener(|this, _, w, cx| this.reopen_closed(w, cx))))))
-                .into_any_element(),
+            None => self.ws_empty(cx),
             }
         };
         let cwd_bar = if settings_on { None } else { self.cwd_bar(window, cx) };
-        let center = div().id("center").flex_1().min_w_0().min_h_0().flex().flex_col().rounded(px(10.)).overflow_hidden().bg(c(theme::scheme().bg))
-            // GPUI 的 overflow_hidden 只按矩形裁剪，不按圆角裁剪：内容（终端、设置页、SFTP 等）若贴边
-            // 绘制自己的背景就会盖住圆角。上下留出内边距，让四个圆角露出卡片自身的背景。
-            .pt(px(CARD_INSET))
-            .when(cwd_bar.is_none(), |d| d.pb(px(if settings_on { CARD_INSET } else { 12. })))
+        // 所有模块共用同一张内容卡片：四边内边距统一为 card_layout::CARD_PAD（也让圆角露出卡片背景）
+        let center = card_layout::content_card("center")
+            .when(cwd_bar.is_some(), |d| d.pb_0())
             .child(div().flex_1().min_h_0().overflow_hidden().flex().flex_col().child(workspace))
             .children(cwd_bar);
 
@@ -1871,9 +1964,18 @@ impl Render for Root {
             Some(p) => {
                 let v = p.read(cx);
                 let (st, col) = v.status(&th);
+                if let Some(e) = &v.embed {
+                    (st, col, String::new(), SharedString::from(e.crumbs(cx)), String::new())
+                } else if let Some(dbv) = &v.db {
+                    // database pane: connection › database › schema › table instead of terminal info
+                    // the pane's own status (rows loaded, time, server version) lives here, not in a footer strip
+                    let d = dbv.read(cx);
+                    (st, col, d.status_line(), SharedString::from(d.crumbs()), String::new())
+                } else {
                 let d = v.session.as_ref().map(|s| { let z = s.size(); format!("{}×{}", z.cols, z.rows) }).unwrap_or_default();
                 let n = v.history.lock().unwrap().len();
                 (st, col, d, shown_title(v), tf("main.history_n", &[("n", &n)]))
+                }
             }
             None => ("—", c(th.overlay0), String::new(), SharedString::from(""), String::new()),
         };
@@ -1900,47 +2002,56 @@ impl Render for Root {
                 .child(icon(IconName::Shield, 12., mode_col)).child(tf("main.perm_status", &[("mode", &mode.label())]))
                 .when(org.is_some(), |d| d.child(div().pl_1().child(t("main.org_badge")))));
 
-        let left = if self.sidebar_visible { px(0.) } else { px(CARD_GAP) };
-        // 顶层：侧栏（全高）| 右列 [标签栏 / 内容]
-        let mut content = div().flex_1().min_h_0().w_full().flex().flex_row().items_stretch().pl(left).gap(px(CARD_GAP));
+        // 顶层：活动图标栏 + 工具窗口（全高）| 右列 [标签栏 / 内容 / 底部工具窗口]
+        let mut content = div().flex_1().min_h_0().w_full().flex().flex_row().items_stretch().gap(px(CARD_GAP));
+        let strip = self.activity_strip(cx).into_any_element();
         if self.sidebar_visible {
-            let sb = self.sidebar(window, cx);
+            let sb = self.tool_panel(window, cx);
             // 侧栏顶部一行（与标签行同高，可拖动窗口）：红黄绿按钮风格时软件名在按钮右侧，否则靠左带小图标
             let name = div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).whitespace_nowrap().child("ShellAX");
             let mut head = chrome::drag_region(div().id("sb-chrome")).h(px(chrome::TAB_H)).flex_shrink_0().flex().items_center().overflow_hidden()
                 .window_control_area(gpui::WindowControlArea::Drag);
-            head = if mac { head.child(self.lights(window, cx)).child(name) } else { head.pl(px(8.)).gap(px(6.)).child(icon(IconName::SquareTerminal, 14., c(th.accent))).child(name) };
-            let sb: AnyElement = div().h_full().flex().flex_col()
-                .child(head.child(chrome::drag_spacer("sb-drag")))
-                .child(div().flex_1().min_h_0().flex().child(sb)).into_any_element();
-            content = match self.sb_anim {
+            head = if mac { head.child(self.lights(window, cx)).child(name) } else { head.pl(px(12.)).gap(px(6.)).child(icon(IconName::SquareTerminal, 14., c(th.accent))).child(name) };
+            let panel: AnyElement = match self.sb_anim {
                 Some((show, seq)) => {
+                    // the panel keeps its full width while it slides, so the terminal is laid out
+                    // once (before opening / after closing), not per frame
                     let w = self.sb_width;
-                    let dur = if show { motion::SIDEBAR_MS } else { motion::SIDEBAR_MS - 40 };
-                    let ease = move |t: f32| if show { 1. - (1. - t).powi(5) } else { t * t * t };
-                    content.child(div().h_full().flex_shrink_0().overflow_hidden().child(sb)
-                        .with_animation(("sb-anim", seq as usize), gpui::Animation::new(motion::ms(dur)).with_easing(ease),
-                            move |d, t| { let k = if show { t } else { 1. - t }; d.w(px(w * k)).opacity(k) }))
+                    motion::slide(div().h_full().flex_shrink_0().w(px(w)), ("sb-anim", seq as usize), div().h_full().w(px(w)).flex().flex_col().child(sb).into_any_element(), w, motion::Edge::Left, show)
                 }
-                None => content.child(sb),
+                None => sb,
             };
+            let vib = if chrome::NATIVE_LIGHTS { 0.72 } else { 1.0 };
+            content = content.child(div().h_full().flex_shrink_0().flex().flex_col()
+                .child(head.bg(c(th.crust).opacity(vib)).child(chrome::drag_spacer("sb-drag")))
+                .child(div().flex_1().min_h_0().flex().flex_row().child(strip).child(div().h_full().flex().flex_col().pb(px(card_layout::EDGE_GAP)).child(panel))));
+        } else {
+            content = content.child(strip);
         }
         let mut work = div().flex_1().min_w_0().min_h_0().flex().flex_row().gap(px(CARD_GAP)).child(center);
-        work = match self.dock {
-            SideDock::Ai => work.child(self.ai_dock(cx)),
-            SideDock::Snippets | SideDock::History => work.child(self.library_dock(window, cx)),
-            SideDock::None => work,
-        };
-        let work_row = div().flex_1().min_h_0().w_full().flex().flex_row().items_stretch().pr(px(4.)).pb(px(CARD_GAP)).gap(px(CARD_GAP))
+        if let Some(col) = self.dock_column(window, cx) { work = work.child(col); }
+        let work_row = div().flex_1().min_h_0().w_full().flex().flex_row().items_stretch().pb(px(card_layout::EDGE_GAP))
             .child(work).child(self.tool_rail(cx));
-        let right = div().flex_1().min_w_0().h_full().flex().flex_col().child(row).child(work_row);
+        let mut right = div().id("right-col").flex_1().min_w_0().h_full().flex().flex_col().child(row).child(work_row);
+        if self.bottom_open {
+            right = right.on_drag_move(cx.listener(|this, ev: &gpui::DragMoveEvent<activity::BottomResize>, _w, cx| {
+                let h = (f32::from(ev.bounds.bottom() - ev.event.position.y) - (CARD_GAP + 2.)).clamp(120., 600.);
+                if (h - this.bottom_h).abs() >= 1.0 { this.bottom_h = h; cx.notify(); }
+            })).child({
+                let panel = div().w_full().pr(px(crate::activity::STRIP_W)).pb(px(card_layout::EDGE_GAP)).child(self.bottom_panel(cx));
+                match self.bottom_anim {
+                    Some((show, seq)) => motion::slide(div().w_full().flex_shrink_0(), ("bottom-anim", seq as usize), panel.into_any_element(), self.bottom_h + 40., motion::Edge::Bottom, show),
+                    None => panel.into_any_element(),
+                }
+            });
+        }
         let body = content.child(right);
         let mut root = div().size_full().relative().flex().flex_col().bg(theme::outer_bg().opacity(if chrome::NATIVE_LIGHTS { 0. } else { op })).font_family(theme::ui_font()).text_size(px(s.appearance.ui_font_size.clamp(10., 20.))).text_color(c(th.text))
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, w, cx| {
                 let k = &ev.keystroke;
                 let bare_tab = k.key == "tab" && !k.modifiers.control && !k.modifiers.alt && !k.modifiers.platform;
                 if bare_tab {
-                    if let Some(p) = this.tabs.get(this.active).and_then(|t| t.layout.leaves().into_iter().find(|p| p.read(cx).focus.is_focused(w) && p.read(cx).sftp.is_none())) {
+                    if let Some(p) = this.tabs.get(this.active).and_then(|t| t.layout.leaves().into_iter().find(|p| p.read(cx).focus.is_focused(w) && !p.read(cx).embedded())) {
                         p.update(cx, |v, cx| v.on_key(ev, w, cx));
                         cx.stop_propagation();
                         return;
@@ -2011,10 +2122,11 @@ impl Render for Root {
             Overlay::None => None,
             Overlay::Palette(p) => Some(div().absolute().top_0().left_0().size_full().child(p.clone()).into_any_element()),
             Overlay::Host(d) => Some(div().absolute().top_0().left_0().size_full().child(d.clone()).into_any_element()),
+            Overlay::Db(d) => Some(div().absolute().top_0().left_0().size_full().child(d.clone()).into_any_element()),
+            Overlay::Asset(d) => Some(div().absolute().top_0().left_0().size_full().child(d.clone()).into_any_element()),
             Overlay::Audit => Some(self.audit_panel(cx)),
             Overlay::Sftp => Some(self.sftp_panel(cx)),
             Overlay::Port => Some(self.port_panel(cx)),
-            Overlay::HostTools(v) => Some(ui::modal(v.clone()).into_any_element()),
         };
         if let Some(o) = overlay { root = root.child(o); }
         if let Some(m) = host_menu { root = root.child(m); }
@@ -2149,9 +2261,7 @@ impl Render for Root {
 
 /// 标签宽度：先在 TAB_W 与 TAB_MIN_W 之间压缩，再放不下就横向滚动。
 /// 终端卡片与外层之间的间距。
-const CARD_GAP: f32 = 6.;
-/// 卡片内容与卡片上下边缘的内边距，保证圆角不被内容盖住。
-const CARD_INSET: f32 = 8.;
+const CARD_GAP: f32 = card_layout::CARD_GAP;
 const TAB_W: f32 = 220.;
 const TAB_MIN_W: f32 = 110.;
 
@@ -2185,7 +2295,7 @@ fn main() {
     let themes = theme::load_all();
     let schemes = theme::load_schemes(&themes);
     let default_target = if std::env::var("NO_SSH").is_ok() { None } else { env_target(&config::get().known_hosts_path()) };
-    gpui_platform::application().with_assets(gpui_kit_assets::AllAssets).run(move |cx: &mut App| {
+    gpui_platform::application().with_assets(file_icon::Assets).run(move |cx: &mut App| {
         gpui_component::init(cx);
         // macOS menu bar (no-op elsewhere): app / file / edit / view / window / help, with ⌘Q.
         app_menu::install(cx);
@@ -2267,7 +2377,7 @@ fn open_main(cx: &mut App, rt: Arc<tokio::runtime::Runtime>, themes: Vec<Arc<The
                     let mut root = Root {
                         rt, default_target, tabs: vec![], active: 0, themes, schemes, histories: HashMap::new(),
                         manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], deny_reason: None, policy_port: None, overlay: Overlay::None, settings: None, sftp_views: HashMap::new(), sftp_current: None, sftp_windows: vec![], drag_div: None, port_view: None, quit_confirm: false, modal: None, quit_ok: false, chat_view: None,
-                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, menu_last: (None, None), menu_ghost: None, menu_ghost_seq: 0, sb_menu_at: std::time::Instant::now(), sb_modal: None, tag_filter: vec![], tab_menu: None, tab_menu_at: std::time::Instant::now(), new_menu: None, new_menu_at: std::time::Instant::now(), new_menu_closed: std::time::Instant::now(), new_menu_collapsed: config::get().sidebar.collapsed.clone(), new_menu_sel: 0, new_menu_search: new_menu_search.clone(), tab_scroll: gpui::ScrollHandle::new(), tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), dock: SideDock::None, lib_search: lib_search.clone(), lib_group: String::new(), lib_hist_all: false, lib_editor: None, lib_vars: None, lib_confirm: None, lib_notice: String::new(), ai_width: { let w = config::get().sidebar.ai_width; if (280.0..=560.0).contains(&w) { w } else { config::AI_DOCK_W } }, host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: true, sb_anim: None, audit, audit_verify: None, audit_filter: Default::default(),
+                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, menu_last: (None, None), menu_ghost: None, menu_ghost_seq: 0, sb_menu_at: std::time::Instant::now(), sb_modal: None, tag_filter: vec![], tab_menu: None, tab_menu_at: std::time::Instant::now(), new_menu: None, new_menu_at: std::time::Instant::now(), new_menu_closed: std::time::Instant::now(), new_menu_collapsed: config::get().sidebar.collapsed.clone(), new_menu_sel: 0, new_menu_search: new_menu_search.clone(), tab_scroll: gpui::ScrollHandle::new(), tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), dock: SideDock::None, dock_ai: false, dock_host: None, dock_min: HashSet::new(), dock_split: 0.5, dock_anim: None, dock_shown: false, dock_flip: HashMap::new(), bottom_anim: None, lib_search: lib_search.clone(), lib_group: String::new(), lib_hist_all: false, lib_editor: None, lib_vars: None, lib_confirm: None, lib_notice: String::new(), ai_width: { let w = config::get().sidebar.ai_width; if (280.0..=560.0).contains(&w) { w } else { config::AI_DOCK_W } }, host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: !config::get().sidebar.collapsed_panel(), sb_anim: None, ws_seen: None, ws_last: HashMap::new(), tool: activity::Tool::from_id(&config::get().sidebar.tool), bottom_open: config::get().sidebar.bottom_open, bottom_tab: activity::Bottom::from_id(&config::get().sidebar.bottom_tab), bottom_h: config::get().sidebar.bottom_height.clamp(120., 600.), exec_log: Default::default(), dbp: Default::default(), kvp: Default::default(), audit, audit_verify: None, audit_filter: Default::default(),
                         settings_dirty: vec![], toast: None, toast_out: false, toast_seq: 0, _subs: vec![],
                     };
                     crate::ctxmenu_view::init(root.rt.handle().clone(), root.prompts.clone());
@@ -2426,7 +2536,7 @@ fn open_main(cx: &mut App, rt: Arc<tokio::runtime::Runtime>, themes: Vec<Arc<The
                         let shift = k.modifiers.shift;
                         let _ = ent.update(cx, |this, cx| {
                             if !matches!(this.overlay, Overlay::None) || this.sb_modal.is_some() { return; }
-                            let Some(p) = this.tabs.get(this.active).and_then(|t| t.layout.leaves().into_iter().find(|p| p.read(cx).focus.is_focused(window) && p.read(cx).sftp.is_none())) else { return; };
+                            let Some(p) = this.tabs.get(this.active).and_then(|t| t.layout.leaves().into_iter().find(|p| p.read(cx).focus.is_focused(window) && !p.read(cx).embedded())) else { return; };
                             p.update(cx, |v, cx| v.inject_tab(shift, window, cx));
                             window.prevent_default();
                             cx.stop_propagation();

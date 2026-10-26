@@ -97,8 +97,31 @@ impl Action {
     pub fn is_write(&self) -> bool { !matches!(self, Action::Docker { verb: "logs", .. }) }
 }
 
+
+/// Read-only network counters (Linux `/proc/net/dev`).
+pub const NET_COMMAND: &str = "cat /proc/net/dev 2>/dev/null";
+#[derive(Debug, Clone, PartialEq)]
+pub struct NetIf { pub name: String, pub rx: u64, pub tx: u64 }
+/// Interfaces with their byte counters, loopback skipped.
+pub fn parse_netdev(out: &str) -> Vec<NetIf> {
+    out.lines().filter_map(|l| {
+        let (name, rest) = l.split_once(':')?;
+        let name = name.trim();
+        if name.is_empty() || name == "lo" || name.contains('|') { return None; }
+        let f: Vec<u64> = rest.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+        if f.len() < 9 { return None; }
+        Some(NetIf { name: name.into(), rx: f[0], tx: f[8] })
+    }).collect()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn netdev_counters() {
+        let out = "Inter-|   Receive                                                |  Transmit\n face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n    lo: 100 1 0 0 0 0 0 0 100 1 0 0 0 0 0 0\n  eth0: 123456 10 0 0 0 0 0 0 654321 9 0 0 0 0 0 0\n";
+        assert_eq!(super::parse_netdev(out), vec![super::NetIf { name: "eth0".into(), rx: 123456, tx: 654321 }]);
+    }
+
     use super::*;
     #[test]
     fn parsers_and_actions() {

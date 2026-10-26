@@ -244,6 +244,7 @@ impl SettingsView {
             r(Terminal, t("ui.shell_integration_osc_133"), t("ui.inject_prompt_marks_into_bash"), Ctl::Choice("terminal.shell_integration", opts(&[("auto", t("ui.auto_inject")), ("off", t("ui.off"))]))),
 
             r(Suggest, t("ui.enable_suggestions"), "", Ctl::Toggle("suggest.enabled")),
+            r(Suggest, t("ui.hist_popup"), t("ui.hist_popup.d"), Ctl::Toggle("suggest.popup")),
             r(Suggest, t("ui.accept_key"), "", Ctl::Choice("suggest.accept", opts(&[("both", t("ui.or_tab")), ("right", t("ui.only")), ("tab", t("ui.tab_only"))]))),
             r(Suggest, t("ui.local_history"), t("ui.record_commands_typed_in_this"), Ctl::Toggle("suggest.local_history")),
             r(Suggest, t("ui.remote_history"), t("ui.read_remote_bash_history_and"), Ctl::Toggle("suggest.remote_history")),
@@ -302,7 +303,6 @@ impl SettingsView {
             r(Audit, t("ui.log_manually_typed_commands"), t("ui.by_default_only_connections_permissions"), Ctl::Toggle("audit.log_commands")),
 
             r(Session, t("ui.persistent_sessions"), t("ui.resume_via_remote_tmux_after"), Ctl::Choice("session.persistent", opts(&[("off", t("ui.off")), ("tmux", "tmux")]))),
-            r(Session, t("sftp.default_mode"), t("sftp.default_mode.d"), Ctl::Choice("session.sftp_mode", opts(&[("popup", t("sftp.mode_popup")), ("tab", t("sftp.mode_tab")), ("split", t("sftp.mode_split")), ("window", t("sftp.mode_window"))]))),
             r(Session, t("sftp.follow_cwd"), t("sftp.follow_cwd.d"), Ctl::Toggle("session.sftp_follow_cwd")),
             r(Session, t("ui.local_daemon"), t("ui.local_daemon.d"), Ctl::Toggle("session.local_daemon")),
             r(Session, t("ui.restore_layout_on_startup"), "", Ctl::Toggle("session.restore_layout")),

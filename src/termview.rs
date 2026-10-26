@@ -90,6 +90,8 @@ type BPoint = (i32, usize);
 /// State shared by the pane and its two paint layers.
 #[derive(Default)]
 pub struct PaintState {
+    /// Debounces / freezes PTY resizes during animations and drags.
+    pub gate: crate::motion::SizeGate,
     pub cell_w: f32,
     pub origin: gpui::Point<Pixels>,
     pub bounds: Bounds<Pixels>,
@@ -168,7 +170,15 @@ impl Render for GridLayer {
                 s.origin = bounds.origin + point(px(pad), px(pad));
                 let cols = ((f32::from(bounds.size.width) - 2.0 * pad - reserve) / cw).floor().max(10.0) as usize;
                 let rows = ((f32::from(bounds.size.height) - 2.0 * pad) / line_h()).floor().max(3.0) as usize;
-                if let Some(s) = &session { s.resize(Size { cols, rows }); *s.cell_px.lock().unwrap() = (cw * window.scale_factor(), line_h() * window.scale_factor()); }
+                if let Some(sess) = &session {
+                    // one resize after animations / drags settle, not one per frame
+                    let cur = sess.size();
+                    if let Some((c2, r2)) = s.gate.poll((cols, rows), (cur.cols, cur.rows), crate::motion::layout_busy(), std::time::Instant::now()) {
+                        sess.resize(Size { cols: c2, rows: r2 });
+                    }
+                    if s.gate.waiting() { window.request_animation_frame(); }
+                    *sess.cell_px.lock().unwrap() = (cw * window.scale_factor(), line_h() * window.scale_factor());
+                }
                 session
             },
             move |bounds, session, window, cx| {
@@ -448,10 +458,32 @@ impl Render for CursorLayer {
     }
 }
 
+// ---------------------------------------------------------------- history dropdown
+/// Rows kept in the dropdown (about 10 visible, the rest scroll).
+const HIST_POP_MAX: usize = 50;
+const HIST_POP_VISIBLE: usize = 10;
+const HIST_POP_ROW: f32 = 26.;
+/// Wait this long after the input changes before opening (avoids flashing while typing fast).
+const HIST_POP_DELAY_MS: u64 = 120;
+
+struct HistPop { input: String, items: Vec<ssh_term_proto::suggest::Match>, sel: usize, scroll: gpui::ScrollHandle }
+
+/// Char ranges → byte ranges of `s`.
+fn char_to_byte_ranges(s: &str, hl: &[(usize, usize)]) -> Vec<std::ops::Range<usize>> {
+    let idx: Vec<usize> = s.char_indices().map(|(b, _)| b).chain(std::iter::once(s.len())).collect();
+    hl.iter().filter(|(a, b)| a < b && *b < idx.len()).map(|(a, b)| idx[*a]..idx[*b]).collect()
+}
+
 // ---------------------------------------------------------------- pane
 pub struct TermView {
     /// SFTP browser hosted in this layout leaf (PRD 5.21 tab/split mode); no shell session then.
     pub sftp: Option<Entity<crate::sftp_view::SftpView>>,
+    /// Database tab (table browser / SQL editor) instead of a shell.
+    pub db: Option<Entity<crate::db_view::DbView>>,
+    /// Redis / container / log view hosted instead of a shell.
+    pub embed: Option<Embed>,
+    /// Module workspace this pane belongs to when its content does not say (container shell).
+    pub ws: Option<crate::activity::Tool>,
     pub title: SharedString,
     pub spec: Spec,
     pub session: Option<Arc<Session>>,
@@ -499,6 +531,13 @@ pub struct TermView {
     pub failed: Option<(String, i32)>,
     exit_seen: u64,
     ai_inline_seq: u64,
+    /// History dropdown under the cursor while typing at the prompt.
+    hist_pop: Option<HistPop>,
+    hist_pop_seq: u64,
+    /// Enter already written to the PTY in this key handler.
+    enter_sent: bool,
+    /// Input the dropdown was closed for (Esc / accepted); it reopens once the input changes.
+    hist_pop_dismissed: Option<String>,
     /// AI inline completion for an input prefix: (prefix, suffix shown as grey text).
     ai_inline: Option<(String, String)>,
     /// Last agent seen in this pane (kept for the layout snapshot after it exits).
@@ -557,8 +596,27 @@ impl TermView {
         me.sftp = Some(v);
         me
     }
+    /// A leaf that hosts a database view instead of a shell.
+    pub fn new_db(v: Entity<crate::db_view::DbView>, history: Arc<Mutex<History>>, manifests: Arc<Vec<Manifest>>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let title = v.read(cx).title.clone();
+        let mut me = Self::new(&title, Spec::Local, Err(anyhow::anyhow!("db")), history, manifests, window, cx);
+        me.error = None;
+        me._subs.push(cx.observe(&v, |me: &mut Self, v, cx| { let t = v.read(cx).title.clone(); if me.title.as_ref() != t.as_str() { me.title = t.into(); } cx.notify(); }));
+        me.db = Some(v);
+        me
+    }
+    /// Hosts an SFTP or database view rather than a shell.
+    /// A leaf hosting a Redis, container or log view.
+    pub fn new_embed(e: Embed, history: Arc<Mutex<History>>, manifests: Arc<Vec<Manifest>>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let title = e.title(cx);
+        let mut me = Self::new(&title, Spec::Local, Err(anyhow::anyhow!("embed")), history, manifests, window, cx);
+        me.error = None;
+        me.embed = Some(e);
+        me
+    }
+    pub fn embedded(&self) -> bool { self.sftp.is_some() || self.db.is_some() || self.embed.is_some() }
     pub fn shown_title(&self) -> SharedString {
-        if self.sftp.is_some() { return self.title.clone(); }
+        if self.embedded() { return self.title.clone(); }
         match (&self.spec, self.title.rsplit_once(" · ")) {
             (Spec::Local, Some((_, sh))) => tf("main.local_title", &[("shell", &sh)]).into(),
             _ => self.title.clone(),
@@ -632,7 +690,7 @@ impl TermView {
             selecting: false, scroll_drag: false, history, tracker: InputTracker::new(),
             born: Instant::now(), progress_tick: false, last_activity: Instant::now(), blink_running: false, software_gpu: std::env::var("SHELLAX_FORCE_BLINK").ok().map(|_| false), last_mouse_cell: None, mouse_down_btn: None,
             manifests, last_command: None, agent: None, agent_seen: Instant::now(), last_detect: Instant::now() - Duration::from_secs(5),
-            detect_scheduled: false, pending_paste: None, pending_cd: None, ai: None, daemon_id: None, resume_offer: None, clip_ask: None, pty_ask: None, pty_write_ok: false, search: None, last_agent: None, failed: None, exit_seen: 0, ai_inline_seq: 0, ai_inline: None, bell_until: None, cmd_started: None, ai_capture: None, ctx_menu: None, ctx_pending: None, ctx_confirm: None, ctx_denied: None, sftp: None, _subs: subs,
+            detect_scheduled: false, pending_paste: None, pending_cd: None, ai: None, daemon_id: None, resume_offer: None, clip_ask: None, pty_ask: None, pty_write_ok: false, search: None, last_agent: None, failed: None, exit_seen: 0, ai_inline_seq: 0, hist_pop: None, hist_pop_seq: 0, enter_sent: false, hist_pop_dismissed: None, ai_inline: None, bell_until: None, cmd_started: None, ai_capture: None, ctx_menu: None, ctx_pending: None, ctx_confirm: None, ctx_denied: None, sftp: None, db: None, embed: None, ws: None, _subs: subs,
         }
     }
 
@@ -643,6 +701,8 @@ impl TermView {
             Some(s) if s.connected.load(Ordering::Acquire) => (t("ui.connected"), c(th.success)),
             Some(_) => (t("ui.connecting"), c(th.warning)),
             None if self.sftp.is_some() => ("SFTP", c(th.accent)),
+            None if self.db.is_some() => ("DB", c(th.accent)),
+            None if self.embed.is_some() => (self.embed.as_ref().unwrap().badge(), c(th.accent)),
             None => (t("ui.connection_failed"), c(th.error)),
         }
     }
@@ -763,6 +823,7 @@ impl TermView {
         let sug = self.compute_suggestion();
         if sug.is_none() { self.schedule_ai_suggestion(cx); }
         self.st.borrow_mut().suggestion = sug.or_else(|| self.ai_suggestion());
+        self.refresh_hist_pop(cx);
         self.repaint_grid(cx);
         self.schedule_detect(cx);
         // connection state changes show in the header
@@ -921,6 +982,110 @@ impl TermView {
             });
         }).detach();
     }
+    /// Input the history dropdown may show for: setting on, at a normal prompt (no alternate
+    /// screen, no agent CLI, typed text echoed — so not a password prompt), cursor at line end.
+    fn hist_pop_input(&self) -> Option<String> {
+        let cfg = config::get();
+        if !(cfg.suggest.enabled && cfg.suggest.popup) || self.agent.is_some() || self.search.is_some() { return None; }
+        self.current_input().filter(|i| !i.trim().is_empty())
+    }
+    fn hist_pop_items(&self, input: &str) -> Vec<ssh_term_proto::suggest::Match> {
+        self.history.lock().unwrap().matches(input, HIST_POP_MAX)
+    }
+    /// Keep the dropdown in step with the prompt line. While open it updates at once (no
+    /// flicker); opening waits briefly so fast typing does not flash it.
+    fn refresh_hist_pop(&mut self, cx: &mut Context<Self>) {
+        let Some(input) = self.hist_pop_input() else {
+            self.hist_pop_dismissed = None;
+            if self.hist_pop.take().is_some() { cx.notify(); }
+            return;
+        };
+        if self.hist_pop.as_ref().is_some_and(|p| p.input == input) { return; }
+        if self.hist_pop_dismissed.as_deref() == Some(input.as_str()) { if self.hist_pop.take().is_some() { cx.notify(); } return; }
+        self.hist_pop_dismissed = None;
+        if let Some(p) = self.hist_pop.as_mut() {
+            let items = self.history.lock().unwrap().matches(&input, HIST_POP_MAX);
+            if items.is_empty() { self.hist_pop = None; } else { p.input = input; p.items = items; p.sel = 0; p.scroll.scroll_to_item(0); }
+            cx.notify();
+            return;
+        }
+        self.hist_pop_seq += 1;
+        let seq = self.hist_pop_seq;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(HIST_POP_DELAY_MS)).await;
+            let _ = this.update(cx, |v, cx| {
+                if v.hist_pop_seq != seq || v.hist_pop.is_some() { return; }
+                let Some(now) = v.hist_pop_input() else { return };
+                if now != input || v.hist_pop_dismissed.as_deref() == Some(now.as_str()) { return; }
+                let items = v.hist_pop_items(&now);
+                if items.is_empty() { return; }
+                v.hist_pop = Some(HistPop { input: now, items, sel: 0, scroll: gpui::ScrollHandle::new() });
+                cx.notify();
+            });
+        }).detach();
+    }
+    /// Replace the prompt line with history entry `i` (never presses Enter).
+    fn hist_pop_accept(&mut self, i: usize, cx: &mut Context<Self>) {
+        let Some(p) = self.hist_pop.take() else { return };
+        let Some(m) = p.items.get(i) else { return };
+        let Some(s) = self.session.clone() else { return };
+        let cmd = m.cmd.replace(['\r', '\n'], " ");
+        let mut bytes = vec![self.kill_line_byte()];
+        bytes.extend_from_slice(cmd.as_bytes());
+        s.write(bytes);
+        self.tracker.key(Key::KillLine);
+        self.tracker.key(Key::Text(&cmd));
+        self.ai_inline = None;
+        self.st.borrow_mut().suggestion = None;
+        self.hist_pop_dismissed = Some(cmd);
+        self.scroll_to_bottom(cx);
+        cx.notify();
+    }
+    /// Keys while the dropdown is open. Returns true when consumed.
+    fn hist_pop_key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        let Some(p) = self.hist_pop.as_mut() else { return false };
+        let n = p.items.len();
+        match key {
+            "up" => { p.sel = (p.sel + n - 1) % n; p.scroll.scroll_to_item(p.sel); cx.notify(); true }
+            "down" => { p.sel = (p.sel + 1) % n; p.scroll.scroll_to_item(p.sel); cx.notify(); true }
+            "enter" | "tab" => { let i = p.sel; self.hist_pop_accept(i, cx); true }
+            "escape" => { self.hist_pop_dismissed = Some(p.input.clone()); self.hist_pop = None; cx.notify(); true }
+            _ => false,
+        }
+    }
+    fn hist_pop_el(&self, window: &Window, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let p = self.hist_pop.as_ref()?;
+        let s = self.session.as_ref()?;
+        let (col, line) = { let t = s.term.lock().unwrap(); let g = t.grid(); if g.display_offset() != 0 { return None; } (g.cursor.point.column.0, g.cursor.point.line.0.max(0)) };
+        let (cw, origin, lh) = { let st = self.st.borrow(); (st.cell_w, st.origin, line_h()) };
+        let th = cur();
+        let rows = p.items.len().min(HIST_POP_VISIBLE);
+        let h = rows as f32 * HIST_POP_ROW + 10.;
+        let x = origin.x + px(col as f32 * cw);
+        let below = origin.y + px((line + 1) as f32 * lh + 2.);
+        let flip = below + px(h) > window.viewport_size().height - px(8.);
+        let (anchor, pos) = if flip { (gpui::Anchor::BottomLeft, point(x, origin.y + px(line as f32 * lh - 2.))) } else { (gpui::Anchor::TopLeft, point(x, below)) };
+        let mono = SharedString::from(config::get().font.family.clone());
+        let mut list = div().id("hist-pop-list").track_scroll(&p.scroll).max_h(px(rows as f32 * HIST_POP_ROW)).overflow_y_scroll().flex().flex_col();
+        for (i, m) in p.items.iter().enumerate() {
+            let selected = i == p.sel;
+            let hl: Vec<(std::ops::Range<usize>, gpui::HighlightStyle)> = char_to_byte_ranges(&m.cmd, &m.hl).into_iter()
+                .map(|r| (r, gpui::HighlightStyle { color: Some(c(th.accent)), font_weight: Some(FontWeight::BOLD), ..Default::default() })).collect();
+            let text = gpui::StyledText::new(SharedString::from(m.cmd.clone())).with_highlights(if selected { vec![] } else { hl });
+            list = list.child(div().id(("hist-pop", i)).h(px(HIST_POP_ROW)).flex_shrink_0().px_2().mx_1().rounded_md().flex().items_center().gap_2().cursor_pointer()
+                .when(selected, |d| d.bg(c(th.accent)).text_color(gpui::white()))
+                .when(!selected, |d| d.text_color(c(th.text)).hover(|d| d.bg(c(cur().surface0))))
+                .on_hover(cx.listener(move |v, hovered: &bool, _, cx| { if *hovered { if let Some(p) = v.hist_pop.as_mut() { if p.sel != i { p.sel = i; cx.notify(); } } } }))
+                .on_mouse_down(MouseButton::Left, cx.listener(move |v, _, _, cx| { cx.stop_propagation(); v.hist_pop_accept(i, cx); }))
+                .child(crate::ui::icon(crate::ui::IconName::Clock, 13., if selected { gpui::white() } else { c(th.overlay1) }))
+                .child(div().min_w_0().flex_1().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(mono.clone()).text_size(px(13.)).child(text)));
+        }
+        let pop = div().occlude().min_w(px(260.)).max_w(px(640.)).py_1().rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.surface1)).shadow_lg()
+            .on_mouse_down_out(cx.listener(|v, _, _, cx| { if let Some(p) = v.hist_pop.take() { v.hist_pop_dismissed = Some(p.input); cx.notify(); } }))
+            .child(list);
+        Some(gpui::deferred(gpui::anchored().anchor(anchor).position(pos).snap_to_window_with_margin(px(8.)).child(pop)).with_priority(5).into_any_element())
+    }
+
     fn compute_suggestion(&self) -> Option<String> {
         if !config::get().suggest.enabled { return None; }
         let ls = self.line_state()?;
@@ -1064,6 +1229,7 @@ impl TermView {
             return;
         }
         let plain = !m.control && !m.alt && !m.platform && !m.shift;
+        if plain && self.hist_pop.is_some() && self.hist_pop_key(k.key.as_str(), cx) { cx.stop_propagation(); return; }
         let accept = config::get().suggest.accept.clone();
         let key_ok = match accept.as_str() { "right" => k.key == "right", "tab" => k.key == "tab", _ => k.key == "right" || k.key == "tab" };
         if plain && key_ok {
@@ -1097,7 +1263,12 @@ impl TermView {
                 return;
             }
             "enter" => {
-                if let Some(ls) = self.line_state() {
+                // send Enter to the shell first; history / audit bookkeeping (file appends) must not
+                // sit between the key press and the shell seeing it
+                let ls = self.line_state();
+                fanout(&s, bytes.clone());
+                self.enter_sent = true;
+                if let Some(ls) = ls {
                     if !ls.alt_screen {
                         if let Some(cmd) = self.tracker.submitted_input(&ls.before_cursor, ls.prompt_col) {
                             self.history.lock().unwrap().add(&cmd);
@@ -1119,7 +1290,7 @@ impl TermView {
         }
         if self.st.borrow().sel.is_some() { self.st.borrow_mut().sel = None; self.grid.update(cx, |_, cx| cx.notify()); }
         self.scroll_to_bottom(cx);
-        fanout(&s, bytes);
+        if !std::mem::take(&mut self.enter_sent) { fanout(&s, bytes); }
         cx.stop_propagation();
     }
 
@@ -2038,6 +2209,12 @@ fn fanout(s: &Arc<Session>, bytes: Vec<u8>) {
 impl Render for TermView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
+        if let Some(e) = &self.embed {
+            return div().track_focus(&self.focus).flex_1().size_full().flex().flex_col().overflow_hidden().child(e.view());
+        }
+        if let Some(v) = self.db.clone() {
+            return div().track_focus(&self.focus).flex_1().size_full().flex().flex_col().overflow_hidden().child(v);
+        }
         if let Some(v) = self.sftp.clone() {
             return div().track_focus(&self.focus).flex_1().size_full().flex().flex_col().overflow_hidden().child(v);
         }
@@ -2057,7 +2234,7 @@ impl Render for TermView {
                     .text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.error)).child(t("rec.indicator")));
             }
         }
-        let connecting = matches!(self.spec, Spec::Ssh(_)) && self.sftp.is_none() && self.session.as_ref().is_some_and(|s| !s.connected.load(Ordering::Acquire) && !s.exited.load(Ordering::Acquire) && s.conn_error.lock().unwrap().is_none());
+        let connecting = matches!(self.spec, Spec::Ssh(_)) && !self.embedded() && self.session.as_ref().is_some_and(|s| !s.connected.load(Ordering::Acquire) && !s.exited.load(Ordering::Acquire) && s.conn_error.lock().unwrap().is_none());
         if connecting {
             let delay = Duration::from_millis(crate::motion::PROGRESS_DELAY_MS);
             if self.born.elapsed() >= delay {
@@ -2078,7 +2255,7 @@ impl Render for TermView {
             }
         }
         let fail = self.error.clone().or_else(|| self.session.as_ref().and_then(|s| s.conn_error.lock().unwrap().clone()));
-        if let (Some(e), None) = (fail, &self.sftp) {
+        if let (Some(e), false) = (fail, self.embedded()) {
             let is_ssh = matches!(self.spec, Spec::Ssh(_));
             let mut actions = div().flex().items_center().gap_2().mt(px(12.))
                 .child(crate::ui::button("conn-retry", t("term.retry"), 1).on_click(cx.listener(|_, _, _, cx| cx.emit(TermEvent::RetryConnect))));
@@ -2167,6 +2344,8 @@ impl Render for TermView {
         }
         if let Some(m) = &self.ctx_menu {
             body = body.child(crate::ctxmenu_view::render(m, cx, Self::ctx_pick, Self::ctx_close));
+        } else if let Some(e) = self.hist_pop_el(_window, cx) {
+            body = body.child(e);
         }
         if self.bell_until.is_some_and(|t| t > Instant::now()) {
             body = body.child(div().absolute().top_0().left_0().size_full().border_2().border_color(c(th.warning)).bg(c(th.warning).opacity(0.06)));
@@ -2223,6 +2402,11 @@ pub fn play_sound() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hist_pop_highlight_ranges() {
+        assert_eq!(char_to_byte_ranges("git 状态 x", &[(4, 6)]), vec![4..10]);
+        assert_eq!(char_to_byte_ranges("ls", &[(0, 2), (5, 9), (1, 1)]), vec![0..2]);
+    }
     #[test]
     fn paste_bytes_are_utf8() {
         let s = "计划已经写成任务书：/Users/x/docs/tasks/01.1-人物与场景视觉升级.md。";
@@ -2285,4 +2469,23 @@ mod tests {
         assert!(!paste(false, "v", true, false, false, true));
         assert!(!paste(true, "c", false, true, false, false));
     }
+}
+
+/// Non-terminal content a layout leaf can host.
+#[derive(Clone)]
+pub enum Embed {
+    Kv(Entity<crate::kv_view::KvView>),
+    Dock(Entity<crate::dock_view::DockView>),
+    Log(Entity<crate::dock_view::LogView>),
+    Mongo(Entity<crate::doc_view::DocView>),
+    Gone(Entity<crate::kv_ui::GoneView>),
+}
+
+impl Embed {
+    pub fn view(&self) -> gpui::AnyView { match self { Embed::Kv(v) => v.clone().into(), Embed::Dock(v) => v.clone().into(), Embed::Log(v) => v.clone().into(), Embed::Mongo(v) => v.clone().into(), Embed::Gone(v) => v.clone().into() } }
+    pub fn title(&self, cx: &gpui::App) -> String { match self { Embed::Kv(v) => v.read(cx).title.clone(), Embed::Dock(v) => v.read(cx).title.clone(), Embed::Log(v) => v.read(cx).title.clone(), Embed::Mongo(v) => v.read(cx).title.clone(), Embed::Gone(v) => v.read(cx).what.clone() } }
+    pub fn crumbs(&self, cx: &gpui::App) -> String { match self { Embed::Kv(v) => v.read(cx).crumbs(), Embed::Dock(v) => v.read(cx).crumbs(), Embed::Log(v) => v.read(cx).title.clone(), Embed::Mongo(v) => v.read(cx).crumbs(), Embed::Gone(v) => v.read(cx).what.clone() } }
+    pub fn badge(&self) -> &'static str { match self { Embed::Kv(_) => "Redis", Embed::Dock(_) | Embed::Log(_) => "Docker", Embed::Mongo(_) => "MongoDB", Embed::Gone(_) => "—" } }
+    /// Layout entry; `None` for a placeholder (the tab is dropped on save).
+    pub fn save(&self, cx: &gpui::App) -> Option<ssh_term_proto::session_store::PaneSave> { match self { Embed::Kv(v) => Some(v.read(cx).save()), Embed::Dock(v) => Some(v.read(cx).save()), Embed::Log(v) => Some(v.read(cx).save()), Embed::Mongo(v) => Some(v.read(cx).save()), Embed::Gone(v) => v.read(cx).save.clone() } }
 }

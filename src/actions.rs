@@ -6,10 +6,11 @@ use crate::ui::IconName;
 pub enum Action {
     CommandPalette, OpenSettings, NewLocalTab, NewHost, SplitAuto, SplitRight, SplitDown, ClosePane,
     NextTab, PrevTab, CycleTheme, ThemeSystem, CyclePermissionMode, ModeAsk, ModePlan, ModeAuto,
-    OpenSftp, OpenSftpPopup, OpenSftpTab, OpenSftpSplit, OpenSftpWindow, OpenPortForward, OpenHostTools, OpenSnippets, OpenHistory, OpenAi, AiCommand, OpenAudit, OpenAbout, ClearHistory, ToggleSidebar,
+    OpenSftp, OpenPortForward, OpenHostTools, OpenSnippets, OpenHistory, OpenAi, AiCommand, OpenAudit, OpenAbout, ClearHistory, ToggleSidebar,
     SettingsPermissions, SettingsAppearance, SettingsTerminal, SettingsSsh, SettingsKeys,
     LaunchAgent1, LaunchAgent2, LaunchAgent3,
     ToggleBroadcast, ToggleRecording, PlayRecording, SnapshotLayout, RollbackLayout, QuickStart,
+    ToolHosts, ToolSftp, ToolDatabase, ToolRedis, ToolDocker, ToolPorts, ToggleBottomPanel, NewDbConnection,
     Quit,
 }
 
@@ -19,11 +20,12 @@ impl Action {
     pub const ALL: &'static [Action] = &[
         Action::CommandPalette, Action::OpenSettings, Action::OpenAbout, Action::NewLocalTab, Action::SplitAuto, Action::SplitRight,
         Action::SplitDown, Action::ClosePane, Action::NextTab, Action::PrevTab, Action::NewHost, Action::CycleTheme, Action::ThemeSystem,
-        Action::ToggleSidebar, Action::CyclePermissionMode, Action::ModeAsk, Action::ModePlan, Action::ModeAuto, Action::OpenSftp, Action::OpenSftpTab, Action::OpenSftpSplit, Action::OpenSftpWindow, Action::OpenSftpPopup, Action::OpenPortForward, Action::OpenHostTools, Action::OpenSnippets, Action::OpenHistory,
+        Action::ToggleSidebar, Action::CyclePermissionMode, Action::ModeAsk, Action::ModePlan, Action::ModeAuto, Action::OpenSftp, Action::OpenPortForward, Action::OpenHostTools, Action::OpenSnippets, Action::OpenHistory,
         Action::OpenAi, Action::AiCommand, Action::OpenAudit, Action::ClearHistory,
         Action::SettingsPermissions, Action::SettingsAppearance, Action::SettingsTerminal, Action::SettingsSsh, Action::SettingsKeys,
         Action::LaunchAgent1, Action::LaunchAgent2, Action::LaunchAgent3,
         Action::ToggleBroadcast, Action::ToggleRecording, Action::PlayRecording, Action::SnapshotLayout, Action::RollbackLayout, Action::QuickStart,
+        Action::ToolHosts, Action::ToolSftp, Action::ToolDatabase, Action::ToolRedis, Action::ToolDocker, Action::ToolPorts, Action::ToggleBottomPanel, Action::NewDbConnection,
         Action::Quit,
     ];
     pub fn info(self) -> Info {
@@ -47,12 +49,8 @@ impl Action {
             Action::ModePlan => i("mode_plan", t("ui.permission_mode_plan_read_only"), t("ui.permissions"), "", I::Shield),
             Action::ModeAuto => i("mode_auto", t("ui.permission_mode_auto_low_risk"), t("ui.permissions"), "", I::Shield),
             Action::OpenSftp => i("sftp", t("ui.sftp_files"), t("ui.tools"), "", I::FolderSync),
-            Action::OpenSftpPopup => i("sftp_popup", t("sftp.open_popup"), t("ui.tools"), "", I::FolderSync),
-            Action::OpenSftpTab => i("sftp_tab", t("sftp.open_tab"), t("ui.tools"), "", I::PanelTop),
-            Action::OpenSftpSplit => i("sftp_split", t("sftp.open_split"), t("ui.tools"), "", I::Columns2),
-            Action::OpenSftpWindow => i("sftp_window", t("sftp.open_window"), t("ui.tools"), "", I::ExternalLink),
-            Action::OpenHostTools => i("host_tools", t("hosttools.title"), t("ui.tools"), "", I::ChartPie),
-            Action::OpenSnippets => i("snippets", t("lib.snippets"), t("ui.tools"), "", I::Code),
+            Action::OpenHostTools => i("host_tools", t("hosttools.title"), t("ui.tools"), "", I::Monitor),
+            Action::OpenSnippets => i("snippets", t("lib.snippets"), t("ui.tools"), "alt-7", I::Code),
             Action::OpenHistory => i("history_panel", t("lib.history"), t("ui.tools"), "", I::Clock),
             Action::OpenPortForward => i("port_forward", t("ui.port_forwarding"), t("ui.tools"), "", I::ArrowLeftRight),
             Action::OpenAi => i("ai_panel", t("ui.ai_agent_panel"), t("ui.tools"), "ctrl-shift-a", I::Bot),
@@ -75,6 +73,14 @@ impl Action {
             Action::SnapshotLayout => i("layout_snapshot", t("snap.action"), t("ui.terminal"), "", I::Camera),
             Action::RollbackLayout => i("layout_rollback", t("snap.rollback_action"), t("ui.terminal"), "", I::RotateCcw),
             Action::QuickStart => i("quick_start", t("qs.action"), t("ui.terminal"), "ctrl-shift-o", I::FolderOpen),
+            Action::ToolHosts => i("tool_hosts", t("tool.hosts"), t("tool.group"), "alt-1", I::Server),
+            Action::ToolSftp => i("tool_sftp", t("tool.sftp"), t("tool.group"), "alt-2", I::FolderSync),
+            Action::ToolDatabase => i("tool_database", t("tool.database"), t("tool.group"), "alt-3", I::Database),
+            Action::ToolRedis => i("tool_redis", t("tool.redis"), t("tool.group"), "alt-4", I::Layers),
+            Action::ToolDocker => i("tool_docker", t("tool.docker"), t("tool.group"), "alt-5", I::Container),
+            Action::ToolPorts => i("tool_ports", t("tool.ports"), t("tool.group"), "alt-6", I::ArrowLeftRight),
+            Action::ToggleBottomPanel => i("toggle_bottom", t("tool.toggle_bottom"), t("tool.group"), "", I::PanelBottom),
+            Action::NewDbConnection => i("new_db", t("db.new_connection"), t("tool.database"), "", I::DatabasePlus),
             // macOS 习惯是 ⌘Q；其他平台留空，避免占用 Ctrl+Q（终端里的流控键）。
             Action::Quit => i("quit", t("menu.quit"), t("ui.general"), if cfg!(target_os = "macos") { "cmd-q" } else { "" }, I::X),
         }

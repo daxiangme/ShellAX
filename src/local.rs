@@ -119,11 +119,12 @@ pub fn spawn_local_in(size: Size, shell: Option<&str>, cwd: Option<&std::path::P
     if (integrate || style) && sh.ends_with("bash") {
         let mut body = if integrate { BASH_INTEGRATION.to_string() } else { "[ -f ~/.bashrc ] && . ~/.bashrc\n".into() };
         if style { body.push_str(COLOR_ALIASES); }
-        let rc = std::env::temp_dir().join("shellax-bash-integration.sh");
+        // one file per variant: sessions starting at the same time must not overwrite each other's rc
+        let rc = std::env::temp_dir().join(format!("shellax-bash-{}{}.sh", if integrate { "i" } else { "n" }, if style { "s" } else { "p" }));
         let _ = std::fs::write(&rc, body);
         cmd.args(["--rcfile", rc.to_str().unwrap_or_default()]);
     } else if (integrate || style) && sh.ends_with("zsh") {
-        let dir = std::env::temp_dir().join("shellax-zsh");
+        let dir = std::env::temp_dir().join(format!("shellax-zsh-{}{}", if integrate { "i" } else { "n" }, if style { "s" } else { "p" }));
         let _ = std::fs::create_dir_all(&dir);
         let zshenv = if integrate { ZSH_ZSHENV.to_string() } else { "[ -f \"$HOME/.zshenv\" ] && . \"$HOME/.zshenv\"\n".into() };
         let mut zshrc = if integrate { ZSH_ZSHRC.to_string() } else { "[ -f \"$HOME/.zshrc\" ] && . \"$HOME/.zshrc\"\n".into() };

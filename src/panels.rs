@@ -100,35 +100,125 @@ impl Root {
         match self.port_view.clone() { Some(v) => ui::modal(v).into_any_element(), None => div().into_any_element() }
     }
 
-    /// Shared right-hand card: same width, radius, resize handle and title row as the AI assistant.
+    /// One right-column card: rounded panel with a 40px title row (collapse + close).
+    /// Width and the resize handle belong to the column (`dock_column`).
     pub(crate) fn dock_frame(&mut self, dock_id: &'static str, title: SharedString, ic: IconName, body: impl IntoElement, cx: &mut Context<Root>) -> AnyElement {
         let th = cur();
         let close_id = SharedString::from(format!("{dock_id}-close"));
-        let resize_id = SharedString::from(format!("{dock_id}-resize"));
-        let mut dock = div().id(dock_id).relative().w(px(self.ai_width)).h_full().flex_shrink_0().flex().flex_col().min_h_0()
-            .rounded(px(10.)).overflow_hidden().bg(c(th.base))
+        let min_id = SharedString::from(format!("{dock_id}-min"));
+        let collapsed = self.dock_min.contains(dock_id);
+        let btn = |id: SharedString| div().id(id).size(px(26.)).rounded_md().flex().items_center().justify_center().cursor_pointer().hover(|d| d.bg(c(cur().surface0)));
+        let mut dock = div().id(dock_id).w_full().flex().flex_col().min_h_0().overflow_hidden()
+            .rounded(px(crate::card_layout::CARD_RADIUS)).bg(c(th.base));
+        dock = dock.child(div().h(px(40.)).px_3().flex_shrink_0().flex().items_center().gap_2().when(!collapsed, |d| d.border_b_1()).border_color(c(th.surface0))
+            .child(icon(ic, 15., c(th.accent)))
+            .child(div().flex_1().min_w_0().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(title))
+            .child(btn(min_id).on_click(cx.listener(move |this, _, _w, cx| { if this.dock_min.remove(dock_id) { *this.dock_flip.entry(dock_id).or_default() += 1; } else { this.dock_min.insert(dock_id); } cx.notify(); }))
+                .child(icon(if collapsed { IconName::ChevronDown } else { IconName::ChevronUp }, 15., c(th.overlay1))))
+            .child(btn(close_id).on_click(cx.listener(move |this, _, w, cx| this.close_dock(dock_id, w, cx)))
+                .child(icon(IconName::X, 16., c(th.overlay1)))));
+        if collapsed { return dock.flex_shrink_0().into_any_element(); }
+        let body = div().flex_1().min_h_0().flex().flex_col().child(body);
+        match self.dock_flip.get(dock_id).copied() {
+            // re-expanded: short ease-out reveal (offset only; the column size does not change)
+            Some(n) if !crate::motion::reduced() => {
+                use gpui::AnimationExt;
+                dock.child(body.with_animation((dock_id, n as usize), gpui::Animation::new(crate::motion::ms(crate::motion::PANEL_CLOSE_MS)).with_easing(crate::motion::ease_out), |d, t| d.relative().top(px((1. - t) * -12.)))).into_any_element()
+            }
+            _ => dock.child(body).into_any_element(),
+        }
+    }
+
+    /// Right column: host status, AI and the snippets/history card stacked top to bottom.
+    /// Shared width (drag the left edge); the first two expanded cards split by `dock_split`.
+    pub(crate) fn dock_column(&mut self, window: &mut gpui::Window, cx: &mut Context<Root>) -> Option<AnyElement> {
+        let mut cards: Vec<(&'static str, AnyElement)> = vec![];
+        if let Some(v) = self.dock_host.clone() {
+            let title = SharedString::from(format!("{} · {}", t("hosttools.title"), v.read(cx).label()));
+            // cached: its 5 s refresh repaints only this card; the window re-renders it only when it notifies
+            let el = v.cached(gpui::StyleRefinement::default().size_full());
+            cards.push(("host-dock", self.dock_frame("host-dock", title, IconName::Monitor, el, cx)));
+        }
+        if self.dock_ai { cards.push(("ai-dock", self.ai_dock(cx))); }
+        if matches!(self.dock, crate::SideDock::Snippets | crate::SideDock::History) {
+            let id = if self.dock == crate::SideDock::Snippets { "snip-dock" } else { "hist-dock" };
+            cards.push((id, self.library_dock(window, cx)));
+        }
+        if cards.is_empty() { self.dock_shown = false; return None; }
+        // first card in an empty column: slide the column in (terminal resizes once, at the end)
+        if !self.dock_shown && !crate::motion::reduced() {
+            let seq = self.dock_anim.map(|a| a.1 + 1).unwrap_or(1);
+            self.dock_anim = Some((true, seq));
+            crate::motion::hold(crate::motion::PANEL_OPEN_MS + 20);
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(crate::motion::ms(crate::motion::PANEL_OPEN_MS)).await;
+                let _ = this.update(cx, |r, cx| if r.dock_anim.is_some_and(|a| a == (true, seq)) { r.dock_anim = None; cx.notify(); });
+            }).detach();
+        }
+        self.dock_shown = true;
+        let open: Vec<usize> = cards.iter().enumerate().filter(|(_, (id, _))| !self.dock_min.contains(id)).map(|(i, _)| i).collect();
+        let split = self.dock_split.clamp(0.15, 0.85);
+        let first_open = open.first().copied();
+        let n_open = open.len().max(1) as f32;
+        let mut col = div().id("dock-col").relative().w(px(self.ai_width)).h_full().flex_shrink_0().flex().flex_col().min_h_0()
             .on_drag_move(cx.listener(|this, ev: &gpui::DragMoveEvent<crate::sidebar::AiResize>, _w, cx| {
                 let w = f32::from(ev.bounds.right() - ev.event.position.x).clamp(280.0, 560.0);
                 if (w - this.ai_width).abs() >= 1.0 { this.ai_width = w; cx.notify(); }
+            }))
+            .on_drag_move(cx.listener(|this, ev: &gpui::DragMoveEvent<DockSplit>, _w, cx| {
+                let h = f32::from(ev.bounds.size.height).max(1.0);
+                let r = (f32::from(ev.event.position.y - ev.bounds.top()) / h).clamp(0.15, 0.85);
+                if (r - this.dock_split).abs() > 0.002 { this.dock_split = r; cx.notify(); }
             }));
-        dock = dock.child(div().id(resize_id).absolute().top_0().left_0().w(px(6.)).h_full().cursor_col_resize()
+        let total = cards.len();
+        for (i, (id, el)) in cards.into_iter().enumerate() {
+            let collapsed = self.dock_min.contains(id);
+            let mut slot = div().w_full().min_h_0().flex().flex_col();
+            slot = if collapsed { slot.flex_shrink_0() } else if open.len() >= 2 {
+                let share = if Some(i) == first_open { split } else { (1.0 - split) / (n_open - 1.0) };
+                slot.flex_basis(gpui::relative(share)).flex_grow(1.).flex_shrink(1.)
+            } else { slot.flex_1() };
+            col = col.child(slot.child(el));
+            if i + 1 < total {
+                // gap between cards; below the first expanded card it doubles as the split handle
+                let handle = Some(i) == first_open && open.len() >= 2;
+                col = col.child(div().id(("dock-gap", i)).h(px(crate::card_layout::CARD_GAP)).flex_shrink_0().w_full()
+                    .when(handle, |d| d.cursor_row_resize().hover(|d| d.bg(c(cur().accent).opacity(0.35)))
+                        .on_drag(DockSplit, |d: &DockSplit, _, _, cx| cx.new(|_| d.clone()))
+                        .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _w, cx| if ev.click_count() >= 2 { this.dock_split = 0.5; cx.notify(); }))));
+            }
+        }
+        col = col.child(div().id("dock-col-resize").absolute().top_0().left_0().w(px(6.)).h_full().cursor_col_resize()
             .hover(|d| d.bg(c(cur().accent).opacity(0.35)))
             .on_drag(crate::sidebar::AiResize, |d: &crate::sidebar::AiResize, _, _, cx| cx.new(|_| d.clone()))
             .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _w, cx| if ev.click_count() >= 2 { this.ai_width = config::AI_DOCK_W; this.save_ai_width(); cx.notify(); })));
-        dock = dock.child(div().h(px(40.)).px_3().flex_shrink_0().flex().items_center().gap_2().border_b_1().border_color(c(th.surface0))
-            .child(icon(ic, 15., c(th.accent)))
-            .child(div().flex_1().min_w_0().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(title))
-            .child(div().id(close_id).size(px(28.)).rounded_md().flex().items_center().justify_center().cursor_pointer()
-                .hover(|d| d.bg(c(cur().surface0)))
-                .on_click(cx.listener(|this, _, w, cx| { this.dock = crate::SideDock::None; crate::chat_view::set_dock_open(false); this.focus_active(w, cx); cx.notify(); }))
-                .child(icon(IconName::X, 16., c(th.overlay1)))));
-        dock.child(body).into_any_element()
+        Some(match self.dock_anim {
+            Some((show, seq)) => crate::motion::slide(div().h_full().flex_shrink_0().w(px(self.ai_width)), ("dock-anim", seq as usize), col.into_any_element(), self.ai_width + 8., crate::motion::Edge::Right, show),
+            None => col.into_any_element(),
+        })
     }
 
     /// Right-hand AI tool window: conversation fills the column, terminal stays visible.
+    /// What the built-in assistant talks about: the focused pane of the active tab.
+    pub(crate) fn ai_target(&self, cx: &gpui::App) -> crate::ai_ctx::Target {
+        use crate::ai_ctx::Target;
+        let Some(p) = self.tabs.get(self.active).map(|t| t.focused.clone()) else { return Target::Other };
+        let v = p.read(cx);
+        if let Some(d) = &v.db { return Target::Db(d.downgrade()); }
+        match &v.embed {
+            Some(crate::termview::Embed::Kv(k)) => Target::Redis(k.downgrade()),
+            Some(crate::termview::Embed::Dock(d)) => Target::Docker(d.downgrade()),
+            Some(_) => Target::Other,
+            None if v.sftp.is_some() => Target::Other,
+            None => Target::Terminal,
+        }
+    }
     pub(crate) fn ai_dock(&mut self, cx: &mut Context<Root>) -> AnyElement {
         let th = cur();
         let s = config::get();
+        let target = self.ai_target(cx);
+        let term = self.tool.workspace() == crate::activity::Tool::Hosts && target.is_terminal();
+        if let Some(v) = self.chat_view.clone() { v.update(cx, |c, cx| c.set_target(target, cx)); }
         let mut strip = div().px_3().py(px(6.)).flex().flex_wrap().items_center().gap_1().border_b_1().border_color(c(th.surface0));
         let mut n = 0usize;
         for (ti, tab) in self.tabs.iter().enumerate() {
@@ -147,7 +237,7 @@ impl Root {
             strip = strip.child(ui::button(("aidock-ql", k), q.name.clone(), 0).h(px(24.)).px_2().text_size(px(11.))
                 .on_click(cx.listener(move |this, _, w, cx| this.launch_agent(k, w, cx))));
         }
-        let mut body = div().flex_1().min_h_0().flex().flex_col().child(strip);
+        let mut body = div().flex_1().min_h_0().flex().flex_col().when(term, |d| d.child(strip));
         if let Some(v) = self.chat_view.clone() { body = body.child(div().flex_1().min_h_0().child(v)); }
         self.dock_frame("ai-dock", t("ui.built_in_ai_assistant").into(), IconName::Sparkles, body, cx)
     }
@@ -156,3 +246,10 @@ impl Root {
 
 #[allow(dead_code)]
 fn _unused(_: Overlay) {}
+
+/// Drag payload for the split between stacked right-column cards.
+#[derive(Clone)]
+pub(crate) struct DockSplit;
+impl gpui::Render for DockSplit {
+    fn render(&mut self, _w: &mut gpui::Window, _cx: &mut Context<Self>) -> impl IntoElement { div() }
+}

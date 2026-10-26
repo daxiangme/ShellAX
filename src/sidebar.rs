@@ -16,7 +16,7 @@ use crate::theme::{c, cur};
 use crate::ui::{self, icon, IconName};
 use crate::{chrome, config, HostDrag, Root};
 
-fn action_tip(label: &str, binding: &str) -> String {
+pub(crate) fn action_tip(label: &str, binding: &str) -> String {
     if binding.is_empty() { return label.to_string(); }
     let keys = binding.split('-').map(|p| if p.len() == 1 { p.to_uppercase() } else {
         let mut c = p.chars();
@@ -73,7 +73,7 @@ impl Render for GroupDrag {
     fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
         div().px_3().py_1().rounded_lg().bg(c(th.base)).border_1().border_color(c(th.accent)).flex().items_center().gap_1()
-            .child(icon(IconName::Folder, 12., c(th.accent))).text_size(px(12.)).text_color(c(th.text)).child(hosttree::leaf_of(&self.path).to_string())
+            .child(icon(IconName::Folder, 12., c(th.accent))).text_size(px(13.)).text_color(c(th.text)).child(hosttree::leaf_of(&self.path).to_string())
     }
 }
 
@@ -134,7 +134,7 @@ impl Root {
             return;
         };
         let view = pane.read(cx);
-        if view.sftp.is_some() { self.toast(t("place.need_terminal").into(), cx); return; }
+        if view.embedded() { self.toast(t("place.need_terminal").into(), cx); return; }
         let host = self.place_host(&view.spec);
         let group = if host.is_empty() { String::new() } else { config::get().hosts.iter().find(|h| h.name == host).and_then(|h| h.group.clone()).unwrap_or_default() };
         match view.shell_cwd().filter(|p| !p.is_empty()) {
@@ -327,7 +327,7 @@ impl Root {
                 this.sb_save("hosts.group_move", format!("group={from:?} into={to:?}"), |s| { hosttree::move_group(&mut s.hosts, &mut s.groups, &from, &to, None); }, cx);
             }))
             .child(icon(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown }, 11., c(th.overlay1)))
-            .child(icon(IconName::Folder, 14., match tags.first() { Some(t0) => c(config::get().tags.rgb(t0)), None => c(th.accent).opacity(0.85) }))
+            .child(icon(IconName::Folder, 16., match tags.first() { Some(t0) => c(config::get().tags.rgb(t0)), None => c(th.accent).opacity(0.85) }))
             .children(ui::tag_dot(tags.first()))
             .child(div().min_w_0().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(name.to_string()))
             .child(div().flex_1())
@@ -363,7 +363,7 @@ impl Root {
                 Some(s) if s.exited.load(Ordering::Acquire) => 0,
                 Some(s) if s.connected.load(Ordering::Acquire) => 2,
                 Some(_) => 1,
-                None if v.sftp.is_none() && v.error.is_some() => 3,
+                None if !v.embedded() && v.error.is_some() => 3,
                 None => 0,
             };
             (match &v.spec { Spec::Local => "local".to_string(), Spec::Ssh(t) => t.label() }, st)
@@ -388,22 +388,16 @@ impl Root {
                 cx.notify();
             }))
             .child(icon(IconName::Plus, 15., c(th.text)));
-        let mut col = div().id("sidebar").relative().w(px(self.sb_width)).flex_shrink_0().h_full().flex().flex_col()
-            .on_drag_move(cx.listener(|this, ev: &gpui::DragMoveEvent<SbResize>, _w, cx| {
-                let w = (f32::from(ev.event.position.x - ev.bounds.left()) - 2.0).clamp(180.0, 480.0);
-                if (w - this.sb_width).abs() >= 1.0 { this.sb_width = w; cx.notify(); }
-            }));
-        // The 4px gap to the right of the sidebar is the resize hit area.
-        col = col.child(div().id("sb-resize").absolute().top_0().right(px(-4.)).w(px(4.)).h_full().cursor_col_resize()
-            .hover(|d| d.bg(c(cur().accent).opacity(0.35)))
-            .on_drag(SbResize, |d: &SbResize, _, _, cx| cx.new(|_| d.clone()))
-            .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _w, cx| if ev.click_count() >= 2 { this.sb_width = config::SIDEBAR_W; this.save_sb_width(); cx.notify(); })));
+        let mut col = self.sb_frame(cx);
         col = col.child(div().px(px(4.)).pb(px(2.)).flex().items_center().gap(px(4.)).child(search_box).child(plus));
 
         // ---- list
         let mut list = div().id("host-list").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().pb_2()
             .on_mouse_down(gpui::MouseButton::Right, cx.listener(|this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.show_sb_menu(SbMenu { target: SbTarget::Empty, pos: ev.position, sub: SbSub::Main }); cx.notify(); }));
+        // SFTP module: remote hosts only (no local terminal, no local folders)
+        let remote_only = self.tool == crate::activity::Tool::Sftp;
         // pinned: local terminal (+ $SSH_HOST target in dev setups)
+        if !remote_only {
         list = list.child(self.section_header("sec-local", t("sb.local"), cx, false));
         let sh = crate::shell_display_name();
         let local_sel = ctx.selected.as_deref() == Some("local");
@@ -417,6 +411,7 @@ impl Root {
             .child(div().flex_1().min_w_0().flex().flex_col().gap(px(1.)).overflow_hidden()
                 .child(div().text_size(px(13.)).line_height(px(17.)).text_color(c(th.text)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(t("ui.local_terminal")))
                 .child(div().text_size(px(11.)).line_height(px(14.)).text_color(c(th.subtext)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(sh))));
+        }
         if let Some(dt) = self.default_target.clone() {
             let l = dt.label();
             let on = ctx.open.iter().any(|(x, o)| *x == l && *o == 2);
@@ -429,18 +424,18 @@ impl Root {
         }
 
         list = list.child(self.section_header("sec-conn", t("sb.connections"), cx, true));
-        let places = s.places.clone();
+        let places = if remote_only { vec![] } else { s.places.clone() };
         let rows = hosttree::rows(&s.hosts, &s.groups, &s.sidebar.collapsed, &q);
         if s.hosts.is_empty() && s.groups.is_empty() {
             // text wraps; buttons stack full-width and ellipsize instead of overflowing the sidebar
             let full = |b: gpui::Stateful<gpui::Div>| b.w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().justify_center();
             list = list.child(div().mx_3().my_2().p_3().min_w_0().overflow_hidden().rounded(px(10.)).bg(c(th.surface0).opacity(0.5)).flex().flex_col().gap_2()
-                .child(div().w_full().min_w_0().whitespace_normal().text_size(px(12.)).text_color(c(th.subtext)).child(t("sb.empty")))
+                .child(div().w_full().min_w_0().whitespace_normal().text_size(px(13.)).text_color(c(th.subtext)).child(t("sb.empty")))
                 .child(div().w_full().min_w_0().flex().flex_col().gap(px(6.))
                     .child(full(ui::button("sb-empty-new", t("sb.new_connection"), 1)).on_click(cx.listener(|this, _, w, cx| this.open_host_dialog(None, None, w, cx))))
                     .child(full(ui::button("sb-empty-import", t("sb.import"), 0)).on_click(cx.listener(|this, _, w, cx| this.open_import(w, cx))))));
         } else if rows.is_empty() {
-            list = list.child(div().px_4().py_3().text_size(px(12.)).text_color(c(th.subtext)).child(t("ui.no_matching_hosts")));
+            list = list.child(div().px_4().py_3().text_size(px(13.)).text_color(c(th.subtext)).child(t("ui.no_matching_hosts")));
         }
         for (i, p) in places.iter().enumerate().filter(|(_, p)| p.group.is_empty()) {
             list = list.child(self.place_row(i, p, 0, cx));
@@ -470,52 +465,64 @@ impl Root {
             let on = self.tag_filter.contains(&color);
             let cc = color.clone();
             let is_prod = color == s.tags.production;
-            list = list.child(div().id(("tagf", i)).mx(px(4.)).pr(px(4.)).pl(px(6.)).h(px(24.)).rounded(px(6.)).flex().items_center().gap(px(6.)).cursor_pointer()
+            list = list.child(div().id(("tagf", i)).mx(px(4.)).pr(px(4.)).pl(px(6.)).h(px(28.)).rounded(px(6.)).flex().items_center().gap(px(6.)).cursor_pointer()
                 .when(on, |d| d.bg(c(th.accent).opacity(0.16))).when(!on, |d| d.hover(|s| s.bg(c(cur().surface0).opacity(0.7))))
                 .on_click(cx.listener(move |this, _, _w, cx| { if let Some(p) = this.tag_filter.iter().position(|t| *t == cc) { this.tag_filter.remove(p); } else { this.tag_filter.push(cc.clone()); } cx.notify(); }))
                 .child(div().size(px(10.)).flex_shrink_0().rounded_full().bg(c(s.tags.rgb(&color))))
-                .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(12.)).text_color(c(th.text)).child(name))
+                .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(13.)).text_color(c(th.text)).child(name))
                 .when(is_prod, |d| d.child(icon(IconName::ShieldAlert, 11., c(th.overlay0))))
                 .child(div().flex_shrink_0().text_size(px(11.)).text_color(c(th.subtext)).child(n.to_string())));
         }
         let _ = searching;
         let vib = if chrome::NATIVE_LIGHTS { 0.72 } else { 1.0 };
-        col.bg(c(th.crust).opacity(vib)).child(list)
+        col.bg(c(crate::theme::scheme().bg).opacity(vib)).child(list)
+    }
+
+    /// Left tool-window frame: fixed width, resize handle on the right edge (double click resets).
+    pub(crate) fn sb_frame(&mut self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let col = div().id("sidebar").relative().w(px(self.sb_width)).flex_shrink_0().h_full().rounded(px(10.)).pt(px(4.)).flex().flex_col()
+            .on_drag_move(cx.listener(|this, ev: &gpui::DragMoveEvent<SbResize>, _w, cx| {
+                let w = (f32::from(ev.event.position.x - ev.bounds.left()) - 2.0).clamp(180.0, 480.0);
+                if (w - this.sb_width).abs() >= 1.0 { this.sb_width = w; cx.notify(); }
+            }));
+        // The 4px gap to the right of the sidebar is the resize hit area.
+        col.child(div().id("sb-resize").absolute().top_0().right(px(-4.)).w(px(4.)).h_full().cursor_col_resize()
+            .hover(|d| d.bg(c(cur().accent).opacity(0.35)))
+            .on_drag(SbResize, |d: &SbResize, _, _, cx| cx.new(|_| d.clone()))
+            .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _w, cx| if ev.click_count() >= 2 { this.sb_width = config::SIDEBAR_W; this.save_sb_width(); cx.notify(); })))
     }
 
     /// Session tools sit beside the terminal, not in the host list.
     pub(crate) fn tool_rail(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
-        let items: [(Action, &str, IconName); 10] = [
-            (Action::OpenSettings, t("ui.settings"), IconName::Settings),
-            (Action::OpenSftp, t("ui.sftp_files"), IconName::FolderSync),
-            (Action::OpenPortForward, t("ui.port_forwarding"), IconName::ArrowLeftRight),
-            (Action::OpenHostTools, t("hosttools.title"), IconName::ChartPie),
+        // Left activity strip owns the modules (terminal, SFTP, database, Redis, Docker, ports);
+        // this right strip holds the tool windows that work on the focused session.
+        let _ = th;
+        let items: [(Action, &str, IconName); 6] = [
+            (Action::OpenAi, "AI / Agent", IconName::Bot),
+            (Action::OpenHostTools, t("hosttools.title"), IconName::Monitor),
             (Action::OpenSnippets, t("lib.snippets"), IconName::Code),
             (Action::OpenHistory, t("lib.history"), IconName::Clock),
-            (Action::OpenAi, "AI / Agent", IconName::Bot),
-            (Action::OpenAudit, t("ui.audit_log"), IconName::ScrollText),
             (Action::CommandPalette, t("ui.command_palette"), IconName::Command),
             (Action::OpenAbout, t("ui.help_about"), IconName::CircleQuestionMark),
         ];
         let n_agents = self.tabs.iter().flat_map(|t| t.layout.leaves()).filter(|p| p.read(cx).agent.is_some()).count();
-        let save_tip = t("place.save").to_string();
-        let mut rail = div().id("tool-rail").w(px(28.)).flex_shrink_0().h_full().flex().flex_col().items_center().py(px(4.)).gap_1();
-        rail = rail.child(div().id("rail-save").size(px(28.)).rounded(px(6.)).flex().items_center().justify_center().cursor_pointer()
-            .hover(|d| d.bg(c(cur().surface0)))
-            .on_click(cx.listener(|this, _, w, cx| this.save_current_place(w, cx)))
-            .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(save_tip.clone()).build(w, cx))
-            .child(icon(IconName::FolderPlus, 15., c(th.accent))));
+        // same size, spacing and active style as the left activity strip
+        let mut rail = div().id("tool-rail").w(px(crate::activity::STRIP_W)).flex_shrink_0().h_full().flex().flex_col().items_center().pt(px(4.)).pb(px(8.)).gap(px(4.));
         for (i, (a, label, ic)) in items.into_iter().enumerate() {
             let tip = action_tip(label, &a.binding());
-            rail = rail.child(div().id(("rail", i)).relative().size(px(28.)).rounded(px(6.)).flex().items_center().justify_center().cursor_pointer()
-                .hover(|d| d.bg(c(cur().surface0)))
-                .on_click(cx.listener(move |this, _, w, cx| this.run(a, w, cx)))
-                .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
-                .when(self.dock_is(a), |d| d.bg(c(th.accent).opacity(0.16)))
-                .child(icon(ic, 15., if self.dock_is(a) { c(th.accent) } else { c(th.overlay1) }))
-                .when(a == Action::OpenAi && n_agents > 0, |d| d.child(div().absolute().top(px(2.)).right(px(2.)).size(px(6.)).rounded_full().bg(c(th.accent)))));
+            rail = rail.child(self.strip_btn(("rail", i), ic, tip, self.dock_is(a), a == Action::OpenAi && n_agents > 0)
+                .on_click(cx.listener(move |this, _, w, cx| this.run(a, w, cx))));
         }
+        rail = rail.child(div().flex_1());
+        let busy = self.transfers_active(cx);
+        rail = rail
+            .child(self.strip_btn("rail-transfers", IconName::ArrowDownUp, action_tip(t("tool.transfers"), &Action::ToggleBottomPanel.binding()), self.bottom_open && self.bottom_tab == crate::activity::Bottom::Transfers, busy)
+                .on_click(cx.listener(|this, _, _w, cx| this.toggle_bottom(Some(crate::activity::Bottom::Transfers), cx))))
+            .child(self.strip_btn("rail-audit", IconName::ScrollText, action_tip(t("ui.audit_log"), &Action::OpenAudit.binding()), false, false)
+                .on_click(cx.listener(|this, _, w, cx| this.run(Action::OpenAudit, w, cx))))
+            .child(self.strip_btn("rail-save", IconName::FolderPlus, t("place.save").to_string(), false, false)
+                .on_click(cx.listener(|this, _, w, cx| this.save_current_place(w, cx))));
         rail
     }
 
@@ -640,7 +647,7 @@ impl Root {
     pub(crate) fn sb_modal_el(&mut self, m: SbModal, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
         let title = |ic, s: String, col| div().flex().items_center().gap_2().child(icon(ic, 16., col)).child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(s));
-        let note = |s: String| div().text_size(px(12.)).text_color(c(th.subtext)).child(s);
+        let note = |s: String| div().text_size(px(13.)).text_color(c(th.subtext)).child(s);
         let cancel = ui::button("sbm-cancel", t("ui.cancel"), 0).on_click(cx.listener(|this, _, w, cx| { this.sb_modal = None; this.focus_active(w, cx); cx.notify(); }));
         let mut card = ui::card(480.).p_5().gap_3();
         match m {
@@ -665,7 +672,7 @@ impl Root {
                         .on_click(cx.listener(|this, _, _w, cx| { if let Some(SbModal::NewTab { dont_ask, .. }) = this.sb_modal.as_mut() { *dont_ask = !*dont_ask; } cx.notify(); }))
                         .child(div().size(px(16.)).rounded(px(4.)).border_1().border_color(c(th.surface2)).flex().items_center().justify_center()
                             .when(dont_ask, |d| d.bg(c(th.accent)).child(icon(IconName::Check, 11., c(th.base)))))
-                        .child(div().text_size(px(12.)).text_color(c(th.text)).child(t("sb.dont_ask_again"))))
+                        .child(div().text_size(px(13.)).text_color(c(th.text)).child(t("sb.dont_ask_again"))))
                     .child(div().flex().gap_2().justify_end().child(cancel)
                         .child(ui::button("sbm-open", t("sb.open_new_tab"), 1).on_click(cx.listener(move |this, _, w, cx| {
                             if dont_ask { let _ = config::update(|s| s.session.confirm_new_tab = false); }
@@ -706,7 +713,7 @@ impl Root {
                 let n = checked.iter().filter(|c| **c).count();
                 let g2 = group.clone();
                 card = card.child(lst)
-                    .child(div().flex().items_center().gap_2().child(div().text_size(px(12.)).text_color(c(th.subtext)).child(t("ui.group"))).child(div().flex_1().child(ui::text_field(&group, false))))
+                    .child(div().flex().items_center().gap_2().child(div().text_size(px(13.)).text_color(c(th.subtext)).child(t("ui.group"))).child(div().flex_1().child(ui::text_field(&group, false))))
                     .child(div().flex().gap_2().justify_end().child(cancel)
                         .child(ui::button("sbm-import", tf("sb.import_n", &[("n", &n)]), 1).on_click(cx.listener(move |this, _, _w, cx| {
                             let Some(SbModal::Import { cands, checked, .. }) = this.sb_modal.clone() else { return };
@@ -738,9 +745,20 @@ impl Root {
         // click must not be treated as a request for another tab (that used to pop the
         // "open again?" dialog). Opening a second tab stays available from the context menu.
         if double { let _ = label; return; }
+        // SFTP tool window: the same host tree, but a click opens the file browser
+        if self.tool == crate::activity::Tool::Sftp {
+            let mode = SftpMode::parse(&config::get().session.sftp_mode);
+            let target = match spec { Spec::Ssh(t) => Some(t), Spec::Local => None };
+            // the focused SFTP tab still choosing a host takes it right away; otherwise a new tab
+            if let Some(t) = target.clone() {
+                let sv = self.tabs.get(self.active).and_then(|tb| tb.focused.read(cx).sftp.clone());
+                if let Some(sv) = sv { if sv.update(cx, |v, cx| v.connect_free_pane(t, cx)) { return; } }
+            }
+            return self.open_sftp_mode(target, mode, window, cx);
+        }
         let same = |p: &Entity<crate::termview::TermView>, cx: &Context<Self>| {
             let v = p.read(cx);
-            v.sftp.is_none() && match (&v.spec, &spec) { (Spec::Local, Spec::Local) => true, (Spec::Ssh(a), Spec::Ssh(b)) => a.label() == b.label(), _ => false }
+            !v.embedded() && match (&v.spec, &spec) { (Spec::Local, Spec::Local) => true, (Spec::Ssh(a), Spec::Ssh(b)) => a.label() == b.label(), _ => false }
         };
         let hit = self.tabs.iter().enumerate().find_map(|(i, t)| t.layout.leaves().into_iter().find(|p| same(p, cx)).map(|p| (i, p)));
         match hit {

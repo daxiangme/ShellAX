@@ -30,6 +30,7 @@ impl Render for DragPreview {
 }
 
 #[derive(Clone, Copy, PartialEq)]
+#[allow(dead_code)]
 pub enum DirAction { Right, Down, Close }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -44,6 +45,7 @@ pub enum SftpEvent {
     /// Move this view to another display mode (PRD 5.21); the entity (state, queue) is kept.
     Move(Mode),
     /// Split or close the pane that contains this SFTP view.
+    #[allow(dead_code)]
     Pane(DirAction),
     /// The title changed (a host connected / the source changed).
     Retitle,
@@ -165,15 +167,9 @@ fn default_local_dir() -> PathBuf {
 
 /// Saved host name for a target (sidebar name), else `user@host:port`.
 fn host_name(t: &SshTarget) -> String {
-    config_hosts().into_iter().find(|(_, x)| x.pool_key() == t.pool_key()).map(|(h, _)| h.name).unwrap_or_else(|| t.label())
+    config_hosts().iter().find(|(_, x)| x.pool_key() == t.pool_key()).map(|(h, _)| h.name.clone()).unwrap_or_else(|| t.label())
 }
-fn config_hosts() -> Vec<(HostEntry, SshTarget)> {
-    let s = crate::config::get();
-    let kh = s.known_hosts_path();
-    let all = s.all_hosts();
-    let o = s.ssh_opts();
-    all.iter().map(|h| (h.clone(), ssh_term_proto::hosts::resolve(h, &kh, &all, &o))).collect()
-}
+fn config_hosts() -> std::sync::Arc<Vec<(HostEntry, SshTarget)>> { crate::config::resolved_hosts() }
 
 /// Recursive local copy; returns the number of files copied.
 fn copy_tree(from: &Path, to: &Path) -> std::io::Result<usize> {
@@ -190,9 +186,9 @@ impl SftpView {
     /// Left pane local; right pane connects to `target` (or shows the "connect to host" state).
     /// Does not connect yet: set `initial_dir`, then call [`start`].
     pub fn new_deferred(target: Option<SshTarget>, rt: tokio::runtime::Handle, prompts: ssh::Prompts, _w: &mut Window, _cx: &mut Context<Self>) -> Self {
-        let mut me = Self { rt, prompts, panes: [Pane::new(Src::Local), Pane::new(Src::Empty)], active: 1, status: String::new(), error: false, edit: None, confirm_delete: None, editor: None, ticking: false, _subs: vec![], sync: None, ctx_menu: None, ops_menu: None, pending_edit: None, mode: Mode::Popup, follow_src: None, follow: Follow::new(false), follow_task: false, next_token: 0 };
+        let mut me = Self { rt, prompts, panes: [Pane::new(Src::Empty), Pane::new(Src::Empty)], active: 1, status: String::new(), error: false, edit: None, confirm_delete: None, editor: None, ticking: false, _subs: vec![], sync: None, ctx_menu: None, ops_menu: None, pending_edit: None, mode: Mode::Popup, follow_src: None, follow: Follow::new(false), follow_task: false, next_token: 0 };
         if let Some(t) = target { me.panes[1].src = Src::Remote(Box::new(me.new_remote(host_name(&t), t))); }
-        me.refresh_local(0);
+        // both panes start on the remote host list; 本地 in the picker switches a pane to local
         me
     }
     pub fn new(target: Option<SshTarget>, rt: tokio::runtime::Handle, prompts: ssh::Prompts, w: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -347,6 +343,16 @@ impl SftpView {
         cx.emit(SftpEvent::Retitle);
         cx.notify();
     }
+    /// Sidebar click in the SFTP module: connect a pane that is still choosing a host
+    /// (active pane first). Returns false when every pane already has a source.
+    pub fn connect_free_pane(&mut self, t: SshTarget, cx: &mut Context<Self>) -> bool {
+        let free = |p: &Pane| matches!(p.src, Src::Empty) || p.picker.is_some();
+        let Some(pi) = [self.active, 1 - self.active.min(1)].into_iter().find(|&i| free(&self.panes[i])) else { return false };
+        let name = host_name(&t);
+        let h = crate::config::get().all_hosts().into_iter().find(|h| h.name == name).unwrap_or_else(|| HostEntry { name: name.clone(), host: t.host.clone(), ..Default::default() });
+        self.choose_host(pi, h, t, cx);
+        true
+    }
     fn choose_local(&mut self, pi: usize, cx: &mut Context<Self>) {
         let p = &mut self.panes[pi];
         p.src = Src::Local;
@@ -375,7 +381,8 @@ impl SftpView {
     }
     fn picker_back(&mut self, pi: usize, cx: &mut Context<Self>) {
         if let Some(p) = self.panes[pi].picker.as_mut() {
-            if p.group.is_empty() { self.panes[pi].picker = None; } else { p.group = hosttree::parent_of(&p.group).to_string(); }
+            // an empty pane always shows the host list, so there is nothing to go back to
+            if p.group.is_empty() { if !matches!(self.panes[pi].src, Src::Empty) { self.panes[pi].picker = None; } } else { p.group = hosttree::parent_of(&p.group).to_string(); }
         }
         cx.notify();
     }
@@ -608,7 +615,7 @@ impl SftpView {
         }, |v, n, cx| { v.start_worker(cx); v.set_status(tf("sftp.relay_queued", &[("n", &n)]), false) });
     }
     /// Remote panes with their transfer queues.
-    fn queues(&self) -> Vec<(usize, Queue)> { (0..2).filter_map(|i| self.panes[i].remote().map(|r| (i, r.queue.clone()))).collect() }
+    pub(crate) fn queues(&self) -> Vec<(usize, Queue)> { (0..2).filter_map(|i| self.panes[i].remote().map(|r| (i, r.queue.clone()))).collect() }
     fn start_worker(&mut self, cx: &mut Context<Self>) {
         for p in &self.panes { if let Some(r) = p.remote() { if let Some(s) = r.sess.clone() { r.queue.start(&self.rt, s, || {}); } } }
         if self.ticking { return; }
@@ -912,22 +919,11 @@ fn icon_btn(id: (&'static str, usize), ic: IconName, enabled: bool) -> gpui::Sta
 }
 
 impl SftpView {
-    fn pane_actions(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let th = cur();
-        let btn = |i: usize, ic: IconName, tip: &'static str, act: DirAction| div().id(("sftp-pane", i)).size(px(24.)).rounded(px(R_MD)).flex().items_center().justify_center().cursor_pointer()
-            .hover(|d| d.bg(c(cur().surface1)))
-            .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip).build(w, cx))
-            .on_click(cx.listener(move |_, _, _, cx| cx.emit(SftpEvent::Pane(act))))
-            .child(icon(ic, 13., c(th.overlay1)));
-        div().flex().items_center().gap(px(2.)).pr_1()
-            .child(btn(0, IconName::Columns2, t("ui.split_left_right"), DirAction::Right))
-            .child(btn(1, IconName::Rows2, t("ui.split_top_bottom"), DirAction::Down))
-            .child(btn(2, IconName::X, t("ui.close_pane"), DirAction::Close))
-    }
     fn mode_bar(&self, cx: &mut Context<Self>) -> gpui::Div {
         let th = cur();
         let mut bar = div().flex().items_center().gap_1();
-        for (i, m) in Mode::ALL.into_iter().enumerate() {
+        // display-mode buttons removed: SFTP lives only in its module's tabs
+        for (i, m) in Mode::ALL.into_iter().enumerate().filter(|_| false) {
             let on = self.mode == m;
             let (ic, key) = match m { Mode::Popup => (IconName::Maximize, "sftp.mode_popup"), Mode::Tab => (IconName::PanelTop, "sftp.mode_tab"), Mode::Split => (IconName::Columns2, "sftp.mode_split"), Mode::Window => (IconName::ExternalLink, "sftp.mode_window") };
             bar = bar.child(div().id(("sftp-mode", i)).h(px(H_COMPACT)).px_2().rounded(px(R_MD)).flex().items_center().gap_1().cursor_pointer().text_size(px(FS_CAPTION))
@@ -1010,7 +1006,7 @@ impl SftpView {
         let th = cur();
         let p = &self.panes[pi];
         let (ic, name) = match &p.src { Src::Remote(_) => (IconName::Server, p.label()), _ => (IconName::Monitor, p.label()) };
-        let tags = p.target().and_then(|t| config_hosts().into_iter().find(|(_, x)| x.pool_key() == t.pool_key())).map(|(h, _)| h.tags).unwrap_or_default();
+        let tags = p.target().and_then(|t| config_hosts().iter().find(|(_, x)| x.pool_key() == t.pool_key()).cloned()).map(|(h, _)| h.tags).unwrap_or_default();
         let s = crate::config::get();
         let filter_on = p.filter.is_some();
         div().h(px(40.)).flex_shrink_0().px_2().flex().items_center().gap_1().border_b_1().border_color(c(th.surface0))
@@ -1107,15 +1103,15 @@ impl SftpView {
             if shown > 2000 { break; }
             let selected = selected_on && (p.multi.contains(&i) || p.sel == Some(i));
             let drag = DragFile { pane: pi, path: p.path_of(&e.name), name: e.name.clone() };
-            let g = crate::filekind::glyph(&e.name, e.is_dir, e.mode, &crate::theme::scheme().ansi, dark, th.overlay1);
+            let cls = crate::file_icon::class(&e.name, e.is_dir, e.mode);
             let hidden = e.name.starts_with('.');
-            list = list.child(div().id(("sftp-row", pid(pi, i))).h(px(32.)).flex_shrink_0().px_3().flex().items_center().gap_2().text_size(px(FS_BODY)).text_color(c(th.text)).cursor_pointer()
+            list = list.child(div().id(("sftp-row", pid(pi, i))).h(px(26.)).flex_shrink_0().px_3().flex().items_center().gap_2().text_size(px(FS_BODY)).text_color(c(th.text)).cursor_pointer()
                 .when(hidden, |d| d.opacity(0.72))
                 .when(selected, |d| d.bg(c(th.accent).opacity(0.2))).when(!selected, |d| d.hover(|d| d.bg(c(cur().surface0))))
                 .on_click(cx.listener(move |v, ev: &gpui::ClickEvent, _, cx| { if ev.click_count() >= 2 { v.open(pi, i, cx) } else { v.select(pi, i, ev.modifiers()); cx.notify() } }))
                 .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |v, ev: &gpui::MouseDownEvent, _, cx| { v.open_ctx_menu(pi, i, ev.position, cx); cx.stop_propagation(); }))
                 .on_drag(drag, |d: &DragFile, _, _, cx| cx.new(|_| DragPreview(d.name.clone())))
-                .child(icon(g.icon, 16., c(g.color)))
+                .child(crate::file_icon::file_icon(cls, 18., dark))
                 .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(e.name.clone()))
                 .child(div().w(px(wt)).flex_shrink_0().px_1().overflow_hidden().whitespace_nowrap().text_size(px(FS_SECONDARY)).text_color(c(th.overlay0)).child(fmt_mtime(e.mtime)))
                 .child(div().w(px(ws)).flex_shrink_0().px_1().overflow_hidden().whitespace_nowrap().text_size(px(FS_SECONDARY)).text_color(c(th.overlay0)).child(if e.is_dir { "—".to_string() } else { human(e.size) }))
@@ -1146,8 +1142,10 @@ impl SftpView {
         let query = pk.search.read(cx).value().trim().to_string();
         let group = pk.group.clone();
         let title = if group.is_empty() { t("sftp.choose_host").to_string() } else { hosttree::leaf_of(&group).to_string() };
+        let can_back = !group.is_empty() || !matches!(self.panes[pi].src, Src::Empty);
         let head = div().h(px(40.)).flex_shrink_0().px_2().flex().items_center().gap_1().border_b_1().border_color(c(th.surface0))
-            .child(icon_btn(("sftp-pk-back", pi), IconName::ArrowLeft, true).on_click(cx.listener(move |v, _, _, cx| v.picker_back(pi, cx))))
+            .when(can_back, |d| d.child(icon_btn(("sftp-pk-back", pi), IconName::ArrowLeft, true).on_click(cx.listener(move |v, _, _, cx| v.picker_back(pi, cx)))))
+            .when(!can_back, |d| d.pl_1())
             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(FS_BODY)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(title))
             .child(ui::button(("sftp-pk-local", pi), t("sftp.local_btn"), 0).h(px(H_COMPACT)).px_2()
                 .child(icon(IconName::Monitor, 13., c(th.subtext)))
@@ -1322,7 +1320,15 @@ fn list_is_empty(hosts: &[HostEntry], groups: &[hosttree::GroupEntry], group: &s
 }
 
 impl Render for SftpView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // a pane without a source shows the remote host list right away
+        for pi in 0..2 {
+            if matches!(self.panes[pi].src, Src::Empty) && self.panes[pi].picker.is_none() {
+                let st = cx.new(|cx| InputState::new(window, cx).placeholder(t("sftp.search_hosts")));
+                self._subs.push(cx.subscribe_in(&st, window, |_, _, ev: &InputEvent, _, cx| if matches!(ev, InputEvent::Change) { cx.notify() }));
+                self.panes[pi].picker = Some(Picker { search: st, group: String::new() });
+            }
+        }
         if let Some(pi) = self.remote_pane() { if self.panes[pi].sess().is_some() { if let Some(p) = self.pending_edit.take() { self.edit_in(pi, p, cx); } } }
         let th = cur();
         let edit_bar = self.edit.as_ref().map(|(k, pi, name, st)| {
@@ -1376,7 +1382,6 @@ impl Render for SftpView {
                 .child(icon(IconName::FolderSync, 16., c(th.accent)))
                 .child(div().text_size(px(FS_BODY)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("ui.sftp_files")))
                 .child(div().flex_1())
-                .when(matches!(self.mode, Mode::Tab | Mode::Split), |d| d.child(self.pane_actions(cx)))
                 .child(self.mode_bar(cx))
                 .when(popup, |d| d.child(div().id("sftp-close").size(px(H_DEFAULT)).rounded(px(R_MD)).flex().items_center().justify_center().cursor_pointer()
                     .hover(|d| d.bg(c(cur().surface0))).on_click(cx.listener(|_, _, _, cx| cx.emit(SftpEvent::Close)))
