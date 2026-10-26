@@ -242,8 +242,8 @@ impl Root {
         let gid = SharedString::from(format!("hr-g-{idx}"));
         let name = h.name.clone();
         let mut row = div().id(("host", idx)).group(gid.clone()).mx(px(4.)).pr(px(4.)).pl(px(6. + 10. * depth as f32 + 12.)).min_h(px(32.)).py(px(2.)).rounded(px(6.)).flex().items_center().gap(px(8.)).cursor_pointer()
-            .when(sel, |d| d.bg(c(th.accent).opacity(0.16)))
-            .when(!sel, |d| d.hover(|s| s.bg(c(cur().surface0).opacity(0.7))))
+            .when(sel, |d| d.bg(crate::theme::selected_bg()))
+            .when(!sel, |d| d.hover(|s| s.bg(crate::theme::hover_bg())))
             // one signal per job: monochrome server icon, 6px connection dot on its top-right corner,
             // small shield badge bottom-right for production; tags as up to 3 dots after the name (+N)
             .child(div().relative().size(px(16.)).flex_shrink_0()
@@ -298,7 +298,7 @@ impl Root {
         let th = cur();
         let sub = if p.host.is_empty() { p.path.clone() } else { format!("{} · {}", p.host, p.path) };
         div().id(("place", idx)).mx(px(4.)).pr(px(4.)).pl(px(6. + 10. * depth as f32 + 12.)).min_h(px(34.)).py(px(3.)).rounded(px(6.)).flex().items_center().gap(px(6.)).cursor_pointer()
-            .hover(|d| d.bg(c(cur().surface0).opacity(0.7)))
+            .hover(|d| d.bg(crate::theme::hover_bg()))
             .on_click(cx.listener(move |this, _, w, cx| this.open_place(idx, w, cx)))
             .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.show_sb_menu(SbMenu { target: SbTarget::Place(idx), pos: ev.position, sub: SbSub::Main }); cx.notify(); }))
             .child(icon(IconName::Folder, 15., c(th.warning)))
@@ -314,7 +314,7 @@ impl Root {
         let tags = s.groups.iter().find(|g| g.path == path).map(|g| g.tags.clone()).unwrap_or_default();
         let (p1, p2, p3, p4) = (path.to_string(), path.to_string(), path.to_string(), path.to_string());
         div().id(SharedString::from(format!("grp-{path}"))).mx(px(4.)).pr(px(4.)).pl(px(6. + 10. * depth as f32)).h(px(ROW_H)).flex().items_center().gap(px(4.)).cursor_pointer().rounded(px(6.))
-            .hover(|s| s.bg(c(cur().surface0).opacity(0.5)))
+            .hover(|s| s.bg(crate::theme::hover_bg()))
             .on_click(cx.listener(move |this, _, _w, cx| this.toggle_collapsed(&p1, cx)))
             .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.show_sb_menu(SbMenu { target: SbTarget::Group(p2.clone()), pos: ev.position, sub: SbSub::Main }); cx.notify(); }))
             .on_drag(GroupDrag { path: path.to_string() }, |d: &GroupDrag, _, _, cx| cx.new(|_| d.clone()))
@@ -403,7 +403,7 @@ impl Root {
         let local_sel = ctx.selected.as_deref() == Some("local");
         let local_on = ctx.open.iter().any(|(l, on)| l == "local" && *on == 2);
         list = list.child(div().id("host-local").mx(px(4.)).pr(px(4.)).pl(px(6.)).min_h(px(34.)).py(px(3.)).rounded(px(6.)).flex().items_center().gap(px(6.)).cursor_pointer()
-            .when(local_sel, |d| d.bg(c(th.accent).opacity(0.16))).when(!local_sel, |d| d.hover(|s| s.bg(c(cur().surface0).opacity(0.7))))
+            .when(local_sel, |d| d.bg(crate::theme::selected_bg())).when(!local_sel, |d| d.hover(|s| s.bg(crate::theme::hover_bg())))
             .on_click(cx.listener(|this, ev: &gpui::ClickEvent, w, cx| this.sb_activate(Spec::Local, t("ui.local_terminal").to_string(), ev.click_count() >= 2, w, cx)))
             .on_mouse_down(gpui::MouseButton::Right, cx.listener(|this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.show_sb_menu(SbMenu { target: SbTarget::Local, pos: ev.position, sub: SbSub::Main }); cx.notify(); }))
             .child(icon(IconName::Monitor, 15., c(th.info)))
@@ -416,7 +416,7 @@ impl Root {
             let l = dt.label();
             let on = ctx.open.iter().any(|(x, o)| *x == l && *o == 2);
             list = list.child(div().id("host-env").mx(px(4.)).pr(px(4.)).pl(px(6.)).min_h(px(34.)).py(px(3.)).rounded(px(6.)).flex().items_center().gap(px(6.)).cursor_pointer()
-                .hover(|s| s.bg(c(cur().surface0).opacity(0.7)))
+                .hover(|s| s.bg(crate::theme::hover_bg()))
                 .on_click(cx.listener(move |this, _, w, cx| this.new_tab(Spec::Ssh(dt.clone()), w, cx)))
                 .child(icon(IconName::Server, 15., c(th.accent)))
                 .child(div().size(px(6.)).flex_shrink_0().rounded_full().bg(if on { c(th.success) } else { c(th.surface2) }))
@@ -466,7 +466,7 @@ impl Root {
             let cc = color.clone();
             let is_prod = color == s.tags.production;
             list = list.child(div().id(("tagf", i)).mx(px(4.)).pr(px(4.)).pl(px(6.)).h(px(28.)).rounded(px(6.)).flex().items_center().gap(px(6.)).cursor_pointer()
-                .when(on, |d| d.bg(c(th.accent).opacity(0.16))).when(!on, |d| d.hover(|s| s.bg(c(cur().surface0).opacity(0.7))))
+                .when(on, |d| d.bg(crate::theme::selected_bg())).when(!on, |d| d.hover(|s| s.bg(crate::theme::hover_bg())))
                 .on_click(cx.listener(move |this, _, _w, cx| { if let Some(p) = this.tag_filter.iter().position(|t| *t == cc) { this.tag_filter.remove(p); } else { this.tag_filter.push(cc.clone()); } cx.notify(); }))
                 .child(div().size(px(10.)).flex_shrink_0().rounded_full().bg(c(s.tags.rgb(&color))))
                 .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(13.)).text_color(c(th.text)).child(name))
@@ -474,8 +474,7 @@ impl Root {
                 .child(div().flex_shrink_0().text_size(px(11.)).text_color(c(th.subtext)).child(n.to_string())));
         }
         let _ = searching;
-        let vib = if chrome::NATIVE_LIGHTS { 0.72 } else { 1.0 };
-        col.bg(c(crate::theme::scheme().bg).opacity(vib)).child(list)
+        col.bg(crate::theme::card_bg()).child(list)
     }
 
     /// Left tool-window frame: fixed width, resize handle on the right edge (double click resets).

@@ -319,7 +319,7 @@ impl SetupView {
         } else {
             page = page.child(div().px(px(14.)).py(px(12.)).rounded(px(10.)).flex().items_center().gap(px(12.))
                 .border_1().border_color(c(th.accent)).bg(c(th.accent).opacity(0.08))
-                .child(div().size(px(30.)).flex_shrink_0().rounded(px(6.)).flex().items_center().justify_center().bg(c(th.accent).opacity(0.16))
+                .child(div().size(px(30.)).flex_shrink_0().rounded(px(6.)).flex().items_center().justify_center().bg(crate::theme::selected_bg())
                     .child(icon(if detected { IconName::Sparkles } else { IconName::Type }, 15., c(th.accent))))
                 .child(div().flex_1().min_w_0().flex().flex_col().gap(px(1.))
                     .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(family.clone()))

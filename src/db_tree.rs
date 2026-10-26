@@ -25,7 +25,7 @@ fn indent(depth: usize) -> Pixels { px(8. + depth as f32 * 16.) }
 
 pub fn row(id: SharedString, depth: usize, selected: bool) -> gpui::Stateful<gpui::Div> {
     div().id(id).h(px(ROW_H)).pl(indent(depth)).pr_2().mx_1().rounded(px(6.)).flex().items_center().gap(px(6.)).cursor_pointer().flex_shrink_0()
-        .text_size(px(TEXT)).bg(if selected { c(cur().surface0) } else { gpui::transparent_black() }).hover(|d| d.bg(c(cur().surface0).opacity(0.7)))
+        .text_size(px(TEXT)).bg(if selected { c(cur().surface0) } else { gpui::transparent_black() }).hover(|d| d.bg(crate::theme::hover_bg()))
 }
 pub fn chev(open: bool, show: bool) -> gpui::Div {
     div().w(px(12.)).flex_shrink_0().when(show, |d| d.child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 12., c(cur().overlay0))))

@@ -927,7 +927,7 @@ impl SftpView {
             let on = self.mode == m;
             let (ic, key) = match m { Mode::Popup => (IconName::Maximize, "sftp.mode_popup"), Mode::Tab => (IconName::PanelTop, "sftp.mode_tab"), Mode::Split => (IconName::Columns2, "sftp.mode_split"), Mode::Window => (IconName::ExternalLink, "sftp.mode_window") };
             bar = bar.child(div().id(("sftp-mode", i)).h(px(H_COMPACT)).px_2().rounded(px(R_MD)).flex().items_center().gap_1().cursor_pointer().text_size(px(FS_CAPTION))
-                .when(on, |d| d.bg(c(th.accent).opacity(0.18)).text_color(c(th.accent))).when(!on, |d| d.text_color(c(th.subtext)).hover(|d| d.bg(c(cur().surface0))))
+                .when(on, |d| d.bg(crate::theme::selected_bg()).text_color(c(th.accent))).when(!on, |d| d.text_color(c(th.subtext)).hover(|d| d.bg(c(cur().surface0))))
                 .on_click(cx.listener(move |v, _, _, cx| if v.mode != m { cx.emit(SftpEvent::Move(m)) }))
                 .child(icon(ic, 12., if on { c(th.accent) } else { c(th.overlay1) })).when(self.mode != Mode::Split, |d| d.child(t(key))));
         }
@@ -1020,7 +1020,7 @@ impl SftpView {
                 .child(icon(IconName::ChevronDown, 12., c(th.overlay1))))
             .child(div().flex_1())
             .child(ui::button(("sftp-filter", pi), t("sftp.filter"), 3).h(px(H_COMPACT)).px_2()
-                .when(filter_on, |d| d.bg(c(th.accent).opacity(0.15)).text_color(c(th.accent)))
+                .when(filter_on, |d| d.bg(crate::theme::selected_bg()).text_color(c(th.accent)))
                 .child(icon(IconName::ListFilter, 13., if filter_on { c(th.accent) } else { c(th.subtext) }))
                 .on_click(cx.listener(move |v, _, w, cx| v.toggle_filter(pi, w, cx))))
             .child(ui::button(("sftp-ops", pi), t("sftp.actions"), 3).h(px(H_COMPACT)).px_2()

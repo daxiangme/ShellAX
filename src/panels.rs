@@ -109,7 +109,7 @@ impl Root {
         let collapsed = self.dock_min.contains(dock_id);
         let btn = |id: SharedString| div().id(id).size(px(26.)).rounded_md().flex().items_center().justify_center().cursor_pointer().hover(|d| d.bg(c(cur().surface0)));
         let mut dock = div().id(dock_id).w_full().flex().flex_col().min_h_0().overflow_hidden()
-            .rounded(px(crate::card_layout::CARD_RADIUS)).bg(c(th.base));
+            .rounded(px(crate::card_layout::CARD_RADIUS)).bg(crate::theme::card_bg());
         dock = dock.child(div().h(px(40.)).px_3().flex_shrink_0().flex().items_center().gap_2().when(!collapsed, |d| d.border_b_1()).border_color(c(th.surface0))
             .child(icon(ic, 15., c(th.accent)))
             .child(div().flex_1().min_w_0().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(title))

@@ -382,7 +382,7 @@ impl DockView {
                 let (rid, rname, rstate) = (ct.id.clone(), ct.name.clone(), ct.state.clone());
                 let iid = ct.id.clone();
                 list = list.child(div().id(("dk-c", n)).min_h(px(44.)).px_3().py_1().flex().items_center().gap_3().border_b_1().border_color(c(th.surface0).opacity(0.5)).cursor_pointer()
-                    .when(sel, |d| d.bg(c(th.accent).opacity(0.14))).hover(|d| d.bg(c(th.surface0).opacity(0.4)))
+                    .when(sel, |d| d.bg(crate::theme::selected_bg())).hover(|d| d.bg(crate::theme::hover_bg()))
                     .on_click(cx.listener(move |v, _, _w, cx| { v.inspect(iid.clone(), cx); cx.notify(); }))
                     .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |v, ev: &gpui::MouseDownEvent, _w, cx| { v.menu = Some(RowMenu { at: ev.position, id: rid.clone(), name: rname.clone(), state: rstate.clone() }); cx.notify(); }))
                     .child(div().size(px(8.)).rounded_full().flex_shrink_0().bg(state_color(&ct.state)))

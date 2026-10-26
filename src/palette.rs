@@ -71,7 +71,7 @@ impl Render for Palette {
             // Spotlight-like: selected row is an accent pill with white text
             list = list.child(div().id(("pal", i)).flex_shrink_0().h(px(32.)).px(px(10.)).rounded(px(6.)).flex().items_center().gap_3().cursor_pointer()
                 .bg(if sel { c(th.accent) } else { gpui::transparent_black() })
-                .when(!sel, |d| d.hover(|d| d.bg(c(cur().surface0).opacity(0.7))))
+                .when(!sel, |d| d.hover(|d| d.bg(crate::theme::hover_bg())))
                 .on_click(cx.listener(move |this, _, _w, cx| { this.selected = i; this.run_selected(cx); }))
                 .child(icon(ic, 15., if sel { gpui::white() } else { c(th.overlay1) }))
                 .child(div().flex_1().text_size(px(13.)).text_color(if sel { gpui::white() } else { c(th.text) }).child(label))

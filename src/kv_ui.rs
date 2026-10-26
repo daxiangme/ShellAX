@@ -313,7 +313,7 @@ impl Root {
             }
             last = Some(group.clone());
             let (oid, eid) = (id.clone(), id.clone());
-            list = list.child(div().id(("kv-it", i)).min_h(px(36.)).mx_1().px_2().rounded(px(6.)).flex().items_center().gap_2().cursor_pointer().hover(|d| d.bg(c(cur().surface0).opacity(0.7)))
+            list = list.child(div().id(("kv-it", i)).min_h(px(36.)).mx_1().px_2().rounded(px(6.)).flex().items_center().gap_2().cursor_pointer().hover(|d| d.bg(crate::theme::hover_bg()))
                 .on_click(cx.listener(move |this, _, w, cx| match kind { AssetKind::Redis => this.open_redis_tab(&oid, w, cx), AssetKind::Docker => this.open_docker_tab(&oid, w, cx) }))
                 .child(icon(ic, 13., c(if prod { th.error } else { th.accent })))
                 .child(div().flex_1().min_w_0().flex().flex_col()

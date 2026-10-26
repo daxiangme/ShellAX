@@ -248,7 +248,7 @@ impl DocView {
         for (i, d) in self.dbs.clone().into_iter().enumerate() {
             let open = self.open.contains(&d);
             let d2 = d.clone();
-            list = list.child(div().id(("mg-db", i)).h(px(24.)).px_2().flex().items_center().gap_1().cursor_pointer().hover(|x| x.bg(c(th.surface0).opacity(0.5)))
+            list = list.child(div().id(("mg-db", i)).h(px(24.)).px_2().flex().items_center().gap_1().cursor_pointer().hover(|x| x.bg(crate::theme::hover_bg()))
                 .on_click(cx.listener(move |v, _, _w, cx| { if !v.open.remove(&d2) { v.open.insert(d2.clone()); if !v.colls.contains_key(&d2) { v.load_colls(d2.clone(), cx); } } cx.notify(); }))
                 .child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 12., c(th.overlay1)))
                 .child(icon(IconName::Database, 13., c(th.accent)))
@@ -260,7 +260,7 @@ impl DocView {
                     let sel = self.db == d && &self.coll == co;
                     let (dd, cc) = (d.clone(), co.clone());
                     list = list.child(div().id(SharedString::from(format!("mg-c-{i}-{j}"))).h(px(24.)).pl(px(30.)).pr_2().flex().items_center().gap_1().cursor_pointer()
-                        .when(sel, |x| x.bg(c(th.accent).opacity(0.18))).hover(|x| x.bg(c(th.surface0).opacity(0.5)))
+                        .when(sel, |x| x.bg(crate::theme::selected_bg())).hover(|x| x.bg(crate::theme::hover_bg()))
                         .on_click(cx.listener(move |v, _, _w, cx| { v.pick(dd.clone(), cc.clone(), cx); cx.notify(); }))
                         .child(icon(IconName::Folder, 12., c(th.overlay1)))
                         .child(div().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(12.)).text_color(c(th.text)).child(co.clone())));
@@ -295,7 +295,7 @@ impl DocView {
         for (i, d) in self.docs.iter().enumerate() {
             let sel = self.selected == Some(i);
             list = list.child(div().id(("mg-d", i)).min_h(px(40.)).px_2().py_1().flex().flex_col().border_b_1().border_color(c(th.surface0).opacity(0.5)).cursor_pointer()
-                .when(sel, |x| x.bg(c(th.accent).opacity(0.14))).hover(|x| x.bg(c(th.surface0).opacity(0.4)))
+                .when(sel, |x| x.bg(crate::theme::selected_bg())).hover(|x| x.bg(crate::theme::hover_bg()))
                 .on_click(cx.listener(move |v, _, _w, cx| { v.selected = Some(i); v.editing = None; v.sync_editor(); cx.notify(); }))
                 .child(mono(doc::id_text(d)).text_color(c(th.accent)))
                 .child(div().whitespace_nowrap().overflow_hidden().text_ellipsis().child(small(doc::preview(d, 300)))));

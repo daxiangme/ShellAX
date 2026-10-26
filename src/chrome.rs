@@ -66,8 +66,8 @@ pub fn window_controls(id: &'static str, window: &Window, on_close: impl Fn(&mut
     let max_glyph = if maxed {
         div().relative().size(px(10.)).child(square(8.).absolute().top(px(2.)).left_0().bg(c(th.crust))).child(div().absolute().top_0().left(px(2.)).size(px(8.)).border_t_1().border_r_1().border_color(fg).rounded_tr(px(1.5)))
     } else { div().child(square(10.)) };
-    let mut min = btn(0, gpui::WindowControlArea::Min).hover(|d| d.bg(c(cur().surface1).opacity(0.7))).child(line(10., 1.));
-    let mut max = btn(1, gpui::WindowControlArea::Max).hover(|d| d.bg(c(cur().surface1).opacity(0.7))).child(max_glyph);
+    let mut min = btn(0, gpui::WindowControlArea::Min).hover(|d| d.bg(crate::theme::hover_bg())).child(line(10., 1.));
+    let mut max = btn(1, gpui::WindowControlArea::Max).hover(|d| d.bg(crate::theme::hover_bg())).child(max_glyph);
     let gid = gpui::SharedString::from(format!("{id}-close"));
     let mut close = btn(2, gpui::WindowControlArea::Close).group(gid.clone()).hover(|d| d.bg(c(0xc42b1c)))
         .child(div().text_color(fg).group_hover(gid, |s| s.text_color(gpui::white())).child(crate::ui::icon(crate::ui::IconName::X, 15., fg)));

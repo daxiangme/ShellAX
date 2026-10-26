@@ -1686,14 +1686,15 @@ impl Root {
         let crumbs = cwd.as_deref().map(termview::cwd_crumbs).unwrap_or_default();
         if crumbs.is_empty() { return None; }
         let mut row = div().id("cwd-bar").h(px(28.)).flex_shrink_0().px_2().flex().items_center().gap(px(2.)).overflow_x_scroll()
-            .bg(c(th.mantle)).rounded_bl(px(12.)).rounded_br(px(12.));
+            // 与终端内容之间一条细分隔线，底色略深一层
+            .bg(c(th.mantle)).border_t_1().border_color(c(th.surface0)).rounded_bl(px(12.)).rounded_br(px(12.));
         let last = crumbs.len().saturating_sub(1);
         for (i, (label, path)) in crumbs.into_iter().enumerate() {
             if i > 0 { row = row.child(icon(IconName::ChevronRight, 11., c(th.overlay0))); }
             let pane = pane.clone();
             let here = i == last;
             row = row.child(div().id(("cwd", i)).h(px(24.)).px_1().flex_shrink_0().rounded(px(4.)).flex().items_center().gap(px(3.)).cursor_pointer()
-                .hover(|d| d.bg(c(cur().surface0)))
+                .hover(|d| d.bg(crate::theme::hover_bg()))
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(move |_, _, cx| {
                     let Some(pane) = pane.clone() else { return };
@@ -1939,7 +1940,7 @@ impl Render for Root {
         let gear_on = self.settings_active();
         row = row.child(div().id("title-settings").size(px(28.)).flex_shrink_0().mr(px(4.)).rounded(px(7.)).flex().items_center().justify_center().cursor_pointer()
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .when(gear_on, |d| d.bg(c(th.accent).opacity(0.12))).when(!gear_on, |d| d.hover(move |s| s.bg(hover_bg)))
+            .when(gear_on, |d| d.bg(crate::theme::selected_bg())).when(!gear_on, |d| d.hover(move |s| s.bg(hover_bg)))
             .tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(crate::sidebar::action_tip(t("ui.settings"), &Action::OpenSettings.binding())).build(w, cx))
             .on_click(cx.listener(|this, _, w, cx| this.run(Action::OpenSettings, w, cx)))
             .child(icon(IconName::Settings, 15., if gear_on { c(th.accent) } else { c(th.overlay1) })));
@@ -1983,9 +1984,10 @@ impl Render for Root {
         let org = ssh_term_proto::managed::get();
         let mode = org.as_ref().map_or(s.permissions.mode, |m| m.clamp_mode(s.permissions.mode));
         let mode_col = match mode { Mode::Ask => c(th.accent), Mode::Plan => c(th.info), Mode::Auto => c(th.warning) };
-        let sb_btn = |id: &'static str| div().id(id).px_2().h(px(20.)).rounded_md().flex().items_center().gap_1().cursor_pointer().hover(|s| s.bg(c(cur().surface0)));
+        let sb_btn = |id: &'static str| div().id(id).px_2().h(px(20.)).rounded_md().flex().items_center().gap_1().cursor_pointer().hover(|s| s.bg(crate::theme::hover_bg()));
+        // 状态栏：统一低饱和文字，只有状态圆点保留颜色
         let statusbar = div().h(px(28.)).px_3().flex().items_center().gap_3()
-            .text_size(px(11.)).text_color(c(th.subtext))
+            .text_size(px(11.)).text_color(theme::muted_text())
             // 原标题栏右上角的“本地终端”入口
             .child(sb_btn("sb-local").tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(t("ui.local_terminal")).build(w, cx))
                 .on_click(cx.listener(|this, _, w, cx| this.new_tab(Spec::Local, w, cx)))
@@ -1997,9 +1999,9 @@ impl Render for Root {
             .child(dims)
             .child("UTF-8")
             .child(sb_btn("theme-btn").on_click(cx.listener(|this, _, w, cx| this.cycle_theme(w, cx))).child(icon(IconName::Palette, 12., c(th.overlay1))).child(theme_label))
-            .child(sb_btn("mode-btn").bg(mode_col.opacity(0.16)).text_color(mode_col).font_weight(FontWeight::SEMIBOLD)
+            .child(sb_btn("mode-btn").border_1().border_color(c(th.surface1)).text_color(theme::muted_text())
                 .on_click(cx.listener(|this, _, w, cx| this.run(Action::CyclePermissionMode, w, cx)))
-                .child(icon(IconName::Shield, 12., mode_col)).child(tf("main.perm_status", &[("mode", &mode.label())]))
+                .child(icon(IconName::Shield, 12., mode_col.opacity(0.8))).child(tf("main.perm_status", &[("mode", &mode.label())]))
                 .when(org.is_some(), |d| d.child(div().pl_1().child(t("main.org_badge")))));
 
         // 顶层：活动图标栏 + 工具窗口（全高）| 右列 [标签栏 / 内容 / 底部工具窗口]
@@ -2021,9 +2023,8 @@ impl Render for Root {
                 }
                 None => sb,
             };
-            let vib = if chrome::NATIVE_LIGHTS { 0.72 } else { 1.0 };
             content = content.child(div().h_full().flex_shrink_0().flex().flex_col()
-                .child(head.bg(c(th.crust).opacity(vib)).child(chrome::drag_spacer("sb-drag")))
+                .child(head.child(chrome::drag_spacer("sb-drag")))
                 .child(div().flex_1().min_h_0().flex().flex_row().child(strip).child(div().h_full().flex().flex_col().pb(px(card_layout::EDGE_GAP)).child(panel))));
         } else {
             content = content.child(strip);
@@ -2046,7 +2047,7 @@ impl Render for Root {
             });
         }
         let body = content.child(right);
-        let mut root = div().size_full().relative().flex().flex_col().bg(theme::outer_bg().opacity(if chrome::NATIVE_LIGHTS { 0. } else { op })).font_family(theme::ui_font()).text_size(px(s.appearance.ui_font_size.clamp(10., 20.))).text_color(c(th.text))
+        let mut root = div().size_full().relative().flex().flex_col().bg(theme::chrome_bg().opacity(if chrome::NATIVE_LIGHTS { 0.72 } else { op })).font_family(theme::ui_font()).text_size(px(s.appearance.ui_font_size.clamp(10., 20.))).text_color(c(th.text))
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, w, cx| {
                 let k = &ev.keystroke;
                 let bare_tab = k.key == "tab" && !k.modifiers.control && !k.modifiers.alt && !k.modifiers.platform;
@@ -2613,7 +2614,7 @@ impl Render for SftpWindow {
         let v = self.view.clone();
         let title = v.read(_cx).title();
         // own title bar: traffic lights (close = re-attach as tab), drag to move
-        let bar = chrome::drag_region(div().id("sftp-win-titlebar")).h(px(chrome::TITLE_H)).flex_shrink_0().flex().items_center().bg(c(th.crust)).border_b_1().border_color(c(th.surface1).opacity(0.6))
+        let bar = chrome::drag_region(div().id("sftp-win-titlebar")).h(px(chrome::TITLE_H)).flex_shrink_0().flex().items_center().bg(theme::chrome_bg()).border_b_1().border_color(c(th.surface1).opacity(0.6))
             .child(chrome::traffic_lights("sftp-lights", w, move |_, cx| v.update(cx, |_, cx| cx.emit(sftp_view::SftpEvent::Move(SftpMode::Tab)))))
             .child(div().flex_1().text_center().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.subtext)).child(title))
             .child(div().w(px(chrome::LIGHTS_W)));

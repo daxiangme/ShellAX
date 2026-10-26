@@ -556,14 +556,27 @@ mod iterm_tests {
     }
 }
 
+// ---- 统一的三层背景：外层框架 / 卡片 / 悬停与选中。界面各处只用这几个，不再各自调深浅。
+
+/// 卡片层：左侧面板、中间内容卡片、右侧卡片（与终端背景一致）。
+pub fn card_bg() -> gpui::Hsla { c(scheme().bg) }
+/// 外层框架：窗口、标题栏、两侧图标栏、标签栏、状态栏。
+pub fn chrome_bg() -> gpui::Hsla { outer_bg() }
+/// 悬停行：卡片上叠一层很淡的前景色。
+pub fn hover_bg() -> gpui::Hsla { c(cur().text).opacity(0.06) }
+/// 选中行：带一点强调色的淡底，不抢文字。
+pub fn selected_bg() -> gpui::Hsla { c(cur().accent).opacity(0.10) }
+/// 状态栏等弱化文字。
+pub fn muted_text() -> gpui::Hsla { c(cur().overlay1) }
+
 /// 窗口外层（侧栏、标签行、状态栏所在）背景：用 crust；与终端背景过近时由终端背景调暗或调亮推导，
 /// 保证终端卡片在亮色、暗色主题下都能与外层区分。
 pub fn outer_bg() -> gpui::Hsla {
     let mut o = c(cur().crust);
     let bg = c(scheme().bg);
-    if (o.l - bg.l).abs() < 0.04 {
+    if (o.l - bg.l).abs() < 0.06 {
         o = bg;
-        o.l = if bg.l > 0.5 { bg.l - 0.06 } else if bg.l < 0.08 { bg.l + 0.06 } else { bg.l - 0.05 };
+        o.l = if bg.l > 0.5 { bg.l - 0.07 } else if bg.l < 0.08 { bg.l + 0.07 } else { bg.l - 0.06 };
     }
     o
 }

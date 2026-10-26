@@ -219,7 +219,7 @@ impl Render for HostDialog {
                                 let chosen = path.clone();
                                 let on = same_key(&current, path);
                                 menu = menu.child(div().id(("keypick", k)).px_2().py_1().rounded(px(6.)).flex().items_center().gap_2().cursor_pointer()
-                                    .when(on, |d| d.bg(c(th.accent).opacity(0.16)))
+                                    .when(on, |d| d.bg(crate::theme::selected_bg()))
                                     .hover(|d| d.bg(c(cur().surface0)))
                                     .on_click(cx.listener(move |this, _, w, cx| {
                                         this.key_menu = false;

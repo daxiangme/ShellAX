@@ -114,7 +114,7 @@ impl Root {
         let col = if active { c(th.accent) } else { c(th.overlay1) };
         let glyph: gpui::AnyElement = match svg { Some(p) => gpui::svg().path(p).size(px(17.)).text_color(col).into_any_element(), None => icon(ic, 17., col).into_any_element() };
         div().id(id).relative().size(px(32.)).rounded(px(8.)).flex().items_center().justify_center().cursor_pointer()
-            .when(active, |d| d.bg(c(th.accent).opacity(0.12)))
+            .when(active, |d| d.bg(crate::theme::selected_bg()))
             .when(!active, |d| d.hover(|s| s.bg(c(cur().surface0))))
             .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
             .child(glyph)
@@ -123,7 +123,6 @@ impl Root {
 
     /// The left activity strip: modules only (session tools live in the right strip, settings in the title bar).
     pub(crate) fn activity_strip(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let th = cur();
         // layout follows `sidebar_visible` (stays true until a collapse animation ends) so icons never jump
         let open = self.sidebar_visible;
         let mut col = div().id("activity").w(px(STRIP_W)).flex_shrink_0().h_full().flex().flex_col().items_center().gap(px(4.)).pb(px(8.));
@@ -134,8 +133,8 @@ impl Root {
             col = col.child(self.strip_btn_with(("act", i), match tool { Tool::Redis => Some("shellax/db/redis.svg"), Tool::Docker => Some("shellax/db/docker.svg"), _ => None }, tool.icon(), tip, open && self.tool == tool, false)
                 .on_click(cx.listener(move |this, _, _w, cx| this.select_tool(tool, _w, cx))));
         }
-        let vib = if chrome::NATIVE_LIGHTS { 0.72 } else { 1.0 };
-        col.bg(c(th.crust).opacity(vib))
+        // 外层框架色由根节点统一提供
+        col
     }
 
     /// Body of the left tool window for the active module.
@@ -144,19 +143,16 @@ impl Root {
             Tool::Hosts | Tool::Sftp => self.sidebar(window, cx).into_any_element(),
             Tool::Database => {
                 let p = self.db_panel(window, cx);
-                let vib = if chrome::NATIVE_LIGHTS { 0.72 } else { 1.0 };
-                self.sb_frame(cx).bg(c(crate::theme::scheme().bg).opacity(vib)).child(p).into_any_element()
+                self.sb_frame(cx).bg(crate::theme::card_bg()).child(p).into_any_element()
             }
             Tool::Redis | Tool::Docker => {
                 let k = if self.tool == Tool::Redis { crate::kv_ui::AssetKind::Redis } else { crate::kv_ui::AssetKind::Docker };
                 let p = self.asset_panel(k, cx);
-                let vib = if chrome::NATIVE_LIGHTS { 0.72 } else { 1.0 };
-                self.sb_frame(cx).bg(c(crate::theme::scheme().bg).opacity(vib)).child(p).into_any_element()
+                self.sb_frame(cx).bg(crate::theme::card_bg()).child(p).into_any_element()
             }
             other => {
                 let body = self.empty_tool(other, cx);
-                let vib = if chrome::NATIVE_LIGHTS { 0.72 } else { 1.0 };
-                self.sb_frame(cx).bg(c(crate::theme::scheme().bg).opacity(vib)).child(panel_title(other.label(), None)).child(body).into_any_element()
+                self.sb_frame(cx).bg(crate::theme::card_bg()).child(panel_title(other.label(), None)).child(body).into_any_element()
             }
         }
     }
@@ -207,7 +203,7 @@ impl Root {
         let th = cur();
         let h = self.bottom_h;
         let tab = |id: &'static str, label: String, on: bool, which: Bottom| div().id(id).px_2().h(px(22.)).rounded(px(6.)).flex().items_center().cursor_pointer().text_size(px(12.))
-            .when(on, |d| d.bg(c(cur().accent).opacity(0.16)).text_color(c(cur().accent)).font_weight(FontWeight::MEDIUM))
+            .when(on, |d| d.bg(crate::theme::selected_bg()).text_color(c(cur().accent)).font_weight(FontWeight::MEDIUM))
             .when(!on, |d| d.text_color(c(cur().subtext)).hover(|s| s.bg(c(cur().surface0))))
             .child(label)
             .on_click(cx.listener(move |this, _, _w, cx| { this.bottom_tab = which; let _ = config::update(|s| s.sidebar.bottom_tab = which.id().into()); cx.notify(); }));
@@ -237,7 +233,7 @@ impl Root {
                     };
                     let p = j.progress().clamp(0., 1.);
                     let arrow = if j.dir == ssh_term_proto::sftp::Dir::Upload { IconName::Upload } else { IconName::Download };
-                    body = body.child(div().id(("job", i)).h(px(26.)).flex().items_center().gap_2().px_1().rounded(px(6.)).hover(|s| s.bg(c(cur().surface0).opacity(0.6)))
+                    body = body.child(div().id(("job", i)).h(px(26.)).flex().items_center().gap_2().px_1().rounded(px(6.)).hover(|s| s.bg(crate::theme::hover_bg()))
                         .child(icon(arrow, 13., c(th.overlay1)))
                         .child(div().w(px(180.)).flex_shrink_0().whitespace_nowrap().overflow_hidden().text_ellipsis().child(j.name()))
                         .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_color(c(th.subtext)).child(format!("{src} · {}", j.remote)))
@@ -250,7 +246,7 @@ impl Root {
                 if log.is_empty() { body = body.child(empty(t("tool.log_empty"))); }
                 for (i, e) in log.iter().enumerate() {
                     let detail = e.detail.clone();
-                    body = body.child(div().id(("log", i)).min_h(px(22.)).flex().items_center().gap_2().px_1().rounded(px(6.)).hover(|s| s.bg(c(cur().surface0).opacity(0.6)))
+                    body = body.child(div().id(("log", i)).min_h(px(22.)).flex().items_center().gap_2().px_1().rounded(px(6.)).hover(|s| s.bg(crate::theme::hover_bg()))
                         .child(div().w(px(56.)).flex_shrink_0().text_color(c(th.overlay1)).child(e.at.clone()))
                         .child(div().size(px(6.)).flex_shrink_0().rounded_full().bg(if e.ok { c(th.success) } else { c(th.error) }))
                         .child(div().w(px(120.)).flex_shrink_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_color(c(th.subtext)).child(e.source.clone()))
@@ -260,7 +256,7 @@ impl Root {
                 }
             }
         }
-        div().id("bottom-panel").relative().w_full().h(px(h)).flex_shrink_0().flex().flex_col().rounded(px(10.)).bg(c(th.mantle)).overflow_hidden()
+        div().id("bottom-panel").relative().w_full().h(px(h)).flex_shrink_0().flex().flex_col().rounded(px(10.)).bg(crate::theme::card_bg()).overflow_hidden()
             .child(div().id("bottom-resize").absolute().top_0().left_0().w_full().h(px(4.)).cursor_row_resize()
                 .hover(|d| d.bg(c(cur().accent).opacity(0.35)))
                 .on_drag(BottomResize, |d: &BottomResize, _, _, cx| cx.new(|_| d.clone()))

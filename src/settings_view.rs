@@ -512,7 +512,7 @@ impl SettingsView {
                 popover = popover.child(
                     div().id("font-detected-item")
                         .px_2().py(px(5.)).rounded(px(6.))
-                        .bg(c(th.accent).opacity(0.12))
+                        .bg(crate::theme::selected_bg())
                         .border_1().border_color(c(th.accent).opacity(0.35))
                         .flex().items_center().justify_between().cursor_pointer()
                         .hover(|d| d.bg(c(th.accent).opacity(0.2)))
@@ -553,7 +553,7 @@ impl SettingsView {
                         div().id(("font-opt", i))
                             .px_2().py(px(5.)).rounded(px(6.))
                             .flex().items_center().justify_between().cursor_pointer()
-                            .when(is_active, |d| d.bg(c(th.accent).opacity(0.14)))
+                            .when(is_active, |d| d.bg(crate::theme::selected_bg()))
                             .hover(|d| d.bg(c(cur().surface0)))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.set(path, toml::Value::String(fam.clone()), cx);
@@ -988,7 +988,7 @@ impl SettingsView {
             let mut body = card()
                 .child(div().flex().items_center().gap_2()
                     .child(ui::icon(ui::IconName::Download, 15., c(th.accent)))
-                    .child(div().px_2().py(px(1.)).rounded_full().bg(c(th.accent).opacity(0.15)).text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.accent)).child(tf("update.new_badge", &[("v", &m.version)])))
+                    .child(div().px_2().py(px(1.)).rounded_full().bg(crate::theme::selected_bg()).text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.accent)).child(tf("update.new_badge", &[("v", &m.version)])))
                     .child(div().flex_1())
                     .child(div().id("upd-notes").text_size(px(12.)).text_color(c(th.accent)).cursor_pointer().hover(|s| s.underline()).child(t("update.view_notes")).on_click(move |_, _w, cx| cx.open_url(&notes_url))));
             let ready = crate::update_ui::ready_for(&m.version);
@@ -1192,7 +1192,7 @@ impl SettingsView {
         }
         div().flex().flex_col()
             .child(div().flex().items_center().gap_3().py_3()
-                .child(div().size(px(40.)).rounded_lg().bg(c(th.accent).opacity(0.15)).flex().items_center().justify_center().child(icon(IconName::SquareTerminal, 22., c(th.accent))))
+                .child(div().size(px(40.)).rounded_lg().bg(crate::theme::selected_bg()).flex().items_center().justify_center().child(icon(IconName::SquareTerminal, 22., c(th.accent))))
                 .child(div().flex().flex_col().child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child("shellax"))
                     .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(tf("settings.version", &[("v", &env!("CARGO_PKG_VERSION"))])))))
             .child(Self::section_title(t("ui.quick_start")))
@@ -1267,7 +1267,7 @@ impl Render for SettingsView {
             let active = query.is_empty() && cat == self.cat;
             nav = nav.child(div().id(("cat", i)).h(px(28.)).px(px(6.)).rounded(px(6.)).flex().items_center().gap(px(8.)).cursor_pointer()
                 .when(active, |d| d.bg(c(th.accent)))
-                .when(!active, |d| d.hover(|d| d.bg(c(cur().surface0).opacity(0.7))))
+                .when(!active, |d| d.hover(|d| d.bg(crate::theme::hover_bg())))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.cat = cat;
                     this.search.update(cx, |s, cx| s.set_value("", window, cx));
@@ -1567,8 +1567,8 @@ impl SettingsView {
             let pid3 = p.id.clone();
             list = list.child(div().id(("aip", i)).flex().items_center().gap_3().px_3().py(px(9.)).cursor_pointer()
                 .when(i > 0, |d| d.border_t_1().border_color(c(th.surface1).opacity(0.5)))
-                .when(sel, |d| d.bg(c(th.accent).opacity(0.1)))
-                .hover(|d| d.bg(c(th.surface0).opacity(0.6)))
+                .when(sel, |d| d.bg(crate::theme::selected_bg()))
+                .hover(|d| d.bg(crate::theme::hover_bg()))
                 .on_click(cx.listener(move |this, _, _w, cx| { this.ai_sel = Some(pid.clone()); this.ai_key_reset(cx); this.ai_dropdown = None; this.load_models(&pid, false, cx); cx.notify(); }))
                 .child(icon(if p.kind == Kind::Anthropic { IconName::Bot } else { IconName::Sparkles }, 15., if sel { c(th.accent) } else { c(th.overlay1) }))
                 .child(div().flex_1().min_w_0().flex().flex_col()
@@ -1709,7 +1709,7 @@ impl SettingsView {
         let adv_open = self.ai_advanced;
         let adv_header = div().id("ai-adv-toggle").px_4().py(px(10.)).cursor_pointer()
             .flex().items_center().justify_between()
-            .hover(|d| d.bg(c(th.surface1).opacity(0.3)))
+            .hover(|d| d.bg(crate::theme::hover_bg()))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.ai_advanced = !this.ai_advanced;
                 cx.notify();
@@ -1862,7 +1862,7 @@ impl SettingsView {
                         .flex_shrink_0()
                         .px_2().py(px(6.)).rounded(px(6.)).cursor_pointer()
                         .flex().items_center().justify_between()
-                        .when(active, |d| d.bg(c(th.accent).opacity(0.12)))
+                        .when(active, |d| d.bg(crate::theme::selected_bg()))
                         .hover(|d| d.bg(c(cur().surface0)))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             let pr = &models::PRESETS[i];
@@ -2024,7 +2024,7 @@ impl SettingsView {
                 if let (Some(a), Some(b)) = (m.price_in, m.price_out) { meta.push(format!("${a:.2} / ${b:.2} per 1M")); }
                 if m.usage != models::Use::Chat { meta.push(format!("{:?}", m.usage).to_lowercase()); }
                 list = list.child(div().id(("mdl", i)).flex_shrink_0().px_2().py(px(5.)).flex().items_center().gap_2().cursor_pointer().rounded_md()
-                    .when(sel, |d| d.bg(c(th.accent).opacity(0.12)))
+                    .when(sel, |d| d.bg(crate::theme::selected_bg()))
                     .hover(|d| d.bg(c(cur().surface0)))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         let v = id.clone();

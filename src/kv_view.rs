@@ -432,7 +432,7 @@ impl KvView {
             let el = match r {
                 tree::Row::Dir { path, name, depth, count, open } => {
                     let p = path.clone();
-                    div().id(("kv-r", i)).h(px(24.)).pl(px(8. + *depth as f32 * 14.)).pr_2().flex().items_center().gap_1().cursor_pointer().hover(|d| d.bg(c(th.surface0).opacity(0.5)))
+                    div().id(("kv-r", i)).h(px(24.)).pl(px(8. + *depth as f32 * 14.)).pr_2().flex().items_center().gap_1().cursor_pointer().hover(|d| d.bg(crate::theme::hover_bg()))
                         .on_click(cx.listener(move |v, _, _w, cx| { if !v.open.remove(&p) { v.open.insert(p.clone()); } v.rebuild(); cx.notify(); }))
                         .child(icon(if *open { IconName::ChevronDown } else { IconName::ChevronRight }, 12., c(th.overlay1)))
                         .child(icon(IconName::Folder, 13., c(th.accent)))
@@ -443,7 +443,7 @@ impl KvView {
                     let k = key.clone();
                     let sel = self.selected.as_ref() == Some(key);
                     div().id(("kv-r", i)).h(px(24.)).pl(px(22. + *depth as f32 * 14.)).pr_2().flex().items_center().gap_1().cursor_pointer()
-                        .when(sel, |d| d.bg(c(th.accent).opacity(0.18))).hover(|d| d.bg(c(th.surface0).opacity(0.5)))
+                        .when(sel, |d| d.bg(crate::theme::selected_bg())).hover(|d| d.bg(crate::theme::hover_bg()))
                         .on_click(cx.listener(move |v, _, _w, cx| { v.select(k.clone(), cx); cx.notify(); }))
                         .child(icon(IconName::Key, 12., c(th.overlay1)))
                         .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(12.)).text_color(c(th.text)).child(name.clone()))
@@ -553,7 +553,7 @@ impl KvView {
         for (i, (a, b)) in items.into_iter().enumerate() {
             let (a2, b2, del) = (a.clone(), b.clone(), a.clone());
             let k = kind_s.clone();
-            list = list.child(div().id(("kv-it", i)).min_h(px(26.)).px_3().flex().items_center().gap_3().border_b_1().border_color(c(th.surface0).opacity(0.5)).cursor_pointer().hover(|d| d.bg(c(th.surface0).opacity(0.4)))
+            list = list.child(div().id(("kv-it", i)).min_h(px(26.)).px_3().flex().items_center().gap_3().border_b_1().border_color(c(th.surface0).opacity(0.5)).cursor_pointer().hover(|d| d.bg(crate::theme::hover_bg()))
                 .on_click(cx.listener(move |v, _, w, cx| {
                     // load into the edit row
                     let (x, y) = if k == "set" { (a2.clone(), String::new()) } else if k == "stream" { (String::new(), b2.clone()) } else { (a2.clone(), b2.clone()) };
