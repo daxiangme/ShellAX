@@ -1195,3 +1195,5 @@
 "update.show_in_folder" = "在文件夹中显示"
 "update.both_failed" = "检查更新失败。网页方式：{web}；接口方式：{api}"
 "update.rate_limited" = "GitHub 接口访问过于频繁（每小时 60 次限制，使用代理时多人共用同一出口 IP 更容易触发），请稍后再试，或直接打开发布页下载。"
+"update.view_notes" = "查看更新说明"
+"update.offer_body" = "当前版本 {cur}，新版本 {v} 已发布。"

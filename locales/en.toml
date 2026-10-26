@@ -1195,3 +1195,5 @@
 "update.show_in_folder" = "Show in folder"
 "update.both_failed" = "Update check failed. Web: {web}. API: {api}"
 "update.rate_limited" = "GitHub API rate limit reached (60 requests per hour per IP; shared proxy IPs hit it sooner). Please try again later, or download from the Releases page."
+"update.view_notes" = "Release notes"
+"update.offer_body" = "You are on {cur}; version {v} is available."

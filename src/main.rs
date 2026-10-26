@@ -1183,6 +1183,58 @@ impl Root {
         true
     }
     /// 退出并更新：启动安装或替换流程后退出；无法自动安装时显示安装包并提示。
+    /// “发现新版本”通知卡片：关闭、稍后、下载更新 / 退出并更新、查看更新说明。下载进度就地显示。
+    fn update_offer_el(&mut self, m: ssh_term_proto::update::Manifest, cx: &mut Context<Self>) -> impl IntoElement {
+        use ssh_term_proto::updater::Phase;
+        let th = theme::cur();
+        let notes_url = format!("https://github.com/{}/releases/tag/v{}", ssh_term_proto::update::REPO, m.version.trim_start_matches('v'));
+        let ready = update_ui::ready_for(&m.version);
+        let phase = update_ui::phase();
+        let mut status: Option<(String, bool)> = None;
+        let mut downloading = false;
+        match &phase {
+            Phase::Downloading { version, progress } if *version == m.version => {
+                downloading = true;
+                let done = progress.done.load(Ordering::Relaxed);
+                let total = progress.total.load(Ordering::Relaxed);
+                let p = if total > 0 { format!("{}%", done * 100 / total) } else { "…".into() };
+                status = Some((tf("update.downloading", &[("v", &m.version), ("p", &p), ("s", &update_ui::human(done))]), false));
+            }
+            Phase::Failed { version, error } if *version == m.version => status = Some((tf("update.download_failed", &[("v", &m.version), ("e", error)]), true)),
+            _ => {}
+        }
+        let mut actions = div().flex().items_center().gap_2().justify_end()
+            .child(div().id("upd-notes").text_size(px(ui::FS_SECONDARY)).text_color(c(th.accent)).cursor_pointer().hover(|s| s.underline())
+                .child(t("update.view_notes")).on_click(move |_, _w, cx| cx.open_url(&notes_url)))
+            .child(div().flex_1());
+        if downloading {
+            actions = actions.child(ui::button("upd-offer-cancel", t("ui.cancel"), 0).on_click(cx.listener(|_, _, _w, cx| { update_ui::cancel(); cx.notify(); })));
+        } else {
+            actions = actions.child(ui::button("upd-offer-later", t("update.later"), 0).on_click(cx.listener(|_, _, _w, cx| { update_ui::dismiss_offer(true); cx.notify(); })));
+            if let Some(rec) = ready {
+                actions = actions.child(ui::button("upd-offer-quit", t("update.quit_and_update"), 1).on_click(cx.listener(move |this, _, w, cx| { update_ui::dismiss_offer(false); this.apply_update(&rec, w, cx); })));
+            } else if ssh_term_proto::updater::downloadable(&m) {
+                let mm = m.clone();
+                let label = if status.as_ref().is_some_and(|s| s.1) { t("update.retry") } else { t("update.download") };
+                actions = actions.child(ui::button("upd-offer-dl", label, 1).on_click(cx.listener(move |_, _, _w, cx| { update_ui::start(mm.clone(), true); cx.notify(); })));
+            } else {
+                let url = if m.url.is_empty() { format!("https://github.com/{}/releases/latest", ssh_term_proto::update::REPO) } else { m.url.clone() };
+                actions = actions.child(ui::button("upd-offer-open", t("settings.update_download"), 1).on_click(move |_, _w, cx| cx.open_url(&url)));
+            }
+        }
+        div().id("upd-offer").absolute().bottom(px(40.)).right(px(16.)).w(px(380.)).p_4().rounded(px(ui::R_LG)).bg(c(th.base)).border_1().border_color(c(th.surface1)).shadow_lg()
+            .flex().flex_col().gap_3().on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(div().flex().items_center().gap_2()
+                .child(icon(IconName::Download, 16., c(th.accent)))
+                .child(div().flex_1().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(tf("main.update_available", &[("v", &m.version)])))
+                .child(div().id("upd-offer-x").p_1().rounded(px(ui::R_MD)).cursor_pointer().hover(|s| s.bg(c(th.surface0)))
+                    .child(icon(IconName::X, 14., c(th.overlay1)))
+                    .on_click(cx.listener(|_, _, _w, cx| { update_ui::dismiss_offer(true); cx.notify(); }))))
+            .child(div().text_size(px(ui::FS_SECONDARY)).text_color(c(th.subtext)).child(tf("update.offer_body", &[("cur", &ssh_term_proto::update::CURRENT), ("v", &m.version)])))
+            .children(status.map(|(msg, err)| div().text_size(px(12.)).text_color(c(if err { th.error } else { th.overlay1 })).child(msg)))
+            .child(actions)
+    }
+
     pub(crate) fn apply_update(&mut self, rec: &ssh_term_proto::updater::Record, w: &mut Window, cx: &mut Context<Self>) {
         match ssh_term_proto::updater::apply(rec) {
             Ok(ssh_term_proto::updater::Apply::QuitNow) => {
@@ -2064,6 +2116,9 @@ impl Render for Root {
             if self.sb_menu.is_none() { if let Some(m) = gs { let el = self.sb_menu_el(m, cx); root = root.child(chrome::pop_out(("menu-out-sb", seq as usize), div().absolute().top_0().left_0().size_full().child(el))); } }
             if self.tab_menu.is_none() { if let Some((i, pos)) = gt { if i < self.tabs.len() { let el = self.tab_menu_el(i, pos, cx); root = root.child(chrome::pop_out(("menu-out-tab", seq as usize), div().absolute().top_0().left_0().size_full().child(el))); } } }
         }
+        if let (Some(m), None) = (update_ui::offered(), update_ui::prompt()) {
+            root = root.child(self.update_offer_el(m, cx));
+        }
         if let Some((msg, seq)) = &self.toast {
             // info toast: neutral text + info icon, 3px semantic bar on the left
             let el = div().absolute().bottom(px(40.)).right(px(16.)).min_w(px(320.)).max_w(px(400.)).pl(px(12.)).pr_4().py_2().rounded(px(ui::R_LG)).bg(c(th.base)).border_1().border_color(c(th.surface1)).shadow_lg()
@@ -2240,8 +2295,9 @@ fn open_main(cx: &mut App, rt: Arc<tokio::runtime::Runtime>, themes: Vec<Arc<The
                             match r {
                                 Ok(Some(m)) => { let _ = this.update(cx, |r, cx| {
                                     r.log("update.available", &m.version);
-                                    if config::get().general.auto_download && ssh_term_proto::updater::downloadable(&m) { update_ui::start(m.clone(), true); }
-                                    else { r.toast_after(tf("main.update_available", &[("v", &m.version)]), std::time::Duration::from_secs(10), cx); }
+                                    if config::get().general.auto_download && ssh_term_proto::updater::downloadable(&m) && update_ui::ready_for(&m.version).is_none() { update_ui::start(m.clone(), true); }
+                                    else { update_ui::offer(m.clone()); }
+                                    cx.notify();
                                 }); }
                                 Ok(None) => {}
                                 Err(e) => eprintln!("update check: {e:#}"),

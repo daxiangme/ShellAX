@@ -23,6 +23,25 @@ pub fn init() {
 
 pub fn phase() -> Phase { PHASE.lock().unwrap().clone() }
 pub fn last() -> Option<Manifest> { LAST.lock().unwrap().clone() }
+/// 待用户处理的“发现新版本”通知（不自动消失）。
+static OFFER: Mutex<Option<Manifest>> = Mutex::new(None);
+/// 本次运行中用户选择“稍后”的版本，不再自动弹出。
+static SNOOZED: Mutex<Option<String>> = Mutex::new(None);
+pub fn offer(m: Manifest) {
+    if SNOOZED.lock().unwrap().as_deref() == Some(m.version.as_str()) { return; }
+    *OFFER.lock().unwrap() = Some(m); bump();
+}
+pub fn offered() -> Option<Manifest> { OFFER.lock().unwrap().clone() }
+/// 关闭通知；`later` 为 true 时本次运行不再为该版本弹出。
+pub fn dismiss_offer(later: bool) {
+    if let Some(m) = OFFER.lock().unwrap().take() { if later { *SNOOZED.lock().unwrap() = Some(m.version); } }
+    bump();
+}
+/// 已下载好的同版本安装包。
+pub fn ready_for(v: &str) -> Option<Record> {
+    match &*PHASE.lock().unwrap() { Phase::Ready(r) if r.version == v && r.file.is_file() => Some(r.clone()), _ => None }
+}
+
 pub fn prompt() -> Option<Record> { PROMPT.lock().unwrap().clone() }
 pub fn dismiss_prompt() { *PROMPT.lock().unwrap() = None; bump(); }
 pub fn downloading() -> bool { matches!(*PHASE.lock().unwrap(), Phase::Downloading { .. }) }
