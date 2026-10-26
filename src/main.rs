@@ -2027,7 +2027,7 @@ impl Render for Root {
         }
         let mut work = div().flex_1().min_w_0().min_h_0().flex().flex_row().gap(px(CARD_GAP)).child(center);
         if let Some(col) = self.dock_column(window, cx) { work = work.child(col); }
-        let work_row = div().flex_1().min_h_0().w_full().flex().flex_row().items_stretch().pb(px(card_layout::EDGE_GAP)).gap(px(CARD_GAP))
+        let work_row = div().flex_1().min_h_0().w_full().flex().flex_row().items_stretch().pb(px(card_layout::EDGE_GAP))
             .child(work).child(self.tool_rail(cx));
         let mut right = div().id("right-col").flex_1().min_w_0().h_full().flex().flex_col().child(row).child(work_row);
         if self.bottom_open {
@@ -2035,7 +2035,7 @@ impl Render for Root {
                 let h = (f32::from(ev.bounds.bottom() - ev.event.position.y) - (CARD_GAP + 2.)).clamp(120., 600.);
                 if (h - this.bottom_h).abs() >= 1.0 { this.bottom_h = h; cx.notify(); }
             })).child({
-                let panel = div().w_full().pr(px(crate::activity::STRIP_W + CARD_GAP)).pb(px(card_layout::EDGE_GAP)).child(self.bottom_panel(cx));
+                let panel = div().w_full().pr(px(crate::activity::STRIP_W)).pb(px(card_layout::EDGE_GAP)).child(self.bottom_panel(cx));
                 match self.bottom_anim {
                     Some((show, seq)) => motion::slide(div().w_full().flex_shrink_0(), ("bottom-anim", seq as usize), panel.into_any_element(), self.bottom_h + 40., motion::Edge::Bottom, show),
                     None => panel.into_any_element(),
