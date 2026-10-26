@@ -394,7 +394,10 @@ impl Root {
         // ---- list
         let mut list = div().id("host-list").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().pb_2()
             .on_mouse_down(gpui::MouseButton::Right, cx.listener(|this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.show_sb_menu(SbMenu { target: SbTarget::Empty, pos: ev.position, sub: SbSub::Main }); cx.notify(); }));
+        // SFTP module: remote hosts only (no local terminal, no local folders)
+        let remote_only = self.tool == crate::activity::Tool::Sftp;
         // pinned: local terminal (+ $SSH_HOST target in dev setups)
+        if !remote_only {
         list = list.child(self.section_header("sec-local", t("sb.local"), cx, false));
         let sh = crate::shell_display_name();
         let local_sel = ctx.selected.as_deref() == Some("local");
@@ -408,6 +411,7 @@ impl Root {
             .child(div().flex_1().min_w_0().flex().flex_col().gap(px(1.)).overflow_hidden()
                 .child(div().text_size(px(13.)).line_height(px(17.)).text_color(c(th.text)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(t("ui.local_terminal")))
                 .child(div().text_size(px(11.)).line_height(px(14.)).text_color(c(th.subtext)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(sh))));
+        }
         if let Some(dt) = self.default_target.clone() {
             let l = dt.label();
             let on = ctx.open.iter().any(|(x, o)| *x == l && *o == 2);
@@ -420,7 +424,7 @@ impl Root {
         }
 
         list = list.child(self.section_header("sec-conn", t("sb.connections"), cx, true));
-        let places = s.places.clone();
+        let places = if remote_only { vec![] } else { s.places.clone() };
         let rows = hosttree::rows(&s.hosts, &s.groups, &s.sidebar.collapsed, &q);
         if s.hosts.is_empty() && s.groups.is_empty() {
             // text wraps; buttons stack full-width and ellipsize instead of overflowing the sidebar
@@ -745,6 +749,11 @@ impl Root {
         if self.tool == crate::activity::Tool::Sftp {
             let mode = SftpMode::parse(&config::get().session.sftp_mode);
             let target = match spec { Spec::Ssh(t) => Some(t), Spec::Local => None };
+            // the focused SFTP tab still choosing a host takes it right away; otherwise a new tab
+            if let Some(t) = target.clone() {
+                let sv = self.tabs.get(self.active).and_then(|tb| tb.focused.read(cx).sftp.clone());
+                if let Some(sv) = sv { if sv.update(cx, |v, cx| v.connect_free_pane(t, cx)) { return; } }
+            }
             return self.open_sftp_mode(target, mode, window, cx);
         }
         let same = |p: &Entity<crate::termview::TermView>, cx: &Context<Self>| {

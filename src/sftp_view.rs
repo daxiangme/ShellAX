@@ -349,6 +349,16 @@ impl SftpView {
         cx.emit(SftpEvent::Retitle);
         cx.notify();
     }
+    /// Sidebar click in the SFTP module: connect a pane that is still choosing a host
+    /// (active pane first). Returns false when every pane already has a source.
+    pub fn connect_free_pane(&mut self, t: SshTarget, cx: &mut Context<Self>) -> bool {
+        let free = |p: &Pane| matches!(p.src, Src::Empty) || p.picker.is_some();
+        let Some(pi) = [self.active, 1 - self.active.min(1)].into_iter().find(|&i| free(&self.panes[i])) else { return false };
+        let name = host_name(&t);
+        let h = crate::config::get().all_hosts().into_iter().find(|h| h.name == name).unwrap_or_else(|| HostEntry { name: name.clone(), host: t.host.clone(), ..Default::default() });
+        self.choose_host(pi, h, t, cx);
+        true
+    }
     fn choose_local(&mut self, pi: usize, cx: &mut Context<Self>) {
         let p = &mut self.panes[pi];
         p.src = Src::Local;
@@ -377,7 +387,8 @@ impl SftpView {
     }
     fn picker_back(&mut self, pi: usize, cx: &mut Context<Self>) {
         if let Some(p) = self.panes[pi].picker.as_mut() {
-            if p.group.is_empty() { self.panes[pi].picker = None; } else { p.group = hosttree::parent_of(&p.group).to_string(); }
+            // an empty pane always shows the host list, so there is nothing to go back to
+            if p.group.is_empty() { if !matches!(self.panes[pi].src, Src::Empty) { self.panes[pi].picker = None; } } else { p.group = hosttree::parent_of(&p.group).to_string(); }
         }
         cx.notify();
     }
@@ -1137,8 +1148,10 @@ impl SftpView {
         let query = pk.search.read(cx).value().trim().to_string();
         let group = pk.group.clone();
         let title = if group.is_empty() { t("sftp.choose_host").to_string() } else { hosttree::leaf_of(&group).to_string() };
+        let can_back = !group.is_empty() || !matches!(self.panes[pi].src, Src::Empty);
         let head = div().h(px(40.)).flex_shrink_0().px_2().flex().items_center().gap_1().border_b_1().border_color(c(th.surface0))
-            .child(icon_btn(("sftp-pk-back", pi), IconName::ArrowLeft, true).on_click(cx.listener(move |v, _, _, cx| v.picker_back(pi, cx))))
+            .when(can_back, |d| d.child(icon_btn(("sftp-pk-back", pi), IconName::ArrowLeft, true).on_click(cx.listener(move |v, _, _, cx| v.picker_back(pi, cx)))))
+            .when(!can_back, |d| d.pl_1())
             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(FS_BODY)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(title))
             .child(ui::button(("sftp-pk-local", pi), t("sftp.local_btn"), 0).h(px(H_COMPACT)).px_2()
                 .child(icon(IconName::Monitor, 13., c(th.subtext)))
@@ -1313,7 +1326,15 @@ fn list_is_empty(hosts: &[HostEntry], groups: &[hosttree::GroupEntry], group: &s
 }
 
 impl Render for SftpView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // a pane without a source shows the remote host list right away
+        for pi in 0..2 {
+            if matches!(self.panes[pi].src, Src::Empty) && self.panes[pi].picker.is_none() {
+                let st = cx.new(|cx| InputState::new(window, cx).placeholder(t("sftp.search_hosts")));
+                self._subs.push(cx.subscribe_in(&st, window, |_, _, ev: &InputEvent, _, cx| if matches!(ev, InputEvent::Change) { cx.notify() }));
+                self.panes[pi].picker = Some(Picker { search: st, group: String::new() });
+            }
+        }
         if let Some(pi) = self.remote_pane() { if self.panes[pi].sess().is_some() { if let Some(p) = self.pending_edit.take() { self.edit_in(pi, p, cx); } } }
         let th = cur();
         let edit_bar = self.edit.as_ref().map(|(k, pi, name, st)| {
