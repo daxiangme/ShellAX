@@ -10,6 +10,7 @@ pub mod export;
 pub mod lex;
 pub mod complete;
 pub mod history;
+pub mod alter;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -220,6 +221,22 @@ impl dyn SqlDriver {
                 Ok(r.col(0).map(|s| s + ";").collect::<Vec<_>>().join("\n\n"))
             }
         }
+    }
+
+    pub async fn indexes(&self, db: &str, schema: Option<&str>, table: &str) -> Result<Vec<alter::IndexDef>> {
+        let r = self.one(db, alter::list_indexes(self.family(), db, schema, table)).await?;
+        Ok(r.rows.iter().map(|row| {
+            let g = |i: usize| row.get(i).cloned().flatten().unwrap_or_default();
+            alter::IndexDef { name: g(0), unique: g(1) == "1", columns: alter::split_list(&g(2)), constraint: g(3) == "1" }
+        }).collect())
+    }
+
+    pub async fn foreign_keys(&self, db: &str, schema: Option<&str>, table: &str) -> Result<Vec<alter::FkDef>> {
+        let r = self.one(db, alter::list_fks(self.family(), db, schema, table)).await?;
+        Ok(r.rows.iter().map(|row| {
+            let g = |i: usize| row.get(i).cloned().flatten().unwrap_or_default();
+            alter::FkDef { name: g(0), columns: alter::split_list(&g(1)), ref_table: g(2), ref_columns: alter::split_list(&g(3)), on_delete: g(4), on_update: g(5) }
+        }).collect())
     }
 
     /// Write a whole table (optionally filtered / ordered) to `path` in `fmt`, streaming rows

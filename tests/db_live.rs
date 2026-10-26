@@ -305,3 +305,88 @@ fn export_cancel() {
         ok(&d, &db, "DROP VIEW public.sx_it_slow").await;
     });
 }
+
+/// Structure designer statements applied for real, then read back from the catalog.
+async fn alter_case(d: &Driver, db: &str, schema: Option<&str>) {
+    use ssh_term_proto::db::alter::{self, ColDef, FkDef, IndexDef, Op};
+    let f = d.family();
+    let q = |t: &str| ssh_term_proto::db::dialect::qualified(f, db, schema, t);
+    let (p, c) = (q("sx_it_p"), q("sx_it_c"));
+    let _ = d.execute(db, &format!("DROP TABLE IF EXISTS {c}; DROP TABLE IF EXISTS {p}"), false).await;
+    let serial = match f { Family::Mysql => "INT AUTO_INCREMENT PRIMARY KEY", Family::Postgres => "serial PRIMARY KEY", _ => "INTEGER PRIMARY KEY" };
+    ok(d, db, &format!("CREATE TABLE {p} (id {serial}, code VARCHAR(10)); CREATE TABLE {c} (id {serial}, pid INT, note VARCHAR(20) DEFAULT 'n', old_col INT)")).await;
+    let cols = d.columns(db, schema, "sx_it_c").await.unwrap();
+    let def = |n: &str| ColDef::from_info(f, cols.iter().find(|c| c.name == n).unwrap());
+    let note = def("note");
+    assert_eq!(note.default.as_deref().map(|d| d.split("::").next().unwrap()), Some("'n'"), "{:?}", note);
+    let mut ops = vec![
+        Op::AddColumn(ColDef { name: "added col".into(), type_name: "VARCHAR(5)".into(), nullable: false, default: Some("'z'".into()), comment: "new".into(), extra: String::new() }),
+        Op::DropColumn("old_col".into()),
+        Op::AddIndex(IndexDef { name: "ix_c_note".into(), columns: vec!["memo".into(), "added col".into()], unique: true, constraint: false }),
+    ];
+    if f != Family::Sqlite {
+        ops.push(Op::ModifyColumn { old: note.clone(), new: ColDef { name: "memo".into(), type_name: "VARCHAR(40)".into(), nullable: false, default: Some("'m'".into()), comment: "memo".into(), ..note.clone() } });
+        ops.push(Op::AddFk(FkDef { name: "fk_c_p".into(), columns: vec!["pid".into()], ref_table: p.clone(), ref_columns: vec!["id".into()], on_delete: "CASCADE".into(), on_update: String::new() }));
+    } else {
+        ops.push(Op::ModifyColumn { old: note.clone(), new: ColDef { name: "memo".into(), ..note.clone() } });
+    }
+    let stmts = alter::statements(f, &c, schema, &ops).unwrap();
+    d.apply(db, schema, stmts.clone()).await.unwrap_or_else(|e| panic!("{e}\n{}", stmts.join(";\n")));
+    let cols = d.columns(db, schema, "sx_it_c").await.unwrap();
+    let names: Vec<&str> = cols.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, vec!["id", "pid", "memo", "added col"]);
+    let memo = &cols[2];
+    if f != Family::Sqlite {
+        assert!(memo.type_name.to_lowercase().contains("40") && memo.nullable == Some(false) && memo.comment == "memo", "{memo:?}");
+        assert!(memo.default.as_deref().unwrap().contains('m'));
+    }
+    let ix = d.indexes(db, schema, "sx_it_c").await.unwrap();
+    let ix = ix.iter().find(|i| i.name == "ix_c_note").unwrap_or_else(|| panic!("{ix:?}"));
+    assert!(ix.unique && ix.columns.len() == 2, "{ix:?}");
+    if f != Family::Sqlite {
+        let fks = d.foreign_keys(db, schema, "sx_it_c").await.unwrap();
+        assert_eq!(fks.len(), 1);
+        assert_eq!((fks[0].name.as_str(), fks[0].columns.clone(), fks[0].ref_columns.clone(), fks[0].on_delete.as_str()), ("fk_c_p", vec!["pid".to_string()], vec!["id".to_string()], "CASCADE"));
+        // read back, drop both, re-add the FK from what was read
+        let st = alter::statements(f, &c, schema, &[Op::DropFk(fks[0].name.clone()), Op::DropIndex(ix.clone())]).unwrap();
+        d.apply(db, schema, st).await.unwrap();
+        assert!(d.foreign_keys(db, schema, "sx_it_c").await.unwrap().is_empty());
+        d.apply(db, schema, alter::statements(f, &c, schema, &[Op::AddFk(fks[0].clone()), Op::AddIndex(ix.clone())]).unwrap()).await.unwrap();
+        assert_eq!(d.foreign_keys(db, schema, "sx_it_c").await.unwrap(), fks);
+        // a failing batch: PostgreSQL rolls back the whole change
+        let bad = alter::statements(f, &c, schema, &[Op::DropColumn("pid".into()), Op::DropColumn("nope".into())]).unwrap();
+        assert!(d.apply(db, schema, bad).await.is_err());
+        if f == Family::Postgres { assert!(d.columns(db, schema, "sx_it_c").await.unwrap().iter().any(|c| c.name == "pid")); }
+    } else {
+        let fks = d.foreign_keys(db, schema, "sx_it_c").await.unwrap();
+        assert!(fks.is_empty());
+        d.apply(db, schema, alter::statements(f, &c, schema, &[Op::DropIndex(ix.clone())]).unwrap()).await.unwrap();
+    }
+    ok(d, db, &format!("DROP TABLE {c}; DROP TABLE {p}")).await;
+}
+
+#[test]
+#[ignore]
+fn structure_designer() {
+    rt().block_on(async {
+        let dir = std::env::temp_dir().join(format!("sx-it-lite-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("t.db");
+        std::fs::write(&file, b"").unwrap();
+        let lite = DbConn { kind: ssh_term_proto::assets::DbKind::Sqlite, file: file.to_string_lossy().into(), ..Default::default() };
+        let d = driver::connect(&lite, None, None).await.unwrap();
+        alter_case(&d, "main", None).await;
+        d.close().await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        if let Some((c, pw)) = conn("SHELLAX_TEST_MYSQL_URL") {
+            let d = driver::connect(&c, pw, None).await.unwrap();
+            alter_case(&d, &c.database, None).await;
+        }
+        if let Some((c, pw)) = conn("SHELLAX_TEST_PG_URL") {
+            let d = driver::connect(&c, pw, None).await.unwrap();
+            ok(&d, &c.database, "CREATE SCHEMA IF NOT EXISTS sx_alt").await;
+            alter_case(&d, &c.database, Some("sx_alt")).await;
+            ok(&d, &c.database, "DROP SCHEMA sx_alt CASCADE").await;
+        }
+    });
+}

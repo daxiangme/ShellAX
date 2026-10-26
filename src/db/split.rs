@@ -89,6 +89,9 @@ fn words(sql: &str) -> Vec<String> {
     strip_comments(sql).split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|w| !w.is_empty()).map(|w| w.to_ascii_uppercase()).collect()
 }
 
+/// Statement that changes the schema (completion caches need a refresh after it).
+pub fn is_ddl(stmt: &str) -> bool { matches!(words(stmt).first().map(String::as_str), Some("CREATE" | "ALTER" | "DROP" | "RENAME" | "COMMENT")) }
+
 /// Coarse class of one statement. Dangerous = DROP / TRUNCATE / ALTER … DROP, or
 /// DELETE / UPDATE without WHERE. Unknown statements count as writes.
 pub fn classify(stmt: &str) -> Class {
@@ -116,6 +119,14 @@ pub fn returns_rows(stmt: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ddl_detection() {
+        assert!(super::is_ddl("/* x */ create table t(a int)"));
+        assert!(super::is_ddl("ALTER TABLE t ADD c int"));
+        assert!(!super::is_ddl("select 'create'"));
+        assert!(!super::is_ddl("UPDATE t SET a=1"));
+    }
+
     use super::*;
 
     fn texts(s: &str) -> Vec<String> { split(s).into_iter().map(|s| s.text).collect() }
