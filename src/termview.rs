@@ -524,6 +524,8 @@ pub struct TermView {
     /// History dropdown under the cursor while typing at the prompt.
     hist_pop: Option<HistPop>,
     hist_pop_seq: u64,
+    /// Enter already written to the PTY in this key handler.
+    enter_sent: bool,
     /// Input the dropdown was closed for (Esc / accepted); it reopens once the input changes.
     hist_pop_dismissed: Option<String>,
     /// AI inline completion for an input prefix: (prefix, suffix shown as grey text).
@@ -678,7 +680,7 @@ impl TermView {
             selecting: false, scroll_drag: false, history, tracker: InputTracker::new(),
             born: Instant::now(), progress_tick: false, last_activity: Instant::now(), blink_running: false, software_gpu: std::env::var("SHELLAX_FORCE_BLINK").ok().map(|_| false), last_mouse_cell: None, mouse_down_btn: None,
             manifests, last_command: None, agent: None, agent_seen: Instant::now(), last_detect: Instant::now() - Duration::from_secs(5),
-            detect_scheduled: false, pending_paste: None, pending_cd: None, ai: None, daemon_id: None, resume_offer: None, clip_ask: None, pty_ask: None, pty_write_ok: false, search: None, last_agent: None, failed: None, exit_seen: 0, ai_inline_seq: 0, hist_pop: None, hist_pop_seq: 0, hist_pop_dismissed: None, ai_inline: None, bell_until: None, cmd_started: None, ai_capture: None, ctx_menu: None, ctx_pending: None, ctx_confirm: None, ctx_denied: None, sftp: None, db: None, embed: None, ws: None, _subs: subs,
+            detect_scheduled: false, pending_paste: None, pending_cd: None, ai: None, daemon_id: None, resume_offer: None, clip_ask: None, pty_ask: None, pty_write_ok: false, search: None, last_agent: None, failed: None, exit_seen: 0, ai_inline_seq: 0, hist_pop: None, hist_pop_seq: 0, enter_sent: false, hist_pop_dismissed: None, ai_inline: None, bell_until: None, cmd_started: None, ai_capture: None, ctx_menu: None, ctx_pending: None, ctx_confirm: None, ctx_denied: None, sftp: None, db: None, embed: None, ws: None, _subs: subs,
         }
     }
 
@@ -1251,7 +1253,12 @@ impl TermView {
                 return;
             }
             "enter" => {
-                if let Some(ls) = self.line_state() {
+                // send Enter to the shell first; history / audit bookkeeping (file appends) must not
+                // sit between the key press and the shell seeing it
+                let ls = self.line_state();
+                fanout(&s, bytes.clone());
+                self.enter_sent = true;
+                if let Some(ls) = ls {
                     if !ls.alt_screen {
                         if let Some(cmd) = self.tracker.submitted_input(&ls.before_cursor, ls.prompt_col) {
                             self.history.lock().unwrap().add(&cmd);
@@ -1273,7 +1280,7 @@ impl TermView {
         }
         if self.st.borrow().sel.is_some() { self.st.borrow_mut().sel = None; self.grid.update(cx, |_, cx| cx.notify()); }
         self.scroll_to_bottom(cx);
-        fanout(&s, bytes);
+        if !std::mem::take(&mut self.enter_sent) { fanout(&s, bytes); }
         cx.stop_propagation();
     }
 

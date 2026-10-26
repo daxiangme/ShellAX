@@ -176,3 +176,27 @@ fn graphics_in_single_chunk_keep_order() {
     assert!(imgs[0].row > line_of("A") && imgs[0].row < line_of("B"), "{txt}");
     assert!(imgs[1].row > line_of("B") && imgs[1].row < line_of("C"), "{txt}");
 }
+
+/// Enter → next prompt (OSC 133;D) for a missing command vs a builtin, through the session layer
+/// (PTY reader, VT parser, OSC 133 hooks). Both should be fast; a slow missing command is the shell's
+/// command-not-found handler, not ShellAX.
+#[test]
+fn failed_command_latency() {
+    std::env::set_var("SHELL", "/bin/bash");
+    let s = local::spawn_local(Size { cols: 100, rows: 30 }, None).unwrap();
+    let t0 = Instant::now();
+    while s.prompt_mark.lock().unwrap().is_none() && t0.elapsed() < Duration::from_secs(10) { std::thread::sleep(Duration::from_millis(20)); }
+    let time = |cmd: &str| {
+        let seq = s.exit_seq.load(std::sync::atomic::Ordering::Relaxed);
+        let t = Instant::now();
+        s.write(format!("{cmd}\r"));
+        while s.exit_seq.load(std::sync::atomic::Ordering::Relaxed) == seq && t.elapsed() < Duration::from_secs(10) { std::thread::sleep(Duration::from_millis(1)); }
+        t.elapsed()
+    };
+    let _ = time("true");
+    let ok = time("true");
+    let bad = time("shellax_no_such_cmd_xyz");
+    println!("builtin {ok:?}, missing command {bad:?}");
+    assert!(bad < Duration::from_millis(500), "missing command took {bad:?}");
+    assert_eq!(*s.last_exit.lock().unwrap(), Some(127));
+}
