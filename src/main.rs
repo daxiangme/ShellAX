@@ -1491,6 +1491,10 @@ impl Root {
     }
 
     fn run(&mut self, a: Action, window: &mut Window, cx: &mut Context<Self>) {
+        // a module showing its empty state has no tab of its own: tab / pane actions must not
+        // reach the hidden tab of another module
+        if matches!(a, Action::SplitAuto | Action::SplitRight | Action::SplitDown | Action::ClosePane | Action::ToggleBroadcast | Action::ToggleRecording | Action::ClearHistory | Action::LaunchAgent1 | Action::LaunchAgent2 | Action::LaunchAgent3)
+            && !self.settings_active() && !self.active_in_ws(cx) { return; }
         match a {
             Action::CommandPalette => self.open_palette(window, cx),
             Action::OpenSettings => self.open_settings(Cat::General, window, cx),
@@ -1875,6 +1879,14 @@ impl Render for Root {
                 }))
                 .child(icon(IconName::Plus, 15., c(th.overlay1))),
         ).child(chrome::drag_spacer("title-spacer").min_w(px(chrome::MIN_DRAG_W)).flex_shrink_0().flex_grow(1.));
+        // settings: a gear at the right end of the title row, just before the window buttons
+        let gear_on = self.settings_active();
+        row = row.child(div().id("title-settings").size(px(28.)).flex_shrink_0().mr(px(4.)).rounded(px(7.)).flex().items_center().justify_center().cursor_pointer()
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .when(gear_on, |d| d.bg(c(th.accent).opacity(0.12))).when(!gear_on, |d| d.hover(move |s| s.bg(hover_bg)))
+            .tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(crate::sidebar::action_tip(t("ui.settings"), &Action::OpenSettings.binding())).build(w, cx))
+            .on_click(cx.listener(|this, _, w, cx| this.run(Action::OpenSettings, w, cx)))
+            .child(icon(IconName::Settings, 15., if gear_on { c(th.accent) } else { c(th.overlay1) })));
         row = match win_ctl { Some(wc) => row.child(wc), None => row.pr(px(8.)) };
 
         let workspace = if settings_on {

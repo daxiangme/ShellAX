@@ -493,6 +493,7 @@ impl Root {
         let th = cur();
         // Left activity strip owns the modules (terminal, SFTP, database, Redis, Docker, ports);
         // this right strip holds the tool windows that work on the focused session.
+        let _ = th;
         let items: [(Action, &str, IconName); 6] = [
             (Action::OpenAi, "AI / Agent", IconName::Bot),
             (Action::OpenSnippets, t("lib.snippets"), IconName::Code),
@@ -502,23 +503,22 @@ impl Root {
             (Action::OpenAbout, t("ui.help_about"), IconName::CircleQuestionMark),
         ];
         let n_agents = self.tabs.iter().flat_map(|t| t.layout.leaves()).filter(|p| p.read(cx).agent.is_some()).count();
-        let save_tip = t("place.save").to_string();
-        let mut rail = div().id("tool-rail").w(px(28.)).flex_shrink_0().h_full().flex().flex_col().items_center().py(px(4.)).gap_1();
-        rail = rail.child(div().id("rail-save").size(px(28.)).rounded(px(6.)).flex().items_center().justify_center().cursor_pointer()
-            .hover(|d| d.bg(c(cur().surface0)))
-            .on_click(cx.listener(|this, _, w, cx| this.save_current_place(w, cx)))
-            .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(save_tip.clone()).build(w, cx))
-            .child(icon(IconName::FolderPlus, 15., c(th.accent))));
+        // same size, spacing and active style as the left activity strip
+        let mut rail = div().id("tool-rail").w(px(crate::activity::STRIP_W)).flex_shrink_0().h_full().flex().flex_col().items_center().pt(px(4.)).pb(px(8.)).gap(px(4.));
         for (i, (a, label, ic)) in items.into_iter().enumerate() {
             let tip = action_tip(label, &a.binding());
-            rail = rail.child(div().id(("rail", i)).relative().size(px(28.)).rounded(px(6.)).flex().items_center().justify_center().cursor_pointer()
-                .hover(|d| d.bg(c(cur().surface0)))
-                .on_click(cx.listener(move |this, _, w, cx| this.run(a, w, cx)))
-                .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
-                .when(self.dock_is(a), |d| d.bg(c(th.accent).opacity(0.16)))
-                .child(icon(ic, 15., if self.dock_is(a) { c(th.accent) } else { c(th.overlay1) }))
-                .when(a == Action::OpenAi && n_agents > 0, |d| d.child(div().absolute().top(px(2.)).right(px(2.)).size(px(6.)).rounded_full().bg(c(th.accent)))));
+            rail = rail.child(self.strip_btn(("rail", i), ic, tip, self.dock_is(a), a == Action::OpenAi && n_agents > 0)
+                .on_click(cx.listener(move |this, _, w, cx| this.run(a, w, cx))));
         }
+        rail = rail.child(div().flex_1());
+        let busy = self.transfers_active(cx);
+        rail = rail
+            .child(self.strip_btn("rail-transfers", IconName::ArrowDownUp, action_tip(t("tool.transfers"), &Action::ToggleBottomPanel.binding()), self.bottom_open && self.bottom_tab == crate::activity::Bottom::Transfers, busy)
+                .on_click(cx.listener(|this, _, _w, cx| this.toggle_bottom(Some(crate::activity::Bottom::Transfers), cx))))
+            .child(self.strip_btn("rail-audit", IconName::ScrollText, action_tip(t("ui.audit_log"), &Action::OpenAudit.binding()), false, false)
+                .on_click(cx.listener(|this, _, w, cx| this.run(Action::OpenAudit, w, cx))))
+            .child(self.strip_btn("rail-save", IconName::FolderPlus, t("place.save").to_string(), false, false)
+                .on_click(cx.listener(|this, _, w, cx| this.save_current_place(w, cx))));
         rail
     }
 

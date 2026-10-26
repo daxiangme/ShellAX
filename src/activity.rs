@@ -11,7 +11,7 @@ use ssh_term_proto::sftp::JobState;
 use crate::actions::Action;
 use crate::theme::{c, cur};
 use crate::ui::{self, icon, IconName};
-use crate::{chrome, config, Root, SideDock};
+use crate::{chrome, config, Root};
 
 pub const STRIP_W: f32 = 40.;
 
@@ -90,7 +90,7 @@ impl Root {
         cx.notify();
     }
 
-    fn strip_btn(&self, id: impl Into<gpui::ElementId>, ic: IconName, tip: String, active: bool, badge: bool) -> gpui::Stateful<gpui::Div> {
+    pub(crate) fn strip_btn(&self, id: impl Into<gpui::ElementId>, ic: IconName, tip: String, active: bool, badge: bool) -> gpui::Stateful<gpui::Div> {
         let th = cur();
         div().id(id).relative().size(px(32.)).rounded(px(8.)).flex().items_center().justify_center().cursor_pointer()
             .when(active, |d| d.bg(c(th.accent).opacity(0.12)))
@@ -100,7 +100,7 @@ impl Root {
             .when(badge, |d| d.child(div().absolute().top(px(4.)).right(px(4.)).size(px(6.)).rounded_full().bg(c(th.accent))))
     }
 
-    /// The left activity strip: modules on top; AI, transfers, audit and settings at the bottom.
+    /// The left activity strip: modules only (session tools live in the right strip, settings in the title bar).
     pub(crate) fn activity_strip(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
         // layout follows `sidebar_visible` (stays true until a collapse animation ends) so icons never jump
@@ -113,18 +113,6 @@ impl Root {
             col = col.child(self.strip_btn(("act", i), tool.icon(), tip, open && self.tool == tool, false)
                 .on_click(cx.listener(move |this, _, _w, cx| this.select_tool(tool, _w, cx))));
         }
-        col = col.child(div().flex_1());
-        let busy = self.transfers_active(cx);
-        let n_agents = self.tabs.iter().flat_map(|t| t.layout.leaves()).filter(|p| p.read(cx).agent.is_some()).count();
-        col = col
-            .child(self.strip_btn("act-ai", IconName::Bot, crate::sidebar::action_tip("AI / Agent", &Action::OpenAi.binding()), self.dock == SideDock::Ai, n_agents > 0)
-                .on_click(cx.listener(|this, _, w, cx| this.run(Action::OpenAi, w, cx))))
-            .child(self.strip_btn("act-transfers", IconName::ArrowDownUp, crate::sidebar::action_tip(t("tool.transfers"), &Action::ToggleBottomPanel.binding()), self.bottom_open && self.bottom_tab == Bottom::Transfers, busy)
-                .on_click(cx.listener(|this, _, _w, cx| this.toggle_bottom(Some(Bottom::Transfers), cx))))
-            .child(self.strip_btn("act-audit", IconName::ScrollText, crate::sidebar::action_tip(t("ui.audit_log"), &Action::OpenAudit.binding()), false, false)
-                .on_click(cx.listener(|this, _, w, cx| this.run(Action::OpenAudit, w, cx))))
-            .child(self.strip_btn("act-settings", IconName::Settings, crate::sidebar::action_tip(t("ui.settings"), &Action::OpenSettings.binding()), self.settings_active(), false)
-                .on_click(cx.listener(|this, _, w, cx| this.run(Action::OpenSettings, w, cx))));
         let vib = if chrome::NATIVE_LIGHTS { 0.72 } else { 1.0 };
         col.bg(c(th.crust).opacity(vib))
     }
