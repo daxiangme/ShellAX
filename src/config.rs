@@ -365,18 +365,24 @@ pub struct Settings {
     /// action id -> keystroke, e.g. "split" = "ctrl-shift-d"; missing = default
     pub keys: std::collections::BTreeMap<String, String>,
     pub notify: Notify,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hosts: Vec<HostEntry>,
     /// Host tree groups (PRD 5.23), sidebar order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<ssh_term_proto::hosttree::GroupEntry>,
     pub tags: Tags,
     pub sidebar: Sidebar,
     /// Saved directories opened from the sidebar.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub places: Vec<Place>,
     /// Database connections (`[[db]]`, v0.2): share the host group tree and tags.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub db: Vec<ssh_term_proto::assets::DbConn>,
     /// Redis connections (`[[redis]]`, v0.2 PRD §6.4).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub redis: Vec<ssh_term_proto::assets::RedisConn>,
     /// Docker engines (`[[docker]]`, v0.2 PRD §6.5).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub docker: Vec<ssh_term_proto::assets::DockerEndpoint>,
     /// legacy top-level keys (v0.5 files); folded into sections on load
     #[serde(skip_serializing)] pub theme: Option<String>,
@@ -766,7 +772,8 @@ mod tests {
         s.set("appearance.opacity", toml::Value::Float(0.82f32 as f64)).unwrap();
         let out = tidy_floats(&toml::to_string_pretty(&s).unwrap());
         assert!(out.contains("opacity = 0.82\n"), "{out}");
-        assert!(out.contains("line_height = 1.4\n"), "{out}");
+        // line_height is a multiplier of the font metrics (default 1.0)
+        assert!(out.contains("line_height = 1.0\n"), "{out}");
         assert_eq!(Settings::parse(&out).unwrap(), s);
     }
 
