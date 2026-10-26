@@ -14,8 +14,6 @@ pub const TOAST_ENTER_MS: u64 = 200;
 pub const TOAST_EXIT_MS: u64 = 150;
 /// Breathing indicators (connecting dot), one full cycle.
 pub const BREATHE_MS: u64 = 1200;
-/// Sidebar collapse / expand.
-pub const SIDEBAR_MS: u64 = 200;
 /// Tab / pane appear.
 pub const APPEAR_MS: u64 = 160;
 /// Delay before a connecting card is shown, to avoid flashing on fast connects.

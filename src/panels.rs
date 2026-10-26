@@ -135,7 +135,9 @@ impl Root {
         let mut cards: Vec<(&'static str, AnyElement)> = vec![];
         if let Some(v) = self.dock_host.clone() {
             let title = SharedString::from(format!("{} · {}", t("hosttools.title"), v.read(cx).label()));
-            cards.push(("host-dock", self.dock_frame("host-dock", title, IconName::Monitor, v, cx)));
+            // cached: its 5 s refresh repaints only this card; the window re-renders it only when it notifies
+            let el = v.cached(gpui::StyleRefinement::default().size_full());
+            cards.push(("host-dock", self.dock_frame("host-dock", title, IconName::Monitor, el, cx)));
         }
         if self.dock_ai { cards.push(("ai-dock", self.ai_dock(cx))); }
         if matches!(self.dock, crate::SideDock::Snippets | crate::SideDock::History) {

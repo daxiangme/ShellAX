@@ -75,8 +75,11 @@ impl HostToolsView {
             let n = n.recv_async().await.unwrap_or_else(|_| Err("cancelled".into()));
             let _ = this.update(cx, |v, cx| {
                 v.stats_busy = false;
-                v.mon = Some(m.map(|x| x.1));
-                v.ps = Some(p.map(|x| x.1));
+                let (m, p) = (Some(m.map(|x| x.1)), Some(p.map(|x| x.1)));
+                let old_rate = std::mem::take(&mut v.net_rate);
+                let mut changed = v.mon != m || v.ps != p;
+                v.mon = m;
+                v.ps = p;
                 let now = std::time::Instant::now();
                 let cur = n.map(|x| hosttools::parse_netdev(&x.1)).unwrap_or_default();
                 v.net_rate = match &v.net {
@@ -85,10 +88,13 @@ impl HostToolsView {
                     None => cur.iter().map(|i| (i.name.clone(), 0., 0.)).collect(),
                 };
                 v.net = if cur.is_empty() { None } else { Some((now, cur)) };
-                cx.notify();
+                // displayed rates are rounded, so compare what is shown
+                let shown = |r: &Vec<(String, f64, f64)>| r.iter().map(|(n, a, b)| format!("{n}{}{}", rate(*a), rate(*b))).collect::<Vec<_>>();
+                changed |= shown(&old_rate) != shown(&v.net_rate);
+                if changed { cx.notify(); }
             });
         }).detach();
-        cx.notify();
+        // nothing visible changes until the data arrives
     }
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         if self.busy { return; }
