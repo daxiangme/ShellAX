@@ -3,7 +3,7 @@ name = "ssh-term-proto"
 version = "0.1.19"
 edition = "2021"
 publish = false
-license = "LicenseRef-Proprietary"
+license = "AGPL-3.0-only"
 default-run = "shellax"
 
 [[bin]]
