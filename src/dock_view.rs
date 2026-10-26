@@ -59,12 +59,14 @@ pub fn state_color(state: &str) -> gpui::Hsla {
 }
 
 impl DockView {
-    pub fn new(ep: DockerEndpoint, via: Option<(SshTarget, Prompts)>, production: bool, rt: tokio::runtime::Handle, log: ExecLog, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(ep: DockerEndpoint, via: Result<Option<(SshTarget, Prompts)>, String>, production: bool, rt: tokio::runtime::Handle, log: ExecLog, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let inspect_ed = cx.new(|cx| EditorState::new(window, cx).language("json").line_number(true));
         let pull_in = cx.new(|cx| InputState::new(window, cx).placeholder(t("docker.pull_placeholder")));
         let subs = vec![cx.subscribe_in(&pull_in, window, |this: &mut Self, _, ev: &InputEvent, _w, cx| { if let InputEvent::PressEnter { .. } = ev { this.pull(cx); } })];
         let me = Self { title: ep.name.clone(), production, dock: None, conn_err: None, rt, log, sub: Sub::Containers, containers: vec![], show_all: true, images: vec![], volumes: vec![], networks: vec![],
             loading: false, error: None, selected: None, inspect_ed, pending_inspect: None, pull_in, pull_log: vec![], pulling: false, ask: None, _subs: subs, ep };
+        let mut me = me;
+        let via = match via { Ok(v) => v, Err(e) => { me.conn_err = Some(e); return me; } };
         let e = me.ep.clone();
         let h = me.rt.spawn(async move { Dock::open(&e, via).await.map(Arc::new) });
         cx.spawn(async move |this, cx| {
@@ -81,6 +83,7 @@ impl DockView {
         me
     }
 
+    pub fn save(&self) -> ssh_term_proto::session_store::PaneSave { ssh_term_proto::session_store::PaneSave::Docker { endpoint: self.ep.id.clone() } }
     pub fn crumbs(&self) -> String {
         let mut s = format!("{} › {}", t("tool.docker"), self.ep.name);
         if let Some(c) = self.selected.as_ref().and_then(|id| self.containers.iter().find(|c| &c.id == id)) { s.push_str(" › "); s.push_str(&c.name); }
@@ -304,7 +307,10 @@ impl Drop for DockView { fn drop(&mut self) { self.close(); } }
 // ---------------- logs tab
 pub struct LogView {
     pub title: String,
-    dock: Arc<Dock>,
+    endpoint: String,
+    name: String,
+    dock: Option<Arc<Dock>>,
+    conn_err: Option<String>,
     rt: tokio::runtime::Handle,
     id: String,
     lines: Vec<String>,
@@ -318,19 +324,30 @@ pub struct LogView {
 const LOG_CAP: usize = 20_000;
 
 impl LogView {
-    pub fn new(dock: Arc<Dock>, rt: tokio::runtime::Handle, id: String, name: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// `dock`: an open connection to reuse; otherwise `ep` / `via` open one (layout restore).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(dock: Option<Arc<Dock>>, ep: Option<DockerEndpoint>, via: Result<Option<(SshTarget, Prompts)>, String>, endpoint: String, rt: tokio::runtime::Handle, id: String, name: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let filter_in = cx.new(|cx| InputState::new(window, cx).placeholder(t("docker.log_filter")));
         let subs = vec![cx.subscribe_in(&filter_in, window, |_: &mut Self, _, _: &InputEvent, _w, cx| cx.notify())];
-        let mut me = Self { title: format!("{} {name}", t("docker.logs")), dock, rt, id, lines: vec![], follow: true, timestamps: false, task: None, filter_in, _subs: subs };
-        me.start(cx);
+        let mut me = Self { title: format!("{} {name}", t("docker.logs")), endpoint, name, dock, conn_err: None, rt, id, lines: vec![], follow: true, timestamps: false, task: None, filter_in, _subs: subs };
+        if me.dock.is_some() { me.start(cx); return me; }
+        let Some(ep) = ep else { me.conn_err = Some(t("kv.gone").into()); return me };
+        let via = match via { Ok(v) => v, Err(e) => { me.conn_err = Some(e); return me } };
+        let h = me.rt.spawn(async move { Dock::open(&ep, via).await.map(Arc::new) });
+        cx.spawn(async move |this, cx| {
+            let r = h.await.map_err(anyhow::Error::from).and_then(|r| r);
+            let _ = this.update(cx, |v, cx| { match r { Ok(d) => { v.dock = Some(d); v.start(cx); } Err(e) => v.conn_err = Some(format!("{e:#}")) } cx.notify(); });
+        }).detach();
         me
     }
+    pub fn save(&self) -> ssh_term_proto::session_store::PaneSave { ssh_term_proto::session_store::PaneSave::DockerLogs { endpoint: self.endpoint.clone(), container: self.id.clone(), name: self.name.clone() } }
     fn start(&mut self, cx: &mut Context<Self>) {
+        let Some(dock) = self.dock.clone() else { return };
         if let Some(t) = self.task.take() { t.abort(); }
         self.lines.clear();
         let (tx, rx) = flume::bounded::<String>(4096);
         let _g = self.rt.enter();
-        self.task = Some(self.dock.logs(&self.id, 1000, self.follow, self.timestamps, tx));
+        self.task = Some(dock.logs(&self.id, 1000, self.follow, self.timestamps, tx));
         cx.spawn(async move |this, cx| {
             while let Ok(l) = rx.recv_async().await {
                 let mut batch = vec![l];
@@ -350,6 +367,7 @@ impl Render for LogView {
         let shown: Vec<&String> = self.lines.iter().filter(|l| f.is_empty() || l.to_lowercase().contains(&f)).collect();
         let start = shown.len().saturating_sub(3000);
         let mut out = div().id("dk-log").flex_1().min_h_0().overflow_y_scroll().p_2().bg(c(th.mantle)).flex().flex_col();
+        if let Some(e) = &self.conn_err { out = out.child(mono(e.clone()).text_color(c(th.error)).whitespace_normal()); }
         for l in &shown[start..] { out = out.child(mono((*l).clone()).whitespace_normal()); }
         div().size_full().flex().flex_col().bg(c(th.base))
             .child(div().h(px(40.)).px_3().flex().items_center().gap_2().border_b_1().border_color(c(th.surface0))

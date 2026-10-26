@@ -2324,11 +2324,15 @@ pub enum Embed {
     Kv(Entity<crate::kv_view::KvView>),
     Dock(Entity<crate::dock_view::DockView>),
     Log(Entity<crate::dock_view::LogView>),
+    Mongo(Entity<crate::doc_view::DocView>),
+    Gone(Entity<crate::kv_ui::GoneView>),
 }
 
 impl Embed {
-    pub fn view(&self) -> gpui::AnyView { match self { Embed::Kv(v) => v.clone().into(), Embed::Dock(v) => v.clone().into(), Embed::Log(v) => v.clone().into() } }
-    pub fn title(&self, cx: &gpui::App) -> String { match self { Embed::Kv(v) => v.read(cx).title.clone(), Embed::Dock(v) => v.read(cx).title.clone(), Embed::Log(v) => v.read(cx).title.clone() } }
-    pub fn crumbs(&self, cx: &gpui::App) -> String { match self { Embed::Kv(v) => v.read(cx).crumbs(), Embed::Dock(v) => v.read(cx).crumbs(), Embed::Log(v) => v.read(cx).title.clone() } }
-    pub fn badge(&self) -> &'static str { match self { Embed::Kv(_) => "Redis", Embed::Dock(_) | Embed::Log(_) => "Docker" } }
+    pub fn view(&self) -> gpui::AnyView { match self { Embed::Kv(v) => v.clone().into(), Embed::Dock(v) => v.clone().into(), Embed::Log(v) => v.clone().into(), Embed::Mongo(v) => v.clone().into(), Embed::Gone(v) => v.clone().into() } }
+    pub fn title(&self, cx: &gpui::App) -> String { match self { Embed::Kv(v) => v.read(cx).title.clone(), Embed::Dock(v) => v.read(cx).title.clone(), Embed::Log(v) => v.read(cx).title.clone(), Embed::Mongo(v) => v.read(cx).title.clone(), Embed::Gone(v) => v.read(cx).what.clone() } }
+    pub fn crumbs(&self, cx: &gpui::App) -> String { match self { Embed::Kv(v) => v.read(cx).crumbs(), Embed::Dock(v) => v.read(cx).crumbs(), Embed::Log(v) => v.read(cx).title.clone(), Embed::Mongo(v) => v.read(cx).crumbs(), Embed::Gone(v) => v.read(cx).what.clone() } }
+    pub fn badge(&self) -> &'static str { match self { Embed::Kv(_) => "Redis", Embed::Dock(_) | Embed::Log(_) => "Docker", Embed::Mongo(_) => "MongoDB", Embed::Gone(_) => "—" } }
+    /// Layout entry; `None` for a placeholder (the tab is dropped on save).
+    pub fn save(&self, cx: &gpui::App) -> Option<ssh_term_proto::session_store::PaneSave> { match self { Embed::Kv(v) => Some(v.read(cx).save()), Embed::Dock(v) => Some(v.read(cx).save()), Embed::Log(v) => Some(v.read(cx).save()), Embed::Mongo(v) => Some(v.read(cx).save()), Embed::Gone(v) => v.read(cx).save.clone() } }
 }

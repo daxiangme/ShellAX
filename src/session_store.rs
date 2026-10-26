@@ -18,6 +18,14 @@ pub enum PaneSave {
     Sftp { target: SshTarget, #[serde(default)] local_dir: String, #[serde(default)] remote_dir: String, #[serde(default)] follow: bool, #[serde(default, skip_serializing_if = "Vec::is_empty")] panes: Vec<SftpSide> },
     /// Database tab: a table browser (`table` set) or a SQL editor with its unsaved text.
     Db { conn: String, #[serde(default)] database: String, #[serde(default, skip_serializing_if = "Option::is_none")] schema: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] table: Option<String>, #[serde(default, skip_serializing_if = "String::is_empty")] sql: String, #[serde(default, skip_serializing_if = "Option::is_none")] editor_h: Option<f32> },
+    /// Redis tab on a saved connection, with the key that was open.
+    Redis { conn: String, #[serde(default, skip_serializing_if = "Option::is_none")] key: Option<String> },
+    /// Container engine tab.
+    Docker { endpoint: String },
+    /// Container log tab.
+    DockerLogs { endpoint: String, container: String, #[serde(default)] name: String },
+    /// MongoDB tab: database / collection and the query in the filter bar.
+    Mongo { conn: String, #[serde(default)] database: String, #[serde(default)] collection: String, #[serde(default, skip_serializing_if = "String::is_empty")] filter: String, #[serde(default, skip_serializing_if = "String::is_empty")] sort: String },
 }
 
 /// One pane of an SFTP view: `kind` is "local", "remote" or "empty".
@@ -32,7 +40,7 @@ pub struct SftpSide {
     pub dir: String,
 }
 impl PaneSave {
-    pub fn resume(&self) -> Option<&str> { match self { PaneSave::Local { resume, .. } | PaneSave::Ssh { resume, .. } => resume.as_deref(), PaneSave::Sftp { .. } | PaneSave::Db { .. } => None } }
+    pub fn resume(&self) -> Option<&str> { match self { PaneSave::Local { resume, .. } | PaneSave::Ssh { resume, .. } => resume.as_deref(), _ => None } }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

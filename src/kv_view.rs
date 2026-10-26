@@ -96,7 +96,7 @@ pub fn parse_fields(s: &str) -> Vec<(String, String)> {
 }
 
 impl KvView {
-    pub fn new(conn: RedisConn, password: Option<String>, via: Option<(SshTarget, Prompts)>, production: bool, rt: tokio::runtime::Handle, log: ExecLog, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(conn: RedisConn, password: Option<String>, via: Result<Option<(SshTarget, Prompts)>, String>, select: Option<String>, production: bool, rt: tokio::runtime::Handle, log: ExecLog, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let filter_in = cx.new(|cx| InputState::new(window, cx).placeholder(t("redis.filter_placeholder")));
         let console_in = cx.new(|cx| InputState::new(window, cx).placeholder(t("redis.console_placeholder")));
         let value_ed = cx.new(|cx| EditorState::new(window, cx).line_number(true));
@@ -116,13 +116,15 @@ impl KvView {
             bulk_in: input(&t("redis.bulk_placeholder"), window, cx),
             console_in, console_out: vec![], info: vec![], slow: vec![], ask: None, _subs: subs, conn,
         };
+        let mut me = me;
+        let via = match via { Ok(v) => v, Err(e) => { me.conn_err = Some(e); return me; } };
         let c = me.conn.clone();
         let h = me.rt.spawn(async move { Kv::open(&c, password, via).await.map(Arc::new) });
         cx.spawn(async move |this, cx| {
             let r = h.await.map_err(anyhow::Error::from).and_then(|r| r);
             let _ = this.update(cx, |v, cx| {
                 match r {
-                    Ok(kv) => { log_push(&v.log, "redis", &format!("connect {}", v.conn.address()), true, kv.version.clone()); v.kv = Some(kv); v.rescan(cx); }
+                    Ok(kv) => { log_push(&v.log, "redis", &format!("connect {}", v.conn.address()), true, kv.version.clone()); v.kv = Some(kv); v.rescan(cx); if let Some(k) = select.clone() { v.select(k, cx); } }
                     Err(e) => { log_push(&v.log, "redis", &format!("connect {}", v.conn.address()), false, format!("{e:#}")); v.conn_err = Some(format!("{e:#}")); }
                 }
                 cx.notify();
@@ -131,6 +133,7 @@ impl KvView {
         me
     }
 
+    pub fn save(&self) -> ssh_term_proto::session_store::PaneSave { ssh_term_proto::session_store::PaneSave::Redis { conn: self.conn.id.clone(), key: self.selected.clone() } }
     pub fn crumbs(&self) -> String {
         let mut s = format!("{} › db{}", self.conn.name, self.conn.db);
         if let Some(k) = &self.selected { s.push_str(" › "); s.push_str(k); }

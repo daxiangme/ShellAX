@@ -13,6 +13,7 @@ mod db_dialog;
 mod db_ui;
 mod db_view;
 mod kv_view;
+mod doc_view;
 mod dock_view;
 mod kv_ui;
 mod host_picker;
@@ -1136,6 +1137,7 @@ impl Root {
                 let v = v.read(cx);
                 if let Some(sv) = &v.sftp { return NodeSave::Leaf { pane: sv.read(cx).save() }; }
                 if let Some(dv) = &v.db { return NodeSave::Leaf { pane: dv.read(cx).save(cx) }; }
+                if let Some(e) = &v.embed { if let Some(pane) = e.save(cx) { return NodeSave::Leaf { pane }; } }
                 let resume = v.agent_label().map(|a| a.0).or(v.last_agent.clone()).and_then(|a| resume_command(&a)).map(str::to_string).or(v.resume_offer.clone());
                 let pane = match &v.spec {
                     Spec::Local => PaneSave::Local { cwd: v.session.as_ref().and_then(|s| s.cwd_probe.lock().unwrap().as_ref().and_then(|f| f())).unwrap_or_default(), daemon_id: v.daemon_id.clone(), resume },
@@ -1185,6 +1187,10 @@ impl Root {
                     if let (Some(h), Some(v)) = (editor_h, p.read(cx).db.clone()) { v.update(cx, |v, _| v.set_editor_h(h)); }
                     p
                 }
+                PaneSave::Redis { conn, key } => r.redis_pane(&conn, key, window, cx),
+                PaneSave::Docker { endpoint } => r.docker_pane(&endpoint, window, cx),
+                PaneSave::DockerLogs { endpoint, container, name } => r.docker_logs_pane(&endpoint, container, name, window, cx),
+                PaneSave::Mongo { conn, database, collection, filter, sort } => r.mongo_pane(&conn, (database, collection, filter, sort), window, cx),
             }),
             NodeSave::Split { vertical, ratio, a, b } => Node::Split { dir: if *vertical { Dir::Vertical } else { Dir::Horizontal }, ratio: *ratio, a: Box::new(r.build_node(a, window, cx)), b: Box::new(r.build_node(b, window, cx)) },
         }

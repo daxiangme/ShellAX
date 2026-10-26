@@ -29,6 +29,18 @@ pub fn parse_doc(s: &str) -> Result<Document> {
     match Bson::try_from(v)? { Bson::Document(d) => Ok(d), _ => bail!(crate::i18n::t("mongo.err_object").to_string()) }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexRow { pub name: String, pub keys: String, pub unique: bool, pub ttl: Option<u64> }
+
+/// `[ {stage}, ... ]` typed by the user (a single object is taken as one stage).
+pub fn parse_pipeline(s: &str) -> Result<Vec<Document>> {
+    let s = s.trim();
+    if s.is_empty() { return Ok(vec![]); }
+    let v: serde_json::Value = serde_json::from_str(s).with_context(|| crate::i18n::t("mongo.err_json").to_string())?;
+    let items = match v { serde_json::Value::Array(a) => a, o => vec![o] };
+    items.into_iter().map(|i| match Bson::try_from(i)? { Bson::Document(d) => Ok(d), _ => bail!(crate::i18n::t("mongo.err_object").to_string()) }).collect()
+}
+
 /// Document as pretty relaxed Extended JSON.
 pub fn to_json(d: &Document) -> String {
     serde_json::to_string_pretty(&Bson::Document(d.clone()).into_relaxed_extjson()).unwrap_or_default()
@@ -130,6 +142,52 @@ impl Mongo {
         Ok(self.client.database(db).collection::<Document>(coll).insert_one(parse_doc(json)?).await?.inserted_id)
     }
 
+    /// Indexes: (name, key spec as JSON, unique, ttl seconds).
+    pub async fn indexes(&self, db: &str, coll: &str) -> Result<Vec<IndexRow>> {
+        let mut cur = self.client.database(db).collection::<Document>(coll).list_indexes().await?;
+        let mut v = vec![];
+        while cur.advance().await? {
+            let m = cur.deserialize_current()?;
+            let o = m.options.unwrap_or_default();
+            v.push(IndexRow { name: o.name.unwrap_or_default(), keys: Bson::Document(m.keys).into_relaxed_extjson().to_string(), unique: o.unique.unwrap_or(false), ttl: o.expire_after.map(|d| d.as_secs()) });
+        }
+        Ok(v)
+    }
+
+    /// Run a pipeline (JSON array of stages); at most `limit` result documents.
+    /// Read-only connections refuse `$out` / `$merge`.
+    pub async fn aggregate(&self, db: &str, coll: &str, pipeline: &str, limit: usize) -> Result<Vec<Document>> {
+        let stages = parse_pipeline(pipeline)?;
+        if stages.iter().any(|s| s.contains_key("$out") || s.contains_key("$merge")) { self.guard()?; }
+        let mut cur = self.client.database(db).collection::<Document>(coll).aggregate(stages).await?;
+        let mut v = vec![];
+        while v.len() < limit && cur.advance().await? { v.push(cur.deserialize_current()?); }
+        Ok(v)
+    }
+
+    /// Every document matching the query, as a pretty JSON array, written to `path`.
+    pub async fn export(&self, db: &str, coll: &str, filter: &str, sort: &str, projection: &str, path: &std::path::Path) -> Result<u64> {
+        let (f, s, p) = (parse_doc(filter)?, parse_doc(sort)?, parse_doc(projection)?);
+        let c = self.client.database(db).collection::<Document>(coll);
+        let mut q = c.find(f);
+        if !s.is_empty() { q = q.sort(s); }
+        if !p.is_empty() { q = q.projection(p); }
+        let mut cur = q.await?;
+        use std::io::Write;
+        let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
+        w.write_all(b"[")?;
+        let mut n = 0u64;
+        while cur.advance().await? {
+            let d: Document = cur.deserialize_current()?;
+            w.write_all(if n == 0 { b"\n" } else { b",\n" })?;
+            w.write_all(serde_json::to_string(&Bson::Document(d).into_relaxed_extjson())?.as_bytes())?;
+            n += 1;
+        }
+        w.write_all(b"\n]\n")?;
+        w.flush()?;
+        Ok(n)
+    }
+
     pub async fn delete(&self, db: &str, coll: &str, id: &Bson) -> Result<u64> {
         self.guard()?;
         Ok(self.client.database(db).collection::<Document>(coll).delete_one(doc! { "_id": id.clone() }).await?.deleted_count)
@@ -140,6 +198,13 @@ impl Mongo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pipelines() {
+        let p = parse_pipeline(r#"[{"$match":{"a":1}},{"$limit":5}]"#).unwrap();
+        assert_eq!((p.len(), p[1].get_i64("$limit").ok().or(p[1].get_i32("$limit").ok().map(i64::from))), (2, Some(5)));
+        assert_eq!(parse_pipeline(r#"{"$count":"n"}"#).unwrap().len(), 1);
+        assert!(parse_pipeline("[1]").is_err() && parse_pipeline("").unwrap().is_empty());
+    }
     #[test]
     fn json_docs() {
         let d = parse_doc(r#"{"_id": {"$oid": "65a000000000000000000001"}, "n": 1, "at": {"$date": "2024-01-02T03:04:05Z"}}"#).unwrap();
