@@ -15,7 +15,7 @@ use ssh_term_proto::ssh::{Prompts, SshTarget};
 
 use crate::activity::{log_push, ExecLog};
 use crate::theme::{c, cur};
-use crate::ui::{self, icon, IconName};
+use crate::ui::{self, icon, mono, small, IconName};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Sub { Docs, Indexes, Aggregate }
@@ -238,8 +238,6 @@ impl DocView {
 
 impl Drop for DocView { fn drop(&mut self) { self.close(); } }
 
-fn small(s: impl Into<SharedString>) -> gpui::Div { div().text_size(px(12.)).text_color(c(cur().subtext)).child(s.into()) }
-fn mono(s: impl Into<SharedString>) -> gpui::Div { div().font_family("monospace").text_size(px(12.)).text_color(c(cur().text)).child(s.into()) }
 
 impl DocView {
     fn tree_el(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -250,9 +248,9 @@ impl DocView {
             let d2 = d.clone();
             list = list.child(div().id(("mg-db", i)).h(px(24.)).px_2().flex().items_center().gap_1().cursor_pointer().hover(|x| x.bg(crate::theme::hover_bg()))
                 .on_click(cx.listener(move |v, _, _w, cx| { if !v.open.remove(&d2) { v.open.insert(d2.clone()); if !v.colls.contains_key(&d2) { v.load_colls(d2.clone(), cx); } } cx.notify(); }))
-                .child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 12., c(th.overlay1)))
-                .child(icon(IconName::Database, 13., c(th.accent)))
-                .child(div().text_size(px(12.)).text_color(c(th.text)).child(d.clone())));
+                .child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, ui::IC_XS, c(th.overlay1)))
+                .child(icon(IconName::Database, ui::IC_SM, c(th.accent)))
+                .child(div().text_size(px(ui::fs_body())).text_color(c(th.text)).child(d.clone())));
             if !open { continue; }
             match self.colls.get(&d) {
                 None => list = list.child(div().pl(px(34.)).child(small(t("db.loading")))),
@@ -262,20 +260,20 @@ impl DocView {
                     list = list.child(div().id(SharedString::from(format!("mg-c-{i}-{j}"))).h(px(24.)).pl(px(30.)).pr_2().flex().items_center().gap_1().cursor_pointer()
                         .when(sel, |x| x.bg(crate::theme::selected_bg())).hover(|x| x.bg(crate::theme::hover_bg()))
                         .on_click(cx.listener(move |v, _, _w, cx| { v.pick(dd.clone(), cc.clone(), cx); cx.notify(); }))
-                        .child(icon(IconName::Folder, 12., c(th.overlay1)))
-                        .child(div().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(12.)).text_color(c(th.text)).child(co.clone())));
+                        .child(icon(IconName::Folder, ui::IC_XS, c(th.overlay1)))
+                        .child(div().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(ui::fs_body())).text_color(c(th.text)).child(co.clone())));
                 },
             }
         }
-        div().w(px(240.)).flex_shrink_0().h_full().flex().flex_col().border_r_1().border_color(c(th.surface0))
+        div().w(px(240.)).flex_shrink_0().h_full().flex().flex_col().border_r_1().border_color(crate::theme::divider())
             .child(div().p_2().flex().gap_1().child(ui::button("mg-refresh", t("redis.refresh"), 0).on_click(cx.listener(|v, _, _w, cx| { v.colls.clear(); v.load_dbs(cx); for d in v.open.clone() { v.load_colls(d, cx); } cx.notify(); }))))
             .child(list).into_any_element()
     }
 
     fn docs_el(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
-        let lbl = |s: &str| div().w(px(70.)).flex_shrink_0().text_size(px(12.)).text_color(c(th.subtext)).child(s.to_string());
-        let bar = div().p_2().flex().flex_col().gap_1().border_b_1().border_color(c(th.surface0))
+        let lbl = |s: &str| div().w(px(70.)).flex_shrink_0().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(s.to_string());
+        let bar = div().p_2().flex().flex_col().gap_1().border_b_1().border_color(crate::theme::divider())
             .child(div().flex().items_center().gap_2().child(lbl(&t("mongo.filter"))).child(div().flex_1().child(ui::text_field(&self.filter_in, false)))
                 .child(ui::button("mg-find", t("mongo.find"), 1).on_click(cx.listener(|v, _, _w, cx| { v.skip = 0; v.find(cx); cx.notify(); }))))
             .child(div().flex().items_center().gap_2().child(lbl(&t("mongo.sort"))).child(div().flex_1().child(ui::text_field(&self.sort_in, false)))
@@ -284,7 +282,7 @@ impl DocView {
         let page = format!("{}–{} / {}", if self.docs.is_empty() { 0 } else { self.skip + 1 }, self.skip + self.docs.len() as u64, total);
         let can_prev = self.skip > 0;
         let can_next = self.skip + (self.docs.len() as u64) < total;
-        let pager = div().px_2().py_1().flex().items_center().gap_2().border_b_1().border_color(c(th.surface0))
+        let pager = div().px_2().py_1().flex().items_center().gap_2().border_b_1().border_color(crate::theme::divider())
             .child(small(page)).child(div().flex_1())
             .child(ui::button("mg-prev", "‹", 0).when(!can_prev, |b| b.opacity(0.4)).on_click(cx.listener(move |v, _, _w, cx| { if can_prev { v.skip = v.skip.saturating_sub(doc::PAGE); v.find(cx); } cx.notify(); })))
             .child(ui::button("mg-next", "›", 0).when(!can_next, |b| b.opacity(0.4)).on_click(cx.listener(move |v, _, _w, cx| { if can_next { v.skip += doc::PAGE; v.find(cx); } cx.notify(); })))
@@ -294,13 +292,13 @@ impl DocView {
         if self.docs.is_empty() { list = list.child(div().p_3().child(small(if self.busy { t("db.loading") } else { t("db.no_rows") }))); }
         for (i, d) in self.docs.iter().enumerate() {
             let sel = self.selected == Some(i);
-            list = list.child(div().id(("mg-d", i)).min_h(px(40.)).px_2().py_1().flex().flex_col().border_b_1().border_color(c(th.surface0).opacity(0.5)).cursor_pointer()
+            list = list.child(div().id(("mg-d", i)).min_h(px(40.)).px_2().py_1().flex().flex_col().border_b_1().border_color(crate::theme::divider()).cursor_pointer()
                 .when(sel, |x| x.bg(crate::theme::selected_bg())).hover(|x| x.bg(crate::theme::hover_bg()))
                 .on_click(cx.listener(move |v, _, _w, cx| { v.selected = Some(i); v.editing = None; v.sync_editor(); cx.notify(); }))
                 .child(mono(doc::id_text(d)).text_color(c(th.accent)))
                 .child(div().whitespace_nowrap().overflow_hidden().text_ellipsis().child(small(doc::preview(d, 300)))));
         }
-        let left = div().w(px(380.)).flex_shrink_0().h_full().flex().flex_col().border_r_1().border_color(c(th.surface0)).child(list);
+        let left = div().w(px(380.)).flex_shrink_0().h_full().flex().flex_col().border_r_1().border_color(crate::theme::divider()).child(list);
         let right = self.doc_detail_el(cx);
         div().flex_1().min_h_0().flex().flex_col().child(bar).child(pager).child(div().flex_1().min_h_0().flex().child(left).child(right)).into_any_element()
     }
@@ -312,7 +310,7 @@ impl DocView {
         if !has { return div().flex_1().flex().items_center().justify_center().child(small(t("mongo.pick_doc"))).into_any_element(); }
         let modes: Vec<(String, String)> = vec![("tree".into(), t("mongo.tree").into()), ("json".into(), "JSON".into())];
         let me = cx.entity().downgrade();
-        let mut head = div().px_2().py_1().flex().items_center().gap_2().border_b_1().border_color(c(th.surface0));
+        let mut head = div().px_2().py_1().flex().items_center().gap_2().border_b_1().border_color(crate::theme::divider());
         if !editing {
             head = head.child(ui::segmented("mg-show", &modes, if self.show == Show::Tree { "tree" } else { "json" }, move |s, _w, cx| { let _ = me.update(cx, |v, cx| { v.show = if s == "tree" { Show::Tree } else { Show::Json }; cx.notify(); }); }))
                 .child(div().flex_1())
@@ -335,7 +333,7 @@ impl DocView {
                 let p = path.clone();
                 list = list.child(div().id(("mg-tr", n)).min_h(px(22.)).pl(px(4. + depth as f32 * 16.)).flex().items_center().gap_1().when(kids, |x| x.cursor_pointer())
                     .on_click(cx.listener(move |v, _, _w, cx| { if kids && !v.collapsed.remove(&p) { v.collapsed.insert(p.clone()); } cx.notify(); }))
-                    .child(div().w(px(12.)).when(kids, |x| x.child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 11., c(th.overlay1)))))
+                    .child(div().w(px(12.)).when(kids, |x| x.child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, ui::IC_XS, c(th.overlay1)))))
                     .child(mono(key).text_color(c(th.accent)))
                     .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().child(mono(val).text_color(if kids { c(th.overlay0) } else { c(th.text) }))));
             }
@@ -345,15 +343,14 @@ impl DocView {
     }
 
     fn indexes_el(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let th = cur();
         let mut list = div().id("mg-idx").flex_1().min_h_0().overflow_y_scroll().flex().flex_col();
-        list = list.child(div().h(px(26.)).px_3().flex().items_center().gap_3().bg(c(th.mantle)).text_size(px(11.)).text_color(c(th.overlay1))
+        list = list.child(ui::table_header().px_3().gap_3()
             .child(div().w(px(220.)).child(t("ui.name"))).child(div().flex_1().child(t("mongo.keys"))).child(div().w(px(160.)).child(t("mongo.options"))));
         for ix in &self.indexes {
             let mut opts = vec![];
             if ix.unique { opts.push(t("mongo.unique").to_string()); }
             if let Some(s) = ix.ttl { opts.push(format!("TTL {s}s")); }
-            list = list.child(div().min_h(px(28.)).px_3().flex().items_center().gap_3().border_b_1().border_color(c(th.surface0).opacity(0.5))
+            list = list.child(div().min_h(px(28.)).px_3().flex().items_center().gap_3().border_b_1().border_color(crate::theme::divider())
                 .child(div().w(px(220.)).child(mono(ix.name.clone()))).child(div().flex_1().min_w_0().child(mono(ix.keys.clone()))).child(div().w(px(160.)).child(small(opts.join(", ")))));
         }
         div().flex_1().min_h_0().flex().flex_col()
@@ -362,13 +359,12 @@ impl DocView {
     }
 
     fn agg_el(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let th = cur();
-        let mut out = div().id("mg-agg").flex_1().min_h_0().overflow_y_scroll().p_2().flex().flex_col().gap_2().bg(c(th.mantle));
+        let mut out = div().id("mg-agg").flex_1().min_h_0().overflow_y_scroll().p_2().flex().flex_col().gap_2().bg(crate::theme::sub_bg());
         for d in &self.agg { out = out.child(mono(doc::to_json(d)).whitespace_normal()); }
         let info = match self.agg_ms { Some(ms) => tf("mongo.agg_result", &[("n", &self.agg.len()), ("ms", &ms)]), None => t("mongo.agg_hint").to_string() };
         div().flex_1().min_h_0().flex().flex_col()
             .child(div().h(px(200.)).flex_shrink_0().child(Editor::new(&self.pipe_ed).h_full()))
-            .child(div().p_2().flex().items_center().gap_2().border_y_1().border_color(c(th.surface0))
+            .child(div().p_2().flex().items_center().gap_2().border_y_1().border_color(crate::theme::divider())
                 .child(ui::button("mg-agg-run", if self.busy { t("db.loading") } else { t("mongo.run") }, 1).on_click(cx.listener(|v, _, _w, cx| { v.run_agg(cx); cx.notify(); })))
                 .child(small(info)))
             .child(out).into_any_element()
@@ -386,11 +382,11 @@ impl DocView {
         let pre: String = pre.chars().take(4000).collect();
         let prod = self.production.then(|| ui::tag(t("tag.production"), c(th.error)));
         Some(ui::modal(ui::card(520.)
-            .child(div().p_5().flex().flex_col().gap_3()
-                .child(div().flex().items_center().gap_2().child(icon(IconName::TriangleAlert, 16., c(th.warning))).child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("db.confirm_title"))).children(prod))
+            .child(ui::dialog_header(Some(IconName::TriangleAlert), t("db.confirm_title"), None, None).children(prod))
+            .child(div().p(px(ui::SP_5)).flex().flex_col().gap(px(ui::SP_3))
                 .child(small(msg))
-                .when(!pre.is_empty(), |d| d.child(div().id("mg-cf-pre").max_h(px(300.)).overflow_y_scroll().p_2().rounded(px(6.)).bg(c(th.mantle)).child(mono(pre).whitespace_normal()))))
-            .child(div().px_5().py_3().flex().justify_end().gap_2().border_t_1().border_color(c(th.surface0))
+                .when(!pre.is_empty(), |d| d.child(div().id("mg-cf-pre").max_h(px(300.)).overflow_y_scroll().p_2().rounded(px(ui::R_MD)).bg(crate::theme::sub_bg()).child(mono(pre).whitespace_normal()))))
+            .child(ui::dialog_footer(None, vec![])
                 .child(ui::button("mg-cf-no", t("ui.cancel"), 0).on_click(cx.listener(|v, _, _w, cx| { v.ask = None; cx.notify(); })))
                 .child(ui::button("mg-cf-yes", t("db.confirm_run"), 2).on_click(cx.listener(|v, _, _w, cx| { if let Some(a) = v.ask.take() { v.perform(a, cx); } cx.notify(); }))))).into_any_element())
     }
@@ -400,9 +396,9 @@ impl Render for DocView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
         if let Some(s) = self.pending_doc.take() { self.doc_ed.update(cx, |e, cx| e.set_value(s, window, cx)); }
-        let mut head = div().h(px(40.)).px_3().flex().items_center().gap_2().border_b_1().border_color(c(th.surface0)).bg(c(th.mantle))
-            .child(icon(IconName::Database, 14., c(th.success)))
-            .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(self.crumbs()))
+        let mut head = ui::toolbar()
+            .child(icon(IconName::Database, ui::IC_SM, c(th.success)))
+            .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(self.crumbs()))
             .child(small(self.mongo.as_ref().map(|m| format!("MongoDB {}{}", m.version, m.via.as_ref().map(|v| format!(" ⇢ {v}")).unwrap_or_default())).unwrap_or_default()));
         if self.production { head = head.child(ui::tag(t("tag.production"), c(th.error))); }
         if self.conn.read_only { head = head.child(ui::tag(t("db.read_only"), c(th.warning))); }
@@ -415,7 +411,7 @@ impl Render for DocView {
             let _ = me.update(cx, |v, cx| { v.sub = sub; if sub == Sub::Indexes { v.load_indexes(cx); } cx.notify(); });
         }));
         let body: AnyElement = if let Some(e) = &self.conn_err {
-            div().flex_1().p_5().flex().flex_col().gap_2().child(div().text_size(px(13.)).text_color(c(th.error)).child(t("ui.connection_failed"))).child(mono(e.clone()).whitespace_normal()).into_any_element()
+            div().flex_1().p_5().flex().flex_col().gap_2().child(ui::notice(ui::Notice::Error, t("ui.connection_failed")).mx_0()).child(mono(e.clone()).whitespace_normal()).into_any_element()
         } else if self.mongo.is_none() {
             div().flex_1().flex().items_center().justify_center().child(small(t("ui.connecting"))).into_any_element()
         } else {
@@ -425,8 +421,8 @@ impl Render for DocView {
             };
             div().flex_1().min_h_0().flex().child(tree).child(div().flex_1().min_w_0().flex().flex_col().child(main)).into_any_element()
         };
-        let err = self.error.clone().map(|e| div().mx_3().mt_2().p_2().rounded(px(6.)).bg(c(th.error).opacity(0.12)).text_size(px(12.)).text_color(c(th.error)).whitespace_normal().child(e));
-        let note = self.note.clone().map(|n| div().mx_3().mt_1().text_size(px(12.)).text_color(c(th.success)).child(n));
+        let err = self.error.clone().map(|e| ui::notice(ui::Notice::Error, e).mt(px(ui::SP_2)));
+        let note = self.note.clone().map(|n| div().mx_3().mt_1().text_size(px(ui::fs_body())).text_color(c(th.success)).child(n));
         let ask = self.ask_el(cx);
         div().size_full().flex().flex_col().relative().bg(c(th.base)).child(head).children(err).children(note).child(body).children(ask)
     }

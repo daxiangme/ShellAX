@@ -2,7 +2,7 @@
 //! owns its own set of tabs. The tab row and the main area show only the current module's
 //! tabs; a module without tabs shows its own empty state. The last active tab of each module
 //! is remembered, and opening a tab from anywhere brings its module to the front.
-use gpui::{div, prelude::*, px, AnyElement, App, Context, EntityId, FontWeight, SharedString, Window};
+use gpui::{div, prelude::*, px, AnyElement, App, Context, EntityId, SharedString, Window};
 use ssh_term_proto::i18n::t;
 
 use crate::activity::Tool;
@@ -127,11 +127,10 @@ impl Root {
         let th = cur();
         let tool = self.tool.workspace();
         let s = config::get();
-        let row = |id: SharedString, ic: IconName, main: String, sub: String| div().id(id).w(px(360.)).h(px(36.)).px_3().rounded(px(8.)).flex().items_center().gap_2().cursor_pointer()
-            .bg(c(th.surface0).opacity(0.5)).hover(|d| d.bg(c(cur().surface1)))
-            .child(icon(ic, 14., c(th.accent)))
-            .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(13.)).text_color(c(th.text)).child(main))
-            .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(sub));
+        let row = |id: SharedString, ic: IconName, main: String, sub: String| ui::list_row(id, 0, false).mx_0().w(px(360.)).h(px(ui::H_LARGE + 4.)).pl(px(ui::SP_3)).pr(px(ui::SP_3)).rounded(px(ui::R_SUB)).bg(crate::theme::sub_bg())
+            .child(icon(ic, ui::IC_MD, c(th.overlay1)))
+            .child(ui::row_title(main).flex_1())
+            .child(ui::row_meta(sub).flex_shrink_0());
         let (title, hint) = match tool {
             Tool::Sftp => (t("ws.sftp_title"), t("ws.sftp_hint")),
             Tool::Database => (t("ws.db_title"), t("ws.db_hint")),
@@ -193,10 +192,9 @@ impl Root {
                     .when(!self.closed_tabs.is_empty(), |d| d.child(ui::button("empty-reopen", t("tab.reopen"), 0).on_click(cx.listener(|this, _, w, cx| this.reopen_closed(w, cx)))));
             }
         }
-        div().flex_1().size_full().flex().flex_col().items_center().justify_center().gap_3().bg(c(th.base))
-            .child(icon(if tool == Tool::Hosts { IconName::SquareTerminal } else { tool.icon() }, 36., c(th.overlay0)))
-            .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(title.to_string()))
-            .when(!hint.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(c(th.subtext)).child(hint.to_string())))
+        // 图标 / 标题 / 说明走 empty_state；最近项列表与按钮排在其下方
+        div().flex_1().size_full().flex().flex_col().items_center().justify_center().gap(px(ui::SP_3)).bg(c(th.base))
+            .child(ui::empty_state(if tool == Tool::Hosts { IconName::SquareTerminal } else { tool.icon() }, title.to_string(), (!hint.is_empty()).then(|| hint.to_string().into()), vec![], true).flex_none().py_0())
             .child(list)
             .child(buttons)
             .into_any_element()

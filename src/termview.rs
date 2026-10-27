@@ -28,6 +28,7 @@ use ssh_term_proto::suggest::{History, InputTracker, Key};
 use ssh_term_proto::term::{Session, Size};
 
 use crate::theme::{c, cur, scheme, term_color, Scheme, Theme};
+use crate::ui;
 use crate::{config, font_size, line_h};
 
 const SCROLLBAR_W: f32 = 8.0;
@@ -1093,15 +1094,15 @@ impl TermView {
             let hl: Vec<(std::ops::Range<usize>, gpui::HighlightStyle)> = char_to_byte_ranges(&m.cmd, &m.hl).into_iter()
                 .map(|r| (r, gpui::HighlightStyle { color: Some(c(th.accent)), font_weight: Some(FontWeight::BOLD), ..Default::default() })).collect();
             let text = gpui::StyledText::new(SharedString::from(m.cmd.clone())).with_highlights(hl);
-            list = list.child(div().id(("hist-pop", i)).h(px(HIST_POP_ROW)).flex_shrink_0().px_2().mx_1().rounded_md().flex().items_center().gap_2().cursor_pointer()
+            list = list.child(div().id(("hist-pop", i)).h(px(HIST_POP_ROW)).flex_shrink_0().px_2().mx_1().rounded(px(ui::R_MD)).flex().items_center().gap_2().cursor_pointer()
                 .text_color(c(th.text))
-                .when(selected, |d| d.bg(crate::theme::selected_bg()))
-                .when(!selected, |d| d.hover(|d| d.bg(crate::theme::hover_bg())))
+                .when(selected, |d| d.bg(crate::theme::menu_sel_bg()))
+                .when(!selected, |d| d.hover(|d| d.bg(crate::theme::menu_sel_bg())))
                 .on_mouse_down(MouseButton::Left, cx.listener(move |v, _, _, cx| { cx.stop_propagation(); v.hist_pop_accept(i, cx); }))
-                .child(crate::ui::icon(crate::ui::IconName::Clock, 13., if selected { c(th.accent) } else { c(th.overlay1) }))
-                .child(div().min_w_0().flex_1().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(mono.clone()).text_size(px(13.)).child(text)));
+                .child(crate::ui::icon(crate::ui::IconName::Clock, ui::IC_SM, c(th.overlay1)))
+                .child(div().min_w_0().flex_1().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(mono.clone()).text_size(px(ui::fs_body())).child(text)));
         }
-        let pop = div().occlude().min_w(px(260.)).max_w(px(640.)).py_1().rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.surface1)).shadow_lg()
+        let pop = ui::popover().occlude().min_w(px(260.)).max_w(px(640.)).py_1()
             .on_mouse_down_out(cx.listener(|v, _, _, cx| { if let Some(p) = v.hist_pop.take() { v.hist_pop_dismissed = Some(p.input); cx.notify(); } }))
             .child(list);
         Some(gpui::deferred(gpui::anchored().anchor(anchor).position(pos).snap_to_window_with_margin(px(8.)).child(pop)).with_priority(5).into_any_element())
@@ -1619,50 +1620,46 @@ impl TermView {
     fn ai_card(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let card = self.ai.clone()?;
         let th = cur();
-        let mono = SharedString::from(config::get().font.family.clone());
-        let btn = |id: &'static str, label: &'static str, kind: u8| div().id(id).px_3().py(px(4.)).rounded_md().cursor_pointer().text_size(px(12.))
-            .bg(match kind { 1 => c(th.accent), 2 => c(th.error), _ => c(th.surface0) })
-            .text_color(if kind == 0 { c(th.text) } else { c(th.base) }).child(label);
         let (border, title, body, buttons): (Hsla, String, gpui::Div, gpui::Div) = match card {
             AiCard::Loading { request } => (c(th.accent), tf("ai.card_loading", &[("req", &request)]), div(), div().flex().gap_2()
-                .child(btn("ai-cancel", t("ui.cancel"), 0).on_click(cx.listener(|v, _, _w, cx| v.ai_cancel(cx))))),
+                .child(ui::button_sm("ai-cancel", t("ui.cancel"), 0).on_click(cx.listener(|v, _, _w, cx| v.ai_cancel(cx))))),
             AiCard::Ready { request, command, explanation, redactions, provider } => (c(th.accent), tf("ai.card_ready", &[("req", &request), ("provider", &provider)]),
                 div().flex().flex_col().gap_1()
-                    .child(div().px_2().py_1().rounded_md().bg(c(th.bg)).font_family(mono).text_size(px(13.)).text_color(c(th.text)).child(command))
+                    .child(div().px_2().py_1().rounded(px(ui::R_MD)).bg(crate::theme::sub_bg()).font_family(ui::mono_family()).text_size(px(ui::fs_mono_block())).text_color(c(th.text)).child(command))
                     .when(!explanation.is_empty(), |d| d.child(div().text_color(c(th.overlay1)).child(explanation)))
-                    .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(tf("ai.card_meta", &[("n", &redactions), ("mode", &config::get().permissions.mode.label())]))),
+                    .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(tf("ai.card_meta", &[("n", &redactions), ("mode", &config::get().permissions.mode.label())]))),
                 div().flex().gap_2()
-                    .child(btn("ai-cancel", t("ai.btn_cancel"), 0).on_click(cx.listener(|v, _, _w, cx| v.ai_cancel(cx))))
-                    .child(btn("ai-exec", t("ai.btn_exec"), 0).on_click(cx.listener(|v, _, _w, cx| v.ai_execute(cx))))
-                    .child(btn("ai-insert", t("ai.btn_insert"), 1).on_click(cx.listener(|v, _, _w, cx| v.ai_insert(cx))))),
+                    .child(ui::button_sm("ai-cancel", t("ai.btn_cancel"), 0).on_click(cx.listener(|v, _, _w, cx| v.ai_cancel(cx))))
+                    .child(ui::button_sm("ai-exec", t("ai.btn_exec"), 0).on_click(cx.listener(|v, _, _w, cx| v.ai_execute(cx))))
+                    .child(ui::button_sm("ai-insert", t("ai.btn_insert"), 1).on_click(cx.listener(|v, _, _w, cx| v.ai_insert(cx))))),
             AiCard::Confirm { command, reason, .. } => (c(th.warning), t("ai.card_confirm").to_string(),
                 div().flex().flex_col().gap_1()
-                    .child(div().px_2().py_1().rounded_md().bg(c(th.bg)).font_family(mono).text_size(px(13.)).text_color(c(th.text)).child(command))
+                    .child(div().px_2().py_1().rounded(px(ui::R_MD)).bg(crate::theme::sub_bg()).font_family(ui::mono_family()).text_size(px(ui::fs_mono_block())).text_color(c(th.text)).child(command))
                     .child(div().text_color(c(th.warning)).child(reason)),
                 div().flex().gap_2()
-                    .child(btn("ai-cancel", t("ui.cancel"), 0).on_click(cx.listener(|v, _, _w, cx| { let _ = crate::audit_log().append("ai.exec.rejected", "user", &format!("host={}", v.audit_host())); v.ai_cancel(cx) })))
-                    .child(btn("ai-confirm", t("ai.btn_confirm"), 2).on_click(cx.listener(|v, _, _w, cx| v.ai_confirm(cx))))),
+                    .child(ui::button_sm("ai-cancel", t("ui.cancel"), 0).on_click(cx.listener(|v, _, _w, cx| { let _ = crate::audit_log().append("ai.exec.rejected", "user", &format!("host={}", v.audit_host())); v.ai_cancel(cx) })))
+                    .child(ui::button_sm("ai-confirm", t("ai.btn_confirm"), 2).on_click(cx.listener(|v, _, _w, cx| v.ai_confirm(cx))))),
             AiCard::Denied { command, reason } => (c(th.error), t("ai.card_denied").to_string(),
                 div().flex().flex_col().gap_1()
-                    .child(div().px_2().py_1().rounded_md().bg(c(th.bg)).font_family(mono).text_size(px(13.)).text_color(c(th.text)).child(command))
+                    .child(div().px_2().py_1().rounded(px(ui::R_MD)).bg(crate::theme::sub_bg()).font_family(ui::mono_family()).text_size(px(ui::fs_mono_block())).text_color(c(th.text)).child(command))
                     .child(div().text_color(c(th.error)).child(reason)),
-                div().flex().gap_2().child(btn("ai-cancel", t("ai.btn_close"), 0).on_click(cx.listener(|v, _, _w, cx| v.ai_cancel(cx))))),
+                div().flex().gap_2().child(ui::button_sm("ai-cancel", t("ai.btn_close"), 0).on_click(cx.listener(|v, _, _w, cx| v.ai_cancel(cx))))),
             AiCard::Error { request, message } => (c(th.error), if request.is_empty() { t("ai.card_hint").to_string() } else { tf("ai.card_error", &[("req", &request)]) },
                 div().text_color(c(th.error)).child(message),
-                div().flex().gap_2().child(btn("ai-cancel", t("ai.btn_close"), 0).on_click(cx.listener(|v, _, _w, cx| v.ai_cancel(cx))))),
+                div().flex().gap_2().child(ui::button_sm("ai-cancel", t("ai.btn_close"), 0).on_click(cx.listener(|v, _, _w, cx| v.ai_cancel(cx))))),
             AiCard::Consent { request } => (c(th.warning), t("ai.consent_title").to_string(),
                 div().text_color(c(th.subtext)).child(self.ai_consent_text()),
                 div().flex().gap_2()
-                    .child(btn("ai-cancel", t("ui.cancel"), 0).on_click(cx.listener(|v, _, _w, cx| v.ai_cancel(cx))))
-                    .child(btn("ai-consent", t("ai.consent_ok"), 1).on_click(cx.listener(move |v, _, _w, cx| { crate::ai_consent_ack(); v.ai_request(request.clone(), cx) })))),
+                    .child(ui::button_sm("ai-cancel", t("ui.cancel"), 0).on_click(cx.listener(|v, _, _w, cx| v.ai_cancel(cx))))
+                    .child(ui::button_sm("ai-consent", t("ai.consent_ok"), 1).on_click(cx.listener(move |v, _, _w, cx| { crate::ai_consent_ack(); v.ai_request(request.clone(), cx) })))),
         };
-        Some(div().id("ai-card").occlude().absolute().bottom(px(12.)).left(px(12.)).right(px(12.)).p_3().rounded_lg().bg(c(th.mantle)).border_1().border_color(border)
+        Some(div().id("ai-card").occlude().absolute().bottom(px(12.)).left(px(12.)).right(px(12.)).p_3().rounded(px(ui::R_LG)).bg(c(th.base).opacity(0.97)).border_1().border_color(crate::theme::divider()).shadow(crate::chrome::soft_shadow(true))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .flex().flex_col().gap_2().text_size(px(12.)).text_color(c(th.text))
-            .child(div().flex().items_center().gap_2().child(crate::ui::icon(crate::ui::IconName::Sparkles, 13., c(th.accent)))
-                .child(div().font_weight(FontWeight::SEMIBOLD).child(title)))
+            .flex().flex_col().gap_2().text_size(px(ui::fs_small())).text_color(c(th.text))
+            .child(div().flex().items_center().gap_2().child(crate::ui::icon(crate::ui::IconName::Sparkles, ui::IC_SM, border))
+                .child(div().text_size(px(ui::fs_title())).font_weight(FontWeight::SEMIBOLD).child(title)))
             .child(body)
-            .child(div().flex().items_center().gap_3().child(div().flex_1().min_w_0().text_size(px(11.)).text_color(c(th.overlay0)).child(t("ai.card_keys"))).child(buttons.flex_shrink_0()))
+            .child(div().flex().items_center().gap_3().child(div().flex_1().min_w_0().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(t("ai.card_keys"))).child(buttons.flex_shrink_0()))
             .into_any_element())
     }
 
@@ -2249,13 +2246,13 @@ impl Render for TermView {
             let rec = sess.is_recording();
             let bc = in_broadcast(sess);
             if bc {
-                body = body.child(div().absolute().bottom(px(6.)).left(px(8.)).right(px(8.)).h(px(24.)).px_3().rounded_md().flex().items_center().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD)
+                body = body.child(div().absolute().bottom(px(6.)).left(px(8.)).right(px(8.)).h(px(24.)).px_3().rounded(px(ui::R_MD)).flex().items_center().text_size(px(ui::fs_body())).font_weight(FontWeight::SEMIBOLD)
                     .bg(c(th.error).opacity(0.92)).text_color(c(th.base)).child(tf("bc.banner", &[("n", &broadcast_count())])));
                 body = body.child(div().absolute().top_0().left_0().size_full().border_2().border_color(c(th.error)));
             }
             if rec {
-                body = body.child(div().absolute().top(px(4.)).right(px(16.)).px_2().py(px(1.)).rounded_md().bg(c(th.error).opacity(0.12)).border_1().border_color(c(th.error))
-                    .text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.error)).child(t("rec.indicator")));
+                body = body.child(div().absolute().top(px(4.)).right(px(16.)).px_2().py(px(1.)).rounded(px(ui::R_MD)).bg(c(th.error).opacity(0.12)).border_1().border_color(c(th.error))
+                    .text_size(px(ui::fs_small())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.error)).child(t("rec.indicator")));
             }
         }
         let connecting = matches!(self.spec, Spec::Ssh(_)) && !self.embedded() && self.session.as_ref().is_some_and(|s| !s.connected.load(Ordering::Acquire) && !s.exited.load(Ordering::Acquire) && s.conn_error.lock().unwrap().is_none());
@@ -2268,9 +2265,9 @@ impl Render for TermView {
                     bar.with_animation("conn-progress", gpui::Animation::new(Duration::from_millis(1200)).repeat().with_max_fps(30.).with_easing(gpui::ease_in_out), |d, t| d.ml(px(t * 264.))).into_any_element()
                 };
                 body = body.child(div().absolute().top_0().left_0().size_full().flex().items_center().justify_center()
-                    .child(div().w(px(360.)).p_4().rounded(px(10.)).bg(c(th.mantle)).border_1().border_color(c(th.surface2)).shadow_lg().flex().flex_col().gap_2()
-                        .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(format!("{}…", t("ui.connecting"))))
-                        .child(div().text_size(px(12.)).text_color(c(th.subtext)).child(host))
+                    .child(div().w(px(360.)).p_4().rounded(px(ui::R_LG)).bg(c(th.base).opacity(0.97)).border_1().border_color(crate::theme::divider()).shadow(crate::chrome::soft_shadow(true)).flex().flex_col().gap_2()
+                        .child(div().text_size(px(ui::fs_title())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(format!("{}…", t("ui.connecting"))))
+                        .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(host))
                         .child(div().mt_1().h(px(2.)).w_full().rounded_full().bg(c(th.surface1)).overflow_hidden().child(bar))));
             } else if !self.progress_tick {
                 self.progress_tick = true;
@@ -2285,24 +2282,23 @@ impl Render for TermView {
                 .child(crate::ui::button("conn-retry", t("term.retry"), 1).on_click(cx.listener(|_, _, _, cx| cx.emit(TermEvent::RetryConnect))));
             if is_ssh { actions = actions.child(crate::ui::button("conn-edit", t("term.edit_host"), 0).on_click(cx.listener(|_, _, _, cx| cx.emit(TermEvent::EditHost)))); }
             body = body.child(div().absolute().top_0().left_0().size_full().flex().items_center().justify_center().bg(c(th.base).opacity(0.6))
-                .child(div().w(px(420.)).max_w(gpui::relative(0.9)).p_4().rounded(px(10.)).bg(c(th.mantle)).border_1().border_color(c(th.surface2)).shadow_lg().flex().flex_col()
-                    .child(div().flex().items_center().gap_2().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text))
+                .child(div().w(px(420.)).max_w(gpui::relative(0.9)).p_4().rounded(px(ui::R_LG)).bg(c(th.base).opacity(0.97)).border_1().border_color(crate::theme::divider()).shadow(crate::chrome::soft_shadow(true)).flex().flex_col()
+                    .child(div().flex().items_center().gap_2().text_size(px(ui::fs_title())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text))
                         .child(div().size(px(8.)).rounded_full().bg(c(th.error))).child(t("ui.connection_failed")))
-                    .child(div().mt(px(8.)).text_size(px(12.)).line_height(px(18.)).text_color(c(th.subtext)).child(e))
+                    .child(div().mt(px(8.)).text_size(px(ui::fs_small())).line_height(px(18.)).text_color(c(th.subtext)).child(e))
                     .child(actions)));
         }
         if let Some(text) = &self.pending_paste {
             let lines = text.trim_end().lines().count();
             let preview: String = text.lines().next().unwrap_or("").chars().take(60).collect();
-            let btn = |id: &'static str, label: &'static str, primary: bool| div().id(id).px_3().py(px(4.)).rounded_md().cursor_pointer().text_size(px(12.))
-                .bg(if primary { c(th.accent) } else { c(th.surface0) }).text_color(if primary { c(th.base) } else { c(th.text) }).child(label);
-            body = body.child(div().absolute().bottom(px(12.)).left(px(12.)).right(px(12.)).p_3().rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.warning))
-                .flex().items_center().gap_3().text_size(px(12.)).text_color(c(th.text))
+            body = body.child(div().absolute().bottom(px(12.)).left(px(12.)).right(px(12.)).p_3().rounded(px(ui::R_LG)).bg(c(th.base).opacity(0.97)).border_1().border_color(crate::theme::divider()).shadow(crate::chrome::soft_shadow(true))
+                .flex().items_center().gap_3().text_size(px(ui::fs_small())).text_color(c(th.text))
+                .child(crate::ui::icon(crate::ui::IconName::TriangleAlert, ui::IC_SM, c(th.warning)))
                 .child(div().flex_1().flex().flex_col().gap_1()
                     .child(div().font_weight(FontWeight::SEMIBOLD).child(tf("term.paste_confirm", &[("lines", &lines)])))
                     .child(div().text_color(c(th.overlay1)).child(format!("{preview} …"))))
-                .child(btn("paste-cancel", t("ui.cancel"), false).on_click(cx.listener(|v, _, _w, cx| { v.pending_paste = None; cx.notify(); })))
-                .child(btn("paste-ok", t("ui.paste"), true).on_click(cx.listener(|v, _, _w, cx| { if let Some(t) = v.pending_paste.take() { v.paste_text(t, cx); } cx.notify(); }))));
+                .child(ui::button_sm("paste-cancel", t("ui.cancel"), 0).on_click(cx.listener(|v, _, _w, cx| { v.pending_paste = None; cx.notify(); })))
+                .child(ui::button_sm("paste-ok", t("ui.paste"), 1).on_click(cx.listener(|v, _, _w, cx| { if let Some(t) = v.pending_paste.take() { v.paste_text(t, cx); } cx.notify(); }))));
         }
         {
             // IME: register this pane as the text input handler while it has focus
@@ -2311,20 +2307,20 @@ impl Render for TermView {
         }
         if let Some(card) = self.ai_card(cx) { body = body.child(card); }
         if let Some(cmd) = self.resume_offer.clone().filter(|_| config::get().session.prompt_resume_agent) {
-            body = body.child(div().absolute().bottom(px(12.)).left(px(12.)).right(px(12.)).p_2().rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.accent))
-                .flex().flex_wrap().items_center().gap_2().text_size(px(12.)).text_color(c(th.text))
+            body = body.child(div().absolute().bottom(px(12.)).left(px(12.)).right(px(12.)).p_2().rounded(px(ui::R_LG)).bg(c(th.base).opacity(0.97)).border_1().border_color(c(th.accent)).shadow(crate::chrome::soft_shadow(true))
+                .flex().flex_wrap().items_center().gap_2().text_size(px(ui::fs_small())).text_color(c(th.text))
                 .child(tf("term.restored_resume", &[("cmd", &cmd)]))
-                .child(div().id("resume-run").px_3().py(px(3.)).rounded_md().cursor_pointer().bg(c(th.accent)).text_color(c(th.base)).child(t("term.resume_agent"))
+                .child(ui::button_sm("resume-run", t("term.resume_agent"), 1)
                     .on_click(cx.listener(|v, _, _w, cx| { if let (Some(cmd), Some(s)) = (v.resume_offer.take(), v.session.clone()) { s.write(format!("{cmd}\r").into_bytes()); } cx.notify(); })))
-                .child(div().id("resume-dismiss").px_2().py(px(3.)).rounded_md().cursor_pointer().bg(c(th.surface0)).child(t("term.dismiss"))
+                .child(ui::button_sm("resume-dismiss", t("term.dismiss"), 0)
                     .on_click(cx.listener(|v, _, _w, cx| { v.resume_offer = None; cx.notify(); }))));
         }
         if let Some(bar) = self.search.clone() {
             let status = match bar.found { Some(true) => t("term.search_found"), Some(false) => t("term.search_none"), None => t("term.search_hint") };
-            body = body.child(div().id("search-bar").occlude().absolute().top(px(6.)).right(px(16.)).w(px(360.)).p_2().rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.accent))
-                .flex().items_center().gap_2().text_size(px(12.)).text_color(c(th.text))
-                .child(crate::ui::icon(crate::ui::IconName::Search, 13., c(th.overlay1)))
-                .child(div().flex_1().px_1().rounded_sm().bg(c(th.base)).font_family(SharedString::from(config::get().font.family.clone())).child(format!("{}▏", bar.query)))
+            body = body.child(div().id("search-bar").occlude().absolute().top(px(6.)).right(px(16.)).w(px(360.)).p_2().rounded(px(ui::R_LG)).bg(c(th.base).opacity(0.97)).border_1().border_color(c(th.accent)).shadow(crate::chrome::soft_shadow(true))
+                .flex().items_center().gap_2().text_size(px(ui::fs_small())).text_color(c(th.text))
+                .child(crate::ui::icon(crate::ui::IconName::Search, ui::IC_SM, c(th.overlay1)))
+                .child(div().flex_1().px_1().rounded(px(ui::R_SM)).bg(c(th.base)).font_family(ui::mono_family()).child(format!("{}▏", bar.query)))
                 .child(div().text_color(if bar.found == Some(false) { c(th.error) } else { c(th.subtext) }).child(status))
                 .child(div().id("search-prev").px_1().cursor_pointer().child("↑").on_click(cx.listener(|v, _, _w, cx| v.search_step(false, cx))))
                 .child(div().id("search-next").px_1().cursor_pointer().child("↓").on_click(cx.listener(|v, _, _w, cx| v.search_step(true, cx))))
@@ -2334,37 +2330,40 @@ impl Render for TermView {
             let preview: String = text.chars().take(80).collect::<String>().replace(['\n', '\r'], " ");
             let large = ssh_term_proto::term::osc52_is_large(text.len());
             let ask = if large { tf("term.osc52_ask_large", &[("n", &text.len()), ("preview", &preview)]) } else { tf("term.osc52_ask", &[("n", &text.len()), ("preview", &preview)]) };
-            body = body.child(div().absolute().bottom(px(12.)).left(px(12.)).right(px(12.)).p_2().rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.warning))
-                .flex().flex_wrap().items_center().gap_2().text_size(px(12.)).text_color(c(th.text))
+            body = body.child(div().absolute().bottom(px(12.)).left(px(12.)).right(px(12.)).p_2().rounded(px(ui::R_LG)).bg(c(th.base).opacity(0.97)).border_1().border_color(crate::theme::divider()).shadow(crate::chrome::soft_shadow(true))
+                .flex().flex_wrap().items_center().gap_2().text_size(px(ui::fs_small())).text_color(c(th.text))
+                .child(crate::ui::icon(crate::ui::IconName::TriangleAlert, ui::IC_SM, c(th.warning)))
                 .child(ask)
-                .child(div().id("osc52-allow").px_3().py(px(3.)).rounded_md().cursor_pointer().bg(c(th.accent)).text_color(c(th.base)).child(t("ui.allow"))
+                .child(ui::button_sm("osc52-allow", t("ui.allow"), 1)
                     .on_click(cx.listener(|v, _, _w, cx| { if let Some(t) = v.clip_ask.take() { v.commit_clip_write(t, cx); } cx.notify(); })))
-                .child(div().id("osc52-deny").px_2().py(px(3.)).rounded_md().cursor_pointer().bg(c(th.surface0)).child(t("ui.deny"))
+                .child(ui::button_sm("osc52-deny", t("ui.deny"), 0)
                     .on_click(cx.listener(|v, _, _w, cx| { if let Some(t) = v.clip_ask.take() { cx.emit(TermEvent::Audit("osc52.write", format!("rejected {} bytes", t.len()))); } cx.notify(); }))));
         }
         if let Some((text, enter, _, _)) = self.pty_ask.clone() {
             let preview: String = text.chars().take(120).collect::<String>().replace(['\n', '\r'], " ");
             let agent = self.agent.map(|(i, _)| agent::display_name(&self.manifests[i].id).to_string()).unwrap_or_default();
-            body = body.child(div().absolute().bottom(px(12.)).left(px(12.)).right(px(12.)).p_2().rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.warning))
-                .flex().flex_wrap().items_center().gap_2().text_size(px(12.)).text_color(c(th.text))
+            body = body.child(div().absolute().bottom(px(12.)).left(px(12.)).right(px(12.)).p_2().rounded(px(ui::R_LG)).bg(c(th.base).opacity(0.97)).border_1().border_color(crate::theme::divider()).shadow(crate::chrome::soft_shadow(true))
+                .flex().flex_wrap().items_center().gap_2().text_size(px(ui::fs_small())).text_color(c(th.text))
+                .child(crate::ui::icon(crate::ui::IconName::TriangleAlert, ui::IC_SM, c(th.warning)))
                 .child(tf(if enter { "term.pty_ask_run" } else { "term.pty_ask_insert" }, &[("agent", &agent), ("preview", &preview)]))
-                .child(div().id("pty-allow").px_3().py(px(3.)).rounded_md().cursor_pointer().bg(c(th.accent)).text_color(c(th.base)).child(t("ui.allow"))
+                .child(ui::button_sm("pty-allow", t("ui.allow"), 1)
                     .on_click(cx.listener(|v, _, _w, cx| v.pty_answer(true, cx))))
-                .child(div().id("pty-deny").px_2().py(px(3.)).rounded_md().cursor_pointer().bg(c(th.surface0)).child(t("ui.deny"))
+                .child(ui::button_sm("pty-deny", t("ui.deny"), 0)
                     .on_click(cx.listener(|v, _, _w, cx| v.pty_answer(false, cx)))));
         }
         if let Some((cmd, why)) = self.ctx_confirm.clone() {
-            body = body.child(div().absolute().bottom(px(12.)).left(px(12.)).right(px(12.)).p_2().rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.warning))
-                .flex().flex_wrap().items_center().gap_2().text_size(px(12.)).text_color(c(th.text))
+            body = body.child(div().absolute().bottom(px(12.)).left(px(12.)).right(px(12.)).p_2().rounded(px(ui::R_LG)).bg(c(th.base).opacity(0.97)).border_1().border_color(crate::theme::divider()).shadow(crate::chrome::soft_shadow(true))
+                .flex().flex_wrap().items_center().gap_2().text_size(px(ui::fs_small())).text_color(c(th.text))
+                .child(crate::ui::icon(crate::ui::IconName::TriangleAlert, ui::IC_SM, c(th.warning)))
                 .child(tf("cm.confirm", &[("cmd", &cmd), ("why", &why)]))
-                .child(div().id("cm-run").px_3().py(px(3.)).rounded_md().cursor_pointer().bg(c(th.accent)).text_color(c(th.base)).child(t("cm.run_now"))
+                .child(ui::button_sm("cm-run", t("cm.run_now"), 1)
                     .on_click(cx.listener(|v, _, _w, cx| { if let Some((cmd, _)) = v.ctx_confirm.clone() { cx.emit(TermEvent::Audit("ctxmenu.approval", format!("approved command={:?}", ssh_term_proto::ai::redact(&cmd).0))); } v.ctx_submit(cx); })))
-                .child(div().id("cm-cancel").px_2().py(px(3.)).rounded_md().cursor_pointer().bg(c(th.surface0)).child(t("ui.cancel"))
+                .child(ui::button_sm("cm-cancel", t("ui.cancel"), 0)
                     .on_click(cx.listener(|v, _, _w, cx| { cx.emit(TermEvent::Audit("ctxmenu.approval", "rejected".into())); v.ctx_confirm = None; cx.notify(); }))));
         }
         if let Some(msg) = self.ctx_denied.clone() {
-            body = body.child(div().id("cm-denied").absolute().bottom(px(12.)).left(px(12.)).right(px(12.)).p_2().rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.error))
-                .text_size(px(12.)).text_color(c(th.error)).cursor_pointer().child(msg).on_click(cx.listener(|v, _, _w, cx| { v.ctx_denied = None; cx.notify(); })));
+            body = body.child(div().id("cm-denied").absolute().bottom(px(12.)).left(px(12.)).right(px(12.)).p_2().rounded(px(ui::R_LG)).bg(c(th.base).opacity(0.97)).border_1().border_color(crate::theme::divider()).shadow(crate::chrome::soft_shadow(true))
+                .text_size(px(ui::fs_body())).text_color(c(th.error)).cursor_pointer().child(msg).on_click(cx.listener(|v, _, _w, cx| { v.ctx_denied = None; cx.notify(); })));
         }
         if let Some(m) = &self.ctx_menu {
             body = body.child(crate::ctxmenu_view::render(m, cx, Self::ctx_pick, Self::ctx_close));
@@ -2377,7 +2376,7 @@ impl Render for TermView {
         // 命令失败时的“AI 解释”入口：浮在终端右下角，不占布局空间；智能体状态已显示在标签上
         if let Some((_cmd, code)) = self.failed.clone() {
             body = body.child(div().absolute().bottom(px(10.)).right(px(14.)).flex().items_center().gap_1().pl_2().pr_1().py(px(3.)).rounded_full()
-                .bg(c(th.base)).border_1().border_color(c(th.error).opacity(0.4)).shadow_md().text_size(px(12.))
+                .bg(c(th.base)).border_1().border_color(c(th.error).opacity(0.4)).shadow_md().text_size(px(ui::fs_body()))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(div().id("explain-fail").cursor_pointer().text_color(c(th.error)).hover(|s| s.underline())
                     .child(tf("ai.explain_btn", &[("code", &code)]))

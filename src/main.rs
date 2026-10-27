@@ -1709,13 +1709,13 @@ impl Root {
         if crumbs.is_empty() { return None; }
         let mut row = div().id("cwd-bar").h(px(28.)).flex_shrink_0().px_2().flex().items_center().gap(px(2.)).overflow_x_scroll()
             // 与终端内容之间一条细分隔线，底色略深一层
-            .bg(c(th.mantle)).border_t_1().border_color(c(th.surface0)).rounded_bl(px(12.)).rounded_br(px(12.));
+            .bg(c(th.mantle)).border_t_1().border_color(crate::theme::divider()).rounded_bl(px(ui::R_XL)).rounded_br(px(ui::R_XL));
         let last = crumbs.len().saturating_sub(1);
         for (i, (label, path)) in crumbs.into_iter().enumerate() {
-            if i > 0 { row = row.child(icon(IconName::ChevronRight, 11., c(th.overlay0))); }
+            if i > 0 { row = row.child(icon(IconName::ChevronRight, ui::IC_XS, c(th.overlay0))); }
             let pane = pane.clone();
             let here = i == last;
-            row = row.child(div().id(("cwd", i)).h(px(24.)).px_1().flex_shrink_0().rounded(px(4.)).flex().items_center().gap(px(3.)).cursor_pointer()
+            row = row.child(div().id(("cwd", i)).h(px(24.)).px_1().flex_shrink_0().rounded(px(ui::R_SM)).flex().items_center().gap(px(3.)).cursor_pointer()
                 .hover(|d| d.bg(crate::theme::hover_bg()))
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(move |_, _, cx| {
@@ -1723,8 +1723,8 @@ impl Root {
                     let path = path.clone();
                     pane.update(cx, |v, cx| v.cd_to(&path, cx));
                 })
-                .child(icon(IconName::Folder, 12., c(th.overlay1)))
-                .child(div().text_size(px(12.)).text_color(if here { c(th.text) } else { c(th.subtext) }).whitespace_nowrap().child(label)));
+                .child(icon(IconName::Folder, ui::IC_XS, c(th.overlay1)))
+                .child(div().text_size(px(ui::fs_small())).text_color(if here { c(th.text) } else { c(th.subtext) }).whitespace_nowrap().child(label)));
         }
         Some(row.into_any_element())
     }

@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::sync::Arc;
 
-use gpui::{div, prelude::*, px, AnyElement, Context, Entity, FontWeight, SharedString, Window};
+use gpui::{div, prelude::*, px, AnyElement, Context, Entity, FontWeight, Window};
 use gpui_component::input::{EditorState, InputEvent, InputState};
 use ssh_term_proto::assets::RedisConn;
 use ssh_term_proto::i18n::{t, tf};
@@ -13,7 +13,7 @@ use ssh_term_proto::ssh::{Prompts, SshTarget};
 
 use crate::activity::{log_push, ExecLog};
 use crate::theme::{c, cur};
-use crate::ui::{self, icon, IconName};
+use crate::ui::{self, icon, mono, small, IconName};
 
 const KEY_CAP: usize = 100_000;
 const ROW_CAP: usize = 3000;
@@ -421,8 +421,6 @@ impl KvView {
 impl Drop for KvView { fn drop(&mut self) { self.close(); } }
 
 // ---------------- render
-fn small(s: impl Into<SharedString>) -> gpui::Div { div().text_size(px(12.)).text_color(c(cur().subtext)).child(s.into()) }
-fn mono(s: impl Into<SharedString>) -> gpui::Div { div().font_family("monospace").text_size(px(12.)).text_color(c(cur().text)).child(s.into()) }
 
 impl KvView {
     fn tree_el(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -434,10 +432,10 @@ impl KvView {
                     let p = path.clone();
                     div().id(("kv-r", i)).h(px(24.)).pl(px(8. + *depth as f32 * 14.)).pr_2().flex().items_center().gap_1().cursor_pointer().hover(|d| d.bg(crate::theme::hover_bg()))
                         .on_click(cx.listener(move |v, _, _w, cx| { if !v.open.remove(&p) { v.open.insert(p.clone()); } v.rebuild(); cx.notify(); }))
-                        .child(icon(if *open { IconName::ChevronDown } else { IconName::ChevronRight }, 12., c(th.overlay1)))
-                        .child(icon(IconName::Folder, 13., c(th.accent)))
-                        .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(12.)).text_color(c(th.text)).child(name.clone()))
-                        .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(count.to_string()))
+                        .child(icon(if *open { IconName::ChevronDown } else { IconName::ChevronRight }, ui::IC_XS, c(th.overlay1)))
+                        .child(icon(IconName::Folder, ui::IC_SM, c(th.accent)))
+                        .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(ui::fs_body())).text_color(c(th.text)).child(name.clone()))
+                        .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(count.to_string()))
                 }
                 tree::Row::Key { key, name, depth } => {
                     let k = key.clone();
@@ -445,8 +443,8 @@ impl KvView {
                     div().id(("kv-r", i)).h(px(24.)).pl(px(22. + *depth as f32 * 14.)).pr_2().flex().items_center().gap_1().cursor_pointer()
                         .when(sel, |d| d.bg(crate::theme::selected_bg())).hover(|d| d.bg(crate::theme::hover_bg()))
                         .on_click(cx.listener(move |v, _, _w, cx| { v.select(k.clone(), cx); cx.notify(); }))
-                        .child(icon(IconName::Key, 12., c(th.overlay1)))
-                        .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(12.)).text_color(c(th.text)).child(name.clone()))
+                        .child(icon(IconName::Key, ui::IC_XS, c(th.overlay1)))
+                        .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(ui::fs_body())).text_color(c(th.text)).child(name.clone()))
                 }
             };
             list = list.child(el);
@@ -455,7 +453,7 @@ impl KvView {
         let loaded = tf("redis.loaded", &[("n", &self.keys.len()), ("total", &self.total.map(|t| t.to_string()).unwrap_or("?".into()))]);
         let kinds: Vec<(String, String)> = std::iter::once(("*".to_string(), t("redis.all_types").to_string())).chain(KINDS.iter().map(|k| (k.to_string(), k.to_string()))).collect();
         let me = cx.entity().downgrade();
-        div().w(px(300.)).flex_shrink_0().h_full().flex().flex_col().border_r_1().border_color(c(th.surface0))
+        div().w(px(300.)).flex_shrink_0().h_full().flex().flex_col().border_r_1().border_color(crate::theme::divider())
             .child(div().p_2().flex().flex_col().gap_2()
                 .child(ui::search_field(&self.filter_in, false))
                 .child(div().id("kv-kinds").overflow_x_scroll().child(ui::segmented("kv-kind", &kinds, self.kind_filter.unwrap_or("*"), move |s, _w, cx| {
@@ -465,7 +463,7 @@ impl KvView {
                     .child(ui::button("kv-refresh", t("redis.refresh"), 0).on_click(cx.listener(|v, _, _w, cx| { v.rescan(cx); cx.notify(); })))
                     .child(ui::button("kv-new", t("redis.new_key"), 0).on_click(cx.listener(|v, _, _w, cx| { v.new_open = !v.new_open; cx.notify(); })))))
             .child(list)
-            .child(div().p_2().flex().items_center().gap_2().border_t_1().border_color(c(th.surface0))
+            .child(div().p_2().flex().items_center().gap_2().border_t_1().border_color(crate::theme::divider())
                 .child(div().flex_1().child(small(loaded)))
                 .when(!self.cursor.done, |d| d.child(ui::button("kv-more", if self.scanning { t("db.loading") } else { t("redis.scan_more") }, 0).on_click(cx.listener(|v, _, _w, cx| { v.scan_more(cx); cx.notify(); })))))
             .into_any_element()
@@ -476,8 +474,8 @@ impl KvView {
         let kinds: Vec<(String, String)> = KINDS.iter().map(|k| (k.to_string(), k.to_string())).collect();
         let me = cx.entity().downgrade();
         let (la, lb) = match self.new_kind.as_str() { "hash" => (t("redis.field"), Some(t("redis.value"))), "zset" => (t("redis.member"), Some(t("redis.score"))), "stream" => (t("redis.field"), Some(t("redis.value"))), "string" => (t("redis.value"), None), _ => (t("redis.member"), None) };
-        div().p_3().m_3().rounded(px(8.)).bg(c(th.surface0).opacity(0.4)).flex().flex_col().gap_2()
-            .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("redis.new_key")))
+        div().p_3().m_3().rounded(px(ui::R_SUB)).bg(crate::theme::sub_bg()).border_1().border_color(crate::theme::divider()).flex().flex_col().gap_2()
+            .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("redis.new_key")))
             .child(ui::segmented("kv-nk", &kinds, &self.new_kind, move |s, _w, cx| { let _ = me.update(cx, |v, cx| { v.new_kind = s; cx.notify(); }); }))
             .child(ui::text_field(&self.new_key, false))
             .child(div().flex().gap_2().child(div().flex_1().child(small(la)).child(ui::text_field(&self.new_a, false)))
@@ -492,12 +490,12 @@ impl KvView {
         let th = cur();
         let mut col = div().flex_1().min_w_0().h_full().flex().flex_col();
         if self.new_open { col = col.child(self.new_key_el(cx)); }
-        if let Some(e) = &self.error { col = col.child(div().mx_3().mt_2().p_2().rounded(px(6.)).bg(c(th.error).opacity(0.12)).text_size(px(12.)).text_color(c(th.error)).whitespace_normal().child(e.clone())); }
-        if let Some(n) = &self.note { col = col.child(div().mx_3().mt_2().text_size(px(12.)).text_color(c(th.success)).child(n.clone())); }
+        if let Some(e) = &self.error { col = col.child(ui::notice(ui::Notice::Error, e.clone()).mt(px(ui::SP_2))); }
+        if let Some(n) = &self.note { col = col.child(div().mx_3().mt_2().text_size(px(ui::fs_body())).text_color(c(th.success)).child(n.clone())); }
         let Some(m) = self.meta.clone() else {
             let hint = if self.loading { t("db.loading") } else { t("redis.pick_key") };
             return col.child(div().flex_1().flex().items_center().justify_center().child(small(hint)))
-                .child(div().p_3().flex().gap_2().items_center().border_t_1().border_color(c(th.surface0))
+                .child(div().p_3().flex().gap_2().items_center().border_t_1().border_color(crate::theme::divider())
                     .child(div().flex_1().child(ui::text_field(&self.bulk_in, false)))
                     .child(ui::button("kv-bulk", t("redis.bulk_delete"), 2).on_click(cx.listener(|v, _, _w, cx| { v.ask_bulk(cx); cx.notify(); }))))
                 .into_any_element();
@@ -506,9 +504,9 @@ impl KvView {
         let info = format!("{} · TTL {} · {}{}{}", m.kind, ttl_text(m.ttl_ms), m.len.map(|l| tf("redis.len", &[("n", &l)])).unwrap_or_default(),
             m.bytes.map(|b| format!(" · {}", ssh_term_proto::dock::human_size(b as i64))).unwrap_or_default(), if m.encoding.is_empty() { String::new() } else { format!(" · {}", m.encoding) });
         col = col.child(div().px_3().pt_3().flex().flex_col().gap_1()
-            .child(div().font_family("monospace").text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).whitespace_normal().child(m.key.clone()))
+            .child(div().font_family(ui::mono_family()).text_size(px(ui::fs_body())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).whitespace_normal().child(m.key.clone()))
             .child(small(info)));
-        col = col.child(div().px_3().py_2().flex().items_center().gap_2().border_b_1().border_color(c(th.surface0))
+        col = col.child(div().px_3().py_2().flex().items_center().gap_2().border_b_1().border_color(crate::theme::divider())
             .child(div().w(px(120.)).child(ui::text_field(&self.ttl_in, false)))
             .child(ui::button("kv-ttl", t("redis.set_ttl"), 0).on_click(cx.listener(|v, _, _w, cx| v.guarded_write("ttl".into(), cx))))
             .child(div().w(px(200.)).child(ui::text_field(&self.rename_in, false)))
@@ -520,8 +518,8 @@ impl KvView {
             Some(Content::Str { full_len, .. }) => {
                 let cut = full_len > kv::STR_MAX;
                 div().flex_1().min_h_0().flex().flex_col().p_3().gap_2()
-                    .when(cut, |d| d.child(div().text_size(px(11.)).text_color(c(th.warning)).child(tf("redis.cut", &[("n", &full_len)]))))
-                    .when(self.binary, |d| d.child(div().text_size(px(11.)).text_color(c(th.warning)).child(t("redis.binary_readonly"))))
+                    .when(cut, |d| d.child(div().text_size(px(ui::fs_small())).text_color(c(th.warning)).child(tf("redis.cut", &[("n", &full_len)]))))
+                    .when(self.binary, |d| d.child(div().text_size(px(ui::fs_small())).text_color(c(th.warning)).child(t("redis.binary_readonly"))))
                     .child(div().flex_1().min_h_0().child(gpui_component::input::Editor::new(&self.value_ed).h_full()))
                     .child(div().flex().gap_2().justify_end()
                         .child(ui::button("kv-json", t("redis.format_json"), 0).on_click(cx.listener(|v, _, _w, cx| {
@@ -547,13 +545,13 @@ impl KvView {
         let th = cur();
         let (ha, hb) = match kind { "hash" => (t("redis.field"), t("redis.value")), "list" => (t("redis.index"), t("redis.value")), "zset" => (t("redis.member"), t("redis.score")), "stream" => ("ID".into(), t("redis.fields")), _ => (t("redis.member"), "".into()) };
         let mut list = div().id("kv-items").flex_1().min_h_0().overflow_y_scroll().flex().flex_col();
-        list = list.child(div().h(px(26.)).px_3().flex().items_center().gap_3().bg(c(th.mantle)).text_size(px(11.)).text_color(c(th.overlay1))
+        list = list.child(ui::table_header().px_3().gap_3()
             .child(div().w(px(220.)).child(ha)).child(div().flex_1().child(hb)));
         let kind_s = kind.to_string();
         for (i, (a, b)) in items.into_iter().enumerate() {
             let (a2, b2, del) = (a.clone(), b.clone(), a.clone());
             let k = kind_s.clone();
-            list = list.child(div().id(("kv-it", i)).min_h(px(26.)).px_3().flex().items_center().gap_3().border_b_1().border_color(c(th.surface0).opacity(0.5)).cursor_pointer().hover(|d| d.bg(crate::theme::hover_bg()))
+            list = list.child(div().id(("kv-it", i)).min_h(px(26.)).px_3().flex().items_center().gap_3().border_b_1().border_color(crate::theme::divider()).cursor_pointer().hover(|d| d.bg(crate::theme::hover_bg()))
                 .on_click(cx.listener(move |v, _, w, cx| {
                     // load into the edit row
                     let (x, y) = if k == "set" { (a2.clone(), String::new()) } else if k == "stream" { (String::new(), b2.clone()) } else { (a2.clone(), b2.clone()) };
@@ -562,13 +560,13 @@ impl KvView {
                 }))
                 .child(div().w(px(220.)).flex_shrink_0().whitespace_nowrap().overflow_hidden().text_ellipsis().child(mono(a)))
                 .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().child(mono(b)))
-                .child(div().id(("kv-it-del", i)).cursor_pointer().child(icon(IconName::Trash, 12., c(th.overlay1)))
+                .child(div().id(("kv-it-del", i)).cursor_pointer().child(icon(IconName::Trash, ui::IC_XS, c(th.overlay1)))
                     .on_click(cx.listener(move |v, _, _w, cx| { cx.stop_propagation(); v.guarded_write(format!("item_del:{del}"), cx); }))));
         }
         if more { list = list.child(div().p_2().child(ui::button("kv-it-more", t("redis.load_more"), 0).on_click(cx.listener(|v, _, _w, cx| { v.more_items(cx); cx.notify(); })))); }
         let edit_a = kind != "stream";
         let edit_b = kind != "set";
-        let mut bar = div().p_3().flex().items_center().gap_2().border_t_1().border_color(c(th.surface0));
+        let mut bar = div().p_3().flex().items_center().gap_2().border_t_1().border_color(crate::theme::divider());
         if edit_a { bar = bar.child(div().w(px(220.)).child(ui::text_field(&self.item_a, false))); }
         if edit_b { bar = bar.child(div().flex_1().child(ui::text_field(&self.item_b, false))); } else { bar = bar.child(div().flex_1()); }
         bar = bar.child(ui::button("kv-it-set", if kind == "stream" { t("redis.xadd") } else { t("redis.set_item") }, 1).on_click(cx.listener(|v, _, _w, cx| v.guarded_write("item_set".into(), cx))));
@@ -582,14 +580,14 @@ impl KvView {
 
     fn console_el(&mut self, _cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
-        let mut out = div().id("kv-console").flex_1().min_h_0().overflow_y_scroll().p_3().flex().flex_col().gap_2().bg(c(th.mantle));
+        let mut out = div().id("kv-console").flex_1().min_h_0().overflow_y_scroll().p_3().flex().flex_col().gap_2().bg(crate::theme::sub_bg());
         for (l, o) in &self.console_out {
             out = out.child(div().flex().flex_col()
                 .child(mono(format!("{}> {l}", self.conn.address())).text_color(c(th.accent)))
                 .child(mono(o.clone()).whitespace_normal().text_color(if o.starts_with("(error)") { c(th.error) } else { c(th.text) })));
         }
         div().flex_1().min_h_0().flex().flex_col().child(out)
-            .child(div().p_2().border_t_1().border_color(c(th.surface0)).child(ui::text_field(&self.console_in, false)))
+            .child(div().p_2().border_t_1().border_color(crate::theme::divider()).child(ui::text_field(&self.console_in, false)))
             .child(small(t("redis.console_hint")).px_3().pb_2())
             .into_any_element()
     }
@@ -599,7 +597,7 @@ impl KvView {
         let mut list = div().id("kv-info").flex_1().min_h_0().overflow_y_scroll().p_3().flex().flex_col();
         let mut last = String::new();
         for (sec, k, v) in &self.info {
-            if *sec != last { last = sec.clone(); list = list.child(div().mt_2().mb_1().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.accent)).child(sec.clone())); }
+            if *sec != last { last = sec.clone(); list = list.child(div().mt_2().mb_1().text_size(px(ui::fs_body())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.accent)).child(sec.clone())); }
             list = list.child(div().flex().gap_3().child(div().w(px(260.)).flex_shrink_0().child(mono(k.clone()).text_color(c(th.subtext)))).child(div().flex_1().min_w_0().whitespace_normal().child(mono(v.clone()))));
         }
         div().flex_1().min_h_0().flex().flex_col()
@@ -613,7 +611,7 @@ impl KvView {
         if self.slow.is_empty() { list = list.child(small(t("redis.slow_empty"))); }
         for e in &self.slow {
             let at = chrono::DateTime::from_timestamp(e.at, 0).map(|d| d.with_timezone(&chrono::Local).format("%m-%d %H:%M:%S").to_string()).unwrap_or_default();
-            list = list.child(div().flex().gap_3().border_b_1().border_color(c(th.surface0).opacity(0.5)).py_1()
+            list = list.child(div().flex().gap_3().border_b_1().border_color(crate::theme::divider()).py_1()
                 .child(div().w(px(110.)).flex_shrink_0().child(mono(at).text_color(c(th.subtext))))
                 .child(div().w(px(90.)).flex_shrink_0().child(mono(format!("{:.2} ms", e.micros as f64 / 1000.)).text_color(c(th.warning))))
                 .child(div().flex_1().min_w_0().whitespace_normal().child(mono(e.command.clone())))
@@ -634,13 +632,13 @@ impl KvView {
         };
         let prod = self.production.then(|| ui::tag(t("tag.production"), c(th.error)));
         Some(ui::modal(ui::card(520.)
-            .child(div().p_5().flex().flex_col().gap_3()
-                .child(div().flex().items_center().gap_2().child(icon(IconName::TriangleAlert, 16., c(th.warning))).child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("db.confirm_title"))).children(prod))
+            .child(ui::dialog_header(Some(IconName::TriangleAlert), t("db.confirm_title"), None, prod.map(|p| p.into_any_element())))
+            .child(div().p(px(ui::SP_5)).flex().flex_col().gap(px(ui::SP_3))
                 .child(small(msg))
-                .child(div().id("kv-cf-pre").max_h(px(300.)).overflow_y_scroll().p_2().rounded(px(6.)).bg(c(th.mantle)).child(mono(preview).whitespace_normal())))
-            .child(div().px_5().py_3().flex().justify_end().gap_2().border_t_1().border_color(c(th.surface0))
-                .child(ui::button("kv-cf-no", t("ui.cancel"), 0).on_click(cx.listener(|v, _, _w, cx| { v.ask = None; cx.notify(); })))
-                .child(ui::button("kv-cf-yes", t("db.confirm_run"), 2).on_click(cx.listener(|v, _, _w, cx| {
+                .child(div().id("kv-cf-pre").max_h(px(300.)).overflow_y_scroll().p_2().rounded(px(ui::R_MD)).bg(crate::theme::sub_bg()).child(mono(preview).whitespace_normal())))
+            .child(ui::dialog_footer(None, vec![
+                ui::button("kv-cf-no", t("ui.cancel"), 0).on_click(cx.listener(|v, _, _w, cx| { v.ask = None; cx.notify(); })).into_any_element(),
+                ui::button("kv-cf-yes", t("db.confirm_run"), 2).on_click(cx.listener(|v, _, _w, cx| {
                     match v.ask.take() {
                         Some(Ask::Console(l)) => v.run_console(l, cx),
                         Some(Ask::Delete(k)) => v.delete(k, cx),
@@ -648,7 +646,8 @@ impl KvView {
                         None => {}
                     }
                     cx.notify();
-                }))))).into_any_element())
+                })).into_any_element(),
+            ]))).into_any_element())
     }
 }
 
@@ -656,9 +655,9 @@ impl Render for KvView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
         if let Some(s) = self.pending_value.take() { self.value_ed.update(cx, |e, cx| e.set_value(s, window, cx)); }
-        let mut head = div().h(px(40.)).px_3().flex().items_center().gap_2().border_b_1().border_color(c(th.surface0)).bg(c(th.mantle))
-            .child(icon(IconName::Database, 14., c(th.error)))
-            .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(self.conn.name.clone()))
+        let mut head = ui::toolbar()
+            .child(icon(IconName::Database, ui::IC_SM, c(th.overlay1)))
+            .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(self.conn.name.clone()))
             .child(small(format!("{} · db{}{}", self.conn.address(), self.conn.db, self.kv.as_ref().map(|k| format!(" · {} {}", k.mode, k.version)).unwrap_or_default())));
         if self.production { head = head.child(ui::tag(t("tag.production"), c(th.error))); }
         if self.conn.read_only { head = head.child(ui::tag(t("db.read_only"), c(th.warning))); }
@@ -671,7 +670,7 @@ impl Render for KvView {
             let _ = me.update(cx, |v, cx| v.set_sub(sub, cx));
         }));
         let body: AnyElement = if let Some(e) = &self.conn_err {
-            div().flex_1().p_5().flex().flex_col().gap_2().child(div().text_size(px(13.)).text_color(c(th.error)).child(t("ui.connection_failed"))).child(mono(e.clone()).whitespace_normal()).into_any_element()
+            div().flex_1().p_5().flex().flex_col().gap_2().child(ui::notice(ui::Notice::Error, t("ui.connection_failed")).mx_0()).child(mono(e.clone()).whitespace_normal()).into_any_element()
         } else if self.kv.is_none() {
             div().flex_1().flex().items_center().justify_center().child(small(t("ui.connecting"))).into_any_element()
         } else {

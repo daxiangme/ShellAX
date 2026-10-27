@@ -92,24 +92,23 @@ impl Render for PortView {
         let mut inputs = div().flex().gap_3();
         for (i, l) in labels.iter().enumerate() {
             if l.is_empty() { continue; }
-            inputs = inputs.child(div().flex().flex_col().gap_1().w(px(170.)).child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(l.to_string())).child(ui::text_field(&self.fields[i], false)));
+            inputs = inputs.child(div().flex().flex_col().gap_1().w(px(170.)).child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(l.to_string())).child(ui::text_field(&self.fields[i], false)));
         }
         let kinds = vec![("L".to_string(), t("ui.local_l").to_string()), ("R".to_string(), t("ui.remote_r").to_string()), ("D".to_string(), t("ui.dynamic_socks_d").to_string())];
         let sel = match self.kind { Kind::L => "L", Kind::R => "R", Kind::D => "D" };
         let me = cx.entity().downgrade();
-        let form = div().p_4().m_4().rounded_lg().border_1().border_color(c(th.surface0)).flex().flex_col().gap_3()
-            .child(div().flex().items_center().gap_2().child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("ui.new_forward")))
-                .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(self.target.as_ref().map(|t| tf("pf.on_host", &[("h", &t.label())])).unwrap_or_else(|| t("pf.need_ssh").into()))))
+        let form = div().p_4().m_4().rounded(px(ui::R_SUB)).border_1().border_color(crate::theme::divider()).flex().flex_col().gap_3()
+            .child(div().flex().items_center().gap_2().child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("ui.new_forward")))
+                .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(self.target.as_ref().map(|t| tf("pf.on_host", &[("h", &t.label())])).unwrap_or_else(|| t("pf.need_ssh").into()))))
             .child(ui::segmented("pf-kind", &kinds, sel, move |v, _, cx| { let _ = me.update(cx, |p, cx| { p.kind = match v.as_str() { "R" => Kind::R, "D" => Kind::D, _ => Kind::L }; cx.notify() }); }))
             .child(inputs)
             .child(div().flex().items_center().gap_3()
                 .child(Switch::new("pf-auto").checked(self.auto).label(t("pf.auto_start")).on_click(cx.listener(|v, on: &bool, _, cx| { v.auto = *on; cx.notify() })))
                 .child(ui::button("pf-add", t("ui.add_and_start"), 1).on_click(cx.listener(|v, _, w, cx| v.add(w, cx))))
-                .children(self.error.clone().map(|e| div().text_size(px(12.)).text_color(c(th.error)).child(e))));
-        let mut list = div().id("pf-list").mx_4().flex_1().min_h_0().overflow_y_scroll().flex().flex_col().rounded_lg().border_1().border_color(c(th.surface0));
+                .children(self.error.clone().map(|e| ui::notice(ui::Notice::Error, e).mx_0())));
+        let mut list = div().id("pf-list").mx_4().flex_1().min_h_0().overflow_y_scroll().flex().flex_col().rounded(px(ui::R_SUB)).border_1().border_color(crate::theme::divider());
         if self.items.is_empty() {
-            list = list.child(div().p_5().flex().flex_col().items_center().gap_2().child(icon(IconName::ArrowLeftRight, 24., c(th.overlay0)))
-                .child(div().text_size(px(13.)).text_color(c(th.subtext)).child(t("ui.no_port_forwards"))).child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ui.forwards_will_be_saved_per"))));
+            list = list.child(ui::empty_state(IconName::ArrowLeftRight, t("ui.no_port_forwards"), Some(t("ui.forwards_will_be_saved_per").into()), vec![], true));
         }
         for (i, r) in self.items.iter().enumerate() {
             let st = r.state();
@@ -117,27 +116,20 @@ impl Render for PortView {
             let on = r.is_on();
             let (r1, r2) = (r.clone(), r.clone());
             let stats = tf("pf.stats", &[("a", &r.stats.active.load(Ordering::Relaxed)), ("t", &r.stats.total.load(Ordering::Relaxed)), ("b", &human(r.stats.bytes.load(Ordering::Relaxed)))]);
-            list = list.child(div().px_3().py(px(8.)).flex().items_center().gap_3().when(i > 0, |d| d.border_t_1().border_color(c(th.surface0))).text_size(px(12.)).text_color(c(th.text))
-                .child(icon(IconName::ArrowLeftRight, 14., col))
+            list = list.child(div().px_3().py(px(8.)).flex().items_center().gap_3().when(i > 0, |d| d.border_t_1().border_color(crate::theme::divider())).text_size(px(ui::fs_body())).text_color(c(th.text))
+                .child(icon(IconName::ArrowLeftRight, ui::IC_SM, col))
                 .child(div().flex_1().flex().flex_col()
                     .child(div().child(r.spec.describe()))
                     .child(diagram(&r.spec, match &st { State::Running { port } => Some(*port), _ => None }, on && matches!(st, State::Running { .. })))
-                    .child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(format!("{} · {}{}", r.spec.host, stats, if r.spec.auto_start { format!(" · {}", t("pf.auto_start")) } else { String::new() })))
-                    .when_some(match &st { State::Error(e) => Some(e.clone()), _ => None }, |d, e| d.child(div().text_size(px(11.)).text_color(c(th.error)).child(e))))
+                    .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(format!("{} · {}{}", r.spec.host, stats, if r.spec.auto_start { format!(" · {}", t("pf.auto_start")) } else { String::new() })))
+                    .when_some(match &st { State::Error(e) => Some(e.clone()), _ => None }, |d, e| d.child(ui::notice(ui::Notice::Error, e).mx_0().mt(px(ui::SP_1)))))
                 .child(ui::tag(label, col))
                 .child(if on { ui::button(("pf-stop", i), t("pf.stop"), 0).on_click(cx.listener(move |v, _, _, cx| v.stop(r1.clone(), cx))) }
                     else { ui::button(("pf-start", i), t("pf.start"), 1).on_click(cx.listener(move |v, _, _, cx| { match v.target.clone() { Some(tg) if tg.label() == r1.spec.host => v.start(r1.clone(), tg, cx), _ => { v.error = Some(tf("pf.open_host_first", &[("h", &r1.spec.host)])); cx.notify() } } })) })
                 .child(ui::button(("pf-del", i), t("sftp.delete"), 2).on_click(cx.listener(move |v, _, _, cx| { let r = r2.clone(); v.stop(r.clone(), cx); v.items.retain(|x| !Arc::ptr_eq(x, &r)); v.save(); cx.notify() }))));
         }
         ui::card(980.).h(px(640.))
-            .child(div().h(px(48.)).px_5().flex().items_center().gap_2().border_b_1().border_color(c(th.surface0))
-                .child(icon(IconName::ArrowLeftRight, 16., c(th.accent)))
-                .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("ui.port_forwarding")))
-                .child(div().pl_2().text_size(px(11.)).text_color(c(th.overlay0)).child(t("pf.subtitle")))
-                .child(div().flex_1())
-                .child(div().id("pf-close").size(px(28.)).rounded_md().flex().items_center().justify_center().cursor_pointer()
-                    .hover(|d| d.bg(c(cur().surface0))).on_click(cx.listener(|_, _, _, cx| cx.emit(PortEvent::Close)))
-                    .child(icon(IconName::X, 16., c(th.overlay1)))))
+            .child(ui::dialog_header(Some(IconName::ArrowLeftRight), t("ui.port_forwarding"), Some(t("pf.subtitle").into()), Some(ui::dialog_close("pf-close", { let me2 = cx.entity().downgrade(); move |_w, cx| { let _ = me2.update(cx, |_, cx| cx.emit(PortEvent::Close)); } }))))
             .child(form).child(list).child(div().h(px(16.)))
     }
 }
@@ -148,12 +140,12 @@ fn diagram(spec: &ssh_term_proto::forward::Spec, port: Option<u16>, live: bool) 
     let (nodes, _) = spec.diagram(port);
     let role = |r: &str| match r { "local" => t("pf.node_local"), "remote" => t("pf.node_remote"), "ssh" => t("pf.node_ssh"), "remote-side" => t("pf.node_remote_side"), "local-side" => t("pf.node_local_side"), _ => t("pf.node_any") };
     let col = |i: usize| match i { 0 => c(th.accent), 1 => c(th.warning), _ => c(th.success) };
-    let boxn = |i: usize, title: &str, addr: &str| div().px_2().py(px(3.)).rounded_md().border_1().border_color(col(i)).bg(col(i).opacity(0.08)).flex().flex_col()
-        .child(div().text_size(px(11.)).text_color(col(i)).child(role(title).to_string())).child(div().text_size(px(12.)).text_color(c(th.text)).child(addr.to_string()));
+    let boxn = |i: usize, title: &str, addr: &str| div().px_2().py(px(3.)).rounded(px(ui::R_MD)).border_1().border_color(col(i)).bg(col(i).opacity(0.08)).flex().flex_col()
+        .child(div().text_size(px(ui::fs_small())).text_color(col(i)).child(role(title).to_string())).child(div().text_size(px(ui::fs_body())).text_color(c(th.text)).child(addr.to_string()));
     let line = if live { c(th.success) } else { c(th.overlay0) };
     let arrow = |label: String, thick: bool| div().flex().flex_col().items_center().min_w(px(90.))
-        .child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(label))
-        .child(div().flex().items_center().w_full().child(div().flex_1().h(px(if thick { 3. } else { 1.5 })).bg(line)).child(div().text_size(px(11.)).text_color(line).child("▶")));
+        .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(label))
+        .child(div().flex().items_center().w_full().child(div().flex_1().h(px(if thick { 3. } else { 1.5 })).bg(line)).child(div().text_size(px(ui::fs_small())).text_color(line).child("▶")));
     let dir_label = match spec.kind { ssh_term_proto::forward::Kind::R => t("pf.tunnel_back").to_string(), _ => t("pf.tunnel").to_string() };
     div().mt_1().flex().items_center().gap_1()
         .child(boxn(0, &nodes[0].1, &nodes[0].2)).child(arrow(dir_label, true))

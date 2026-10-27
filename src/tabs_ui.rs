@@ -159,8 +159,8 @@ impl Root {
         let sel = self.new_menu_sel.min(items.len().saturating_sub(1));
         let searching = !self.new_menu_search.read(cx).value().trim().is_empty();
         let row = |i: usize| div().id(("newm", i)).h(px(ui::H_DEFAULT)).px(px(10.)).rounded(px(ui::R_MD)).flex().items_center().gap_2().text_size(px(ui::fs_body())).text_color(c(th.text)).cursor_pointer()
-            .when(i == sel, |d| d.bg(c(th.surface0)))
-            .hover(|d| d.bg(c(cur().accent)).text_color(gpui::white()));
+            .when(i == sel, |d| d.bg(crate::theme::menu_sel_bg()))
+            .hover(|d| d.bg(crate::theme::menu_sel_bg()));
         let mut list = div().id("newm-list").max_h(px(360.)).overflow_y_scroll().flex().flex_col();
         let mut n_hosts = 0;
         for (i, it) in items.iter().enumerate() {
@@ -168,18 +168,18 @@ impl Root {
             let click = cx.listener(move |this, _, w, cx| this.new_menu_activate(it2.clone(), w, cx));
             match it {
                 NewItem::Local => {
-                    list = list.child(row(i).child(icon(IconName::SquareTerminal, 16., c(th.overlay1))).child(div().flex_1().child(t("newmenu.local")))
-                        .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(if cfg!(target_os = "macos") { "⌘T" } else { "Ctrl+T" })).on_click(click));
+                    list = list.child(row(i).child(icon(IconName::SquareTerminal, ui::IC_MD, c(th.overlay1))).child(div().flex_1().child(t("newmenu.local")))
+                        .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(if cfg!(target_os = "macos") { "⌘T" } else { "Ctrl+T" })).on_click(click));
                     if items.len() > 2 { list = list.child(ui::menu_sep()); }
                 }
                 NewItem::Group { name, depth, count, collapsed, .. } => {
                     let tags = s.groups.iter().find(|g| matches!(it, NewItem::Group { path, .. } if *path == g.path)).map(|g| g.tags.clone()).unwrap_or_default();
                     list = list.child(row(i).pl(px(10. + *depth as f32 * 14.)).text_color(c(th.subtext))
-                        .child(icon(if *collapsed { IconName::ChevronRight } else { IconName::ChevronDown }, 12., c(th.overlay1)))
-                        .child(icon(IconName::Folder, 14., c(th.accent)))
+                        .child(icon(if *collapsed { IconName::ChevronRight } else { IconName::ChevronDown }, ui::IC_XS, c(th.overlay1)))
+                        .child(icon(IconName::Folder, ui::IC_SM, c(th.accent)))
                         .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(gpui::FontWeight::MEDIUM).child(name.clone()))
                         .children(tags.iter().take(3).map(|t| div().size(px(6.)).flex_shrink_0().rounded_full().bg(c(s.tags.rgb(t)))))
-                        .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(count.to_string()))
+                        .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(count.to_string()))
                         .on_click(click));
                 }
                 NewItem::Host { index, depth } => {
@@ -187,15 +187,15 @@ impl Root {
                     n_hosts += 1;
                     let addr = format!("{}{}", h.user.as_ref().map(|u| format!("{u}@")).unwrap_or_default(), h.host);
                     list = list.child(row(i).pl(px(10. + *depth as f32 * 14. + if *depth > 0 { 12. } else { 0. })).tooltip({ let a = addr.clone(); move |w, cx| gpui_component::tooltip::Tooltip::new(a.clone()).build(w, cx) })
-                        .child(icon(IconName::Server, 14., c(th.overlay1)))
+                        .child(icon(IconName::Server, ui::IC_SM, c(th.overlay1)))
                         .child(div().flex_shrink_0().max_w(px(180.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(h.name.clone()))
                         .children(h.tags.iter().take(3).map(|t| div().size(px(6.)).flex_shrink_0().rounded_full().bg(c(s.tags.rgb(t)))))
-                        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(11.)).text_color(c(th.overlay0)).child(addr))
+                        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(addr))
                         .on_click(click));
                 }
                 NewItem::NewHost => {
-                    if searching && n_hosts == 0 { list = list.child(div().px(px(10.)).py_2().text_size(px(12.)).text_color(c(th.overlay0)).child(t("newmenu.no_match"))); }
-                    list = list.child(ui::menu_sep()).child(row(i).child(icon(IconName::Plus, 16., c(th.overlay1))).child(div().flex_1().child(t("newmenu.new_host"))).on_click(click));
+                    if searching && n_hosts == 0 { list = list.child(div().px(px(10.)).py_2().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(t("newmenu.no_match"))); }
+                    list = list.child(ui::menu_sep()).child(row(i).child(icon(IconName::Plus, ui::IC_MD, c(th.overlay1))).child(div().flex_1().child(t("newmenu.new_host"))).on_click(click));
                 }
             }
         }
@@ -255,19 +255,15 @@ impl Root {
     /// Small header at the top-right of a pane, visible while the pointer is over the pane:
     /// split right, split down, close pane — they act on that pane (PRD 5.23).
     pub(crate) fn pane_header(&self, p: &Entity<TermView>, group: gpui::SharedString, cx: &mut Context<Self>) -> AnyElement {
-        let th = cur();
-        let btn = |i: usize, ic: IconName, tip: &'static str| div().id((gpui::SharedString::from(format!("ph-{}", p.entity_id())), i)).size(px(22.)).rounded(px(6.)).flex().items_center().justify_center().cursor_pointer()
-            .hover(|d| d.bg(c(cur().surface1)))
-            .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip).build(w, cx))
-            .child(icon(ic, 13., c(th.overlay1)));
+        let btn = |i: usize, ic: IconName, tip: &'static str| ui::icon_button((gpui::SharedString::from(format!("ph-{}", p.entity_id())), i), ic, ui::IconBtn::Md, tip);
         let focus = |this: &mut Root, p: &Entity<TermView>, w: &mut Window, cx: &mut Context<Root>| {
             if let Some(ti) = this.tabs.iter().position(|t| t.layout.leaves().iter().any(|x| x == p)) { this.active = ti; this.leave_settings(); this.tabs[ti].focused = p.clone(); }
             let fh = p.read(cx).focus.clone(); w.focus(&fh, cx);
         };
         let (a, b, d) = (p.clone(), p.clone(), p.clone());
-        div().absolute().top(px(4.)).right(px(8.)).w(px(74.)).h(px(28.)).flex().items_center().justify_end().gap(px(2.)).rounded(px(6.))
+        div().absolute().top(px(4.)).right(px(8.)).p(px(2.)).flex().items_center().justify_end().gap(px(2.)).rounded(px(ui::R_SUB))
             .invisible().group_hover(group.clone(), |s| s.visible()).hover(|s| s.visible())
-            .bg(c(th.mantle).opacity(0.92)).border_1().border_color(c(th.surface1).opacity(0.7)).shadow(chrome::soft_shadow(false))
+            .bg(crate::theme::card_bg()).border_1().border_color(crate::theme::divider()).shadow(chrome::soft_shadow(false))
             .child(btn(0, IconName::Columns2, t("ui.split_left_right")).on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, _, w, cx| { cx.stop_propagation(); focus(this, &a, w, cx); this.split(Some(Dir::Vertical), w, cx); cx.notify(); })))
             .child(btn(1, IconName::Rows2, t("ui.split_top_bottom")).on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, _, w, cx| { cx.stop_propagation(); focus(this, &b, w, cx); this.split(Some(Dir::Horizontal), w, cx); cx.notify(); })))
             .child(btn(2, IconName::X, t("ui.close_pane")).on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, _, w, cx| { cx.stop_propagation(); focus(this, &d, w, cx); this.close_pane(w, cx); cx.notify(); })))

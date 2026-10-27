@@ -253,12 +253,12 @@ impl ToolView {
     fn out_head(&self, full: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
         let small = |id: &'static str, ic: IconName, tip: &'static str| div().id(id).h(px(ui::H_COMPACT)).px_2().rounded(px(ui::R_MD)).flex().items_center().gap_1().cursor_pointer()
-            .text_size(px(ui::fs_caption())).text_color(c(cur().subtext)).hover(|s| s.bg(crate::theme::hover_bg()))
-            .child(icon(ic, 12., c(cur().overlay1))).child(tip);
-        div().h(px(30.)).px_2().flex().items_center().gap_1().flex_shrink_0().border_b_1().border_color(c(th.surface0))
-            .child(div().flex_1().text_size(px(ui::fs_caption())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.overlay1)).child(t("tools.ui_output")))
-            .when_some(self.notice.clone(), |d, n| d.child(div().text_size(px(ui::fs_caption())).text_color(c(th.success)).child(n)))
-            .when(self.busy, |d| d.child(div().text_size(px(ui::fs_caption())).text_color(c(th.overlay1)).child(t("tools.ui_running"))))
+            .text_size(px(ui::fs_small())).text_color(c(cur().subtext)).hover(|s| s.bg(crate::theme::hover_bg()))
+            .child(icon(ic, ui::IC_XS, c(cur().overlay1))).child(tip);
+        ui::toolbar()
+            .child(div().flex_1().text_size(px(ui::fs_small())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.overlay1)).child(t("tools.ui_output")))
+            .when_some(self.notice.clone(), |d, n| d.child(div().text_size(px(ui::fs_small())).text_color(c(th.success)).child(n)))
+            .when(self.busy, |d| d.child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(t("tools.ui_running"))))
             .child(small("out-copy", IconName::Copy, t("tools.ui_copy")).on_click(cx.listener(|this, _, _w, cx| this.copy(cx))))
             .when(full, |d| d.child(small("out-save", IconName::Save, t("tools.ui_save")).on_click(cx.listener(|this, _, _w, cx| this.save(cx))))
                 .child(small("out-term", IconName::SquareTerminal, t("tools.ui_send_term")).on_click(cx.listener(|this, _, _w, cx| { let s = this.output.text.clone(); if !s.is_empty() { cx.emit(ToolEvent::SendToTerminal(s)); } }))))
@@ -266,7 +266,7 @@ impl ToolView {
     }
 
     fn field_label(s: &str) -> impl IntoElement {
-        div().text_size(px(ui::fs_caption())).text_color(c(cur().overlay1)).child(s.to_string())
+        div().text_size(px(ui::fs_small())).text_color(c(cur().overlay1)).child(s.to_string())
     }
 }
 
@@ -308,14 +308,14 @@ impl Render for ToolView {
                     let multiple = f.kind == FieldKind::Files;
                     let names: Vec<String> = self.files.get(&f.id).map(|v| v.iter().map(|p| p.display().to_string()).collect()).unwrap_or_default();
                     let id2 = id.clone();
-                    row = row.child(div().id(SharedString::from(format!("drop-{id}"))).min_h(px(64.)).p_3().rounded(px(ui::R_MD)).border_1().border_dashed().border_color(c(th.surface1))
+                    row = row.child(div().id(SharedString::from(format!("drop-{id}"))).min_h(px(64.)).p_3().rounded(px(ui::R_MD)).border_1().border_dashed().border_color(crate::theme::divider())
                         .flex().flex_col().items_center().justify_center().gap_1().cursor_pointer().hover(|s| s.bg(crate::theme::hover_bg()))
                         .drag_over::<ExternalPaths>(|st, _, _, _| st.border_color(c(cur().accent)))
                         .on_drop(cx.listener(move |v, ps: &ExternalPaths, _, cx| v.set_files(id2.clone(), ps.paths().to_vec(), cx)))
                         .on_click(cx.listener(move |v, _, _, cx| v.pick_files(id.clone(), multiple, cx)))
-                        .child(icon(IconName::FileUp, 18., c(th.overlay1)))
+                        .child(icon(IconName::FileUp, ui::IC_LG, c(th.overlay1)))
                         .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(t("tools.ui_drop_hint")))
-                        .children(names.into_iter().map(|n| div().text_size(px(ui::fs_caption())).text_color(c(th.text)).child(n))));
+                        .children(names.into_iter().map(|n| div().text_size(px(ui::fs_small())).text_color(c(th.text)).child(n))));
                 }
                 _ => {}
             }
@@ -348,10 +348,10 @@ impl Render for ToolView {
             .child(div().flex_1().min_w_0().child(opts)).child(run_btn);
         // 输出卡片
         let mut out = sub_card().flex().flex_col().min_h(px(120.)).child(self.out_head(true, cx));
-        if let Some(e) = &self.error { out = out.child(div().px_3().py_2().text_size(px(ui::fs_small())).text_color(c(th.error)).whitespace_normal().child(e.clone())); }
+        if let Some(e) = &self.error { out = out.child(ui::notice(ui::Notice::Error, e.clone()).my(px(ui::SP_2))); }
         if let Some([r, g, b, a]) = self.output.color {
             out = out.child(div().px_3().pt_2().flex().items_center().gap_2()
-                .child(div().size(px(28.)).rounded(px(ui::R_MD)).border_1().border_color(c(th.surface1)).bg(gpui::Rgba { r: r as f32 / 255., g: g as f32 / 255., b: b as f32 / 255., a: a as f32 / 255. })));
+                .child(div().size(px(28.)).rounded(px(ui::R_MD)).border_1().border_color(crate::theme::divider()).bg(gpui::Rgba { r: r as f32 / 255., g: g as f32 / 255., b: b as f32 / 255., a: a as f32 / 255. })));
         }
         out = out.child(div().flex_1().min_h(px(80.)).child(Editor::new(&self.out_ed).h_full()));
         out = out.flex_1().min_h_0();

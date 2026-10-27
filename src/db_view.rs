@@ -108,7 +108,7 @@ impl TableDelegate for Grid {
         let th = cur();
         let (v, mark) = self.shown(row, col);
         let text = if mark == Mark::Default { t("db.default_value").to_string() } else { cell_display(v.as_deref()) };
-        div().w_full().h_full().flex().items_center().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(12.))
+        div().w_full().h_full().flex().items_center().whitespace_nowrap().overflow_hidden().text_ellipsis().font_family(ui::mono_family()).text_size(px(ui::fs_mono()))
             .when(v.is_none(), |d| d.italic().text_color(c(th.overlay0)))
             .when(mark == Mark::Edited, |d| d.bg(c(th.warning).opacity(0.22)))
             .when(mark == Mark::Added || mark == Mark::Default, |d| d.bg(c(th.success).opacity(0.14)))
@@ -119,7 +119,7 @@ impl TableDelegate for Grid {
         self.shown(row, col).0.unwrap_or_else(|| "NULL".into())
     }
     fn render_empty(&mut self, _w: &mut Window, _cx: &mut Context<TableState<Self>>) -> impl IntoElement {
-        div().size_full().flex().items_center().justify_center().text_size(px(12.)).text_color(c(cur().overlay0)).child(if self.busy { t("db.loading") } else { t("db.no_rows") })
+        div().size_full().flex().items_center().justify_center().text_size(px(ui::fs_small())).text_color(c(cur().overlay0)).child(if self.busy { t("db.loading") } else { t("db.no_rows") })
     }
     fn loading(&self, _: &App) -> bool { self.busy && self.rows.is_empty() }
     fn has_more(&self, _: &App) -> bool { self.more && !self.busy }
@@ -995,17 +995,17 @@ impl DbView {
     fn toolbar_btn(id: &'static str, ic: IconName, label: Option<String>, tip: &'static str) -> gpui::Stateful<gpui::Div> {
         let th = cur();
         let _ = tip;
-        div().id(id).h(px(26.)).px_2().rounded(px(6.)).flex().items_center().gap_1().cursor_pointer().flex_shrink_0()
-            .text_size(px(12.)).text_color(c(th.subtext)).hover(|d| d.bg(c(cur().surface0))).active(|d| d.bg(c(cur().surface1)))
-            .child(icon(ic, 13., c(th.subtext))).children(label)
+        div().id(id).h(px(ui::H_COMPACT)).px_2().rounded(px(ui::R_MD)).flex().items_center().gap_1().cursor_pointer().flex_shrink_0()
+            .text_size(px(ui::fs_small())).text_color(c(th.subtext)).hover(|d| d.bg(crate::theme::hover_bg())).active(|d| d.bg(crate::theme::hover_bg()))
+            .child(icon(ic, ui::IC_SM, c(th.subtext))).children(label)
     }
 
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
-        let mut row = div().h(px(36.)).px_2().flex().items_center().gap_1().flex_shrink_0().border_b_1().border_color(c(th.surface0)).bg(c(th.mantle));
+        let mut row = ui::toolbar();
         row = row.child(div().px_1().flex().items_center().gap_1().max_w(px(300.)).min_w_0()
-            .child(icon(if self.table_mode() { IconName::Table } else { IconName::Database }, 13., c(th.accent)))
-            .child(div().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(12.)).text_color(c(th.subtext)).child(self.crumbs())));
+            .child(icon(if self.table_mode() { IconName::Table } else { IconName::Database }, ui::IC_SM, c(th.accent)))
+            .child(div().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(self.crumbs())));
         if self.read_only { row = row.child(ui::tag(t("db.read_only"), c(th.warning))); }
         if self.production { row = row.child(ui::tag(t("tag.production"), c(th.error))); }
         row = row.child(div().w(px(8.)));
@@ -1020,7 +1020,7 @@ impl DbView {
             row = row.child(div().w(px(6.)));
             if self.sub == Sub::Data {
                 row = row.child(Self::toolbar_btn("dbv-refresh", IconName::RefreshCw, None, "").on_click(cx.listener(|v, _, _w, cx| v.guarded(Next::Reload, cx))))
-                    .child(div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.overlay1)).child("WHERE"))
+                    .child(div().text_size(px(ui::fs_small())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.overlay1)).child("WHERE"))
                     .child(div().flex_1().min_w(px(120.)).child(ui::text_field(&self.where_in, false)))
                     .child(ui::button("dbv-apply", t("db.apply"), 0).on_click(cx.listener(|v, _, _w, cx| v.guarded(Next::Where, cx))));
                 if !self.applied_where.is_empty() {
@@ -1059,7 +1059,7 @@ impl DbView {
                 .child(Self::toolbar_btn("dbv-saved", IconName::Bookmark, Some(t("db.saved").into()), "").on_click(cx.listener(|v, _, _w, cx| v.toggle_pop(Pop::Saved, cx))))
                 .child(Self::toolbar_btn("dbv-export", IconName::ArrowDownToLine, Some(t("db.export").into()), "").on_click(cx.listener(|v, _, _w, cx| v.toggle_pop(Pop::Export, cx))))
                 .child(div().flex_1())
-                .child(div().text_size(px(11.)).text_color(c(th.overlay0)).whitespace_nowrap().child(t("db.run_hint")));
+                .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).whitespace_nowrap().child(t("db.run_hint")));
         }
         row
     }
@@ -1070,8 +1070,8 @@ impl DbView {
         let block = self.edit_block(cx);
         let pending = self.grid.read(cx).delegate().pending();
         let col_name = self.sel.and_then(|(_, col)| self.grid.read(cx).delegate().cols.get(col).map(|c| c.name.clone()));
-        let mut row = div().h(px(34.)).px_2().flex().items_center().gap_1().flex_shrink_0().border_b_1().border_color(c(th.surface0));
-        row = row.child(div().min_w(px(60.)).max_w(px(180.)).px_1().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.overlay1))
+        let mut row = ui::toolbar();
+        row = row.child(div().min_w(px(60.)).max_w(px(180.)).px_1().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(ui::fs_small())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.overlay1))
             .child(col_name.unwrap_or_else(|| t("db.select_cell").to_string())));
         if block.is_none() {
             row = row.child(div().flex_1().min_w(px(120.)).child(ui::text_field(&self.cell_in, false)))
@@ -1081,40 +1081,41 @@ impl DbView {
                 .child(Self::toolbar_btn("dbv-add-row", IconName::Plus, Some(t("db.add_row").into()), "").on_click(cx.listener(|v, _, _w, cx| v.add_row(cx))))
                 .child(Self::toolbar_btn("dbv-del-row", IconName::Minus, Some(t("db.delete_row").into()), "").on_click(cx.listener(|v, _, _w, cx| v.delete_row(cx))));
         } else {
-            row = row.child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(11.)).text_color(c(th.overlay0)).child(block.unwrap_or_default()));
+            row = row.child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(block.unwrap_or_default()));
         }
         if pending > 0 {
             row = row.child(ui::button("dbv-rollback", t("db.rollback"), 0).on_click(cx.listener(|v, _, _w, cx| v.rollback(cx))))
                 .child(ui::button("dbv-commit", tf("db.commit_n", &[("n", &pending)]), 1).on_click(cx.listener(|v, _, _w, cx| v.commit(cx))));
         }
-        let note = self.edit_note.clone().map(|n| div().px_3().py_1().flex_shrink_0().text_size(px(11.)).text_color(c(th.error)).child(n));
+        let note = self.edit_note.clone().map(|n| ui::notice(ui::Notice::Error, n).flex_shrink_0().my(px(ui::SP_1)));
         div().flex().flex_col().flex_shrink_0().child(row).children(note)
     }
 
     fn structure_el(&self) -> gpui::AnyElement {
         let th = cur();
         let cols = match &self.table_cols {
-            None => return div().flex_1().p_3().text_size(px(12.)).text_color(c(th.overlay1)).child(t("db.loading")).into_any_element(),
-            Some(Err(e)) => return div().flex_1().p_3().text_size(px(12.)).text_color(c(th.error)).child(e.clone()).into_any_element(),
+            None => return div().flex_1().p_3().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(t("db.loading")).into_any_element(),
+            Some(Err(e)) => return ui::notice(ui::Notice::Error, e.clone()).m(px(ui::SP_3)).into_any_element(),
             Some(Ok(c)) => c,
         };
         let widths = [36., 180., 200., 60., 50., 180.];
-        let cell = |w: f32, s: String, color| div().w(px(w)).flex_shrink_0().px_2().whitespace_nowrap().overflow_hidden().text_ellipsis().text_color(color).child(s);
-        let mut list = div().id("dbv-structure").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().text_size(px(12.));
+        let cell = |w: f32, s: String, color| div().w(px(w)).flex_shrink_0().px_2().whitespace_nowrap().overflow_hidden().text_ellipsis().font_family(ui::mono_family()).text_size(px(ui::fs_mono())).text_color(color).child(s);
+        let hcell = |w: f32, s: String| div().w(px(w)).flex_shrink_0().px_2().child(s);
+        let mut list = div().id("dbv-structure").flex_1().min_h_0().overflow_y_scroll().flex().flex_col();
         let head = [t("db.col_index"), t("db.col_name"), t("db.col_type"), t("db.col_nullable"), t("db.col_pk"), t("db.col_default")];
-        let mut hr = div().h(px(28.)).flex().items_center().border_b_1().border_color(c(th.surface0)).bg(c(th.mantle)).font_weight(FontWeight::SEMIBOLD);
-        for (i, h) in head.iter().enumerate() { hr = hr.child(cell(widths[i], h.to_string(), c(th.overlay1))); }
-        hr = hr.child(div().flex_1().px_2().text_color(c(th.overlay1)).child(t("db.col_comment")));
+        let mut hr = ui::table_header();
+        for (i, h) in head.iter().enumerate() { hr = hr.child(hcell(widths[i], h.to_string())); }
+        hr = hr.child(div().flex_1().px_2().child(t("db.col_comment")));
         list = list.child(hr);
         for (i, col) in cols.iter().enumerate() {
-            list = list.child(div().h(px(26.)).flex().items_center().border_b_1().border_color(c(th.surface0).opacity(0.5))
+            list = list.child(div().h(px(26.)).flex().items_center().border_b_1().border_color(crate::theme::divider())
                 .child(cell(widths[0], (i + 1).to_string(), c(th.overlay0)))
                 .child(cell(widths[1], col.name.clone(), c(th.text)))
                 .child(cell(widths[2], col.type_name.clone(), c(th.ansi[6])))
                 .child(cell(widths[3], match col.nullable { Some(true) => "YES".into(), Some(false) => "NO".into(), None => String::new() }, c(th.subtext)))
                 .child(cell(widths[4], if col.primary { "PK".into() } else { String::new() }, c(th.warning)))
                 .child(cell(widths[5], col.default.clone().unwrap_or_default(), c(th.subtext)))
-                .child(div().flex_1().min_w_0().px_2().whitespace_nowrap().overflow_hidden().text_ellipsis().text_color(c(th.overlay1)).child(col.comment.clone())));
+                .child(div().flex_1().min_w_0().px_2().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(col.comment.clone())));
         }
         list.into_any_element()
     }
@@ -1125,16 +1126,16 @@ impl DbView {
         let f = self.live.as_ref().map(|l| l.driver.family()).unwrap_or(ssh_term_proto::assets::Family::Sqlite);
         let field = |i: &Entity<InputState>, w: f32| div().w(px(w)).flex_shrink_0().child(ui::text_field(i, false));
         let flex_field = |i: &Entity<InputState>| div().flex_1().min_w(px(80.)).child(ui::text_field(i, false));
-        let check = |id: (&'static str, usize), on: bool, label: String| div().id(id).flex().items_center().gap_1().px_1().flex_shrink_0().cursor_pointer().text_size(px(11.)).text_color(c(th.subtext))
-            .child(div().size(px(14.)).rounded(px(3.)).border_1().border_color(c(th.surface2)).flex().items_center().justify_center().when(on, |d| d.bg(c(th.accent)).child(icon(IconName::Check, 10., gpui::white()))))
+        let check = |id: (&'static str, usize), on: bool, label: String| div().id(id).flex().items_center().gap_1().px_1().flex_shrink_0().cursor_pointer().text_size(px(ui::fs_small())).text_color(c(th.subtext))
+            .child(div().size(px(14.)).rounded(px(ui::R_SM)).border_1().border_color(c(th.surface2)).flex().items_center().justify_center().when(on, |d| d.bg(c(th.accent)).child(icon(IconName::Check, ui::IC_XS, gpui::white()))))
             .child(label);
-        let drop_btn = |id: (&'static str, usize), dropped: bool| div().id(id).px_2().h(px(24.)).flex().items_center().rounded(px(5.)).cursor_pointer().flex_shrink_0().text_size(px(11.))
-            .text_color(if dropped { c(th.accent) } else { c(th.error) }).hover(|d| d.bg(c(cur().surface0))).child(if dropped { t("db.undo_drop") } else { t("db.drop") });
-        let section = |title: String| div().pt_3().pb_1().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.overlay1)).child(title);
+        let drop_btn = |id: (&'static str, usize), dropped: bool| div().id(id).px_2().h(px(24.)).flex().items_center().rounded(px(ui::R_MD)).cursor_pointer().flex_shrink_0().text_size(px(ui::fs_small()))
+            .text_color(if dropped { c(th.accent) } else { c(th.error) }).hover(|d| d.bg(crate::theme::hover_bg())).child(if dropped { t("db.undo_drop") } else { t("db.drop") });
+        let section = |title: String| div().pt_3().pb_1().text_size(px(ui::fs_small())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.overlay1)).child(title);
         let row = |dropped: bool, new: bool| div().py_1().flex().items_center().gap_1().when(dropped, |d| d.opacity(0.45)).when(new, |d| d.bg(c(th.success).opacity(0.08)));
-        let mut list = div().id("dbv-design").flex_1().min_h_0().overflow_y_scroll().px_3().pb_3().flex().flex_col().text_size(px(12.));
-        if let Some(e) = &self.design_err { list = list.child(div().pt_2().text_color(c(th.error)).child(e.clone())); }
-        if f == ssh_term_proto::assets::Family::Sqlite { list = list.child(div().pt_2().text_size(px(11.)).text_color(c(th.overlay0)).child(t("db.design_sqlite_note"))); }
+        let mut list = div().id("dbv-design").flex_1().min_h_0().overflow_y_scroll().px_3().pb_3().flex().flex_col().text_size(px(ui::fs_body()));
+        if let Some(e) = &self.design_err { list = list.child(ui::notice(ui::Notice::Error, e.clone()).mt(px(ui::SP_2))); }
+        if f == ssh_term_proto::assets::Family::Sqlite { list = list.child(div().pt_2().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(t("db.design_sqlite_note"))); }
         list = list.child(section(t("db.design_cols").into()));
         for (i, col) in d.cols.iter().enumerate() {
             let locked = col.orig.as_ref().is_some_and(|o| o.generated());
@@ -1160,15 +1161,15 @@ impl DbView {
                 .child(drop_btn(("dbv-fd", i), k.dropped).on_click(cx.listener(move |v, _, _w, cx| { if let Some(d) = v.design.as_mut() { if d.fks[i].orig.is_none() { d.fks.remove(i); } else { d.fks[i].dropped = !d.fks[i].dropped; } } cx.notify(); }))));
         }
         list = list.child(div().pt_1().child(ui::button("dbv-add-fk", t("db.add_fk"), 0).on_click(cx.listener(|v, _, w, cx| { let x = Self::dfk(None, w, cx); if let Some(d) = v.design.as_mut() { d.fks.push(x); } cx.notify(); }))));
-        list = list.child(div().pt_2().text_size(px(11.)).text_color(c(th.overlay0)).child(tf("db.design_hint", &[("actions", &alter::FK_ACTIONS.join(" / "))])));
+        list = list.child(div().pt_2().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(tf("db.design_hint", &[("actions", &alter::FK_ACTIONS.join(" / "))])));
         list.into_any_element()
     }
 
     fn ddl_el(&self) -> gpui::AnyElement {
         let th = cur();
         match &self.ddl {
-            Some(Err(e)) => div().flex_1().p_3().text_size(px(12.)).text_color(c(th.error)).child(e.clone()).into_any_element(),
-            Some(Ok(s)) if s.is_empty() => div().flex_1().p_3().text_size(px(12.)).text_color(c(th.overlay1)).child(t("db.loading")).into_any_element(),
+            Some(Err(e)) => ui::notice(ui::Notice::Error, e.clone()).m(px(ui::SP_3)).into_any_element(),
+            Some(Ok(s)) if s.is_empty() => div().flex_1().p_3().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(t("db.loading")).into_any_element(),
             _ => div().flex_1().min_h_0().child(Editor::new(&self.ddl_ed).h_full().bordered(false)).into_any_element(),
         }
     }
@@ -1183,7 +1184,7 @@ impl DbView {
                 for (i, (fmt, label)) in [(export::Format::Csv, "CSV"), (export::Format::Json, "JSON"), (export::Format::Sql, "SQL INSERT")].into_iter().enumerate() {
                     card = card.child(ui::menu_item(("dbv-exp", i), None, label, true, false).on_click(cx.listener(move |v, _, _w, cx| v.export(fmt, cx))));
                 }
-                card = card.child(div().px_2().pb_1().text_size(px(11.)).text_color(c(th.overlay0)).child(if self.table_mode() { t("db.export_note_table") } else { t("db.export_note") }));
+                card = card.child(div().px_2().pb_1().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(if self.table_mode() { t("db.export_note_table") } else { t("db.export_note") }));
             }
             Pop::History => {
                 card = card.w(px(480.)).max_h(px(420.)).child(div().p_1().child(ui::search_field(&self.hist_in, false)));
@@ -1194,12 +1195,12 @@ impl DbView {
                     n += 1;
                     let sql = e.sql.clone();
                     let when = chrono::DateTime::from_timestamp(e.at, 0).map(|d| d.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string()).unwrap_or_default();
-                    list = list.child(div().id(("dbv-h", i)).px_2().py_1().rounded(px(6.)).cursor_pointer().hover(|d| d.bg(c(cur().surface0)))
+                    list = list.child(div().id(("dbv-h", i)).px_2().py_1().rounded(px(ui::R_MD)).cursor_pointer().hover(|d| d.bg(crate::theme::menu_sel_bg()))
                         .on_click(cx.listener(move |v, _, w, cx| v.load_sql(sql.clone(), w, cx)))
-                        .child(div().font_family("monospace").text_size(px(12.)).text_color(if e.ok { c(th.text) } else { c(th.error) }).whitespace_nowrap().overflow_hidden().text_ellipsis().child(one_line(&e.sql)))
-                        .child(div().text_size(px(10.)).text_color(c(th.overlay0)).child(format!("{when} · {} ms{}", e.ms, if e.database.is_empty() { String::new() } else { format!(" · {}", e.database) }))));
+                        .child(div().font_family(ui::mono_family()).text_size(px(ui::fs_mono())).text_color(if e.ok { c(th.text) } else { c(th.error) }).whitespace_nowrap().overflow_hidden().text_ellipsis().child(one_line(&e.sql)))
+                        .child(div().text_size(px(ui::fs_caption())).text_color(c(th.overlay0)).child(format!("{when} · {} ms{}", e.ms, if e.database.is_empty() { String::new() } else { format!(" · {}", e.database) }))));
                 }
-                if n == 0 { list = list.child(div().p_3().text_size(px(12.)).text_color(c(th.overlay0)).child(t("db.history_empty"))); }
+                if n == 0 { list = list.child(div().p_3().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(t("db.history_empty"))); }
                 card = card.child(list);
             }
             Pop::Saved => {
@@ -1209,15 +1210,15 @@ impl DbView {
                 let mut list = div().id("dbv-saved-list").flex().flex_col().overflow_y_scroll().max_h(px(360.));
                 for (i, sq) in self.hist.saved.iter().enumerate() {
                     let (sql, name) = (sq.sql.clone(), sq.name.clone());
-                    list = list.child(div().id(("dbv-s", i)).px_2().py_1().rounded(px(6.)).flex().items_center().gap_2().cursor_pointer().hover(|d| d.bg(c(cur().surface0)))
+                    list = list.child(div().id(("dbv-s", i)).px_2().py_1().rounded(px(ui::R_MD)).flex().items_center().gap_2().cursor_pointer().hover(|d| d.bg(crate::theme::menu_sel_bg()))
                         .on_click(cx.listener(move |v, _, w, cx| v.load_sql(sql.clone(), w, cx)))
                         .child(div().flex_1().min_w_0().flex().flex_col()
-                            .child(div().text_size(px(12.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(sq.name.clone()))
-                            .child(div().font_family("monospace").text_size(px(11.)).text_color(c(th.overlay1)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(one_line(&sq.sql))))
-                        .child(div().id(("dbv-s-del", i)).px_1().rounded(px(4.)).text_size(px(12.)).text_color(c(th.overlay0)).hover(|d| d.text_color(c(cur().error)))
+                            .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(sq.name.clone()))
+                            .child(div().font_family(ui::mono_family()).text_size(px(ui::fs_small())).text_color(c(th.overlay1)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(one_line(&sq.sql))))
+                        .child(div().id(("dbv-s-del", i)).px_1().rounded(px(ui::R_SM)).text_size(px(ui::fs_small())).text_color(c(th.overlay0)).hover(|d| d.text_color(c(cur().error)))
                             .on_click(cx.listener(move |v, _, _w, cx| { cx.stop_propagation(); v.delete_saved(&name, cx); })).child("×")));
                 }
-                if self.hist.saved.is_empty() { list = list.child(div().p_3().text_size(px(12.)).text_color(c(th.overlay0)).child(t("db.saved_empty"))); }
+                if self.hist.saved.is_empty() { list = list.child(div().p_3().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(t("db.saved_empty"))); }
                 card = card.child(list);
             }
         }
@@ -1239,33 +1240,33 @@ impl DbView {
     fn result_tabs(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         if self.results.is_empty() { return None; }
         let th = cur();
-        let mut row = div().h(px(28.)).px_2().flex().items_center().gap_1().flex_shrink_0().border_b_1().border_color(c(th.surface0)).id("dbv-rtabs").overflow_x_scroll();
+        let mut row = div().h(px(28.)).px_2().flex().items_center().gap_1().flex_shrink_0().border_b_1().border_color(crate::theme::divider()).id("dbv-rtabs").overflow_x_scroll();
         for (i, rs) in self.results.iter().enumerate() {
             let active = i == self.result_ix;
             let label = match (&rs.error, rs.returns_rows) { (Some(_), _) => tf("db.result_err", &[("n", &(i + 1))]), (None, true) => tf("db.result_rows", &[("n", &(i + 1)), ("rows", &rs.rows.len())]), (None, false) => tf("db.result_affected", &[("n", &(i + 1)), ("rows", &rs.affected)]) };
-            row = row.child(div().id(("dbv-rt", i)).h(px(22.)).px_2().rounded(px(5.)).flex().items_center().cursor_pointer().text_size(px(11.)).flex_shrink_0()
-                .bg(if active { c(th.surface0) } else { gpui::transparent_black() })
+            row = row.child(div().id(("dbv-rt", i)).h(px(22.)).px_2().rounded(px(ui::R_MD)).flex().items_center().cursor_pointer().text_size(px(ui::fs_small())).flex_shrink_0()
+                .bg(if active { crate::theme::selected_bg() } else { gpui::transparent_black() })
                 .text_color(if rs.error.is_some() { c(th.error) } else if active { c(th.text) } else { c(th.overlay1) })
-                .hover(|d| d.bg(c(cur().surface0)))
+                .hover(|d| d.bg(crate::theme::hover_bg()))
                 .on_click(cx.listener(move |v, _, _w, cx| { v.result_ix = i; v.show_result(cx); cx.notify(); }))
                 .child(label));
         }
-        row = row.child(div().flex_1()).child(div().id("dbv-rclear").h(px(22.)).px_2().rounded(px(5.)).flex().items_center().gap_1().cursor_pointer().text_size(px(11.)).flex_shrink_0()
-            .text_color(c(th.overlay1)).hover(|d| d.bg(c(cur().surface0)))
+        row = row.child(div().flex_1()).child(div().id("dbv-rclear").h(px(22.)).px_2().rounded(px(ui::R_MD)).flex().items_center().gap_1().cursor_pointer().text_size(px(ui::fs_small())).flex_shrink_0()
+            .text_color(c(th.overlay1)).hover(|d| d.bg(crate::theme::hover_bg()))
             .on_click(cx.listener(|v, _, _w, cx| { v.results.clear(); v.result_ix = 0; v.error = None; v.show_result(cx); cx.notify(); }))
-            .child(icon(IconName::Delete, 12., c(th.overlay1))).child(t("db.clear_results")));
+            .child(icon(IconName::Delete, ui::IC_XS, c(th.overlay1))).child(t("db.clear_results")));
         Some(row)
     }
 
     fn result_body(&self) -> gpui::AnyElement {
         let th = cur();
-        let msg = |s: String, err: bool| div().flex_1().p_3().text_size(px(12.)).text_color(if err { c(th.error) } else { c(th.subtext) }).child(s).into_any_element();
+        let msg = |s: String, err: bool| div().flex_1().p_3().text_size(px(ui::fs_small())).text_color(if err { c(th.error) } else { c(th.subtext) }).child(s).into_any_element();
         if let Some(e) = &self.conn_err { return msg(e.clone(), true); }
         match self.results.get(self.result_ix) {
             Some(rs) if rs.error.is_some() => msg(rs.error.clone().unwrap_or_default(), true),
             Some(rs) if !rs.returns_rows => msg(tf("db.affected_ms", &[("n", &rs.affected), ("ms", &rs.elapsed.as_millis())]), false),
             Some(rs) => {
-                let note = rs.truncated.then(|| div().px_3().py_1().text_size(px(11.)).text_color(c(th.warning)).child(tf("db.truncated", &[("n", &db::MAX_ROWS)])));
+                let note = rs.truncated.then(|| div().px_3().py_1().text_size(px(ui::fs_small())).text_color(c(th.warning)).child(tf("db.truncated", &[("n", &db::MAX_ROWS)])));
                 div().flex_1().min_h_0().flex().flex_col().children(note).child(div().flex_1().min_h_0().child(DataTable::new(&self.grid).stripe(true).bordered(false))).into_any_element()
             }
             None => match &self.error { Some(e) => msg(e.clone(), true), None => msg(t("db.query_hint").into(), false) },
@@ -1295,13 +1296,13 @@ impl DbView {
         let preview: String = preview.chars().take(if matches!(ask, Ask::Alter(_)) { 20000 } else { 1200 }).collect();
         let show_pre = !preview.is_empty();
         Some(ui::modal(ui::card(520.)
-            .child(div().p_5().flex().flex_col().gap_3()
-                .child(div().flex().items_center().gap_2().child(icon(IconName::TriangleAlert, 16., c(th.warning))).child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("db.confirm_title"))))
-                .child(div().text_size(px(12.)).text_color(c(th.subtext)).child(msg))
-                .when(show_pre, |d| d.child(div().id("dbv-cf-pre").max_h(px(320.)).overflow_y_scroll().p_2().rounded(px(6.)).bg(c(th.mantle)).font_family("monospace").text_size(px(12.)).text_color(c(th.text)).whitespace_normal().child(preview))))
-            .child(div().px_5().py_3().flex().justify_end().gap_2().border_t_1().border_color(c(th.surface0))
-                .child(ui::button("dbv-cf-no", t("ui.cancel"), 0).on_click(cx.listener(|v, _, _w, cx| v.dismiss_ask(cx))))
-                .child(ui::button("dbv-cf-yes", ok_label, 2).on_click(cx.listener(|v, _, _w, cx| {
+            .child(ui::dialog_header(Some(IconName::TriangleAlert), t("db.confirm_title"), None, None))
+            .child(div().p(px(ui::SP_5)).flex().flex_col().gap(px(ui::SP_3))
+                .child(div().text_size(px(ui::fs_body())).text_color(c(th.subtext)).child(msg))
+                .when(show_pre, |d| d.child(div().id("dbv-cf-pre").max_h(px(320.)).overflow_y_scroll().p_2().rounded(px(ui::R_MD)).bg(crate::theme::sub_bg()).font_family(ui::mono_family()).text_size(px(ui::fs_mono())).text_color(c(th.text)).whitespace_normal().child(preview))))
+            .child(ui::dialog_footer(None, vec![
+                ui::button("dbv-cf-no", t("ui.cancel"), 0).on_click(cx.listener(|v, _, _w, cx| v.dismiss_ask(cx))).into_any_element(),
+                ui::button("dbv-cf-yes", ok_label, 2).on_click(cx.listener(|v, _, _w, cx| {
                     match v.ask.take() {
                         Some(Ask::Run { sql, .. }) => v.execute(sql, cx),
                         Some(Ask::Commit(stmts)) | Some(Ask::Import { stmts, .. }) => v.apply(stmts, cx),
@@ -1309,7 +1310,8 @@ impl DbView {
                         Some(Ask::Discard(next)) => { v.grid.update(cx, |s, _| s.delegate_mut().clear_staged()); v.run_next(next, cx); }
                         None => {}
                     }
-                }))))))
+                })).into_any_element(),
+            ]))))
     }
 }
 
@@ -1413,11 +1415,11 @@ impl Render for DbView {
         if self.table_mode() {
             let body: gpui::AnyElement = match self.sub {
                 Sub::Structure if self.design.is_some() => self.design_el(cx),
-                Sub::Structure => match &self.design_err { Some(e) => div().flex_1().flex().flex_col().child(div().px_3().pt_2().text_size(px(12.)).text_color(c(th.error)).child(e.clone())).child(self.structure_el()).into_any_element(), None => self.structure_el() },
+                Sub::Structure => match &self.design_err { Some(e) => div().flex_1().flex().flex_col().child(ui::notice(ui::Notice::Error, e.clone()).mt(px(ui::SP_2))).child(self.structure_el()).into_any_element(), None => self.structure_el() },
                 Sub::Ddl => self.ddl_el(),
                 Sub::Data => match (&self.conn_err, &self.error) {
-                    (Some(e), _) | (None, Some(e)) => div().flex_1().p_3().text_size(px(12.)).text_color(c(th.error)).child(e.clone()).into_any_element(),
-                    _ if self.live.is_none() => div().flex_1().p_3().text_size(px(12.)).text_color(c(th.overlay1)).child(t("db.connecting")).into_any_element(),
+                    (Some(e), _) | (None, Some(e)) => ui::notice(ui::Notice::Error, e.clone()).m(px(ui::SP_3)).into_any_element(),
+                    _ if self.live.is_none() => div().flex_1().p_3().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(t("db.connecting")).into_any_element(),
                     _ => div().flex_1().min_h_0().flex().flex_col().child(self.edit_bar(cx)).child(div().flex_1().min_h_0().child(DataTable::new(&self.grid).stripe(true).bordered(false))).into_any_element(),
                 },
             };
@@ -1432,7 +1434,7 @@ impl Render for DbView {
                     if k.key == "s" && (k.modifiers.control || k.modifiers.platform) && !k.modifiers.shift && v.save_file(cx) { cx.stop_propagation(); }
                 }))
                 .child(Editor::new(&self.editor).h_full().bordered(false));
-            let handle = div().id("dbv-split").h(px(crate::card_layout::CARD_PAD)).w_full().flex_shrink_0().cursor_row_resize().rounded(px(3.))
+            let handle = div().id("dbv-split").h(px(crate::card_layout::CARD_PAD)).w_full().flex_shrink_0().cursor_row_resize().rounded(px(ui::R_SM))
                 .hover(|d| d.bg(c(cur().accent).opacity(0.35)))
                 .on_drag(EditorResize, |d: &EditorResize, _, _, cx| cx.new(|_| d.clone()))
                 .on_click(cx.listener(|v, ev: &gpui::ClickEvent, _w, cx| if ev.click_count() >= 2 { v.editor_h = EDITOR_RATIO; cx.notify(); }));

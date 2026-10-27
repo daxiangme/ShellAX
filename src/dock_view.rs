@@ -15,7 +15,7 @@ use ssh_term_proto::ssh::{Prompts, SshTarget};
 
 use crate::activity::{log_push, ExecLog};
 use crate::theme::{c, cur};
-use crate::ui::{self, icon, IconName};
+use crate::ui::{self, icon, mono, small, IconName};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Sub { Containers, Stats, Images, Volumes, Networks }
@@ -84,8 +84,6 @@ pub struct DockView {
 
 impl EventEmitter<DockEvent> for DockView {}
 
-fn small(s: impl Into<SharedString>) -> gpui::Div { div().text_size(px(12.)).text_color(c(cur().subtext)).child(s.into()) }
-fn mono(s: impl Into<SharedString>) -> gpui::Div { div().font_family("monospace").text_size(px(12.)).text_color(c(cur().text)).child(s.into()) }
 fn ago(ts: i64) -> String { chrono::DateTime::from_timestamp(ts, 0).map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default() }
 
 pub fn state_color(state: &str) -> gpui::Hsla {
@@ -343,12 +341,12 @@ impl DockView {
         for (project, cs) in dock::group(&shown) {
             let running = cs.iter().filter(|c| c.state == "running").count();
             let head = match &project { Some(p) => format!("{p}  ·  {running}/{}", cs.len()), None => t("docker.standalone").to_string() };
-            let mut hrow = div().h(px(30.)).px_3().flex().items_center().gap_2().bg(c(th.mantle))
-                .child(icon(if project.is_some() { IconName::Layers } else { IconName::Box }, 13., c(th.accent)))
-                .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(head));
+            let mut hrow = div().h(px(30.)).px_3().flex().items_center().gap_2().bg(crate::theme::sub_bg())
+                .child(icon(if project.is_some() { IconName::Layers } else { IconName::Box }, ui::IC_SM, c(th.accent)))
+                .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(head));
             if let Some(p) = &project {
                 hrow = hrow.child(div().flex_1());
-                if self.compose_busy.as_deref() == Some(p.as_str()) { hrow = hrow.child(icon(IconName::LoaderCircle, 12., c(th.accent))); }
+                if self.compose_busy.as_deref() == Some(p.as_str()) { hrow = hrow.child(icon(IconName::LoaderCircle, ui::IC_XS, c(th.accent))); }
                 let (wd, files) = (cs.iter().find_map(|c| c.workdir.clone()), cs.iter().find_map(|c| c.config_files.clone()));
                 for (k, op) in [ComposeOp::Up, ComposeOp::Restart, ComposeOp::Stop, ComposeOp::Down].into_iter().enumerate() {
                     let (p, wd, files) = (p.clone(), wd.clone(), files.clone());
@@ -376,25 +374,25 @@ impl DockView {
                 btns = btns.child(ui::button(("dk-logs", n), t("docker.logs"), 0).on_click(cx.listener(move |_, _, _w, cx| { cx.stop_propagation(); cx.emit(DockEvent::Logs(lid.clone(), lname.clone())); })));
                 if running { btns = btns.child(ui::button(("dk-exec", n), t("docker.exec"), 0).on_click(cx.listener(move |_, _, _w, cx| { cx.stop_propagation(); cx.emit(DockEvent::Exec(eid.clone())); }))); }
                 let (mid, mname, mstate) = (ct.id.clone(), ct.name.clone(), ct.state.clone());
-                btns = btns.child(div().id(("dk-more", n)).size(px(26.)).rounded(px(6.)).flex().items_center().justify_center().cursor_pointer().hover(|d| d.bg(c(cur().surface0)))
+                btns = btns.child(div().id(("dk-more", n)).size(px(26.)).rounded(px(ui::R_MD)).flex().items_center().justify_center().cursor_pointer().hover(|d| d.bg(crate::theme::hover_bg()))
                     .on_click(cx.listener(move |v, ev: &gpui::ClickEvent, _w, cx| { cx.stop_propagation(); v.menu = Some(RowMenu { at: ev.position(), id: mid.clone(), name: mname.clone(), state: mstate.clone() }); cx.notify(); }))
-                    .child(icon(IconName::Ellipsis, 14., c(th.overlay1))));
+                    .child(icon(IconName::Ellipsis, ui::IC_SM, c(th.overlay1))));
                 let (rid, rname, rstate) = (ct.id.clone(), ct.name.clone(), ct.state.clone());
                 let iid = ct.id.clone();
-                list = list.child(div().id(("dk-c", n)).min_h(px(44.)).px_3().py_1().flex().items_center().gap_3().border_b_1().border_color(c(th.surface0).opacity(0.5)).cursor_pointer()
+                list = list.child(div().id(("dk-c", n)).min_h(px(44.)).px_3().py_1().flex().items_center().gap_3().border_b_1().border_color(crate::theme::divider()).cursor_pointer()
                     .when(sel, |d| d.bg(crate::theme::selected_bg())).hover(|d| d.bg(crate::theme::hover_bg()))
                     .on_click(cx.listener(move |v, _, _w, cx| { v.inspect(iid.clone(), cx); cx.notify(); }))
                     .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |v, ev: &gpui::MouseDownEvent, _w, cx| { v.menu = Some(RowMenu { at: ev.position, id: rid.clone(), name: rname.clone(), state: rstate.clone() }); cx.notify(); }))
                     .child(div().size(px(8.)).rounded_full().flex_shrink_0().bg(state_color(&ct.state)))
                     .child(div().flex_1().min_w_0().flex().flex_col()
-                        .child(div().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(13.)).text_color(c(th.text)).child(match &ct.service { Some(s) => format!("{}  ({s})", ct.name), None => ct.name.clone() }))
+                        .child(div().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(ui::fs_body())).text_color(c(th.text)).child(match &ct.service { Some(s) => format!("{}  ({s})", ct.name), None => ct.name.clone() }))
                         .child(div().whitespace_nowrap().overflow_hidden().text_ellipsis().child(small(format!("{} · {} · {}", ct.image, ct.status, ct.ports)))))
                     .child(btns));
             }
         }
-        let detail = self.selected.is_some().then(|| div().w(px(440.)).flex_shrink_0().h_full().flex().flex_col().border_l_1().border_color(c(th.surface0))
+        let detail = self.selected.is_some().then(|| div().w(px(440.)).flex_shrink_0().h_full().flex().flex_col().border_l_1().border_color(crate::theme::divider())
             .child(div().h(px(32.)).px_3().flex().items_center().gap_2().child(small(t("docker.inspect"))).child(div().flex_1())
-                .child(div().id("dk-insp-x").cursor_pointer().child(icon(IconName::X, 13., c(th.overlay1))).on_click(cx.listener(|v, _, _w, cx| { v.selected = None; cx.notify(); }))))
+                .child(div().id("dk-insp-x").cursor_pointer().child(icon(IconName::X, ui::IC_SM, c(th.overlay1))).on_click(cx.listener(|v, _, _w, cx| { v.selected = None; cx.notify(); }))))
             .child(div().flex_1().min_h_0().child(gpui_component::input::Editor::new(&self.inspect_ed).h_full())));
         div().flex_1().min_h_0().flex().child(div().flex_1().min_w_0().flex().flex_col().child(list)).children(detail).into_any_element()
     }
@@ -405,8 +403,8 @@ impl DockView {
         for (i, im) in self.images.iter().enumerate() {
             let tags = if im.tags.is_empty() { "<none>".to_string() } else { im.tags.join(", ") };
             let (id, label) = (im.id.clone(), tags.clone());
-            list = list.child(div().min_h(px(36.)).px_3().flex().items_center().gap_3().border_b_1().border_color(c(th.surface0).opacity(0.5))
-                .child(div().flex_1().min_w_0().flex().flex_col().child(div().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(13.)).text_color(c(th.text)).child(tags))
+            list = list.child(div().min_h(px(36.)).px_3().flex().items_center().gap_3().border_b_1().border_color(crate::theme::divider())
+                .child(div().flex_1().min_w_0().flex().flex_col().child(div().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(ui::fs_body())).text_color(c(th.text)).child(tags))
                     .child(small(format!("{} · {} · {}", im.id.trim_start_matches("sha256:").chars().take(12).collect::<String>(), dock::human_size(im.size), ago(im.created)))))
                 .when(im.containers > 0, |d| d.child(small(tf("docker.used_by", &[("n", &im.containers)]))))
                 .child({ let img = im.tags.first().cloned().unwrap_or_else(|| im.id.clone()); ui::button(("dk-run", i), t("docker.run"), 1).on_click(cx.listener(move |v, _, w, cx| v.open_create(&img, w, cx))) })
@@ -415,11 +413,11 @@ impl DockView {
                     cx.notify();
                 }))));
         }
-        let mut pull = div().p_3().flex().flex_col().gap_2().border_b_1().border_color(c(th.surface0))
+        let mut pull = div().p_3().flex().flex_col().gap_2().border_b_1().border_color(crate::theme::divider())
             .child(div().flex().gap_2().child(div().flex_1().child(ui::text_field(&self.pull_in, false)))
                 .child(ui::button("dk-pull", if self.pulling { t("docker.pulling") } else { t("docker.pull") }, 1).on_click(cx.listener(|v, _, _w, cx| { v.pull(cx); cx.notify(); }))));
         if !self.pull_log.is_empty() {
-            let mut lg = div().id("dk-pull-log").max_h(px(140.)).overflow_y_scroll().p_2().rounded(px(6.)).bg(c(th.mantle)).flex().flex_col();
+            let mut lg = div().id("dk-pull-log").max_h(px(140.)).overflow_y_scroll().p_2().rounded(px(ui::R_MD)).bg(crate::theme::sub_bg()).flex().flex_col();
             for l in self.pull_log.iter().rev().take(40) { lg = lg.child(mono(l.clone())); }
             pull = pull.child(lg);
         }
@@ -430,8 +428,8 @@ impl DockView {
         let th = cur();
         let mut list = div().id("dk-simple").flex_1().min_h_0().overflow_y_scroll().flex().flex_col();
         for (a, b) in rows {
-            list = list.child(div().min_h(px(32.)).px_3().flex().items_center().gap_3().border_b_1().border_color(c(th.surface0).opacity(0.5))
-                .child(div().w(px(320.)).flex_shrink_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(13.)).text_color(c(th.text)).child(a))
+            list = list.child(div().min_h(px(32.)).px_3().flex().items_center().gap_3().border_b_1().border_color(crate::theme::divider())
+                .child(div().w(px(320.)).flex_shrink_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(ui::fs_body())).text_color(c(th.text)).child(a))
                 .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().child(small(b))));
         }
         list.into_any_element()
@@ -448,8 +446,8 @@ impl DockView {
             let (cpu, mem) = match st { Some(s) => (format!("{:.1}%", s.cpu), if s.limit > 0 { format!("{} / {}", dock::human_size(s.mem as i64), dock::human_size(s.limit as i64)) } else { dock::human_size(s.mem as i64) }), None => ("…".into(), "…".into()) };
             let s = st.unwrap_or_default();
             let mf = if s.limit > 0 { s.mem as f64 / s.limit as f64 } else { 0. };
-            list = list.child(div().min_h(px(40.)).px_3().flex().items_center().gap_3().border_b_1().border_color(c(th.surface0).opacity(0.5))
-                .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(13.)).text_color(c(th.text)).child(ct.name.clone()))
+            list = list.child(div().min_h(px(40.)).px_3().flex().items_center().gap_3().border_b_1().border_color(crate::theme::divider())
+                .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(ui::fs_body())).text_color(c(th.text)).child(ct.name.clone()))
                 .child(small(t("docker.cpu"))).child(bar(s.cpu / 100., if s.cpu > 80. { c(th.error) } else { c(th.accent) })).child(div().w(px(64.)).child(mono(cpu)))
                 .child(small(t("docker.mem"))).child(bar(mf, if mf > 0.85 { c(th.error) } else { c(th.success) })).child(div().w(px(170.)).child(mono(mem))));
         }
@@ -488,14 +486,14 @@ impl DockView {
     fn create_el(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let f = self.create.as_ref()?;
         let th = cur();
-        let lbl = |k: &'static str| div().w(px(96.)).flex_shrink_0().pt(px(6.)).text_size(px(12.)).text_color(c(th.subtext)).child(t(k));
+        let lbl = |k: &'static str| div().w(px(96.)).flex_shrink_0().pt(px(6.)).text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(t(k));
         let row = |k: &'static str, el: AnyElement| div().flex().items_start().gap_2().child(lbl(k)).child(div().flex_1().min_w_0().child(el));
         let me = cx.entity().downgrade();
         let pols: Vec<(String, String)> = [("no", "docker.rp_no"), ("always", "docker.rp_always"), ("unless-stopped", "docker.rp_unless"), ("on-failure", "docker.rp_failure")].iter().map(|(a, b)| (a.to_string(), t(b).to_string())).collect();
         let start = f.start;
         Some(ui::modal(ui::card(560.)
-            .child(div().p_5().flex().flex_col().gap_3()
-                .child(div().flex().items_center().gap_2().child(icon(IconName::Container, 16., c(th.accent))).child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("docker.create"))))
+            .child(ui::dialog_header(Some(IconName::Container), t("docker.create"), None, None))
+            .child(div().p(px(ui::SP_5)).flex().flex_col().gap(px(ui::SP_3))
                 .child(row("docker.f_image", ui::text_field(&f.image, false).into_any_element()))
                 .child(row("docker.f_name", ui::text_field(&f.name, false).into_any_element()))
                 .child(row("docker.f_ports", Textarea::new(&f.ports).into_any_element()))
@@ -506,8 +504,8 @@ impl DockView {
                 .child(div().flex().items_center().gap_2().pl(px(104.))
                     .child(gpui_component::switch::Switch::new("dk-start").checked(start).label(t("docker.f_start")).small()
                         .on_click(cx.listener(|v, on: &bool, _, cx| { if let Some(f) = v.create.as_mut() { f.start = *on; } cx.notify(); }))))
-                .children(f.err.clone().map(|e| div().p_2().rounded(px(6.)).bg(c(th.error).opacity(0.12)).text_size(px(12.)).text_color(c(th.error)).whitespace_normal().child(e))))
-            .child(div().px_5().py_3().flex().justify_end().gap_2().border_t_1().border_color(c(th.surface0))
+                .children(f.err.clone().map(|e| ui::notice(ui::Notice::Error, e).mx_0())))
+            .child(ui::dialog_footer(None, vec![])
                 .child(ui::button("dk-cr-no", t("ui.cancel"), 0).on_click(cx.listener(|v, _, _w, cx| { v.create = None; cx.notify(); })))
                 .child(ui::button("dk-cr-yes", if f.busy { t("docker.creating") } else { t("docker.create") }, 1).on_click(cx.listener(|v, _, _w, cx| { if v.create.as_ref().is_some_and(|f| !f.busy) { v.submit_create(cx); } cx.notify(); })))))
             .into_any_element())
@@ -516,17 +514,17 @@ impl DockView {
     fn exec_el(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let b = self.exec_box.as_ref()?;
         let th = cur();
-        let mut out = div().id("dk-exec-out").h(px(300.)).overflow_y_scroll().p_2().rounded(px(6.)).bg(c(th.mantle)).flex().flex_col();
+        let mut out = div().id("dk-exec-out").h(px(300.)).overflow_y_scroll().p_2().rounded(px(ui::R_MD)).bg(crate::theme::sub_bg()).flex().flex_col();
         if b.output.is_empty() { out = out.child(small(t("docker.exec_hint"))); }
         for l in b.output.lines().rev().take(2000).collect::<Vec<_>>().into_iter().rev() { out = out.child(mono(l.to_string()).whitespace_normal()); }
         Some(ui::modal(ui::card(640.)
-            .child(div().p_5().flex().flex_col().gap_3()
-                .child(div().flex().items_center().gap_2().child(icon(IconName::SquareTerminal, 16., c(th.accent))).child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(tf("docker.exec_title", &[("name", &b.name)])))
-                    .when(self.production, |d| d.child(ui::tag(t("tag.production"), c(th.error)))))
+            .child(ui::dialog_header(Some(IconName::SquareTerminal), tf("docker.exec_title", &[("name", &b.name)]), None, None)
+                .when(self.production, |d| d.child(ui::tag(t("tag.production"), c(th.error)))))
+            .child(div().p(px(ui::SP_5)).flex().flex_col().gap(px(ui::SP_3))
                 .child(div().flex().gap_2().child(div().flex_1().child(ui::text_field(&b.input, false)))
                     .child(ui::button("dk-ex-run", if b.running { t("docker.running") } else { t("docker.exec_run") }, 1).on_click(cx.listener(|v, _, _w, cx| { v.submit_exec(cx); cx.notify(); }))))
                 .child(out))
-            .child(div().px_5().py_3().flex().justify_end().gap_2().border_t_1().border_color(c(th.surface0))
+            .child(ui::dialog_footer(None, vec![])
                 .child(ui::button("dk-ex-clear", t("docker.clear"), 0).on_click(cx.listener(|v, _, _w, cx| { if let Some(b) = v.exec_box.as_mut() { b.output.clear(); } cx.notify(); })))
                 .child(ui::button("dk-ex-close", t("docker.close"), 0).on_click(cx.listener(|v, _, _w, cx| { v.exec_box = None; cx.notify(); })))))
             .into_any_element())
@@ -544,10 +542,10 @@ impl DockView {
         };
         let prod = self.production.then(|| ui::tag(t("tag.production"), c(th.error)));
         Some(ui::modal(ui::card(460.)
-            .child(div().p_5().flex().flex_col().gap_3()
-                .child(div().flex().items_center().gap_2().child(icon(IconName::TriangleAlert, 16., c(th.warning))).child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("db.confirm_title"))).children(prod))
+            .child(ui::dialog_header(Some(IconName::TriangleAlert), t("db.confirm_title"), None, None).children(prod))
+            .child(div().p(px(ui::SP_5)).flex().flex_col().gap(px(ui::SP_3))
                 .child(small(msg)))
-            .child(div().px_5().py_3().flex().justify_end().gap_2().border_t_1().border_color(c(th.surface0))
+            .child(ui::dialog_footer(None, vec![])
                 .child(ui::button("dk-cf-no", t("ui.cancel"), 0).on_click(cx.listener(|v, _, _w, cx| { v.ask = None; cx.notify(); })))
                 .child(ui::button("dk-cf-yes", t("db.confirm_run"), 2).on_click(cx.listener(|v, _, _w, cx| {
                     match v.ask.take() {
@@ -567,9 +565,9 @@ impl Render for DockView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
         if let Some(s) = self.pending_inspect.take() { self.inspect_ed.update(cx, |e, cx| e.set_value(s, window, cx)); }
-        let mut head = div().h(px(40.)).px_3().flex().items_center().gap_2().border_b_1().border_color(c(th.surface0)).bg(c(th.mantle))
-            .child(icon(IconName::Container, 14., c(th.accent)))
-            .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(self.ep.name.clone()))
+        let mut head = ui::toolbar()
+            .child(icon(IconName::Container, ui::IC_SM, c(th.accent)))
+            .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(self.ep.name.clone()))
             .child(small(self.dock.as_ref().map(|d| format!("{} · {}", d.via.clone().unwrap_or_else(|| t("docker.local").to_string()), d.version)).unwrap_or_default()));
         if self.production { head = head.child(ui::tag(t("tag.production"), c(th.error))); }
         if self.ep.read_only { head = head.child(ui::tag(t("db.read_only"), c(th.warning))); }
@@ -589,7 +587,7 @@ impl Render for DockView {
             let _ = me.update(cx, |v, cx| { v.sub = sub; v.refresh(cx); if sub == Sub::Stats { v.start_stats(cx); } cx.notify(); });
         }));
         let body: AnyElement = if let Some(e) = &self.conn_err {
-            div().flex_1().p_5().flex().flex_col().gap_2().child(div().text_size(px(13.)).text_color(c(th.error)).child(t("ui.connection_failed"))).child(mono(e.clone()).whitespace_normal()).into_any_element()
+            div().flex_1().p_5().flex().flex_col().gap_2().child(ui::notice(ui::Notice::Error, t("ui.connection_failed")).mx_0()).child(mono(e.clone()).whitespace_normal()).into_any_element()
         } else if self.dock.is_none() {
             div().flex_1().flex().items_center().justify_center().child(small(t("ui.connecting"))).into_any_element()
         } else {
@@ -601,7 +599,7 @@ impl Render for DockView {
                 Sub::Networks => self.simple_el(self.networks.iter().map(|n| (n.name.clone(), format!("{} · {} · {}", n.driver, n.scope, n.id.chars().take(12).collect::<String>()))).collect()),
             }
         };
-        let err = self.error.clone().map(|e| div().mx_3().mt_2().p_2().rounded(px(6.)).bg(c(th.error).opacity(0.12)).text_size(px(12.)).text_color(c(th.error)).whitespace_normal().child(e));
+        let err = self.error.clone().map(|e| ui::notice(ui::Notice::Error, e).mt(px(ui::SP_2)));
         let (menu, create, exec) = (self.menu_el(cx), self.create_el(cx), self.exec_el(cx));
         let ask = self.ask_el(cx);
         div().size_full().flex().flex_col().relative().bg(c(th.base)).child(head).children(err).child(body).children(menu).children(create).children(exec).children(ask)
@@ -672,13 +670,13 @@ impl Render for LogView {
         let f = self.filter_in.read(cx).value().trim().to_lowercase();
         let shown: Vec<&String> = self.lines.iter().filter(|l| f.is_empty() || l.to_lowercase().contains(&f)).collect();
         let start = shown.len().saturating_sub(3000);
-        let mut out = div().id("dk-log").flex_1().min_h_0().overflow_y_scroll().p_2().bg(c(th.mantle)).flex().flex_col();
+        let mut out = div().id("dk-log").flex_1().min_h_0().overflow_y_scroll().p_2().bg(crate::theme::sub_bg()).flex().flex_col();
         if let Some(e) = &self.conn_err { out = out.child(mono(e.clone()).text_color(c(th.error)).whitespace_normal()); }
         for l in &shown[start..] { out = out.child(mono((*l).clone()).whitespace_normal()); }
         div().size_full().flex().flex_col().bg(c(th.base))
-            .child(div().h(px(40.)).px_3().flex().items_center().gap_2().border_b_1().border_color(c(th.surface0))
-                .child(icon(IconName::FileText, 14., c(th.accent)))
-                .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(self.title.clone()))
+            .child(ui::toolbar()
+                .child(icon(IconName::FileText, ui::IC_SM, c(th.accent)))
+                .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(self.title.clone()))
                 .child(small(tf("docker.log_lines", &[("n", &self.lines.len())])))
                 .child(div().flex_1())
                 .child(div().w(px(220.)).child(ui::search_field(&self.filter_in, false)))

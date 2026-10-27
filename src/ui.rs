@@ -336,6 +336,12 @@ pub fn notice(kind: Notice, text: impl Into<SharedString>) -> Div {
     div().mx(px(LIST_INSET)).px(px(ROW_PX)).py(px(6.)).rounded(px(R_MD)).bg(col.opacity(0.10)).text_color(col).text_size(px(fs_small())).child(text.into())
 }
 
+/// 次要说明文字：`fs_small` + `subtext`。
+pub fn small(s: impl Into<SharedString>) -> Div { div().text_size(px(fs_small())).text_color(c(cur().subtext)).child(s.into()) }
+
+/// 等宽文字（命令、SQL、键值）：`mono_family` + `fs_mono` + `text`。
+pub fn mono(s: impl Into<SharedString>) -> Div { div().font_family(mono_family()).text_size(px(fs_mono())).text_color(c(cur().text)).child(s.into()) }
+
 /// 弹窗头部：高 48，可选强调色图标、标题 + 副标题、右侧关闭按钮（`dialog_close`）。
 pub fn dialog_header(ic: Option<IconName>, title: impl Into<SharedString>, subtitle: Option<SharedString>, close: Option<AnyElement>) -> Div {
     let th = cur();
