@@ -41,6 +41,46 @@ add-zsh-hook precmd __as_precmd
 add-zsh-hook preexec __as_preexec
 "#;
 
+/// PowerShell 集成：包一层 `prompt`，每次出提示符前输出 OSC 9;9（Windows Terminal / ConPTY 约定）和 OSC 7，
+/// 让路径栏知道当前目录（PowerShell 的 `Set-Location` 不会改变进程自身的工作目录，只靠进程探测会一直停在起始目录）。
+/// 先加载用户的 profile 再包装，所以 oh-my-posh / starship 等提示符主题照常生效。
+pub const PWSH_INTEGRATION: &str = concat!(
+    "$global:__as_p=$function:prompt; ",
+    "function global:prompt { $e=[char]27; $l=Get-Location; $o=if($global:__as_p){ & $global:__as_p } else { 'PS> ' }; ",
+    "if($l.Provider.Name -eq 'FileSystem'){ $d=$l.ProviderPath; ",
+    "($e+']9;9;'+$d+$e+'\\')+($e+']7;file://localhost/'+($d -replace '\\\\','/')+$e+'\\')+$o } else { $o } }"
+);
+
+/// cmd.exe 集成：`PROMPT` 里用 `$E]9;9;$P$E\` 输出 OSC 9;9，后面保留用户原来的提示符（默认 `$P$G`）。
+pub fn cmd_prompt(existing: Option<&str>) -> String {
+    format!("$E]9;9;$P$E\\{}", existing.filter(|s| !s.is_empty()).unwrap_or("$P$G"))
+}
+
+/// 用 sysinfo 读进程的工作目录（Mac: proc_pidinfo；Windows: 读进程环境块）。
+fn sysinfo_cwd(pid: u32) -> Option<String> {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    let mut sys = System::new();
+    let p = Pid::from_u32(pid);
+    sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[p]), ProcessRefreshKind::new().with_cwd(UpdateKind::Always));
+    sys.process(p).and_then(|pr| pr.cwd()).map(|d| d.display().to_string()).filter(|d| !d.is_empty())
+}
+
+/// 本地 shell 进程的当前工作目录：Linux 读 `/proc`；Mac / Windows 用 sysinfo（libproc / 读进程环境块），
+/// 结果缓存约一秒，因为路径栏每帧都会问。
+fn process_cwd_probe(pid: u32) -> crate::term::FgProbe {
+    let cache: Mutex<Option<(std::time::Instant, Option<String>)>> = Mutex::new(None);
+    Box::new(move || {
+        if cfg!(target_os = "linux") {
+            return std::fs::read_link(format!("/proc/{pid}/cwd")).ok().map(|p| p.display().to_string());
+        }
+        let mut g = cache.lock().ok()?;
+        if let Some((at, v)) = g.as_ref() { if at.elapsed() < std::time::Duration::from_millis(1000) { return v.clone(); } }
+        let v = sysinfo_cwd(pid);
+        *g = Some((std::time::Instant::now(), v.clone()));
+        v
+    })
+}
+
 /// Shell started for a local pane without an explicit shell: $SHELL, else the platform default.
 pub fn default_shell_path() -> String { std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(default_shell) }
 
@@ -135,6 +175,12 @@ pub fn spawn_local_in(size: Size, shell: Option<&str>, cwd: Option<&std::path::P
         cmd.env("ZDOTDIR", dir.as_os_str());
         hist_file = ".zsh_history";
     }
+    let stem = std::path::Path::new(&sh).file_stem().map(|s| s.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    if integrate && (stem == "pwsh" || stem == "powershell") {
+        cmd.args(["-NoLogo", "-NoExit", "-Command", PWSH_INTEGRATION]);
+    } else if integrate && stem == "cmd" {
+        cmd.env("PROMPT", cmd_prompt(std::env::var("PROMPT").ok().as_deref()));
+    }
     if sh.ends_with("zsh") { hist_file = ".zsh_history"; }
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
@@ -149,7 +195,7 @@ pub fn spawn_local_in(size: Size, shell: Option<&str>, cwd: Option<&std::path::P
     match cwd.filter(|c| c.is_dir()) { Some(c) => cmd.cwd(c), None => if let Some(h) = home() { cmd.cwd(h); } }
     let mut child = pair.slave.spawn_command(cmd)?;
     if let Some(pid) = child.process_id() {
-        *session.cwd_probe.lock().unwrap() = Some(Box::new(move || std::fs::read_link(format!("/proc/{pid}/cwd")).ok().map(|p| p.display().to_string())));
+        *session.cwd_probe.lock().unwrap() = Some(process_cwd_probe(pid));
     }
     if let Some(h) = home() {
         if let Ok(body) = std::fs::read(h.join(hist_file)) {
@@ -202,4 +248,27 @@ pub fn spawn_local_in(size: Size, shell: Option<&str>, cwd: Option<&std::path::P
         let _ = child.kill();
     })?;
     Ok(session)
+}
+
+#[cfg(test)]
+mod cwd_tests {
+    use super::*;
+    #[test]
+    fn cmd_prompt_emits_osc9_9_and_keeps_the_users_prompt() {
+        assert_eq!(cmd_prompt(None), "$E]9;9;$P$E\\$P$G");
+        assert_eq!(cmd_prompt(Some("$T$G")), "$E]9;9;$P$E\\$T$G");
+        assert_eq!(cmd_prompt(Some("")), "$E]9;9;$P$E\\$P$G");
+    }
+    #[test]
+    fn pwsh_script_has_no_double_quotes() {
+        // 作为一个命令行参数传给 powershell，避免被转义规则破坏
+        assert!(!PWSH_INTEGRATION.contains('"'));
+        assert!(PWSH_INTEGRATION.contains("9;9;"));
+    }
+    #[test]
+    fn sysinfo_reports_a_process_cwd() {
+        let here = std::env::current_dir().unwrap();
+        let got = sysinfo_cwd(std::process::id()).expect("cwd of own process");
+        assert_eq!(std::fs::canonicalize(&got).unwrap(), std::fs::canonicalize(here).unwrap());
+    }
 }

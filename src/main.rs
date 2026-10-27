@@ -1674,25 +1674,36 @@ pub(crate) fn sync_component_theme(th: &Theme, cx: &mut App) {
 }
 
 impl Root {
-    /// Current directory of the focused terminal, as a clickable path. Sits in the
-    /// card's bottom corner band so the rounded edge stays covered.
+    /// Current directory of the focused terminal, as a clickable path, plus the host readout at the
+    /// right. Sits in the card's bottom corner band so the rounded edge stays covered.
+    /// Local panes always get the bar: when the shell's directory is unknown (no OSC 7 / 9;9 yet and
+    /// no process probe) the path area shows the home directory instead of hiding the whole bar.
     fn cwd_bar(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let th = cur();
         let pane = self.focused_pane(window, cx);
         if !config::get().terminal.show_cwd { return None; }
-        let cwd = pane.as_ref().and_then(|p| p.read(cx).shell_cwd()).filter(|p| !p.is_empty());
+        let local = pane.as_ref().is_some_and(|p| matches!(p.read(cx).spec, termview::Spec::Local));
+        let cwd = pane.as_ref().and_then(|p| p.read(cx).shell_cwd()).filter(|p| !p.is_empty())
+            .or_else(|| local.then(|| std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_else(|_| "~".into())));
         let crumbs = cwd.as_deref().map(termview::cwd_crumbs).unwrap_or_default();
-        if crumbs.is_empty() { return None; }
-        let mut row = div().id("cwd-bar").h(px(28.)).flex_shrink_0().px_2().flex().items_center().gap(px(ui::SP_2))
+        let stats = pane.as_ref().and_then(|p| { let spec = p.read(cx).spec.clone(); self.host_stats_el(&spec, cx) });
+        if crumbs.is_empty() && stats.is_none() { return None; }
+        let mut row = div().id("cwd-bar").h(px(ui::H_DEFAULT)).flex_shrink_0().px_2().flex().items_center().gap(px(ui::SP_2))
             // 与终端内容之间一条细分隔线，底色略深一层
             .bg(c(th.mantle)).border_t_1().border_color(crate::theme::divider()).rounded_bl(px(card_layout::CARD_RADIUS)).rounded_br(px(card_layout::CARD_RADIUS));
-        let mut crumb_row = div().id("cwd-crumbs").h_full().flex_1().min_w_0().flex().items_center().gap(px(2.)).overflow_x_scroll();
+        // 每一段：固定高度 H_COMPACT，图标 + 文字同一行居中，行高显式给定（否则文字行盒比图标高，视觉上上下错位）；
+        // 分隔箭头放在同样高度的居中盒里，段与段之间不再另加间距。
+        let line = px(ui::lh(ui::fs_small()));
+        let mut crumb_row = div().id("cwd-crumbs").h_full().flex_1().min_w_0().flex().items_center().overflow_x_scroll();
         let last = crumbs.len().saturating_sub(1);
         for (i, (label, path)) in crumbs.into_iter().enumerate() {
-            if i > 0 { crumb_row = crumb_row.child(icon(IconName::ChevronRight, ui::IC_XS, c(th.overlay0))); }
+            if i > 0 {
+                crumb_row = crumb_row.child(div().h(px(ui::H_COMPACT)).w(px(ui::IC_XS + 2.)).flex_shrink_0().flex().items_center().justify_center()
+                    .child(icon(IconName::ChevronRight, ui::IC_XS, c(th.overlay0))));
+            }
             let pane = pane.clone();
             let here = i == last;
-            crumb_row = crumb_row.child(div().id(("cwd", i)).h(px(24.)).px_1().flex_shrink_0().rounded(px(ui::R_SM)).flex().items_center().gap(px(3.)).cursor_pointer()
+            crumb_row = crumb_row.child(div().id(("cwd", i)).h(px(ui::H_COMPACT)).px_1().flex_shrink_0().rounded(px(ui::R_SM)).flex().flex_row().items_center().gap(px(ui::SP_1)).cursor_pointer()
                 .hover(|d| d.bg(crate::theme::hover_bg()))
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(move |_, _, cx| {
@@ -1700,10 +1711,9 @@ impl Root {
                     let path = path.clone();
                     pane.update(cx, |v, cx| v.cd_to(&path, cx));
                 })
-                .child(icon(IconName::Folder, ui::IC_XS, c(th.overlay1)))
-                .child(div().text_size(px(ui::fs_small())).text_color(if here { c(th.text) } else { c(th.subtext) }).whitespace_nowrap().child(label)));
+                .child(div().size(px(ui::IC_XS)).flex_shrink_0().flex().items_center().justify_center().child(icon(IconName::Folder, ui::IC_XS, c(th.overlay1))))
+                .child(div().h(line).flex().items_center().text_size(px(ui::fs_small())).line_height(line).text_color(if here { c(th.text) } else { c(th.subtext) }).whitespace_nowrap().child(label)));
         }
-        let stats = pane.as_ref().and_then(|p| { let spec = p.read(cx).spec.clone(); self.host_stats_el(&spec, cx) });
         row = row.child(crumb_row).children(stats);
         Some(row.into_any_element())
     }

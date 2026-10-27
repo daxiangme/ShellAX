@@ -82,7 +82,22 @@ pub fn parse_osc7(payload: &str) -> Option<String> {
         }
         out.push(b[i]); i += 1;
     }
-    String::from_utf8(out).ok()
+    let path = String::from_utf8(out).ok()?;
+    Some(windows_drive_path(&path).unwrap_or(path))
+}
+
+/// `/C:/Users/x`（OSC 7 里的 Windows 路径）→ `C:\Users\x`；其他路径返回 None。
+fn windows_drive_path(p: &str) -> Option<String> {
+    let b = p.as_bytes();
+    if b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':' && (b.len() == 3 || b[3] == b'/') {
+        Some(p[1..].replace('/', "\\"))
+    } else { None }
+}
+
+/// OSC 9;9（Windows Terminal / ConPTY 约定，PowerShell 与 cmd 提示符输出）的负载：`"C:\Users\x"` 或不带引号。
+pub fn parse_osc9_cwd(payload: &str) -> Option<String> {
+    let p = payload.trim().trim_matches('"').trim();
+    if p.is_empty() { None } else { Some(p.to_string()) }
 }
 
 // ---------------------------------------------------------------- classification

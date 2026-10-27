@@ -98,6 +98,10 @@ fn resolve_relative_with_cwd() {
     assert_eq!(parse_osc7("file://host/home/u/my%20dir"), Some("/home/u/my dir".into()));
     assert_eq!(parse_osc7("file://h/tmp/%E4%B8%AD"), Some("/tmp/中".into()));
     assert_eq!(parse_osc7("http://x"), None);
+    assert_eq!(parse_osc7("file://PC/C:/Users/me/my%20dir"), Some("C:\\Users\\me\\my dir".into()));
+    assert_eq!(parse_osc7("file://PC/D:"), Some("D:".into()));
+    assert_eq!(parse_osc9_cwd("\"C:\\Users\\me\""), Some("C:\\Users\\me".into()));
+    assert_eq!(parse_osc9_cwd("  "), None);
 }
 
 #[test]

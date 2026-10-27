@@ -100,7 +100,7 @@ impl Root {
         if items.is_empty() { return None; }
         let tip = gpui::SharedString::from(tooltip_text(spec, &s));
         let stale = s.at.elapsed() > Duration::from_secs(hoststats::POLL_SECS * 5);
-        Some(div().id("host-stats").h(px(24.)).px_1().flex_shrink_0().flex().items_center().gap(px(ui::SP_2)).rounded(px(ui::R_SM)).cursor_pointer()
+        Some(div().id("host-stats").h(px(ui::H_COMPACT)).px_1().flex_shrink_0().flex().items_center().gap(px(ui::SP_2)).rounded(px(ui::R_SM)).cursor_pointer()
             .when(stale, |d| d.opacity(0.5))
             .hover(|d| d.bg(theme::hover_bg()))
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())

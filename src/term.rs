@@ -130,7 +130,7 @@ fn find_osc(b: &[u8]) -> Option<(usize, usize, u8, &[u8])> {
     while i + 4 < b.len() {
         let p = b[i..].windows(2).position(|w| w == b"\x1b]")? + i;
         let rest = &b[p + 2..];
-        let (kind, skip) = if rest.starts_with(b"133;") { (b'1', 4) } else if rest.starts_with(b"9;4") { (b'9', 2) } else if rest.starts_with(b"7;") { (b'7', 2) } else { i = p + 2; continue };
+        let (kind, skip) = if rest.starts_with(b"133;") { (b'1', 4) } else if rest.starts_with(b"9;4") { (b'9', 2) } else if rest.starts_with(b"7;") { (b'7', 2) } else if rest.starts_with(b"9;9;") { (b'c', 4) } else { i = p + 2; continue };
         let body = &rest[skip..];
         let end = body.iter().enumerate().find_map(|(j, &c)| {
             if c == 0x07 { Some((j, j + 1)) } else if c == 0x1b && body.get(j + 1) == Some(&b'\\') { Some((j, j + 2)) } else { None }
@@ -203,6 +203,8 @@ impl Session {
                                 }
                             } else if kind == b'7' {
                                 if let Some(p) = crate::ctxmenu::parse_osc7(&String::from_utf8_lossy(payload)) { *s2.osc7_cwd.lock().unwrap() = Some(p); }
+                            } else if kind == b'c' {
+                                if let Some(p) = crate::ctxmenu::parse_osc9_cwd(&String::from_utf8_lossy(payload)) { *s2.osc7_cwd.lock().unwrap() = Some(p); }
                             } else {
                                 *s2.shared.progress.lock().unwrap() = String::from_utf8_lossy(payload).into_owned();
                             }
@@ -373,6 +375,8 @@ mod tests {
         assert_eq!(&b[s..e], b"\x1b]133;B\x07");
         let (_, _, k7, p7) = find_osc(b"x\x1b]7;file://h/tmp/a b\x07y").unwrap();
         assert_eq!((k7, p7), (b'7', &b"file://h/tmp/a b"[..]));
+        let (_, _, kc, pc) = find_osc(b"x\x1b]9;9;\"C:\\Users\"\x1b\\y").unwrap();
+        assert_eq!((kc, pc), (b'c', &b"\"C:\\Users\""[..]));
         let b = b"\x1b]9;4;1;-1\x1b\\";
         let (_, _, k, p) = find_osc(b).unwrap();
         assert_eq!((k, p), (b'9', &b"4;1;-1"[..]));

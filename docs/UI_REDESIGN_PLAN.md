@@ -395,7 +395,7 @@ island
 ### 5.4 中间内容岛
 
 - **pane 悬浮头**（`tabs_ui.rs:257-280`）：按钮 → `IconBtn::Md`；容器底 `card_bg()`、边框 `divider()`、`R_SUB`。
-- **路径栏 cwd bar**（`main.rs:1705`）：高 28 保持；文字 `fs_small`；分隔线 `divider()`。通栏贴满内容岛左右边缘，底部圆角 `CARD_RADIUS`。
+- **路径栏 cwd bar**（`main.rs:1705`）：高 28 保持；文字 `fs_small`；分隔线 `divider()`。每段高 `H_COMPACT`，图标（`IC_XS`）与文字（显式行高 `lh(fs_small)`）同行居中、间距 `SP_1`；分隔箭头在同高居中盒里。本地面板始终显示路径栏：目录取 OSC 7 / OSC 9;9（PowerShell、cmd 提示符注入）→ 进程工作目录（Linux `/proc`，Mac / Windows sysinfo）→ 主目录；右侧显示本机 CPU / 内存 / 磁盘（Windows 无负载）。通栏贴满内容岛左右边缘，底部圆角 `CARD_RADIUS`。
 - **空工作区**（`ws_empty`）→ `empty_state`（横向按钮）。
 - **数据库视图**（`db_view.rs`）：工具栏 36/34 → `toolbar()`；结果表头 `table_header`；单元格 `mono_family` + `fs_mono`；SQL 编辑器/结果子卡片 `R_SUB`；错误条 `notice(error)`。
 - **Redis 视图**（`kv_view.rs:659`）、**Docker 视图**（`dock_view.rs:346,396,570,679`）、**文档视图**（`doc_view.rs:403`）、**工具页**（`tools_view.rs:258`）、**工作区头**（`workspace.rs:130`）：头部统一 `toolbar()`；分组头 `table_header`；`small()/mono()` 辅助函数改为调用 `ui` 组件；弹出表单 → `ui::card` + `dialog_header/footer`。
