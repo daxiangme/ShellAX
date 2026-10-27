@@ -14,6 +14,11 @@ on:
 permissions:
   contents: write
 
+# 多个扩展标签同时推送时依次执行，避免同时改写 ext-index。
+concurrency:
+  group: ext-release
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -55,6 +60,7 @@ jobs:
           name: ext-packs
           path: dist/
       - name: Publish
+        # 扩展包 Release 一律不标为“最新”，应用内更新检查只看 v* 正式版
         if: github.event_name == 'push' || inputs.dry_run == false
         env:
           GH_TOKEN: ${{ github.token }}
@@ -62,8 +68,8 @@ jobs:
           set -euo pipefail
           if [ "${GITHUB_EVENT_NAME}" = push ]; then
             tag="${GITHUB_REF_NAME}"; id=$(echo "$tag" | sed -E 's/^ext-(.*)-v[^-]+$/\1/')
-            gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --title "$tag" --notes "扩展包 $id"
+            gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --title "$tag" --notes "扩展包 $id" --latest=false
             gh release upload "$tag" "dist/$id.wasm" --clobber
           fi
-          gh release view ext-index >/dev/null 2>&1 || gh release create ext-index --title ext-index --notes "扩展包索引"
+          gh release view ext-index >/dev/null 2>&1 || gh release create ext-index --title ext-index --notes "扩展包索引" --latest=false
           gh release upload ext-index dist/index.json --clobber
