@@ -28,7 +28,7 @@ ShellAX 是用 Rust + GPUI 编写的跨平台终端 / SSH 客户端。除终端�
 - **主机管理**：分组（`a/b/c` 嵌套）、颜色标签、生产主机标记、从 `~/.ssh/config` 导入、`ssh://` / `sftp://` 链接、SSH 密钥生成与导入；密钥口令与 API Key 存入系统钥匙串，不可用时退回加密文件，不写入配置文件。
 
 ### SFTP
-弹窗 / 标签页 / 分屏 / 独立窗口四种打开方式；本机与远端、远端与远端之间均可传输；传输队列支持断点续传；内置文本编辑（带冲突检测）；目录同步（单向或双向，先预览差异，删除需确认）。
+SFTP 在独立标签页中打开，两侧各自选择“本机”或任一已保存主机，本机与远端、远端与远端之间均可传输；传输队列支持断点续传；内置文本编辑（带冲突检测）；目录同步（单向或双向，先预览差异，删除需确认）。
 
 ### 数据库
 - 连接：MySQL、MariaDB、StarRocks、OceanBase、PostgreSQL、openGauss、Kingbase、SQLite、SQL Server、ClickHouse，以及 MongoDB（独立的文档标签）。可直连，也可经 SSH 隧道；连接可标记为只读或生产。
@@ -73,12 +73,12 @@ ShellAX 是用 Rust + GPUI 编写的跨平台终端 / SSH 客户端。除终端�
 - **权限引擎**：三种模式（询问 / 只读计划 / 自动）、风险等级与允许 / 询问 / 拒绝规则，生产主机写操作与危险命令可强制确认；Ctrl+Shift+M 循环切换模式。
 - **外部 Agent**：识别运行在终端中的命令行 Agent 的状态（空闲 / 工作中 / 等待审批），可在状态变化时发桌面通知；审批超时可自动拒绝或继续等待。
 - **`shellax-cli` 与本地策略服务**：为外部 Agent 安装命令钩子，所有命令经权限引擎判定；Agent 也可通过 `exec` / `upload` / `download` 在已保存的主机上操作，只需给出主机名，凭据与密钥始终留在 ShellAX 内。
-- **审计**：追加式 JSONL 日志，带 SHA-256 哈希链，可校验完整性，保留天数可配置；Ctrl+Shift+L 打开审计查看。
+- **审计**：追加式 JSONL 日志，带 SHA-256 哈希链，保留天数可配置；Ctrl+Shift+L 打开审计查看。
 - **组织托管策略**：`/etc/shellax/managed-policy.yaml`（只读、优先级最高）可强制硬拒绝规则、限定权限模式、对生产主机限制风险等级、设定审计保留下限。
 
 ### 界面与设置
 - 亮 / 暗主题与跟随系统，内置多套主题与终端配色，可导入配色（ShellAX TOML、`.itermcolors` 与通用 TOML 配色文件）；中英文界面；可选“减少动态效果”；系统托盘（Linux，显示运行中的 Agent 数量）；命令面板（Ctrl+Shift+P）；可自定义右键上下文菜单；快捷键可在设置中修改。
-- 设置分为：通用、外观、终端、命令建议、SSH、代理、凭据与密钥、AI、外部 Agent、权限、标签、审计、会话、快捷键、通知、右键菜单、扩展、关于。
+- 设置分为：通用、外观、终端、命令建议、SSH、代理、凭据与密钥、AI、外部 Agent、权限与安全、标签、审计、会话与布局、快捷键、通知、右键菜单、扩展、关于。
 
 ### 更新
 - 默认从 GitHub Releases 检查更新，可选“稳定版 / 测试版”通道；也可指定自定义清单地址（`general.update_url` 或 `SHELLAX_UPDATE_URL`）。
@@ -87,7 +87,7 @@ ShellAX 是用 Rust + GPUI 编写的跨平台终端 / SSH 客户端。除终端�
 ## 安装
 
 ### Windows
-从发布页下载 `ShellAX-Setup-x64.exe`（安装包）或 `ShellAX-portable-x64.zip`（便携版）。最低 Windows 10 1903。安装包未做代码签名，SmartScreen 可能提示“已保护你的电脑”，点“更多信息 → 仍要运行”。
+从发布页下载 `ShellAX-Setup-x64.exe`（安装包）或 `ShellAX-portable-x64.zip`（便携版）。安装包未做代码签名，SmartScreen 可能提示“已保护你的电脑”，点“更多信息 → 仍要运行”。
 
 ### Mac
 打开 `ShellAX-macos-aarch64.dmg`（或使用同名 `.zip`），把 ShellAX 拖到 Applications。应用仅做 ad-hoc 签名、未经公证，首次打开若提示“无法验证开发者”：
@@ -104,12 +104,12 @@ ShellAX 是用 Rust + GPUI 编写的跨平台终端 / SSH 客户端。除终端�
   - `serve`：无界面运行策略服务
   - `hosts`、`exec`、`upload`、`download`：在已保存的主机上列出、执行、传输
   - `play`：播放 asciicast 录制
-  - `daemon`：本地常驻进程，窗口关闭后 shell 仍保留（仅 Linux / Mac）
+  - `daemon`：本地常驻进程，窗口关闭后 shell 仍保留（需在设置的“会话与布局”中开启；仅 Linux / Mac）
 - 配置：`~/.config/shellax/config.toml`（Windows：`%APPDATA%\ShellAX`）；数据：`~/.local/share/shellax`（Windows：`%LOCALAPPDATA%\shellax`）。
 - 环境变量：`SHELLAX_CONFIG` 指定配置文件，`SHELLAX_NO_ANIM=1` 关闭动画，`SHELLAX_SERVER_DECORATIONS=1` 使用系统标题栏，`SHELLAX_UPDATE_URL` 指定自定义更新清单。
 
 ## 构建
-需要 Rust ≥ 1.89。Linux 另需 `libxkbcommon-dev libwayland-dev libvulkan-dev libfontconfig-dev libssl-dev clang`；Windows 需要 Visual Studio Build Tools（使用 C++ 的桌面开发）。
+使用 Rust stable 工具链（CI 与发布均使用 stable）。平台依赖与调试方法见 `docs/DEVELOPMENT.md`。
 ```bash
 cargo build --release
 cargo build --profile dist        # 发布构建：LTO + strip
