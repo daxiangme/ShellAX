@@ -1028,19 +1028,11 @@ impl SftpView {
     }
 
     fn nav_row(&self, pi: usize, cx: &mut Context<Self>) -> AnyElement {
-        let th = cur();
         let p = &self.panes[pi];
         let mut bar = div().h(px(ui::H_LARGE)).flex_shrink_0().px_2().flex().items_center().gap(px(2.)).bg(crate::theme::sub_bg()).overflow_hidden()
             .child(icon_btn(("sftp-back", pi), IconName::ArrowLeft, !p.back.is_empty()).on_click(cx.listener(move |v, _, _, cx| v.go_back(pi, cx))))
             .child(icon_btn(("sftp-fwd", pi), IconName::ArrowRight, !p.fwd.is_empty()).on_click(cx.listener(move |v, _, _, cx| v.go_fwd(pi, cx))))
             .child(div().w(px(4.)));
-        let crumb = |i: usize, label: String, last: bool| {
-            div().id(("sftp-crumb", pid(pi, i))).h(px(H_COMPACT)).px_1().flex_shrink_0().rounded(px(R_SM)).flex().items_center().cursor_pointer()
-                .text_size(px(fs_small())).text_color(if last { c(th.text) } else { c(th.subtext) })
-                .when(last, |d| d.font_weight(FontWeight::MEDIUM))
-                .hover(|d| d.bg(crate::theme::hover_bg()))
-                .child(label)
-        };
         let mut parts: Vec<(String, String)> = vec![];
         if p.is_local() {
             if cfg!(windows) { parts.push((t("sftp.this_pc").to_string(), String::new())); }
@@ -1050,8 +1042,8 @@ impl SftpView {
         }
         let n = parts.len();
         for (i, (label, dir)) in parts.into_iter().enumerate() {
-            if i > 0 { bar = bar.child(icon(IconName::ChevronRight, ui::IC_XS, c(th.overlay0))); }
-            bar = bar.child(crumb(i, label, i + 1 == n).on_click(cx.listener(move |v, _, _, cx| v.goto(pi, dir.clone(), cx))));
+            if i > 0 { bar = bar.child(ui::crumb_sep()); }
+            bar = bar.child(ui::crumb(("sftp-crumb", pid(pi, i)), None, Some(label.into()), i + 1 == n).on_click(cx.listener(move |v, _, _, cx| v.goto(pi, dir.clone(), cx))));
         }
         bar.into_any_element()
     }

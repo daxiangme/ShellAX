@@ -57,7 +57,8 @@ enum IconField { Color, Glyph }
 pub(crate) enum SbModal {
     /// 右键「更换图标」：色板 + 图标网格 + 恢复默认；每次点选立即写入配置，预览与侧栏同步更新。
     ChangeIcon(IconTarget),
-    Prompt { kind: PromptKind, input: Entity<InputState> },
+    /// `icon`：带「图标」栏的对话框（新建 / 重命名分组、重命名主机 / 位置、保存位置）暂存的 (icon, icon_color)，保存时一并写入；其余为 `None`。
+    Prompt { kind: PromptKind, input: Entity<InputState>, icon: Option<(Option<String>, Option<String>)> },
     DeleteHost(String),
     DeleteGroup(String),
     Import { cands: Vec<HostEntry>, checked: Vec<bool>, group: Entity<InputState> },
@@ -85,6 +86,29 @@ impl Render for GroupDrag {
         div().px_3().py_1().rounded(px(ui::R_MD)).bg(c(th.base)).border_1().border_color(c(th.accent)).flex().items_center().gap_1()
             .child(icon(IconName::Folder, ui::IC_XS, c(th.accent))).text_size(px(ui::fs_body())).text_color(c(th.text)).child(hosttree::leaf_of(&self.path).to_string())
     }
+}
+
+/// 目标在配置里的 (icon, icon_color) 两个槽位；分组没有条目时先补一条。
+fn icon_slot<'a>(s: &'a mut config::Settings, t: &IconTarget) -> Option<(&'a mut Option<String>, &'a mut Option<String>)> {
+    match t {
+        IconTarget::Host(n) => s.hosts.iter_mut().find(|h| &h.name == n).map(|h| (&mut h.icon, &mut h.icon_color)),
+        IconTarget::Group(p) => {
+            if !s.groups.iter().any(|g| &g.path == p) { s.groups.push(hosttree::GroupEntry { path: p.clone(), ..Default::default() }); }
+            s.groups.iter_mut().find(|g| &g.path == p).map(|g| (&mut g.icon, &mut g.icon_color))
+        }
+        IconTarget::Place(i) => s.places.get_mut(*i).map(|p| (&mut p.icon, &mut p.icon_color)),
+    }
+}
+/// 颜色 id → 存储值（主机默认无色；文件夹默认蓝；未知 id 丢弃）。
+fn store_color(t: &IconTarget, id: &str) -> Option<String> { iconset::store(id, if matches!(t, IconTarget::Host(_)) { "" } else { iconset::COLORS[0] }, iconset::is_color) }
+/// 图标 / 字形 id → 存储值（默认与未知 id 存成 `None`）。
+fn store_glyph(t: &IconTarget, id: &str) -> Option<String> {
+    if matches!(t, IconTarget::Host(_)) { iconset::store(id, iconset::HOST_ICONS[0], iconset::is_host_icon) } else { iconset::store(id, iconset::FOLDER_GLYPHS[0], iconset::is_folder_glyph) }
+}
+/// 编辑对话框保存时一并写入暂存的 (icon, icon_color)；`None` 表示该对话框没有图标栏，不改动。
+fn apply_icon(s: &mut config::Settings, t: &IconTarget, v: &Option<(Option<String>, Option<String>)>) {
+    let Some((icon, color)) = v else { return };
+    if let Some((i, c)) = icon_slot(s, t) { *i = icon.clone(); *c = color.clone(); }
 }
 
 impl Root {
@@ -117,20 +141,11 @@ impl Root {
         let detail = format!("target={target:?} field={field:?}");
         self.sb_save("sidebar.icon", detail, move |s| {
             let (mut icon, mut color) = (None, None);
-            let slot: Option<(&mut Option<String>, &mut Option<String>)> = match &t {
-                IconTarget::Host(n) => s.hosts.iter_mut().find(|h| &h.name == n).map(|h| (&mut h.icon, &mut h.icon_color)),
-                IconTarget::Group(p) => {
-                    if !s.groups.iter().any(|g| &g.path == p) { s.groups.push(hosttree::GroupEntry { path: p.clone(), ..Default::default() }); }
-                    s.groups.iter_mut().find(|g| &g.path == p).map(|g| (&mut g.icon, &mut g.icon_color))
-                }
-                IconTarget::Place(i) => s.places.get_mut(*i).map(|p| (&mut p.icon, &mut p.icon_color)),
-            };
-            let (i, c) = slot.unwrap_or((&mut icon, &mut color));
-            let host = matches!(t, IconTarget::Host(_));
+            let (i, c) = icon_slot(s, &t).unwrap_or((&mut icon, &mut color));
             match field {
                 None => { *i = None; *c = None; }
-                Some((IconField::Color, id)) => *c = iconset::store(&id, if host { "" } else { iconset::COLORS[0] }, iconset::is_color),
-                Some((IconField::Glyph, id)) => *i = if host { iconset::store(&id, iconset::HOST_ICONS[0], iconset::is_host_icon) } else { iconset::store(&id, iconset::FOLDER_GLYPHS[0], iconset::is_folder_glyph) },
+                Some((IconField::Color, id)) => *c = store_color(&t, &id),
+                Some((IconField::Glyph, id)) => *i = store_glyph(&t, &id),
             }
         }, cx);
     }
@@ -211,29 +226,39 @@ impl Root {
     fn prompt(&mut self, kind: PromptKind, value: String, window: &mut Window, cx: &mut Context<Self>) {
         let input = cx.new(|cx| InputState::new(window, cx).default_value(value));
         input.update(cx, |s, cx| s.focus(window, cx));
-        self.sb_modal = Some(SbModal::Prompt { kind, input });
+        let icon = match &kind {
+            PromptKind::NewGroup(_) | PromptKind::SavePlace { .. } => Some((None, None)),
+            PromptKind::RenameHost(n) => Some(Self::icon_of(&IconTarget::Host(n.clone()))),
+            PromptKind::RenameGroup(p) => Some(Self::icon_of(&IconTarget::Group(p.clone()))),
+            PromptKind::RenamePlace(i) => Some(Self::icon_of(&IconTarget::Place(*i))),
+            PromptKind::PlacePath { .. } => None,
+        };
+        self.sb_modal = Some(SbModal::Prompt { kind, input, icon });
         cx.notify();
     }
-    fn prompt_ok(&mut self, kind: PromptKind, val: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn prompt_ok(&mut self, kind: PromptKind, val: String, icon: Option<(Option<String>, Option<String>)>, window: &mut Window, cx: &mut Context<Self>) {
         let val = val.trim().to_string();
         if val.is_empty() { return; }
         match kind {
             PromptKind::NewGroup(parent) => {
                 let mut made = String::new();
-                self.sb_save("hosts.group_new", format!("parent={parent:?} name={val:?}"), |s| { made = hosttree::add_group(&mut s.groups, &parent, &val); }, cx);
+                self.sb_save("hosts.group_new", format!("parent={parent:?} name={val:?}"), |s| { made = hosttree::add_group(&mut s.groups, &parent, &val); apply_icon(s, &IconTarget::Group(made.clone()), &icon); }, cx);
                 // make sure the new group is visible
                 if !parent.is_empty() && config::get().sidebar.collapsed.contains(&parent) { self.toggle_collapsed(&parent, cx); }
             }
             PromptKind::RenameHost(old) => {
                 if config::get().hosts.iter().any(|h| h.name == val && h.name != old) { return self.toast(tf("host.exists", &[("name", &val)]), cx); }
-                self.sb_save("hosts.rename", format!("from={old:?} to={val:?}"), |s| { hosttree::rename_host(&mut s.hosts, &old, &val); }, cx);
+                self.sb_save("hosts.rename", format!("from={old:?} to={val:?}"), |s| { hosttree::rename_host(&mut s.hosts, &old, &val); apply_icon(s, &IconTarget::Host(val.clone()), &icon); }, cx);
             }
             PromptKind::RenameGroup(old) => {
                 let mut ok = true;
                 self.sb_save("hosts.group_rename", format!("from={old:?} to={val:?}"), |s| {
                     let (h, g) = (&mut s.hosts, &mut s.groups);
                     match hosttree::rename_group(h, g, &old, &val) {
-                        Some(new) => for c in s.sidebar.collapsed.iter_mut() { if hosttree::under(c, &old) { *c = format!("{new}{}", &c[old.len()..]); } },
+                        Some(new) => {
+                            for c in s.sidebar.collapsed.iter_mut() { if hosttree::under(c, &old) { *c = format!("{new}{}", &c[old.len()..]); } }
+                            apply_icon(s, &IconTarget::Group(new), &icon);
+                        }
                         None => ok = false,
                     }
                 }, cx);
@@ -245,10 +270,10 @@ impl Root {
                 return;
             }
             PromptKind::SavePlace { path, host, group } => {
-                self.sb_save("places.save", format!("name={val:?} path={path:?} host={host:?} group={group:?}"), |s| s.places.push(config::Place { name: val.clone(), path, host, group, ..Default::default() }), cx);
+                self.sb_save("places.save", format!("name={val:?} path={path:?} host={host:?} group={group:?}"), |s| { s.places.push(config::Place { name: val.clone(), path, host, group, ..Default::default() }); let i = s.places.len() - 1; apply_icon(s, &IconTarget::Place(i), &icon); }, cx);
             }
             PromptKind::RenamePlace(i) => {
-                self.sb_save("places.rename", format!("i={i} name={val:?}"), |s| { if let Some(p) = s.places.get_mut(i) { p.name = val.clone(); } }, cx);
+                self.sb_save("places.rename", format!("i={i} name={val:?}"), |s| { if let Some(p) = s.places.get_mut(i) { p.name = val.clone(); } apply_icon(s, &IconTarget::Place(i), &icon); }, cx);
             }
         }
         self.sb_modal = None;
@@ -693,38 +718,21 @@ impl Root {
         match m {
             SbModal::ChangeIcon(target) => {
                 let (icon_id, color_id) = Self::icon_of(&target);
-                let is_host = matches!(target, IconTarget::Host(_));
+                let kind = if matches!(target, IconTarget::Host(_)) { ui::IconKind::Host } else { ui::IconKind::Folder };
                 let entity_name = match &target {
                     IconTarget::Host(n) => n.clone(),
                     IconTarget::Group(p) => hosttree::leaf_of(p).to_string(),
                     IconTarget::Place(i) => config::get().places.get(*i).map(|p| p.name.clone()).unwrap_or_default(),
                 };
-                let (cur_icon, cur_color) = (iconset::pick(&icon_id, if is_host { iconset::is_host_icon } else { iconset::is_folder_glyph }), iconset::pick(&color_id, iconset::is_color));
-                // 预览：与侧栏行同款图标，放大一档
-                let preview = if is_host { crate::file_icon::host_icon(ui::IC_XL, cur_icon, cur_color) } else { crate::file_icon::folder_icon_styled(ui::IC_XL, false, cur_color, cur_icon) };
-                let swatches: Vec<(String, gpui::Hsla, String)> = iconset::COLORS.iter().map(|id| (id.to_string(), crate::theme::folder_tone(Some(id)).0 .0, t(&format!("icon.color.{id}")).to_string())).collect();
                 let me = cx.entity().downgrade();
                 let on_color = { let (me, tg) = (me.clone(), target.clone()); move |id: String, _w: &mut Window, cx: &mut gpui::App| { let _ = me.update(cx, |this, cx| this.set_icon(&tg, Some((IconField::Color, id)), cx)); } };
                 let on_glyph = { let (me, tg) = (me.clone(), target.clone()); move |id: String, _w: &mut Window, cx: &mut gpui::App| { let _ = me.update(cx, |this, cx| this.set_icon(&tg, Some((IconField::Glyph, id)), cx)); } };
-                let cells: Vec<(String, AnyElement, String)> = if is_host {
-                    iconset::HOST_ICONS.iter().map(|id| (id.to_string(), crate::file_icon::host_icon(ui::IC_XL, Some(id), cur_color), t(&format!("icon.host.{id}")).to_string())).collect()
-                } else {
-                    iconset::FOLDER_GLYPHS.iter().map(|id| (id.to_string(), crate::file_icon::folder_icon_styled(ui::IC_XL, false, cur_color, Some(id)), t(&format!("icon.glyph.{id}")).to_string())).collect()
-                };
-                let label = |k: &'static str| div().text_size(px(ui::fs_small())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.subtext)).child(t(k));
                 hdr = (IconName::Palette, c(cur().accent), t("icon.title").to_string());
-                body = body
-                    .child(div().flex().items_center().gap(px(ui::SP_3))
-                        .child(div().size(px(ui::ICON_CELL + 8.)).flex_shrink_0().rounded(px(ui::R_MD)).bg(crate::theme::sub_bg()).flex().items_center().justify_center().child(preview))
-                        .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(entity_name)))
-                    .child(label(if is_host { "icon.accent" } else { "icon.color" }))
-                    .child(ui::swatch_row("icon-color", &swatches, if is_host { cur_color } else { Some(cur_color.unwrap_or(iconset::COLORS[0])) }, on_color))
-                    .child(label("icon.icon"))
-                    .child(ui::icon_grid("icon-glyph", cells, Some(cur_icon.unwrap_or(if is_host { iconset::HOST_ICONS[0] } else { iconset::FOLDER_GLYPHS[0] })), 6, on_glyph));
+                body = body.child(ui::icon_picker(kind, icon_id.as_deref(), color_id.as_deref(), Some(entity_name), None, on_color, on_glyph));
                 let reset = ui::button("sbm-icon-reset", t("icon.reset"), 0).on_click({ let tg = target.clone(); cx.listener(move |this, _, _w, cx| this.set_icon(&tg, None, cx)) });
                 foot = ui::dialog_footer(Some(reset.into_any_element()), vec![ui::button("sbm-icon-done", t("ui.done"), 1).on_click(cx.listener(|this, _, w, cx| { this.sb_modal = None; this.focus_active(w, cx); cx.notify(); })).into_any_element()]);
             }
-            SbModal::Prompt { kind, input } => {
+            SbModal::Prompt { kind, input, icon } => {
                 let head = match &kind {
                     PromptKind::NewGroup(p) if p.is_empty() => t("sb.new_group").to_string(),
                     PromptKind::NewGroup(p) => tf("sb.new_subgroup_in", &[("g", &hosttree::leaf_of(p))]),
@@ -732,12 +740,24 @@ impl Root {
                     PromptKind::SavePlace { .. } => t("place.name_title").to_string(),
                     PromptKind::PlacePath { .. } => t("place.path_title").to_string(),
                 };
+                let (ic1, ic2) = (icon.clone(), icon.clone());
+                let host_kind = matches!(kind, PromptKind::RenameHost(_));
                 let (k1, i1, k2, i2) = (kind.clone(), input.clone(), kind, input.clone());
                 hdr = (IconName::TextCursorInput, c(cur().accent), head);
                 body = body
-                    .child(div().on_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, w, cx| if ev.keystroke.key == "enter" { let v = i1.read(cx).value().to_string(); this.prompt_ok(k1.clone(), v, w, cx); cx.notify(); })).child(ui::text_field(&input, false)));
+                    .child(div().on_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, w, cx| if ev.keystroke.key == "enter" { let v = i1.read(cx).value().to_string(); this.prompt_ok(k1.clone(), v, ic1.clone(), w, cx); cx.notify(); })).child(ui::text_field(&input, false)));
+                if let Some((ic, col)) = icon {
+                    // 「图标」栏：暂存在对话框里，点「保存」时与名称一起写入
+                    let me = cx.entity().downgrade();
+                    let tg = if host_kind { IconTarget::Host(String::new()) } else { IconTarget::Place(0) };
+                    let on_color = { let (me, tg) = (me.clone(), tg.clone()); move |id: String, _w: &mut Window, cx: &mut gpui::App| { let _ = me.update(cx, |this, cx| { if let Some(SbModal::Prompt { icon: Some(v), .. }) = this.sb_modal.as_mut() { v.1 = store_color(&tg, &id); } cx.notify(); }); } };
+                    let on_glyph = { let (me, tg) = (me.clone(), tg.clone()); move |id: String, _w: &mut Window, cx: &mut gpui::App| { let _ = me.update(cx, |this, cx| { if let Some(SbModal::Prompt { icon: Some(v), .. }) = this.sb_modal.as_mut() { v.0 = store_glyph(&tg, &id); } cx.notify(); }); } };
+                    let reset = ui::button("sbm-icon-reset", t("icon.reset"), 0).on_click(cx.listener(|this, _, _w, cx| { if let Some(SbModal::Prompt { icon: Some(v), .. }) = this.sb_modal.as_mut() { *v = (None, None); } cx.notify(); }));
+                    body = body.child(div().text_size(px(ui::fs_small())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.subtext)).child(t("icon.field")))
+                        .child(ui::icon_picker(if host_kind { ui::IconKind::Host } else { ui::IconKind::Folder }, ic.as_deref(), col.as_deref(), None, Some(reset.into_any_element()), on_color, on_glyph));
+                }
                 foot = foot.child(cancel)
-                        .child(ui::button("sbm-ok", t("ui.save"), 1).on_click(cx.listener(move |this, _, w, cx| { let v = i2.read(cx).value().to_string(); this.prompt_ok(k2.clone(), v, w, cx); cx.notify(); })));
+                        .child(ui::button("sbm-ok", t("ui.save"), 1).on_click(cx.listener(move |this, _, w, cx| { let v = i2.read(cx).value().to_string(); this.prompt_ok(k2.clone(), v, ic2.clone(), w, cx); cx.notify(); })));
             }
             SbModal::NewTab { spec, label, dont_ask } => {
                 let sp = spec.clone();
@@ -852,5 +872,36 @@ impl Root {
     pub(crate) fn save_ai_width(&mut self) {
         let w = self.ai_width.round();
         if (config::get().sidebar.ai_width - w).abs() >= 1.0 { let _ = config::update(|s| s.sidebar.ai_width = w); }
+    }
+}
+
+#[cfg(test)]
+mod icon_tests {
+    use super::*;
+    #[test]
+    fn dialog_icon_apply_covers_host_group_place() {
+        let mut s = config::Settings::default();
+        s.hosts.push(ssh_term_proto::hosts::HostEntry { name: "web".into(), host: "h".into(), ..Default::default() });
+        s.places.push(config::Place { name: "p".into(), path: "/".into(), ..Default::default() });
+        let v = Some((Some("router".to_string()), Some("green".to_string())));
+        apply_icon(&mut s, &IconTarget::Host("web".into()), &v);
+        apply_icon(&mut s, &IconTarget::Place(0), &Some((Some("star".into()), None)));
+        // 分组没有条目时由 apply_icon 补一条
+        apply_icon(&mut s, &IconTarget::Group("prod".into()), &Some((Some("database".into()), Some("red".into()))));
+        assert_eq!((s.hosts[0].icon.as_deref(), s.hosts[0].icon_color.as_deref()), (Some("router"), Some("green")));
+        assert_eq!((s.places[0].icon.as_deref(), s.places[0].icon_color.as_deref()), (Some("star"), None));
+        let g = s.groups.iter().find(|g| g.path == "prod").unwrap();
+        assert_eq!((g.icon.as_deref(), g.icon_color.as_deref()), (Some("database"), Some("red")));
+        // None = 对话框没有图标栏，不改动；(None, None) = 恢复默认
+        apply_icon(&mut s, &IconTarget::Host("web".into()), &None);
+        assert_eq!(s.hosts[0].icon.as_deref(), Some("router"));
+        apply_icon(&mut s, &IconTarget::Host("web".into()), &Some((None, None)));
+        assert_eq!((s.hosts[0].icon.clone(), s.hosts[0].icon_color.clone()), (None, None));
+        // 默认值与未知 id 存成 None
+        assert_eq!(store_color(&IconTarget::Group("x".into()), "blue"), None);
+        assert_eq!(store_color(&IconTarget::Group("x".into()), "red").as_deref(), Some("red"));
+        assert_eq!(store_glyph(&IconTarget::Host("x".into()), "server"), None);
+        assert_eq!(store_glyph(&IconTarget::Host("x".into()), "apple"), None);
+        assert_eq!(store_glyph(&IconTarget::Group("x".into()), "star").as_deref(), Some("star"));
     }
 }

@@ -274,6 +274,7 @@ island
   - 文件夹（分组 / 位置）：8 色（蓝默认、绿、橙、红、紫、青、灰、黄），色值在 `theme::ICON_TONES`（每色浅 / 深主题各一对 back / front + 字形色），经 `theme::folder_tone` 取用；12 个字形（默认纯文件夹、代码、分支、文档、数据库、云、星标、锁、主页、下载、图片、终端），作为第三层 SVG（`assets/icons/files/glyph_*.svg`）叠在文件夹前片中央；分组仍保留展开 / 折叠两态。
   - SSH 主机：11 个图标（服务器默认、云主机、笔记本、台式机、路由 / 网关、数据库服务器、容器、单板机，以及 Linux、Windows、Mac 三个自绘几何标记，非官方标志）；同为两层填充（机身 `entity_body` + 强调部分 `entity_accent`）；色板只改强调部分（`theme::host_accent`），不选即用主题强调色。
   - 存储：`GroupEntry`、`Place`、`HostEntry` 各新增可选字段 `icon`、`icon_color`（serde 默认 + 为空不写出），旧配置无需迁移；未知 id 渲染回默认。id 与标签表在 `iconset.rs`，中英文名称键为 `icon.color.*`、`icon.glyph.*`、`icon.host.*`。
+  - 入口除右键「更换图标…」外，还有三处编辑对话框里的「图标」栏（共用 `ui::icon_picker`：预览 + 色板 + 图标网格 + 恢复默认）：连接编辑对话框（`host_dialog`）、新建 / 重命名分组、重命名主机 / 位置与保存位置（`SbModal::Prompt` 的暂存 `icon`）。对话框里的选择先暂存，点「保存」时与名称一起写入；右键入口仍是即时保存。
   - 不变：状态点、生产盾牌、标签色点；不支持导入自定义图标。仅左侧栏行套用，SFTP 主机选择器与标签页图标仍用默认图标。
 - **标签行**：`list_row` 单行；8px 色点 + 名称 + 生产盾牌 + 计数。
 - 空状态改 `ui::empty_state(Server, "还没有连接", 说明, [新建连接(主), 导入 ~/.ssh/config])`。无匹配时 `empty_state(Search, "没有匹配的主机", None, [])`。
@@ -401,7 +402,7 @@ island
 ### 5.4 中间内容岛
 
 - **pane 悬浮头**（`tabs_ui.rs:257-280`）：按钮 → `IconBtn::Md`；容器底 `card_bg()`、边框 `divider()`、`R_SUB`。
-- **路径栏 cwd bar**（`main.rs:1705`）：高 28 保持；文字 `fs_small`；分隔线 `divider()`。每段高 `H_COMPACT`，图标（`IC_XS`）与文字（显式行高 `lh(fs_small)`）同行居中、间距 `SP_1`；分隔箭头在同高居中盒里。本地面板始终显示路径栏：目录取 OSC 7 / OSC 9;9（PowerShell、cmd 提示符注入）→ 进程工作目录（Linux `/proc`，Mac / Windows sysinfo）→ 主目录；右侧显示本机 CPU / 内存 / 磁盘（Windows 无负载）。通栏贴满内容岛左右边缘，底部圆角 `CARD_RADIUS`。
+- **路径栏 cwd bar**（`main.rs:1705`）：高 28 保持；文字 `fs_small`；分隔线 `divider()`。每段用共用的 `ui::crumb` / `ui::crumb_sep`（SFTP 路径栏同一套）：高 `H_COMPACT`，图标（`IC_XS`）与文字同行居中、间距 `SP_1`；文字走 `ui::aligned_text`（显式行高 `lh(fs_small)`，并按真实字体度量上提 `ui::text_lift`，补偿 GPUI 把 ascent + descent 整体居中造成的字形偏低）；分隔箭头在同高居中盒里；根目录只画磁盘图标（`HardDrive`），不显示「/」，其余段用线框文件夹图标。本地面板始终显示路径栏：目录取 OSC 7 / OSC 9;9（PowerShell、cmd 提示符注入）→ 进程工作目录（Linux `/proc`，Mac / Windows sysinfo）→ 主目录；右侧显示本机 CPU / 内存 / 磁盘（Windows 无负载）。通栏贴满内容岛左右边缘，底部圆角 `CARD_RADIUS`。
 - **空工作区**（`ws_empty`）→ `empty_state`（横向按钮）。
 - **数据库视图**（`db_view.rs`）：工具栏 36/34 → `toolbar()`；结果表头 `table_header`；单元格 `mono_family` + `fs_mono`；SQL 编辑器/结果子卡片 `R_SUB`；错误条 `notice(error)`。
 - **Redis 视图**（`kv_view.rs:659`）、**Docker 视图**（`dock_view.rs:346,396,570,679`）、**文档视图**（`doc_view.rs:403`）、**工具页**（`tools_view.rs:258`）、**工作区头**（`workspace.rs:130`）：头部统一 `toolbar()`；分组头 `table_header`；`small()/mono()` 辅助函数改为调用 `ui` 组件；弹出表单 → `ui::card` + `dialog_header/footer`。

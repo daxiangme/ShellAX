@@ -106,6 +106,7 @@
 "icon.color.purple" = "Purple"
 "icon.color.red" = "Red"
 "icon.color.yellow" = "Yellow"
+"icon.field" = "Icon"
 "icon.glyph.branch" = "Git branch"
 "icon.glyph.cloud" = "Cloud"
 "icon.glyph.code" = "Code"

@@ -491,6 +491,93 @@ pub fn icon_grid(base: &'static str, cells: Vec<(String, AnyElement, String)>, s
     grid.into_any_element()
 }
 
+// ---- 文字与图标的垂直对齐 / 面包屑 ----
+// 根因：GPUI 把字体「ascent + descent」整体居中放进 line_height 盒（baseline = (lh - asc - desc)/2 + asc）。
+// Segoe UI / 微软雅黑 / PingFang 等字体 ascent 远大于 descent，盒子中心比小写字母的视觉中心（约 (cap_height + x_height)/4）
+// 高出 0.1em 以上，所以文字与盒子居中的图标并排时整体偏低约 1～2px。这里按真实字体度量算出偏移，文字上提同样的量。
+static TEXT_LIFT: std::sync::Mutex<Vec<(u32, String, f32)>> = std::sync::Mutex::new(Vec::new());
+
+/// 在渲染入口（拿得到 Window 的地方）为 `fs` 号字量一次文字下沉量并缓存；之后 `text_lift(fs)` 可在任何地方读取。
+pub fn prime_text_lift(window: &gpui::Window, fs: f32) {
+    let fam = crate::theme::ui_font();
+    let key = fs.to_bits();
+    if TEXT_LIFT.lock().unwrap().iter().any(|(k, f, _)| *k == key && f.as_str() == fam.as_ref()) { return; }
+    let ts = window.text_system();
+    let font = gpui::font(fam.clone());
+    let fid = ts.resolve_font(&font);
+    let size = px(fs);
+    let run = gpui::TextRun { len: 2, font, color: gpui::black(), background_color: None, underline: None, strikethrough: None };
+    let line = ts.layout_line("Hx", size, &[run], None);
+    let (asc, desc) = (f32::from(line.ascent), f32::from(line.descent).abs());
+    let (cap, xh) = (f32::from(ts.cap_height(fid, size)), f32::from(ts.x_height(fid, size)));
+    let ink_center = if cap > 0. && xh > 0. { (cap + xh) / 4. } else { fs * 0.3 };
+    let lift = (((asc - desc) / 2. - ink_center).max(0.) * 2.).round() / 2.;
+    let lift = if lift.is_finite() { lift.min(fs * 0.3) } else { fs * 0.1 };
+    TEXT_LIFT.lock().unwrap().push((key, fam.to_string(), lift));
+}
+
+/// 字号 `fs` 的文字在 `line_height` 盒里相对盒子中心的视觉下沉量（px）；未量过时按 0.1em 估算。
+pub fn text_lift(fs: f32) -> f32 {
+    let fam = crate::theme::ui_font();
+    let key = fs.to_bits();
+    TEXT_LIFT.lock().unwrap().iter().find(|(k, f, _)| *k == key && f.as_str() == fam.as_ref()).map(|e| e.2).unwrap_or_else(|| (fs * 0.1 * 2.).round() / 2.)
+}
+
+/// 单行文字：行高显式给定并按真实字体度量上提，使字形视觉中心与同行居中的图标重合。
+pub fn aligned_text(fs: f32, text: impl Into<SharedString>) -> Div {
+    let line = px(lh(fs));
+    div().h(line).flex_shrink_0().whitespace_nowrap().relative().top(px(-text_lift(fs))).text_size(px(fs)).line_height(line).child(text.into())
+}
+
+/// 面包屑一段：固定高 `H_COMPACT`，可选前置图标（`IC_XS`）+ 可选文字，同一行居中；`here` = 当前（最后）一段。
+/// 路径栏（终端底部）与 SFTP 路径栏共用。
+pub fn crumb(id: impl Into<ElementId>, lead: Option<IconName>, label: Option<SharedString>, here: bool) -> Stateful<Div> {
+    let th = cur();
+    div().id(id).h(px(H_COMPACT)).px_1().flex_shrink_0().rounded(px(R_SM)).flex().flex_row().items_center().gap(px(SP_1)).cursor_pointer()
+        .hover(|d| d.bg(hover_bg()))
+        .children(lead.map(|ic| div().size(px(IC_XS)).flex_shrink_0().flex().items_center().justify_center().child(icon(ic, IC_XS, c(th.overlay1)))))
+        .children(label.map(|l| aligned_text(fs_small(), l).text_color(if here { c(th.text) } else { c(th.subtext) }).when(here, |d| d.font_weight(FontWeight::MEDIUM))))
+}
+
+/// 面包屑分隔箭头：与 `crumb` 同高的居中盒，段与段之间不再另加间距。
+pub fn crumb_sep() -> Div {
+    div().h(px(H_COMPACT)).w(px(IC_XS + 2.)).flex_shrink_0().flex().items_center().justify_center().child(icon(IconName::ChevronRight, IC_XS, c(cur().overlay0)))
+}
+
+/// 图标选择器作用的对象类别：文件夹（分组 / 位置）或主机。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum IconKind { Folder, Host }
+
+/// 完整图标选择器（右键「更换图标」与各编辑对话框共用）：预览（可带名称与右侧操作）+ 色板 + 图标网格。
+/// `icon` / `color` 是当前保存值（`None` = 默认）；点选色板或图标时回调传入 id。
+pub fn icon_picker(kind: IconKind, icon: Option<&str>, color: Option<&str>, name: Option<String>, action: Option<AnyElement>,
+    on_color: impl Fn(String, &mut gpui::Window, &mut gpui::App) + 'static + Clone,
+    on_glyph: impl Fn(String, &mut gpui::Window, &mut gpui::App) + 'static + Clone) -> Div {
+    use ssh_term_proto::{i18n::t, iconset};
+    let th = cur();
+    let host = kind == IconKind::Host;
+    let (icon_o, color_o) = (icon.map(str::to_string), color.map(str::to_string));
+    let cur_icon = iconset::pick(&icon_o, if host { iconset::is_host_icon } else { iconset::is_folder_glyph });
+    let cur_color = iconset::pick(&color_o, iconset::is_color);
+    let preview = if host { crate::file_icon::host_icon(IC_XL, cur_icon, cur_color) } else { crate::file_icon::folder_icon_styled(IC_XL, false, cur_color, cur_icon) };
+    let swatches: Vec<(String, Hsla, String)> = iconset::COLORS.iter().map(|id| (id.to_string(), crate::theme::folder_tone(Some(id)).0 .0, t(&format!("icon.color.{id}")).to_string())).collect();
+    let cells: Vec<(String, AnyElement, String)> = if host {
+        iconset::HOST_ICONS.iter().map(|id| (id.to_string(), crate::file_icon::host_icon(IC_XL, Some(id), cur_color), t(&format!("icon.host.{id}")).to_string())).collect()
+    } else {
+        iconset::FOLDER_GLYPHS.iter().map(|id| (id.to_string(), crate::file_icon::folder_icon_styled(IC_XL, false, cur_color, Some(id)), t(&format!("icon.glyph.{id}")).to_string())).collect()
+    };
+    let label = |k: &'static str| div().text_size(px(fs_small())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.subtext)).child(t(k));
+    div().flex().flex_col().gap(px(SP_3))
+        .child(div().flex().items_center().gap(px(SP_3))
+            .child(div().size(px(ICON_CELL + 8.)).flex_shrink_0().rounded(px(R_MD)).bg(crate::theme::sub_bg()).flex().items_center().justify_center().child(preview))
+            .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_size(px(fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).children(name))
+            .children(action))
+        .child(label(if host { "icon.accent" } else { "icon.color" }))
+        .child(swatch_row("icon-color", &swatches, if host { cur_color } else { Some(cur_color.unwrap_or(iconset::COLORS[0])) }, on_color))
+        .child(label("icon.icon"))
+        .child(icon_grid("icon-glyph", cells, Some(cur_icon.unwrap_or(if host { iconset::HOST_ICONS[0] } else { iconset::FOLDER_GLYPHS[0] })), 6, on_glyph))
+}
+
 /// Multi-select tag chips (dot + name), wrapping onto more lines; selected chips are highlighted.
 pub fn tag_chips(base: &'static str, selected: &[String], names: &[(String, String)], on: impl Fn(String, &mut gpui::Window, &mut gpui::App) + 'static + Clone) -> AnyElement {
     let th = cur();

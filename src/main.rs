@@ -1691,28 +1691,21 @@ impl Root {
         let mut row = div().id("cwd-bar").h(px(ui::H_DEFAULT)).flex_shrink_0().px_2().flex().items_center().gap(px(ui::SP_2))
             // 与终端内容之间一条细分隔线，底色略深一层
             .bg(c(th.mantle)).border_t_1().border_color(crate::theme::divider()).rounded_bl(px(card_layout::CARD_RADIUS)).rounded_br(px(card_layout::CARD_RADIUS));
-        // 每一段：固定高度 H_COMPACT，图标 + 文字同一行居中，行高显式给定（否则文字行盒比图标高，视觉上上下错位）；
-        // 分隔箭头放在同样高度的居中盒里，段与段之间不再另加间距。
-        let line = px(ui::lh(ui::fs_small()));
+        // 每一段用共用的 ui::crumb / ui::crumb_sep（与 SFTP 路径栏同一套）：固定高度、图标与文字同行居中，
+        // 文字按真实字体度量上提，避免 GPUI 行盒把字形压低（见 ui::text_lift）。根目录只画磁盘图标，不再显示「/」。
         let mut crumb_row = div().id("cwd-crumbs").h_full().flex_1().min_w_0().flex().items_center().overflow_x_scroll();
         let last = crumbs.len().saturating_sub(1);
         for (i, (label, path)) in crumbs.into_iter().enumerate() {
-            if i > 0 {
-                crumb_row = crumb_row.child(div().h(px(ui::H_COMPACT)).w(px(ui::IC_XS + 2.)).flex_shrink_0().flex().items_center().justify_center()
-                    .child(icon(IconName::ChevronRight, ui::IC_XS, c(th.overlay0))));
-            }
+            if i > 0 { crumb_row = crumb_row.child(ui::crumb_sep()); }
             let pane = pane.clone();
-            let here = i == last;
-            crumb_row = crumb_row.child(div().id(("cwd", i)).h(px(ui::H_COMPACT)).px_1().flex_shrink_0().rounded(px(ui::R_SM)).flex().flex_row().items_center().gap(px(ui::SP_1)).cursor_pointer()
-                .hover(|d| d.bg(crate::theme::hover_bg()))
+            let (lead, text) = if i == 0 { (IconName::HardDrive, (label != "/").then(|| SharedString::from(label))) } else { (IconName::Folder, Some(SharedString::from(label))) };
+            crumb_row = crumb_row.child(ui::crumb(("cwd", i), Some(lead), text, i == last)
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(move |_, _, cx| {
                     let Some(pane) = pane.clone() else { return };
                     let path = path.clone();
                     pane.update(cx, |v, cx| v.cd_to(&path, cx));
-                })
-                .child(div().size(px(ui::IC_XS)).flex_shrink_0().flex().items_center().justify_center().child(icon(IconName::Folder, ui::IC_XS, c(th.overlay1))))
-                .child(div().h(line).flex().items_center().text_size(px(ui::fs_small())).line_height(line).text_color(if here { c(th.text) } else { c(th.subtext) }).whitespace_nowrap().child(label)));
+                }));
         }
         row = row.child(crumb_row).children(stats);
         Some(row.into_any_element())
@@ -1786,6 +1779,7 @@ pub(crate) fn state_color(st: AgentState, th: &Theme) -> Hsla {
 impl Render for Root {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_workspace(cx);
+        ui::prime_text_lift(window, ui::fs_small());
         // live language switch: refresh placeholders of long-lived inputs
         let lang = ssh_term_proto::i18n::current() as u8;
         if self.lang_seen != lang {

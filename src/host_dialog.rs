@@ -40,6 +40,9 @@ pub struct HostDialog {
     /// Open the list of keys already in ~/.ssh.
     key_menu: bool,
     tags: Vec<String>,
+    /// 暂存的自定义图标 / 颜色（保存时写入，None = 默认）。
+    icon: Option<String>,
+    icon_color: Option<String>,
     error: Option<String>,
     prompts: ssh::Prompts,
     rt: tokio::runtime::Handle,
@@ -86,7 +89,7 @@ impl HostDialog {
         };
         methods.dedup();
         if methods.is_empty() { methods.push(Method::Password); }
-        Self { editing: existing.map(|h| h.name), fields, password, key_path, passphrase, cert_path, methods, use_proxy: e.use_proxy, add_menu: false, key_menu: false, tags: e.tags.clone(), error: None, prompts, rt, test: None, test_task: None }
+        Self { editing: existing.map(|h| h.name), fields, password, key_path, passphrase, cert_path, methods, use_proxy: e.use_proxy, add_menu: false, key_menu: false, tags: e.tags.clone(), icon: e.icon.clone(), icon_color: e.icon_color.clone(), error: None, prompts, rt, test: None, test_task: None }
     }
 
     fn val(&self, key: &str, cx: &Context<Self>) -> String {
@@ -106,9 +109,7 @@ impl HostDialog {
         let key = if uses(Method::Key) || uses(Method::Cert) { opt(Self::v(&self.key_path, cx)) } else { None };
         let cert = if uses(Method::Cert) { opt(Self::v(&self.cert_path, cx)) } else { None };
         let auth = self.methods.iter().map(|m| m.id()).collect::<Vec<_>>().join(",");
-        // 图标由侧栏「更换图标」维护，编辑连接时原样保留
-        let (icon, icon_color) = self.editing.as_ref().and_then(|n| config::get().hosts.iter().find(|h| &h.name == n).map(|h| (h.icon.clone(), h.icon_color.clone()))).unwrap_or_default();
-        Some(HostEntry { icon, icon_color, name, host, port, user: opt(self.val("user", cx)), identity_file: key, cert,
+        Some(HostEntry { icon: self.icon.clone(), icon_color: self.icon_color.clone(), name, host, port, user: opt(self.val("user", cx)), identity_file: key, cert,
             group: opt(self.val("group", cx)).map(|g| ssh_term_proto::outline::normalize(&g)).filter(|g| !g.is_empty()), auth: Some(auth), production: false, tags: self.tags.clone(), jump: opt(self.val("jump", cx)), use_proxy: self.use_proxy, source: "config" })
     }
 
@@ -286,6 +287,16 @@ impl Render for HostDialog {
             .child(div().flex_1().min_w_0().flex().flex_col().gap(px(6.))
                 .child(crate::ui::tag_chips("host-tags", &self.tags, &tags_cfg.all(), move |color, _w, cx| { let _ = me.update(cx, |this, cx| { ssh_term_proto::hosttree::toggle(&mut this.tags, &color); cx.notify(); }); }))
                 .child(div().w_full().whitespace_normal().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(tf("tag.prod_hint", &[("name", &tags_cfg.name(&tags_cfg.production))])))));
+        // 图标：与侧栏右键「更换图标」同一个选择器，点「保存」时一并写入
+        {
+            use ssh_term_proto::iconset;
+            let (me1, me2, me3) = (cx.entity().downgrade(), cx.entity().downgrade(), cx.entity().downgrade());
+            let reset = ui::button("host-icon-reset", t("icon.reset"), 0).on_click(move |_, _, cx| { let _ = me3.update(cx, |this, cx| { this.icon = None; this.icon_color = None; cx.notify(); }); });
+            let picker = ui::icon_picker(ui::IconKind::Host, self.icon.as_deref(), self.icon_color.as_deref(), Some(self.val("name", cx)), Some(reset.into_any_element()),
+                move |id, _w, cx| { let _ = me1.update(cx, |this, cx| { this.icon_color = iconset::store(&id, "", iconset::is_color); cx.notify(); }); },
+                move |id, _w, cx| { let _ = me2.update(cx, |this, cx| { this.icon = iconset::store(&id, iconset::HOST_ICONS[0], iconset::is_host_icon); cx.notify(); }); });
+            form = form.child(div().flex().items_start().gap_3().child(label(t("icon.field"))).child(div().flex_1().min_w_0().child(picker)));
+        }
         // ---- test results
         if let Some(rows) = &self.test {
             let names = [t("host.test_dns"), t("host.test_tcp"), t("host.test_ssh"), t("host.test_auth")];

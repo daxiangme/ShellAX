@@ -106,6 +106,7 @@
 "icon.color.purple" = "紫色"
 "icon.color.red" = "红色"
 "icon.color.yellow" = "黄色"
+"icon.field" = "图标"
 "icon.glyph.branch" = "Git 分支"
 "icon.glyph.cloud" = "云"
 "icon.glyph.code" = "代码"
