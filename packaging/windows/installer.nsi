@@ -33,15 +33,34 @@ VIAddVersionKey /LANG=0 "LegalCopyright" "ShellAX"
 ; 安装完成后重新启动应用。手动安装不带 /RESTART，行为不变。
 Section "Install"
   SetShellVarContext current
+  ; 等旧进程退出（运行中的 shellax.exe 删不掉）；等满 30 秒仍删不掉时，强制结束一次再等
   StrCpy $1 0
+  StrCpy $3 0
   wait_old:
     ClearErrors
     Delete "$INSTDIR\shellax.exe"
     IfErrors 0 wait_done
     IntOp $1 $1 + 1
-    IntCmp $1 60 wait_done
+    IntCmp $1 60 timed_out
     Sleep 500
     Goto wait_old
+  timed_out:
+    IntCmp $3 0 do_kill give_up give_up
+  do_kill:
+    StrCpy $3 1
+    StrCpy $1 0
+    nsExec::Exec 'taskkill /F /IM shellax.exe'
+    Pop $4
+    Sleep 1000
+    Goto wait_old
+  give_up:
+    ; 静默安装时没有界面，把原因写到临时目录，应用内更新的助手会读出来
+    IfSilent 0 +4
+      FileOpen $5 "$TEMP\shellax-setup-error.log" w
+      FileWrite $5 "cannot replace $INSTDIR\shellax.exe (in use or not writable)"
+      FileClose $5
+    MessageBox MB_OK|MB_ICONSTOP "无法替换 $INSTDIR\shellax.exe。请先退出 ShellAX 后重试。$\nCannot replace $INSTDIR\shellax.exe. Please quit ShellAX and try again." /SD IDOK
+    Abort
   wait_done:
   SetOutPath "$INSTDIR"
   File "${SRC}\shellax.exe"

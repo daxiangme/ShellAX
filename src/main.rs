@@ -1349,14 +1349,14 @@ impl Root {
     }
 
     pub(crate) fn apply_update(&mut self, rec: &ssh_term_proto::updater::Record, w: &mut Window, cx: &mut Context<Self>) {
-        match ssh_term_proto::updater::apply(rec) {
+        match ssh_term_proto::updater::apply(rec, &data_dir()) {
             Ok(ssh_term_proto::updater::Apply::QuitNow) => {
                 self.log("update.apply", &rec.version);
                 self.quit_ok = true; self.save_layout(cx);
                 for v in self.tabs.iter().flat_map(|t| t.layout.leaves()) { if let Some(s) = &v.read(cx).session { if v.read(cx).daemon_id.is_none() { s.close(); } } }
                 w.remove_window(); cx.quit();
             }
-            Ok(ssh_term_proto::updater::Apply::Revealed) => self.toast_after(t("update.revealed").into(), std::time::Duration::from_secs(8), cx),
+            Ok(ssh_term_proto::updater::Apply::Revealed(why)) => self.toast_after(tf("update.revealed", &[("why", &t(why))]), std::time::Duration::from_secs(8), cx),
             Err(e) => self.toast_after(tf("update.apply_failed", &[("e", &format!("{e:#}"))]), std::time::Duration::from_secs(8), cx),
         }
     }
@@ -2402,6 +2402,13 @@ fn open_main(cx: &mut App, rt: Arc<tokio::runtime::Runtime>, themes: Vec<Arc<The
                     // 应用内更新：读下载记录并清理旧安装包；下载进度变化时刷新主窗口和设置页
                     if !secondary() {
                         update_ui::init();
+                        // 上次更新没成功（助手脚本记在 update.log 里）：启动后说明原因
+                        if let Some(why) = ssh_term_proto::updater::take_failure(&data_dir()) {
+                            cx.spawn(async move |this, cx| {
+                                cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
+                                let _ = this.update(cx, |r, cx| r.toast_after(tf("update.last_failed", &[("why", &why)]), std::time::Duration::from_secs(12), cx));
+                            }).detach();
+                        }
                         cx.spawn(async move |this, cx| {
                             let mut seen = u64::MAX;
                             loop {
