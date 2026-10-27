@@ -25,11 +25,21 @@ impl AppTray {
     }
 }
 
+/// 托盘图标：内嵌的应用图标（packaging/shellax-256.png）缩到 64px，转成 StatusNotifierItem 要求的 ARGB32（网络字节序）。
+#[cfg(target_os = "linux")]
+pub fn brand_pixmap() -> Vec<ksni::Icon> {
+    let Ok(img) = image::load_from_memory_with_format(include_bytes!("../packaging/shellax-256.png"), image::ImageFormat::Png) else { return vec![]; };
+    let img = img.resize(64, 64, image::imageops::FilterType::Lanczos3).to_rgba8();
+    let data = img.pixels().flat_map(|p| [p[3], p[0], p[1], p[2]]).collect();
+    vec![ksni::Icon { width: img.width() as i32, height: img.height() as i32, data }]
+}
+
 #[cfg(target_os = "linux")]
 impl ksni::Tray for AppTray {
     fn id(&self) -> String { "shellax".into() }
     fn title(&self) -> String { self.summary() }
-    fn icon_name(&self) -> String { "utilities-terminal".into() }
+    fn icon_name(&self) -> String { String::new() }
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> { brand_pixmap() }
     fn status(&self) -> ksni::Status { if self.waiting > 0 { ksni::Status::NeedsAttention } else { ksni::Status::Active } }
     fn tool_tip(&self) -> ksni::ToolTip { ksni::ToolTip { title: self.summary(), description: String::new(), icon_name: String::new(), icon_pixmap: vec![] } }
     fn activate(&mut self, _x: i32, _y: i32) { let _ = self.tx.send(TrayCmd::Show); }
@@ -61,6 +71,15 @@ pub async fn spawn(t: AppTray) -> anyhow::Result<Handle> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tray_pixmap_is_the_brand_icon() {
+        let v = brand_pixmap();
+        assert_eq!(v.len(), 1);
+        assert_eq!((v[0].width, v[0].height), (64, 64));
+        assert_eq!(v[0].data.len(), 64 * 64 * 4);
+        assert!(v[0].data.chunks(4).any(|p| p[0] > 200), "has opaque pixels");
+    }
     #[test]
     fn summary_and_labels() {
         let (tx, _rx) = flume::unbounded();

@@ -18,6 +18,8 @@ const FILES: &[(&str, &[u8])] = &[
     ("shellax/files/monitor_screen.svg", include_bytes!("../assets/icons/files/monitor_screen.svg")),
     ("shellax/files/laptop_body.svg", include_bytes!("../assets/icons/files/laptop_body.svg")),
     ("shellax/files/laptop_screen.svg", include_bytes!("../assets/icons/files/laptop_screen.svg")),
+    ("shellax/files/brand_badge.svg", include_bytes!("../assets/icons/files/brand_badge.svg")),
+    ("shellax/files/brand_prompt.svg", include_bytes!("../assets/icons/files/brand_prompt.svg")),
     ("shellax/files/server_body.svg", include_bytes!("../assets/icons/files/server_body.svg")),
     ("shellax/files/server_leds.svg", include_bytes!("../assets/icons/files/server_leds.svg")),
     ("shellax/files/doc_page.svg", include_bytes!("../assets/icons/files/doc_page.svg")),
@@ -122,6 +124,14 @@ pub fn laptop_icon(size: f32) -> AnyElement {
     div().relative().size(px(size)).flex_shrink_0()
         .child(layer("shellax/files/laptop_body.svg", size, crate::theme::entity_body()))
         .child(layer("shellax/files/laptop_screen.svg", size, crate::theme::entity_accent())).into_any_element()
+}
+
+/// 应用品牌标志（与 assets/brand/shellax-icon.svg 同形）：主题蓝 #007aff 平滑徽章 + 白色 `>_`。
+/// 标题栏、关于页等应用自绘的品牌位置共用；固定品牌色，不随主题强调色变化。
+pub fn brand_icon(size: f32) -> AnyElement {
+    div().relative().size(px(size)).flex_shrink_0()
+        .child(layer("shellax/files/brand_badge.svg", size, gpui::Hsla::from(rgb(0x007aff))))
+        .child(layer("shellax/files/brand_prompt.svg", size, gpui::Hsla::from(rgb(0xffffff)))).into_any_element()
 }
 
 /// 「本机」图标：macOS 用笔记本，Windows / Linux 用显示器。主机列表本地终端行与 SFTP 本地来源共用此入口。

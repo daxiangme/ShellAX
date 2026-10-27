@@ -2022,7 +2022,7 @@ impl Render for Root {
             let title = if mac {
                 div().flex().items_center().child(name)
             } else {
-                div().flex().items_center().gap(px(6.)).pl(px(12.)).child(icon(IconName::SquareTerminal, ui::IC_SM, c(th.accent))).child(name)
+                div().flex().items_center().gap(px(6.)).pl(px(12.)).child(crate::file_icon::brand_icon(ui::IC_MD)).child(name)
             };
             let head_inner = if mac {
                 // 收起后红黄绿按钮的位置由标签栏留出，这里只占位

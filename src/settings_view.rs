@@ -1186,7 +1186,7 @@ impl SettingsView {
         }
         div().flex().flex_col()
             .child(div().flex().items_center().gap_3().py_3()
-                .child(div().size(px(40.)).rounded(px(ui::R_SUB)).bg(crate::theme::selected_bg()).flex().items_center().justify_center().child(icon(IconName::SquareTerminal, ui::IC_XL, c(th.accent))))
+                .child(div().size(px(40.)).flex().items_center().justify_center().child(crate::file_icon::brand_icon(40.)))
                 .child(div().flex().flex_col().child(div().text_size(px(ui::fs_title())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child("shellax"))
                     .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(tf("settings.version", &[("v", &env!("CARGO_PKG_VERSION"))])))))
             .child(Self::section_title(t("ui.quick_start")))
