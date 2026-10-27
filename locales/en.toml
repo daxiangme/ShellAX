@@ -361,6 +361,8 @@
 "ui.changes_are_saved_to_config" = "Changes are saved to config.toml immediately"
 "ui.reduce_motion" = "Reduce motion"
 "ui.reduce_motion_desc" = "Skip menu, dialog and notification animations"
+"ui.dock_multi" = "Allow several right-panel cards at once"
+"ui.dock_multi_desc" = "When off, the right panel shows one card at a time (host tools, AI, snippets, history); opening a card replaces the current one"
 "ui.check_for_updates_automatically" = "Check for updates automatically"
 "ui.kex_preference" = "Key exchange (KEX) preference"
 "ui.cipher_preference" = "Cipher preference"

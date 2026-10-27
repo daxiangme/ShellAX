@@ -464,21 +464,26 @@ impl Root {
                 .child(div().flex_shrink_0().text_size(px(ui::fs_caption())).text_color(c(th.overlay1)).child(n.to_string())));
         }
         let _ = searching;
-        col.child(list)
+        let handle = self.sb_resize_handle(cx);
+        col.child(list).child(handle)
     }
 
-    /// Left tool-window frame: fixed width, resize handle on the right edge (double click resets).
+    /// Left tool-window frame: fixed width; the resize handle (`sb_resize_handle`) must be appended as the last child.
     pub(crate) fn sb_frame(&mut self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
-        let col = card_layout::island("sidebar").relative().w(px(self.sb_width)).flex_shrink_0().h_full()
+        card_layout::island("sidebar").relative().w(px(self.sb_width)).flex_shrink_0().h_full()
             .on_drag_move(cx.listener(|this, ev: &gpui::DragMoveEvent<SbResize>, _w, cx| {
-                let w = (f32::from(ev.event.position.x - ev.bounds.left()) - 2.0).clamp(180.0, 480.0);
+                let w = (f32::from(ev.event.position.x - ev.bounds.left()) + 2.0).clamp(180.0, 480.0);
                 if (w - this.sb_width).abs() >= 1.0 { this.sb_width = w; cx.notify(); }
-            }));
-        // The 4px gap to the right of the sidebar is the resize hit area.
-        col.child(div().id("sb-resize").absolute().top_0().right(px(-4.)).w(px(4.)).h_full().cursor_col_resize()
+            }))
+    }
+
+    /// 左工具岛右边缘的拖拽手柄（双击恢复默认宽度）：放在岛内部右侧 6px（岛带 `overflow_hidden`，放在外侧间隙会被裁掉而点不到），
+    /// 并且必须作为岛的最后一个子元素追加，才会画在内容之上、不被内容盖住。
+    pub(crate) fn sb_resize_handle(&mut self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        div().id("sb-resize").absolute().top_0().right_0().w(px(6.)).h_full().cursor_col_resize()
             .hover(|d| d.bg(c(cur().accent).opacity(0.35)))
             .on_drag(SbResize, |d: &SbResize, _, _, cx| cx.new(|_| d.clone()))
-            .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _w, cx| if ev.click_count() >= 2 { this.sb_width = config::SIDEBAR_W; this.save_sb_width(); cx.notify(); })))
+            .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _w, cx| if ev.click_count() >= 2 { this.sb_width = config::SIDEBAR_W; this.save_sb_width(); cx.notify(); }))
     }
 
     /// Session tools sit beside the terminal, not in the host list.

@@ -361,6 +361,8 @@
 "ui.changes_are_saved_to_config" = "修改即保存到 config.toml"
 "ui.reduce_motion" = "减少动态效果"
 "ui.reduce_motion_desc" = "关闭菜单、对话框和通知的动画"
+"ui.dock_multi" = "右侧栏允许多张卡片同时展开"
+"ui.dock_multi_desc" = "关闭后右侧栏同一时间只显示一张卡片（主机工具、AI、常用命令、历史命令），打开新卡片会替换当前卡片"
 "ui.check_for_updates_automatically" = "自动检查更新"
 "ui.kex_preference" = "密钥交换（KEX）算法偏好"
 "ui.cipher_preference" = "加密算法偏好"

@@ -8,7 +8,7 @@ use gpui_component::input::{Editor, EditorState, InputEvent, InputState};
 use ssh_term_proto::i18n::{t, tf};
 use ssh_term_proto::tools::{self, Args, FieldKind, Output, ToolSpec};
 
-use crate::card_layout::{content_card, sub_card, CARD_PAD};
+use crate::card_layout::{content_card, sub_card, sub_card_body, CARD_PAD, SUB_PAD};
 use crate::theme::{c, cur};
 use crate::ui::{self, icon, IconName};
 use gpui_component::Sizable as _;
@@ -238,13 +238,13 @@ impl ToolView {
         let send = div().flex().items_center().gap_2()
             .child(div().flex_1().child(ui::text_field(&w.msg, false)))
             .child(ui::button("ws-send", t("tools.ws_send"), 0).on_click(cx.listener(|this, _, w, cx| this.ws_send(w, cx))));
-        let mut log = div().id("ws-log").flex_1().min_h_0().overflow_y_scroll().p_2().flex().flex_col().gap(px(2.))
+        let mut log = sub_card_body().id("ws-log").overflow_y_scroll().flex().flex_col().gap(px(2.))
             .font_family(SharedString::from(crate::config::get().font.family.clone())).text_size(px(ui::fs_small()));
         for (i, (mine, l)) in w.log.iter().enumerate() {
             log = log.child(div().id(("wsl", i)).whitespace_normal().text_color(if *mine { c(th.accent) } else { c(th.text) }).child(l.clone()));
         }
         div().flex_1().min_h_0().flex().flex_col().gap(px(CARD_PAD))
-            .child(sub_card().p_2().flex().flex_col().gap_2().child(bar).child(send))
+            .child(sub_card().p(px(SUB_PAD)).flex().flex_col().gap_2().child(bar).child(send))
             .child(sub_card().flex_1().min_h_0().flex().flex_col().child(self.out_head(false, cx)).child(log))
             .into_any_element()
     }
@@ -296,7 +296,7 @@ impl Render for ToolView {
         }
         let me = cx.entity().downgrade();
         // 输入卡片
-        let mut input = sub_card().p_2().flex().flex_col().gap_2();
+        let mut input = sub_card().p(px(SUB_PAD)).flex().flex_col().gap_2();
         let mut tall = false;
         for f in self.spec.inputs.clone() {
             let mut row = div().flex().flex_col().gap_1().child(Self::field_label(&f.label));
@@ -344,16 +344,16 @@ impl Render for ToolView {
             opts = opts.child(el);
         }
         let run_btn = ui::button("tool-run", if self.spec.live { t("tools.ui_refresh") } else { t("tools.ui_run") }, 1).on_click(cx.listener(|this, _, _w, cx| this.run(cx)));
-        let opts_card = sub_card().p_2().flex().items_end().gap_3().flex_shrink_0()
+        let opts_card = sub_card().p(px(SUB_PAD)).flex().items_end().gap_3().flex_shrink_0()
             .child(div().flex_1().min_w_0().child(opts)).child(run_btn);
         // 输出卡片
         let mut out = sub_card().flex().flex_col().min_h(px(120.)).child(self.out_head(true, cx));
-        if let Some(e) = &self.error { out = out.child(ui::notice(ui::Notice::Error, e.clone()).my(px(ui::SP_2))); }
+        if let Some(e) = &self.error { out = out.child(ui::notice(ui::Notice::Error, e.clone()).mx(px(SUB_PAD)).my(px(ui::SP_2))); }
         if let Some([r, g, b, a]) = self.output.color {
-            out = out.child(div().px_3().pt_2().flex().items_center().gap_2()
+            out = out.child(div().px(px(SUB_PAD)).pt(px(SUB_PAD)).flex().items_center().gap_2()
                 .child(div().size(px(28.)).rounded(px(ui::R_MD)).border_1().border_color(crate::theme::divider()).bg(gpui::Rgba { r: r as f32 / 255., g: g as f32 / 255., b: b as f32 / 255., a: a as f32 / 255. })));
         }
-        out = out.child(div().flex_1().min_h(px(80.)).child(Editor::new(&self.out_ed).h_full()));
+        out = out.child(sub_card_body().min_h(px(80.)).child(Editor::new(&self.out_ed).h_full()));
         out = out.flex_1().min_h_0();
         content_card("tool-card").child(head)
             .child(div().id("tool-body").flex_1().min_h_0().flex().flex_col().gap(px(CARD_PAD))

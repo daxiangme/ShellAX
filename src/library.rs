@@ -533,7 +533,7 @@ impl Root {
 
     fn save_hist_as_snippet(&mut self, cmd: String, window: &mut Window, cx: &mut Context<Self>) {
         self.dock_snip = true;
-        self.dock_min.remove("snip-dock");
+        self.open_dock_exclusive("snip-dock");
         let name: String = cmd.trim().chars().take(40).collect();
         self.open_lib_editor(None, name, String::new(), String::new(), cmd, window, cx);
     }

@@ -215,6 +215,7 @@ impl SettingsView {
             r(Appearance, t("ui.light_theme"), t("ui.used_in_light_mode_when"), Ctl::Choice("appearance.light_theme", light)),
             r(Appearance, t("ui.dark_theme"), t("ui.used_in_dark_mode_when"), Ctl::Choice("appearance.dark_theme", dark)),
             r(Appearance, t("ui.reduce_motion"), t("ui.reduce_motion_desc"), Ctl::Toggle("appearance.reduce_motion")),
+            r(Appearance, t("ui.dock_multi"), t("ui.dock_multi_desc"), Ctl::Toggle("sidebar.dock_multi")),
             r(Appearance, t("ui.terminal_font"), t("ui.primary_font_monospace"), Ctl::Font("font.family")),
             r(Appearance, t("ui.fallback_fonts"), t("ui.comma_separated_used_in_order"), Ctl::Text("font.fallbacks", "Noto Sans Mono CJK SC, …")),
             r(Appearance, t("ui.font_size"), t("ui.in_pt_8_32"), Ctl::Text("font.size", "13.5")),

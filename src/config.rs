@@ -329,8 +329,18 @@ pub struct Sidebar {
     pub tools_fav: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools_recent: Vec<String>,
+    /// 右侧栏：允许多张卡片同时展开（默认）；关闭后同一时间只保留一张。
+    pub dock_multi: bool,
+    /// 右侧栏已打开的卡片 id（`host-dock` / `ai-dock` / `snip-dock` / `hist-dock`），按打开先后排列，最后一个最近打开。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub dock_open: Vec<String>,
+    /// 右侧栏中折叠为标题行的卡片 id。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub dock_min: Vec<String>,
+    /// 两张卡片展开时上方卡片占的高度比例（0.15–0.85）。
+    pub dock_split: f32,
 }
-impl Default for Sidebar { fn default() -> Self { Self { collapsed: vec![], width: SIDEBAR_W, ai_width: AI_DOCK_W, tool: "hosts".into(), bottom_open: false, bottom_height: BOTTOM_H, bottom_tab: "transfers".into(), panel_hidden: false, tools_fav: vec![], tools_recent: vec![] } } }
+impl Default for Sidebar { fn default() -> Self { Self { collapsed: vec![], width: SIDEBAR_W, ai_width: AI_DOCK_W, tool: "hosts".into(), bottom_open: false, bottom_height: BOTTOM_H, bottom_tab: "transfers".into(), panel_hidden: false, tools_fav: vec![], tools_recent: vec![], dock_multi: true, dock_open: vec![], dock_min: vec![], dock_split: 0.5 } } }
 impl Sidebar { /** left tool window starts collapsed */ pub fn collapsed_panel(&self) -> bool { self.panel_hidden } }
 /// Default bottom tool window height.
 pub const BOTTOM_H: f32 = 220.0;
@@ -424,6 +434,7 @@ impl Settings {
         ssh_term_proto::assets::normalize_kv_docker(&mut s.redis, &mut s.docker);
         ssh_term_proto::assets::ensure_asset_groups(&s.db, &mut s.groups);
         if s.sidebar.tool.is_empty() { s.sidebar.tool = "hosts".into(); }
+        s.sidebar.dock_split = s.sidebar.dock_split.clamp(0.15, 0.85);
         Ok(s)
     }
     pub fn load() -> (Settings, Option<String>) {
@@ -702,6 +713,8 @@ mod tests {
         assert!(s.db.is_empty());
         assert_eq!((s.sidebar.tool.as_str(), s.sidebar.width, s.sidebar.ai_width, s.sidebar.bottom_open), ("hosts", 300.0, AI_DOCK_W, false));
         assert_eq!(s.sidebar.collapsed, vec!["prod".to_string()]);
+        // 右侧栏新字段缺省：允许多卡片、无已打开卡片、分割 0.5
+        assert!(s.sidebar.dock_multi && s.sidebar.dock_open.is_empty() && s.sidebar.dock_min.is_empty() && s.sidebar.dock_split == 0.5);
         // writing it back and reading again is lossless and adds no [[db]] noise
         let text = toml::to_string_pretty(&s).unwrap();
         assert!(!text.contains("[[db]]"));

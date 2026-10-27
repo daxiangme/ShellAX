@@ -97,7 +97,7 @@ impl Root {
         let min_id = SharedString::from(format!("{dock_id}-min"));
         let head_id = SharedString::from(format!("{dock_id}-head"));
         let collapsed = self.dock_min.contains(dock_id);
-        let toggle = move |this: &mut Root| { if this.dock_min.remove(dock_id) { *this.dock_flip.entry(dock_id).or_default() += 1; } else { this.dock_min.insert(dock_id); } };
+        let toggle = move |this: &mut Root| { if this.dock_min.remove(dock_id) { *this.dock_flip.entry(dock_id).or_default() += 1; } else { this.dock_min.insert(dock_id); } this.save_docks(); };
         actions.push(ui::icon_button(min_id, if collapsed { IconName::ChevronDown } else { IconName::ChevronUp }, ui::IconBtn::Md, if collapsed { t("ai.expand") } else { t("ai.collapse") })
             .on_click(cx.listener(move |this, _, _w, cx| { cx.stop_propagation(); toggle(this); cx.notify(); })).into_any_element());
         actions.push(ui::icon_button(close_id, IconName::X, ui::IconBtn::Md, t("ui.close")).on_click(cx.listener(move |this, _, w, cx| this.close_dock(dock_id, w, cx))).into_any_element());
@@ -119,8 +119,8 @@ impl Root {
         }
     }
 
-    /// Right column: host status, AI and the snippets/history card stacked top to bottom.
-    /// Shared width (drag the left edge); the first two expanded cards split by `dock_split`.
+    /// Right column: host status, AI, snippets and history cards stacked top to bottom (several may be open; `sidebar.dock_multi` limits it to one).
+    /// Shared width (drag the left edge); two expanded cards split by `dock_split`, three or more share equally with a minimum height.
     pub(crate) fn dock_column(&mut self, window: &mut gpui::Window, cx: &mut Context<Root>) -> Option<AnyElement> {
         let mut cards: Vec<(&'static str, AnyElement)> = vec![];
         if let Some(v) = self.dock_host.clone() {
@@ -159,25 +159,27 @@ impl Root {
                 if (r - this.dock_split).abs() > 0.002 { this.dock_split = r; cx.notify(); }
             }));
         let total = cards.len();
+        // 卡片放进可纵向滚动的内层容器：三张及以上展开时每张有最小高度，放不下就滚动而不是被压扁
+        let mut inner = div().id("dock-scroll").w_full().flex_1().min_h_0().overflow_y_scroll().flex().flex_col();
         for (i, (id, el)) in cards.into_iter().enumerate() {
             let collapsed = self.dock_min.contains(id);
             let mut slot = div().w_full().min_h_0().flex().flex_col();
             slot = if collapsed { slot.flex_shrink_0() } else if open.len() >= 2 {
                 // two open cards follow the draggable split; three or more share the height equally
                 let share = if open.len() > 2 { 1.0 / n_open } else if Some(i) == first_open { split } else { 1.0 - split };
-                slot.flex_basis(gpui::relative(share)).flex_grow(1.).flex_shrink(1.)
+                slot.flex_basis(gpui::relative(share)).flex_grow(1.).flex_shrink(1.).when(open.len() > 2, |d| d.min_h(px(DOCK_MIN_H)))
             } else { slot.flex_1() };
-            col = col.child(slot.child(el));
+            inner = inner.child(slot.child(el));
             if i + 1 < total {
                 // gap between cards; below the first expanded card it doubles as the split handle
                 let handle = Some(i) == first_open && open.len() == 2;
-                col = col.child(div().id(("dock-gap", i)).h(px(crate::card_layout::CARD_GAP)).flex_shrink_0().w_full()
+                inner = inner.child(div().id(("dock-gap", i)).h(px(crate::card_layout::CARD_GAP)).flex_shrink_0().w_full()
                     .when(handle, |d| d.cursor_row_resize().hover(|d| d.bg(c(cur().accent).opacity(0.35)))
                         .on_drag(DockSplit, |d: &DockSplit, _, _, cx| cx.new(|_| d.clone()))
                         .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _w, cx| if ev.click_count() >= 2 { this.dock_split = 0.5; cx.notify(); }))));
             }
         }
-        col = col.child(div().id("dock-col-resize").absolute().top_0().left_0().w(px(6.)).h_full().cursor_col_resize()
+        col = col.child(inner).child(div().id("dock-col-resize").absolute().top_0().left_0().w(px(6.)).h_full().cursor_col_resize()
             .hover(|d| d.bg(c(cur().accent).opacity(0.35)))
             .on_drag(crate::sidebar::AiResize, |d: &crate::sidebar::AiResize, _, _, cx| cx.new(|_| d.clone()))
             .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _w, cx| if ev.click_count() >= 2 { this.ai_width = config::AI_DOCK_W; this.save_ai_width(); cx.notify(); })));
@@ -238,6 +240,9 @@ impl Root {
 
 #[allow(dead_code)]
 fn _unused(_: Overlay) {}
+
+/// 三张及以上卡片同时展开时，每张展开卡片的最小高度（px），放不下时右侧栏内部滚动。
+const DOCK_MIN_H: f32 = 160.;
 
 /// Drag payload for the split between stacked right-column cards.
 #[derive(Clone)]

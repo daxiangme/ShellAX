@@ -138,20 +138,20 @@ impl Root {
             Tool::Hosts | Tool::Sftp => self.sidebar(window, cx).into_any_element(),
             Tool::Database => {
                 let p = self.db_panel(window, cx);
-                self.sb_frame(cx).child(p).into_any_element()
+                { let h = self.sb_resize_handle(cx); self.sb_frame(cx).child(p).child(h).into_any_element() }
             }
             Tool::Redis | Tool::Docker => {
                 let k = if self.tool == Tool::Redis { crate::kv_ui::AssetKind::Redis } else { crate::kv_ui::AssetKind::Docker };
                 let p = self.asset_panel(k, cx);
-                self.sb_frame(cx).child(p).into_any_element()
+                { let h = self.sb_resize_handle(cx); self.sb_frame(cx).child(p).child(h).into_any_element() }
             }
             Tool::Tools => {
                 let p = self.tools_panel(window, cx);
-                self.sb_frame(cx).child(p).into_any_element()
+                { let h = self.sb_resize_handle(cx); self.sb_frame(cx).child(p).child(h).into_any_element() }
             }
             other => {
                 let body = self.empty_tool(other, cx);
-                self.sb_frame(cx).child(body).into_any_element()
+                { let h = self.sb_resize_handle(cx); self.sb_frame(cx).child(body).child(h).into_any_element() }
             }
         }
     }
