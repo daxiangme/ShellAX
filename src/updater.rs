@@ -320,7 +320,7 @@ fn apply_windows(rec: &Record, exe: &Path, data: &Path) -> Result<Apply> {
     let reg = registry_install_dir();
     let plan = win_plan(&rec.file, exe, reg.as_deref(), &|d, n| d.join(n).is_file());
     let (mode, dir, extra) = match &plan {
-        WinPlan::Reveal(why) => { reveal(&rec.file)?; return Ok(Apply::Revealed(why)); }
+        WinPlan::Reveal(why) => { reveal(&rec.file)?; return Ok(Apply::Revealed(*why)); }
         WinPlan::Setup { install_dir } => ("setup", install_dir.clone(), if reg.as_deref().is_some_and(|r| same_dir(r, install_dir)) { String::new() } else { install_dir.display().to_string() }),
         WinPlan::Portable { dir } => ("portable", dir.clone(), String::new()),
     };
