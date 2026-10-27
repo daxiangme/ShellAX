@@ -106,6 +106,11 @@ pub fn icon_button(id: impl Into<ElementId>, ic: IconName, size: IconBtn, tip: i
 
 /// 图标按钮的完整形态：`active` 为激活态（淡强调底 + 强调色图标），`danger` 为危险操作（悬停变红）。
 pub fn icon_button_state(id: impl Into<ElementId>, ic: IconName, size: IconBtn, tip: impl Into<SharedString>, active: bool, danger: bool) -> Stateful<Div> {
+    icon_button_svg(id, ic.path(), size, tip, active, danger)
+}
+
+/// 同 `icon_button_state`，图标换成自带的 SVG 资源路径（数据库引擎、工具箱等品牌图标）。
+pub fn icon_button_svg(id: impl Into<ElementId>, path: impl Into<SharedString>, size: IconBtn, tip: impl Into<SharedString>, active: bool, danger: bool) -> Stateful<Div> {
     let th = cur();
     let id: ElementId = id.into();
     let group = SharedString::from(format!("ib-{id}"));
@@ -121,7 +126,7 @@ pub fn icon_button_state(id: impl Into<ElementId>, ic: IconName, size: IconBtn, 
         .when(active, |d| d.bg(selected_bg()))
         .when(!active, |d| d.hover(move |s| s.bg(if danger { crate::theme::danger_bg() } else { hover_bg() })).active(|s| s.bg(selected_bg())))
         .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
-        .child(svg().path(ic.path()).size(px(glyph)).flex_shrink_0().text_color(rest).group_hover(group, move |s| s.text_color(hot)))
+        .child(svg().path(path).size(px(glyph)).flex_shrink_0().text_color(rest).group_hover(group, move |s| s.text_color(hot)))
 }
 
 /// 弹窗 / 浮层右上角的关闭按钮。
@@ -132,10 +137,17 @@ pub fn dialog_close(id: impl Into<ElementId>, on: impl Fn(&mut gpui::Window, &mu
 /// 面板 / 岛的标题行：高 36，标题半粗，可选图标与副标题，右侧为 `IconBtn::Md` 操作。
 pub fn panel_header(title: impl Into<SharedString>, subtitle: Option<SharedString>, ic: Option<IconName>, actions: Vec<AnyElement>) -> Div {
     let th = cur();
+    let lead = ic.map(|i| icon(i, IC_SM, c(th.overlay1)).into_any_element()).into_iter()
+        .chain([div().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(fs_body())).line_height(px(lh(fs_body()))).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(title.into()).into_any_element()])
+        .chain(subtitle.map(|s| div().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(fs_small())).text_color(c(th.subtext)).child(format!("· {s}")).into_any_element()))
+        .collect();
+    panel_header_with(lead, actions)
+}
+
+/// 标题行的通用形态：左侧放任意前导元素（标题、页签 chip），右侧为 `IconBtn::Md` 操作。
+pub fn panel_header_with(lead: Vec<AnyElement>, actions: Vec<AnyElement>) -> Div {
     div().w_full().h(px(PANEL_HEAD_H)).flex_shrink_0().pl(px(PANEL_PX)).pr(px(PANEL_PX - 4.)).flex().items_center().gap(px(6.))
-        .children(ic.map(|i| icon(i, IC_SM, c(th.overlay1))))
-        .child(div().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(fs_body())).line_height(px(lh(fs_body()))).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(title.into()))
-        .children(subtitle.map(|s| div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(fs_small())).text_color(c(th.subtext)).child(format!("· {s}"))))
+        .children(lead)
         .child(div().flex_1())
         .child(div().flex().items_center().gap(px(2.)).children(actions))
 }

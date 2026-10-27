@@ -118,7 +118,7 @@ impl Root {
             body = body.child(div().px_3().pb_2().text_size(px(12.)).text_color(c(th.warning)).child(notice));
         }
         let (id, title, ic) = if snippets_mode { ("snip-dock", t("lib.snippets"), IconName::Code) } else { ("hist-dock", t("lib.history"), IconName::Clock) };
-        self.dock_frame(id, title.into(), ic, body, cx)
+        self.dock_frame(id, title.into(), None, ic, vec![], body, cx)
     }
 
     fn snippet_groups(&mut self, all: &[Snippet], group: &str, cx: &mut Context<Self>) -> gpui::Div {

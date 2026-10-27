@@ -567,8 +567,8 @@ pub fn chrome_bg() -> gpui::Hsla { outer_bg() }
 pub fn hover_bg() -> gpui::Hsla { c(cur().text).opacity(0.06) }
 /// 选中行：带一点强调色的淡底，不抢文字。
 pub fn selected_bg() -> gpui::Hsla { c(cur().accent).opacity(0.10) }
-/// 状态栏等弱化文字。
-pub fn muted_text() -> gpui::Hsla { c(cur().overlay1) }
+/// 状态栏等弱化文字：取次文本色 subtext（与规范的文本层级一致）。
+pub fn muted_text() -> gpui::Hsla { c(cur().subtext) }
 /// 弹出菜单 / 命令面板 / 下拉的键盘高亮行：强调色与卡片底色 30% 混合的不透明色，文字保持 text。
 pub fn menu_sel_bg() -> gpui::Hsla {
     let (a, b) = (gpui::Rgba::from(c(cur().accent)), gpui::Rgba::from(card_bg()));

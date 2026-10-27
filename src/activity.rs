@@ -9,6 +9,7 @@ use ssh_term_proto::i18n::{t, tf};
 use ssh_term_proto::sftp::JobState;
 
 use crate::actions::Action;
+use crate::card_layout;
 use crate::theme::{c, cur};
 use crate::ui::{self, icon, IconName};
 use crate::{chrome, config, Root};
@@ -111,13 +112,7 @@ impl Root {
     /// Strip button whose glyph is one of our own SVGs (`svg`) instead of a stock icon.
     pub(crate) fn strip_btn_with(&self, id: impl Into<gpui::ElementId>, svg: Option<&'static str>, ic: IconName, tip: String, active: bool, badge: bool) -> gpui::Stateful<gpui::Div> {
         let th = cur();
-        let col = if active { c(th.accent) } else { c(th.overlay1) };
-        let glyph: gpui::AnyElement = match svg { Some(p) => gpui::svg().path(p).size(px(17.)).text_color(col).into_any_element(), None => icon(ic, 17., col).into_any_element() };
-        div().id(id).relative().size(px(32.)).rounded(px(8.)).flex().items_center().justify_center().cursor_pointer()
-            .when(active, |d| d.bg(crate::theme::selected_bg()))
-            .when(!active, |d| d.hover(|s| s.bg(c(cur().surface0))))
-            .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
-            .child(glyph)
+        ui::icon_button_svg(id, svg.map_or_else(|| ic.path(), gpui::SharedString::from), ui::IconBtn::Strip, tip, active, false).relative()
             .when(badge, |d| d.child(div().absolute().top(px(4.)).right(px(4.)).size(px(6.)).rounded_full().bg(c(th.accent))))
     }
 
@@ -143,16 +138,16 @@ impl Root {
             Tool::Hosts | Tool::Sftp => self.sidebar(window, cx).into_any_element(),
             Tool::Database => {
                 let p = self.db_panel(window, cx);
-                self.sb_frame(cx).bg(crate::theme::card_bg()).child(p).into_any_element()
+                self.sb_frame(cx).child(p).into_any_element()
             }
             Tool::Redis | Tool::Docker => {
                 let k = if self.tool == Tool::Redis { crate::kv_ui::AssetKind::Redis } else { crate::kv_ui::AssetKind::Docker };
                 let p = self.asset_panel(k, cx);
-                self.sb_frame(cx).bg(crate::theme::card_bg()).child(p).into_any_element()
+                self.sb_frame(cx).child(p).into_any_element()
             }
             Tool::Tools => {
                 let p = self.tools_panel(window, cx);
-                self.sb_frame(cx).bg(crate::theme::card_bg()).child(p).into_any_element()
+                self.sb_frame(cx).child(p).into_any_element()
             }
             other => {
                 let body = self.empty_tool(other, cx);
@@ -206,29 +201,25 @@ impl Root {
     pub(crate) fn bottom_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
         let h = self.bottom_h;
-        let tab = |id: &'static str, label: String, on: bool, which: Bottom| div().id(id).px_2().h(px(22.)).rounded(px(6.)).flex().items_center().cursor_pointer().text_size(px(12.))
-            .when(on, |d| d.bg(crate::theme::selected_bg()).text_color(c(cur().accent)).font_weight(FontWeight::MEDIUM))
-            .when(!on, |d| d.text_color(c(cur().subtext)).hover(|s| s.bg(c(cur().surface0))))
-            .child(label)
-            .on_click(cx.listener(move |this, _, _w, cx| { this.bottom_tab = which; let _ = config::update(|s| s.sidebar.bottom_tab = which.id().into()); cx.notify(); }));
+        let tab = |id: &'static str, label: String, on: bool, which: Bottom| ui::chip(id, label, on)
+            .on_click(cx.listener(move |this, _, _w, cx| { this.bottom_tab = which; let _ = config::update(|s| s.sidebar.bottom_tab = which.id().into()); cx.notify(); })).into_any_element();
         let jobs = self.transfer_jobs(cx);
         let log: Vec<LogEntry> = self.exec_log.lock().unwrap().iter().rev().take(300).cloned().collect();
-        let head = div().h(px(30.)).px_2().flex().items_center().gap_1().flex_shrink_0()
-            .child(tab("bt-transfers", tf("tool.transfers_n", &[("n", &jobs.len())]), self.bottom_tab == Bottom::Transfers, Bottom::Transfers))
-            .child(tab("bt-log", t("tool.exec_log").to_string(), self.bottom_tab == Bottom::Log, Bottom::Log))
-            .child(div().flex_1())
-            .when(self.bottom_tab == Bottom::Log && !log.is_empty(), |d| d.child(div().id("bt-clear").size(px(22.)).rounded(px(6.)).flex().items_center().justify_center().cursor_pointer().hover(|s| s.bg(c(cur().surface0)))
-                .tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(t("tool.clear")).build(w, cx))
-                .on_click(cx.listener(|this, _, _w, cx| { this.exec_log.lock().unwrap().clear(); cx.notify(); }))
-                .child(icon(IconName::Trash, 13., c(th.overlay1)))))
-            .child(div().id("bt-close").size(px(22.)).rounded(px(6.)).flex().items_center().justify_center().cursor_pointer().hover(|s| s.bg(c(cur().surface0)))
-                .on_click(cx.listener(|this, _, _w, cx| this.toggle_bottom(None, cx)))
-                .child(icon(IconName::PanelBottomClose, 13., c(th.overlay1))));
-        let mut body = div().id("bottom-body").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().px_2().pb_2().text_size(px(12.));
-        let empty = |s: &str| div().p_3().text_color(c(cur().overlay1)).child(s.to_string());
+        let mut actions: Vec<AnyElement> = vec![];
+        if self.bottom_tab == Bottom::Log && !log.is_empty() {
+            actions.push(ui::icon_button_state("bt-clear", IconName::Trash, ui::IconBtn::Md, t("tool.clear"), false, true)
+                .on_click(cx.listener(|this, _, _w, cx| { this.exec_log.lock().unwrap().clear(); cx.notify(); })).into_any_element());
+        }
+        actions.push(ui::icon_button("bt-close", IconName::PanelBottomClose, ui::IconBtn::Md, t("ui.close")).on_click(cx.listener(|this, _, _w, cx| this.toggle_bottom(None, cx))).into_any_element());
+        let head = ui::panel_header_with(vec![
+            tab("bt-transfers", tf("tool.transfers_n", &[("n", &jobs.len())]), self.bottom_tab == Bottom::Transfers, Bottom::Transfers),
+            tab("bt-log", t("tool.exec_log").to_string(), self.bottom_tab == Bottom::Log, Bottom::Log),
+        ], actions);
+        let mut body = div().id("bottom-body").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().px(px(ui::SP_2)).pb(px(ui::SP_2)).text_size(px(ui::fs_small()));
+        let empty = |ic: IconName, s: &str| ui::empty_state(ic, s.to_string(), None, vec![], true);
         match self.bottom_tab {
             Bottom::Transfers => {
-                if jobs.is_empty() { body = body.child(empty(t("tool.transfers_empty"))); }
+                if jobs.is_empty() { body = body.child(empty(IconName::ArrowDownUp, t("tool.transfers_empty"))); }
                 for (i, (src, j)) in jobs.iter().rev().enumerate() {
                     let st = j.state();
                     let (label, col) = match st {
@@ -237,8 +228,8 @@ impl Root {
                     };
                     let p = j.progress().clamp(0., 1.);
                     let arrow = if j.dir == ssh_term_proto::sftp::Dir::Upload { IconName::Upload } else { IconName::Download };
-                    body = body.child(div().id(("job", i)).h(px(26.)).flex().items_center().gap_2().px_1().rounded(px(6.)).hover(|s| s.bg(crate::theme::hover_bg()))
-                        .child(icon(arrow, 13., c(th.overlay1)))
+                    body = body.child(div().id(("job", i)).min_h(px(ui::row_h())).flex().items_center().gap_2().px_1().rounded(px(ui::R_MD)).hover(|s| s.bg(crate::theme::hover_bg()))
+                        .child(icon(arrow, ui::IC_XS, c(th.overlay1)))
                         .child(div().w(px(180.)).flex_shrink_0().whitespace_nowrap().overflow_hidden().text_ellipsis().child(j.name()))
                         .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_color(c(th.subtext)).child(format!("{src} · {}", j.remote)))
                         .child(div().w(px(120.)).h(px(4.)).flex_shrink_0().rounded_full().bg(c(th.surface1)).child(div().h_full().rounded_full().bg(c(col)).w(px(120. * p))))
@@ -247,20 +238,20 @@ impl Root {
                 }
             }
             Bottom::Log => {
-                if log.is_empty() { body = body.child(empty(t("tool.log_empty"))); }
+                if log.is_empty() { body = body.child(empty(IconName::ScrollText, t("tool.log_empty"))); }
                 for (i, e) in log.iter().enumerate() {
                     let detail = e.detail.clone();
-                    body = body.child(div().id(("log", i)).min_h(px(22.)).flex().items_center().gap_2().px_1().rounded(px(6.)).hover(|s| s.bg(crate::theme::hover_bg()))
+                    body = body.child(div().id(("log", i)).min_h(px(ui::row_h())).flex().items_center().gap_2().px_1().rounded(px(ui::R_MD)).hover(|s| s.bg(crate::theme::hover_bg()))
                         .child(div().w(px(56.)).flex_shrink_0().text_color(c(th.overlay1)).child(e.at.clone()))
                         .child(div().size(px(6.)).flex_shrink_0().rounded_full().bg(if e.ok { c(th.success) } else { c(th.error) }))
                         .child(div().w(px(120.)).flex_shrink_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_color(c(th.subtext)).child(e.source.clone()))
-                        .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().font_family(gpui::SharedString::from(config::get().font.family.clone())).child(e.text.replace('\n', " ")))
+                        .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().font_family(ui::mono_family()).text_size(px(ui::fs_mono())).child(e.text.replace('\n', " ")))
                         .child(div().flex_shrink_0().text_color(if e.ok { c(th.subtext) } else { c(th.error) }).max_w(px(260.)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(e.detail.clone()))
                         .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(detail.clone()).build(w, cx)));
                 }
             }
         }
-        div().id("bottom-panel").relative().w_full().h(px(h)).flex_shrink_0().flex().flex_col().rounded(px(10.)).bg(crate::theme::card_bg()).overflow_hidden()
+        card_layout::island("bottom-panel").relative().w_full().h(px(h)).flex_shrink_0()
             .child(div().id("bottom-resize").absolute().top_0().left_0().w_full().h(px(4.)).cursor_row_resize()
                 .hover(|d| d.bg(c(cur().accent).opacity(0.35)))
                 .on_drag(BottomResize, |d: &BottomResize, _, _, cx| cx.new(|_| d.clone()))

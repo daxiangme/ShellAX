@@ -11,6 +11,7 @@ use ssh_term_proto::sftp_mode::Mode as SftpMode;
 use std::sync::atomic::Ordering;
 
 use crate::actions::Action;
+use crate::card_layout;
 use crate::termview::Spec;
 use crate::theme::{c, cur};
 use crate::ui::{self, icon, IconName};
@@ -479,7 +480,7 @@ impl Root {
 
     /// Left tool-window frame: fixed width, resize handle on the right edge (double click resets).
     pub(crate) fn sb_frame(&mut self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
-        let col = div().id("sidebar").relative().w(px(self.sb_width)).flex_shrink_0().h_full().rounded(px(10.)).pt(px(4.)).flex().flex_col()
+        let col = card_layout::island("sidebar").relative().w(px(self.sb_width)).flex_shrink_0().h_full()
             .on_drag_move(cx.listener(|this, ev: &gpui::DragMoveEvent<SbResize>, _w, cx| {
                 let w = (f32::from(ev.event.position.x - ev.bounds.left()) - 2.0).clamp(180.0, 480.0);
                 if (w - this.sb_width).abs() >= 1.0 { this.sb_width = w; cx.notify(); }
@@ -513,7 +514,7 @@ impl Root {
             rail = rail.child(self.strip_btn(("rail", i), ic, tip, self.dock_is(a), a == Action::OpenAi && n_agents > 0)
                 .on_click(cx.listener(move |this, _, w, cx| this.run(a, w, cx))));
         }
-        rail = rail.child(div().flex_1());
+        rail = rail.child(div().flex_1()).child(div().w(px(16.)).h(px(1.)).flex_shrink_0().my(px(4.)).bg(crate::theme::divider()));
         let busy = self.transfers_active(cx);
         rail = rail
             .child(self.strip_btn("rail-transfers", IconName::ArrowDownUp, action_tip(t("tool.transfers"), &Action::ToggleBottomPanel.binding()), self.bottom_open && self.bottom_tab == crate::activity::Bottom::Transfers, busy)

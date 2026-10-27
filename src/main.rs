@@ -1827,7 +1827,7 @@ impl Render for Root {
         // elevated pill (no border / accent bar), inactive tabs are bare text with a faint hover fill.
         let dark_ui = th.appearance == theme::Appearance::Dark;
         let pill_bg = if dark_ui { c(th.surface0) } else { gpui::white() };
-        let hover_bg = c(th.text).opacity(0.05);
+        let hover_bg = theme::hover_bg();
         let pill_shadow = vec![gpui::BoxShadow { color: gpui::black().opacity(if dark_ui { 0.28 } else { 0.07 }), offset: gpui::point(px(0.), px(1.)), blur_radius: px(2.), spread_radius: px(0.), inset: false }];
         // 标签之间的间隙：拖动区（Windows 上为 HTCAPTION，其他平台由整行 drag_region 处理）
         let gap = |sep: bool| div().w(px(5.)).h(px(28.)).flex_shrink_0().flex().items_center().justify_center()
@@ -1838,12 +1838,9 @@ impl Render for Root {
         // 侧栏折叠时标签栏到达窗口左缘：为红黄绿按钮留位
         row = if mac && !self.sidebar_visible { row.child(self.lights(window, cx)) } else { row.pl(px(6.)) };
         let mut tabbar = div().id("tab-scroll").h_full().min_w_0().flex_shrink(1.).flex().items_center().overflow_x_scroll().track_scroll(&self.tab_scroll);
-        row = row.child(div().id("sb-collapse").size(px(28.)).flex_shrink_0().rounded(px(7.)).flex().items_center().justify_center().cursor_pointer()
+        row = row.child(ui::icon_button("sb-collapse", IconName::PanelLeft, ui::IconBtn::Lg, t("ui.show_hide_sidebar"))
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .hover(move |d| d.bg(hover_bg))
-            .tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(t("ui.show_hide_sidebar")).build(w, cx))
-            .on_click(cx.listener(|this, _, _w, cx| { this.toggle_sidebar(cx); cx.notify(); }))
-            .child(icon(IconName::PanelLeft, 14., c(th.overlay1))));
+            .on_click(cx.listener(|this, _, _w, cx| { this.toggle_sidebar(cx); cx.notify(); })));
         // base titles first, so identical ones can get a " (2)", " (3)" suffix
         let base_titles: Vec<SharedString> = self.tabs.iter().map(|t| {
             let panes = t.layout.leaves();
@@ -1867,9 +1864,9 @@ impl Render for Root {
             // hairline separator only between two inactive tabs
             if shown > 1 { tabbar = tabbar.child(gap(!active && (settings_on || i != self.active + 1))); }
             let tg = SharedString::from(format!("tab-g-{i}"));
-            let mut tabel = div().id(("tab", i)).relative().group(tg.clone()).h(px(28.)).w(px(TAB_W)).flex_shrink(1.).min_w(px(TAB_MIN_W)).pl(px(10.)).pr(px(4.)).rounded(px(7.)).flex().items_center().gap(px(6.)).cursor_pointer()
+            let mut tabel = div().id(("tab", i)).relative().group(tg.clone()).h(px(card_layout::TAB_PILL_H)).w(px(TAB_W)).flex_shrink(1.).min_w(px(TAB_MIN_W)).pl(px(10.)).pr(px(4.)).rounded(px(ui::R_MD)).flex().items_center().gap(px(6.)).cursor_pointer()
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .when(active, |d| d.bg(pill_bg).shadow(pill_shadow.clone()).rounded_tl(px(10.)).rounded_tr(px(10.)))
+                .when(active, |d| d.bg(pill_bg).shadow(pill_shadow.clone()).rounded_tl(px(ui::R_LG)).rounded_tr(px(ui::R_LG)))
                 .when_some(tip, |d, tip| d.tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx)))
                 .when(!active, |d| d.hover(move |s| s.bg(hover_bg)))
                 .on_click(cx.listener({ let title = title.to_string(); move |this, ev: &gpui::ClickEvent, w, cx| {
@@ -1889,13 +1886,13 @@ impl Render for Root {
                     // small monochrome kind icon: terminal / ssh / sftp
                     let v = panes[0].read(cx);
                     let ic = if matches!(v.embed, Some(termview::Embed::Kv(_))) { IconName::Database } else if matches!(v.embed, Some(termview::Embed::Tool(_))) { IconName::PencilRuler } else if v.embed.is_some() { IconName::Container } else if v.db.is_some() { IconName::Database } else if v.sftp.is_some() { IconName::FolderSync } else if matches!(v.spec, Spec::Ssh(_)) { IconName::Server } else { IconName::SquareTerminal };
-                    icon(ic, 13., if active { c(th.subtext) } else { c(th.overlay1) })
+                    icon(ic, ui::IC_SM, if active { c(th.subtext) } else { c(th.overlay1) })
                 })
-                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.)).text_color(if active { c(th.text) } else { c(th.overlay1) }).when(active, |d| d.font_weight(FontWeight::MEDIUM))
+                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(ui::fs_body())).text_color(if active { c(th.text) } else { c(th.overlay1) }).when(active, |d| d.font_weight(FontWeight::MEDIUM))
                     .child(match &self.tab_rename { Some((j, inp)) if *j == i => gpui_component::Sizable::with_size(gpui_component::input::Input::new(inp).appearance(false), gpui_component::Size::XSmall).into_any_element(), _ => title.clone().into_any_element() }));
             if let Some((name, st)) = agent {
                 let col = state_color(st, &th);
-                tabel = tabel.child(div().px(px(6.)).rounded_md().bg(col.opacity(0.18)).text_color(col).text_size(px(11.)).child(format!("● {name} {}", st.label())));
+                tabel = tabel.child(ui::tag(format!("● {name} {}", st.label()), col));
             }
             let drag = TabDrag { idx: i, title: title.clone() };
             tabel = tabel.on_drag(drag, |d: &TabDrag, _, _, cx| cx.new(|_| d.clone()));
@@ -1906,12 +1903,12 @@ impl Render for Root {
                 .when(show_dot, |d| d.child(div().absolute().top(px(6.)).left(px(6.)).size(px(6.)).rounded_full().bg(scol).group_hover(tg.clone(), |s| s.invisible())))
                 .child(div().id(("close", i)).absolute().top_0().left_0().size(px(18.)).rounded_full().flex().items_center().justify_center()
                     .when(!active, |d| d.invisible().group_hover(tg.clone(), |s| s.visible()))
-                    .hover(|s| s.bg(c(cur().text).opacity(0.1)))
+                    .hover(|s| s.bg(theme::hover_bg()))
                     .on_click(cx.listener(move |this, _, w, cx| {
                         cx.stop_propagation();
                         this.close_tab(i, w, cx);
                     }))
-                    .child(icon(IconName::X, 11., c(th.overlay1)))));
+                    .child(icon(IconName::X, ui::IC_XS, c(th.overlay1)))));
             // tab appear: fade + grow from a narrow pill (keyed by the first pane, so reorders don't replay it)
             let tabel: AnyElement = if motion::reduced() { tabel.into_any_element() } else {
                 tabel.with_animation(("tab-in", panes[0].entity_id().as_u64() as usize), gpui::Animation::new(motion::ms(motion::APPEAR_MS)).with_easing(gpui::ease_out_quint()),
@@ -1926,25 +1923,23 @@ impl Render for Root {
         if settings_tab.is_some() {
             let tg = SharedString::from("settings-tab-g");
             if !self.tabs.is_empty() { tabbar = tabbar.child(gap(!settings_on && self.active + 1 != self.tabs.len())); }
-            tabbar = tabbar.child(div().id("settings-tab").group(tg.clone()).h(px(28.)).w(px(TAB_W)).flex_shrink(1.).min_w(px(TAB_MIN_W)).pl(px(10.)).pr(px(4.)).rounded(px(7.)).flex().items_center().gap(px(6.)).cursor_pointer()
+            tabbar = tabbar.child(div().id("settings-tab").group(tg.clone()).h(px(card_layout::TAB_PILL_H)).w(px(TAB_W)).flex_shrink(1.).min_w(px(TAB_MIN_W)).pl(px(10.)).pr(px(4.)).rounded(px(ui::R_MD)).flex().items_center().gap(px(6.)).cursor_pointer()
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .when(settings_on, |d| d.bg(pill_bg).shadow(pill_shadow.clone()).rounded_tl(px(10.)).rounded_tr(px(10.)))
+                .when(settings_on, |d| d.bg(pill_bg).shadow(pill_shadow.clone()).rounded_tl(px(ui::R_LG)).rounded_tr(px(ui::R_LG)))
                 .when(!settings_on, |d| d.hover(move |s| s.bg(hover_bg)))
                 .on_click(cx.listener(|this, _, w, cx| this.open_settings(Cat::General, w, cx)))
-                .child(icon(IconName::Settings, 13., if settings_on { c(th.subtext) } else { c(th.overlay1) }))
-                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.)).text_color(if settings_on { c(th.text) } else { c(th.overlay1) }).when(settings_on, |d| d.font_weight(FontWeight::MEDIUM)).child(t("ui.settings")))
+                .child(icon(IconName::Settings, ui::IC_SM, if settings_on { c(th.subtext) } else { c(th.overlay1) }))
+                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(ui::fs_body())).text_color(if settings_on { c(th.text) } else { c(th.overlay1) }).when(settings_on, |d| d.font_weight(FontWeight::MEDIUM)).child(t("ui.settings")))
                 .child(div().id("settings-tab-close").size(px(18.)).rounded_full().flex().items_center().justify_center()
                     .when(!settings_on, |d| d.invisible().group_hover(tg, |s| s.visible()))
-                    .hover(|s| s.bg(c(cur().text).opacity(0.1)))
+                    .hover(|s| s.bg(theme::hover_bg()))
                     .on_click(cx.listener(|this, _, w, cx| { cx.stop_propagation(); this.close_settings(w, cx); }))
-                    .child(icon(IconName::X, 12., c(th.overlay0)))));
+                    .child(icon(IconName::X, ui::IC_XS, c(th.overlay0)))));
         }
         // "+" then the empty title-bar area (window drag / double-click maximize / Windows snap),
         // then the window's own min / max / close buttons (Windows/Linux style, PRD 5.23)
         row = row.child(tabbar).child(
-            div().id("new-tab").size(px(28.)).flex_shrink_0().ml(px(2.)).rounded(px(7.)).on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()).flex().items_center().justify_center().cursor_pointer()
-                .hover(move |s| s.bg(hover_bg)).active(move |s| s.bg(pill_bg))
-                .tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(t("ui.new_tab")).build(w, cx))
+            ui::icon_button("new-tab", IconName::Plus, ui::IconBtn::Lg, t("ui.new_tab")).ml(px(2.)).on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(|this, ev: &gpui::ClickEvent, w, cx| {
                     // 菜单刚被“点击外部”关闭（就是这次点击）时不再重新打开，实现开关切换
                     if this.new_menu.is_some() || this.new_menu_closed.elapsed() < std::time::Duration::from_millis(250) { this.new_menu = None; cx.notify(); return; }
@@ -1952,17 +1947,13 @@ impl Render for Root {
                     if this.new_module_tab(w, cx) { return; }
                     let p = ev.position();
                     this.open_new_menu(gpui::point(p.x - px(14.), p.y + px(18.)), w, cx);
-                }))
-                .child(icon(IconName::Plus, 15., c(th.overlay1))),
+                })),
         ).child(chrome::drag_spacer("title-spacer").min_w(px(chrome::MIN_DRAG_W)).flex_shrink_0().flex_grow(1.));
         // settings: a gear at the right end of the title row, just before the window buttons
         let gear_on = self.settings_active();
-        row = row.child(div().id("title-settings").size(px(28.)).flex_shrink_0().mr(px(4.)).rounded(px(7.)).flex().items_center().justify_center().cursor_pointer()
+        row = row.child(ui::icon_button_state("title-settings", IconName::Settings, ui::IconBtn::Lg, crate::sidebar::action_tip(t("ui.settings"), &Action::OpenSettings.binding()), gear_on, false).mr(px(4.))
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .when(gear_on, |d| d.bg(crate::theme::selected_bg())).when(!gear_on, |d| d.hover(move |s| s.bg(hover_bg)))
-            .tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(crate::sidebar::action_tip(t("ui.settings"), &Action::OpenSettings.binding())).build(w, cx))
-            .on_click(cx.listener(|this, _, w, cx| this.run(Action::OpenSettings, w, cx)))
-            .child(icon(IconName::Settings, 15., if gear_on { c(th.accent) } else { c(th.overlay1) })));
+            .on_click(cx.listener(|this, _, w, cx| this.run(Action::OpenSettings, w, cx))));
         row = match win_ctl { Some(wc) => row.child(wc), None => row.pr(px(8.)) };
 
         let workspace = if settings_on {
@@ -2003,24 +1994,24 @@ impl Render for Root {
         let org = ssh_term_proto::managed::get();
         let mode = org.as_ref().map_or(s.permissions.mode, |m| m.clamp_mode(s.permissions.mode));
         let mode_col = match mode { Mode::Ask => c(th.accent), Mode::Plan => c(th.info), Mode::Auto => c(th.warning) };
-        let sb_btn = |id: &'static str| div().id(id).px_2().h(px(20.)).rounded_md().flex().items_center().gap_1().cursor_pointer().hover(|s| s.bg(crate::theme::hover_bg()));
+        let sb_btn = |id: &'static str| div().id(id).px_2().h(px(22.)).rounded(px(ui::R_MD)).flex().items_center().gap_1().cursor_pointer().hover(|s| s.bg(crate::theme::hover_bg()));
         // 状态栏：统一低饱和文字，只有状态圆点保留颜色
         let statusbar = div().h(px(28.)).px_3().flex().items_center().gap_3()
-            .text_size(px(11.)).text_color(theme::muted_text())
+            .text_size(px(ui::fs_small())).text_color(theme::muted_text())
             // 原标题栏右上角的“本地终端”入口
             .child(sb_btn("sb-local").tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(t("ui.local_terminal")).build(w, cx))
                 .on_click(cx.listener(|this, _, w, cx| this.new_tab(Spec::Local, w, cx)))
-                .child(icon(IconName::SquareTerminal, 12., c(th.overlay1))).child(t("ui.local_terminal")))
+                .child(icon(IconName::SquareTerminal, ui::IC_XS, c(th.overlay1))).child(t("ui.local_terminal")))
             .child(div().flex().items_center().gap_2().child(div().size(px(7.)).rounded_full().bg(scolor)).child(status))
             .child(title)
             .child(div().flex_1())
             .child(hist)
             .child(dims)
             .child("UTF-8")
-            .child(sb_btn("theme-btn").on_click(cx.listener(|this, _, w, cx| this.cycle_theme(w, cx))).child(icon(IconName::Palette, 12., c(th.overlay1))).child(theme_label))
-            .child(sb_btn("mode-btn").border_1().border_color(c(th.surface1)).text_color(theme::muted_text())
+            .child(sb_btn("theme-btn").on_click(cx.listener(|this, _, w, cx| this.cycle_theme(w, cx))).child(icon(IconName::Palette, ui::IC_XS, c(th.overlay1))).child(theme_label))
+            .child(sb_btn("mode-btn").border_1().border_color(theme::divider()).text_color(theme::muted_text())
                 .on_click(cx.listener(|this, _, w, cx| this.run(Action::CyclePermissionMode, w, cx)))
-                .child(icon(IconName::Shield, 12., mode_col.opacity(0.8))).child(tf("main.perm_status", &[("mode", &mode.label())]))
+                .child(icon(IconName::Shield, ui::IC_XS, mode_col.opacity(0.8))).child(tf("main.perm_status", &[("mode", &mode.label())]))
                 .when(org.is_some(), |d| d.child(div().pl_1().child(t("main.org_badge")))));
 
         // 顶层：活动图标栏 + 工具窗口（全高）| 右列 [标签栏 / 内容 / 底部工具窗口]
@@ -2029,10 +2020,10 @@ impl Render for Root {
         if self.sidebar_visible {
             let sb = self.tool_panel(window, cx);
             // 侧栏顶部一行（与标签行同高，可拖动窗口）：红黄绿按钮风格时软件名在按钮右侧，否则靠左带小图标
-            let name = div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).whitespace_nowrap().child("ShellAX");
+            let name = div().text_size(px(ui::fs_body())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).whitespace_nowrap().child("ShellAX");
             let mut head = chrome::drag_region(div().id("sb-chrome")).h(px(chrome::TAB_H)).flex_shrink_0().flex().items_center().overflow_hidden()
                 .window_control_area(gpui::WindowControlArea::Drag);
-            head = if mac { head.child(self.lights(window, cx)).child(name) } else { head.pl(px(12.)).gap(px(6.)).child(icon(IconName::SquareTerminal, 14., c(th.accent))).child(name) };
+            head = if mac { head.child(self.lights(window, cx)).child(name) } else { head.pl(px(12.)).gap(px(6.)).child(icon(IconName::SquareTerminal, ui::IC_SM, c(th.accent))).child(name) };
             let panel: AnyElement = match self.sb_anim {
                 Some((show, seq)) => {
                     // the panel keeps its full width while it slides, so the terminal is laid out

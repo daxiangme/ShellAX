@@ -100,24 +100,21 @@ impl Root {
         match self.port_view.clone() { Some(v) => ui::modal(v).into_any_element(), None => div().into_any_element() }
     }
 
-    /// One right-column card: rounded panel with a 40px title row (collapse + close).
+    /// One right-column card: an island with a `panel_header` (extra actions + collapse + close).
     /// Width and the resize handle belong to the column (`dock_column`).
-    pub(crate) fn dock_frame(&mut self, dock_id: &'static str, title: SharedString, ic: IconName, body: impl IntoElement, cx: &mut Context<Root>) -> AnyElement {
-        let th = cur();
+    pub(crate) fn dock_frame(&mut self, dock_id: &'static str, title: SharedString, subtitle: Option<SharedString>, ic: IconName, mut actions: Vec<AnyElement>, body: impl IntoElement, cx: &mut Context<Root>) -> AnyElement {
         let close_id = SharedString::from(format!("{dock_id}-close"));
         let min_id = SharedString::from(format!("{dock_id}-min"));
+        let head_id = SharedString::from(format!("{dock_id}-head"));
         let collapsed = self.dock_min.contains(dock_id);
-        let btn = |id: SharedString| div().id(id).size(px(26.)).rounded_md().flex().items_center().justify_center().cursor_pointer().hover(|d| d.bg(c(cur().surface0)));
-        // one uniform rounded border around the whole card; no separator line under the title row
-        let mut dock = div().id(dock_id).w_full().flex().flex_col().min_h_0().overflow_hidden()
-            .rounded(px(crate::card_layout::CARD_RADIUS)).bg(crate::theme::card_bg()).border_1().border_color(c(th.surface0));
-        dock = dock.child(div().h(px(40.)).px_3().flex_shrink_0().flex().items_center().gap_2()
-            .child(icon(ic, 15., c(th.accent)))
-            .child(div().flex_1().min_w_0().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(title))
-            .child(btn(min_id).on_click(cx.listener(move |this, _, _w, cx| { if this.dock_min.remove(dock_id) { *this.dock_flip.entry(dock_id).or_default() += 1; } else { this.dock_min.insert(dock_id); } cx.notify(); }))
-                .child(icon(if collapsed { IconName::ChevronDown } else { IconName::ChevronUp }, 15., c(th.overlay1))))
-            .child(btn(close_id).on_click(cx.listener(move |this, _, w, cx| this.close_dock(dock_id, w, cx)))
-                .child(icon(IconName::X, 16., c(th.overlay1)))));
+        let toggle = move |this: &mut Root| { if this.dock_min.remove(dock_id) { *this.dock_flip.entry(dock_id).or_default() += 1; } else { this.dock_min.insert(dock_id); } };
+        actions.push(ui::icon_button(min_id, if collapsed { IconName::ChevronDown } else { IconName::ChevronUp }, ui::IconBtn::Md, if collapsed { t("ai.expand") } else { t("ai.collapse") })
+            .on_click(cx.listener(move |this, _, _w, cx| { cx.stop_propagation(); toggle(this); cx.notify(); })).into_any_element());
+        actions.push(ui::icon_button(close_id, IconName::X, ui::IconBtn::Md, t("ui.close")).on_click(cx.listener(move |this, _, w, cx| this.close_dock(dock_id, w, cx))).into_any_element());
+        // 折叠态整行可点击展开
+        let head = div().id(head_id).w_full().flex_shrink_0().child(ui::panel_header(title, subtitle, Some(ic), actions))
+            .when(collapsed, |d| d.cursor_pointer().on_click(cx.listener(move |this, _, _w, cx| { toggle(this); cx.notify(); })));
+        let dock = crate::card_layout::island(dock_id).w_full().min_h_0().child(head);
         if collapsed { return dock.flex_shrink_0().into_any_element(); }
         // the expanded card takes the whole slot; its body scrolls inside
         let dock = dock.flex_1();
@@ -140,7 +137,7 @@ impl Root {
             let title = SharedString::from(format!("{} · {}", t("hosttools.title"), v.read(cx).label()));
             // cached: its 5 s refresh repaints only this card; the window re-renders it only when it notifies
             let el = v.cached(gpui::StyleRefinement::default().size_full());
-            cards.push(("host-dock", self.dock_frame("host-dock", title, IconName::Monitor, el, cx)));
+            cards.push(("host-dock", self.dock_frame("host-dock", title, None, IconName::Monitor, vec![], el, cx)));
         }
         if self.dock_ai { cards.push(("ai-dock", self.ai_dock(cx))); }
         if self.dock_snip { cards.push(("snip-dock", self.library_dock(true, window, cx))); }
@@ -244,7 +241,7 @@ impl Root {
         strip = strip.child(launch).when(n > 0, |d| d.flex_wrap());
         let mut body = div().flex_1().min_h_0().flex().flex_col().when(term, |d| d.child(strip));
         if let Some(v) = self.chat_view.clone() { body = body.child(div().flex_1().min_h_0().child(v)); }
-        self.dock_frame("ai-dock", t("ui.built_in_ai_assistant").into(), IconName::Sparkles, body, cx)
+        self.dock_frame("ai-dock", t("ui.built_in_ai_assistant").into(), None, IconName::Sparkles, vec![], body, cx)
     }
 }
 
