@@ -37,10 +37,36 @@ pub struct Field {
     pub choices: Vec<(String, String)>,
     #[serde(default)]
     pub placeholder: String,
+    /// 多行输入的高度提示 `(最少行, 最多行)`：随内容增高，超出后框内滚动；缺省（旧扩展包也一样）为占满剩余空间的大文本框。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<(u8, u8)>,
+}
+
+/// 输入字段在输入卡片里占的高度形态。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InSize {
+    /// 单行字段，固定行高。
+    Line,
+    /// 多行，按内容在 (最少, 最多) 行之间增高。
+    Auto(u8, u8),
+    /// 大文本，占剩余空间。
+    Fill,
+    /// 文件拖放区。
+    Zone,
 }
 
 impl Field {
-    fn new(id: &str, kind: FieldKind, label: &str) -> Field { Field { id: id.into(), label: label.into(), kind, default: String::new(), choices: vec![], placeholder: String::new() } }
+    fn new(id: &str, kind: FieldKind, label: &str) -> Field { Field { id: id.into(), label: label.into(), kind, default: String::new(), choices: vec![], placeholder: String::new(), rows: None } }
+    /// 多行输入按内容增高（最少 / 最多行数）。
+    pub fn auto(mut self, min: u8, max: u8) -> Field { self.rows = Some((min.max(1), max.max(min).max(1))); self }
+    /// 字段在输入卡片里的高度形态。
+    pub fn size(&self) -> InSize {
+        match self.kind {
+            FieldKind::Multiline => match self.rows { Some((a, b)) => InSize::Auto(a.max(1), b.max(a).max(1)), None => InSize::Fill },
+            FieldKind::File | FieldKind::Files => InSize::Zone,
+            _ => InSize::Line,
+        }
+    }
     pub fn text(id: &str, label: &str) -> Field { Field::new(id, FieldKind::Text, label) }
     pub fn multiline(id: &str, label: &str) -> Field { Field::new(id, FieldKind::Multiline, label) }
     pub fn file(id: &str, label: &str) -> Field { Field::new(id, FieldKind::File, label) }
@@ -235,6 +261,35 @@ impl From<String> for Output { fn from(s: String) -> Output { Output::text(s) } 
 /// 带会话历史的工具（生成类）：每次运行追加一批，不覆盖旧结果。
 pub fn has_history(id: &str) -> bool { matches!(id, "password" | "uuid" | "random_num" | "random_group") }
 
+/// 输出贴合内容的工具（键值行、文件卡片）：结果出现前不画输出卡片，高度随内容、超出后卡片内部滚动，下方留白。
+/// 其余工具（文本、图片预览、历史、批量列表、正则）的输出占满剩余空间。
+pub fn out_fit(id: &str) -> bool {
+    matches!(id,
+        "units" | "en_amount" | "rmb" | "sum_list" | "loan" | "id_card" | "cron" | "naming" | "color" | "radix" | "md5" | "file_md5" | "sha" | "hmac"
+        | "timestamp" | "date_calc" | "workday" | "world_clock" | "tz_convert"
+        | "pdf_merge" | "pdf_split" | "pdf_rotate" | "pdf_delete" | "pdf_reorder" | "pdf_watermark" | "pdf_pagenum" | "img_to_pdf" | "pdf_clean")
+}
+
+/// 未重新打包的扩展包的多行输入高度：宿主按 (工具 id, 字段 id) 覆盖；`None` 表示明确的大文本。
+/// 清单里自带 `rows` 的字段优先，这张表只补旧包没有的提示。
+pub const PACK_ROWS: &[(&str, &str, Option<(u8, u8)>)] = &[
+    ("qr_gen", "input", Some((2, 8))),
+    ("pinyin", "input", None),
+    ("zh_convert", "input", None),
+    ("world_clock", "zones", Some((3, 10))),
+    ("tz_convert", "to", Some((3, 10))),
+];
+
+/// 给扩展包的工具补上输入高度提示（内置工具不动）。
+pub fn apply_hints(spec: &mut ToolSpec) {
+    if spec.pack.is_empty() { return; }
+    for f in &mut spec.inputs {
+        if f.kind == FieldKind::Multiline && f.rows.is_none() {
+            if let Some((_, _, r)) = PACK_ROWS.iter().find(|(t, fid, _)| *t == spec.id && *fid == f.id) { f.rows = *r; }
+        }
+    }
+}
+
 /// 分类：(id, 文案键, 图标名)。扩展包分类也在这里，以便未安装时也能显示占位。
 pub const CATEGORIES: &[(&str, &str)] = &[
     ("unit", "tools.cat_unit"), ("text", "tools.cat_text"), ("dev", "tools.cat_dev"), ("crypto", "tools.cat_crypto"),
@@ -253,6 +308,8 @@ fn spec(id: &str, cat: &str, kw: &str, inputs: Vec<Field>, options: Vec<Field>) 
 pub fn builtin() -> Vec<ToolSpec> {
     use Field as F;
     let input = || F::multiline("input", t("tools.f_input"));
+    // 短输入：按内容增高（最少 / 最多行），超出后框内滚动
+    let short = |min: u8, max: u8| F::multiline("input", t("tools.f_input")).auto(min, max);
     let enc_out = [("base64", "Base64"), ("hex", "Hex")];
     let dir = [("enc", "tools.o_encrypt"), ("dec", "tools.o_decrypt")];
     let keymode = [("pass", "tools.o_key_pass"), ("utf8", "tools.o_key_utf8"), ("hex", "tools.o_key_hex")];
@@ -262,7 +319,7 @@ pub fn builtin() -> Vec<ToolSpec> {
             vec![F::select("kind", t("tools.f_kind"), &num::UNIT_KINDS.iter().map(|k| (k.0, k.1)).collect::<Vec<_>>()), F::text("from", t("tools.f_from_unit")).with_default("m")]),
         spec("en_amount", "unit", "english amount words money check", vec![F::text("input", t("tools.f_amount"))], vec![F::select("currency", t("tools.f_currency"), &[("USD", "USD"), ("RMB", "RMB"), ("EUR", "EUR"), ("HKD", "HKD"), ("", "tools.o_none")])]),
         spec("rmb", "unit", "rmb uppercase daxie", vec![F::text("input", t("tools.f_amount"))], vec![]),
-        spec("sum_list", "unit", "sum average total list", vec![input()], vec![]),
+        spec("sum_list", "unit", "sum average total list", vec![short(3, 10)], vec![]),
         spec("loan", "unit", "loan mortgage monthly payment", vec![],
             vec![F::number("principal", t("tools.f_principal"), "1000000"), F::number("rate", t("tools.f_rate"), "3.5"), F::number("years", t("tools.f_years"), "30"),
                  F::select("method", t("tools.f_method"), &[("annuity", "tools.o_annuity"), ("linear", "tools.o_linear")])]),
@@ -285,23 +342,23 @@ pub fn builtin() -> Vec<ToolSpec> {
         spec("css", "dev", "css format minify", vec![input()], vec![F::select("mode", t("tools.f_mode"), &[("pretty", "tools.o_pretty"), ("minify", "tools.o_minify")])]),
         spec("html", "dev", "html format minify", vec![input()], vec![F::select("mode", t("tools.f_mode"), &[("pretty", "tools.o_pretty"), ("minify", "tools.o_minify")])]),
         spec("cron", "dev", "crontab cron schedule next", vec![F::text("input", t("tools.f_cron")).with_default("*/5 * * * *")], vec![F::number("count", t("tools.f_count"), "10")]),
-        spec("naming", "dev", "camel snake kebab pascal naming case", vec![input()], vec![]),
+        spec("naming", "dev", "camel snake kebab pascal naming case", vec![short(2, 8)], vec![]),
         spec("color", "dev", "color hex rgb hsl", vec![F::text("input", t("tools.f_color")).with_default("#3b82f6")], vec![]),
         spec("radix", "dev", "binary octal hex decimal base radix", vec![F::text("input", t("tools.f_value"))], vec![F::select("from", t("tools.f_from_base"), &[("auto", "tools.o_auto"), ("2", "2"), ("8", "8"), ("10", "10"), ("16", "16"), ("36", "36")])]),
         ToolSpec { interactive: true, live: false, ..spec("websocket", "dev", "websocket ws wss test", vec![], vec![]) },
         // 加密编码
-        spec("md5", "crypto", "md5 hash", vec![input()], vec![]),
+        spec("md5", "crypto", "md5 hash", vec![short(3, 10)], vec![]),
         ToolSpec { heavy: true, live: false, ..spec("file_md5", "crypto", "file md5 sha checksum hash", vec![F::file("file", t("tools.f_file"))], vec![F::select("algo", t("tools.f_algo"), &[("md5", "MD5"), ("sha1", "SHA-1"), ("sha256", "SHA-256"), ("sha512", "SHA-512")])]) },
-        spec("sha", "crypto", "sha1 sha256 sha512 hash", vec![input()], vec![F::toggle("upper", t("tools.o_uppercase"), false)]),
-        spec("hmac", "crypto", "hmac hash", vec![input(), F::text("key", t("tools.f_key"))], vec![F::select("algo", t("tools.f_algo"), &[("sha256", "SHA-256"), ("sha1", "SHA-1"), ("sha512", "SHA-512"), ("sha384", "SHA-384"), ("sha224", "SHA-224"), ("md5", "MD5")])]),
-        ToolSpec { live: false, ..spec("aes", "crypto", "aes encrypt decrypt", vec![input(), F::text("key", t("tools.f_key")), F::text("iv", t("tools.f_iv"))],
+        spec("sha", "crypto", "sha1 sha256 sha512 hash", vec![short(3, 10)], vec![F::toggle("upper", t("tools.o_uppercase"), false)]),
+        spec("hmac", "crypto", "hmac hash", vec![short(3, 10), F::text("key", t("tools.f_key"))], vec![F::select("algo", t("tools.f_algo"), &[("sha256", "SHA-256"), ("sha1", "SHA-1"), ("sha512", "SHA-512"), ("sha384", "SHA-384"), ("sha224", "SHA-224"), ("md5", "MD5")])]),
+        ToolSpec { live: false, ..spec("aes", "crypto", "aes encrypt decrypt", vec![short(3, 10), F::text("key", t("tools.f_key")), F::text("iv", t("tools.f_iv"))],
             vec![F::select("dir", t("tools.f_dir"), &dir), F::select("keymode", t("tools.f_keymode"), &keymode), F::select("mode", t("tools.f_cipher_mode"), &[("cbc", "CBC"), ("ecb", "ECB"), ("ctr", "CTR"), ("cfb", "CFB"), ("ofb", "OFB")]),
                  F::select("pad", t("tools.f_padding"), &[("pkcs7", "PKCS7"), ("zero", "ZeroPadding"), ("none", "NoPadding")]), F::select("enc", t("tools.f_cipher_enc"), &enc_out)]) },
-        ToolSpec { live: false, ..spec("des", "crypto", "des 3des tripledes encrypt decrypt", vec![input(), F::text("key", t("tools.f_key")), F::text("iv", t("tools.f_iv"))],
+        ToolSpec { live: false, ..spec("des", "crypto", "des 3des tripledes encrypt decrypt", vec![short(3, 10), F::text("key", t("tools.f_key")), F::text("iv", t("tools.f_iv"))],
             vec![F::select("algo", t("tools.f_algo"), &[("des", "DES"), ("3des", "3DES")]), F::select("dir", t("tools.f_dir"), &dir), F::select("keymode", t("tools.f_keymode"), &keymode), F::select("mode", t("tools.f_cipher_mode"), &[("cbc", "CBC"), ("ecb", "ECB")]),
                  F::select("pad", t("tools.f_padding"), &[("pkcs7", "PKCS7"), ("zero", "ZeroPadding"), ("none", "NoPadding")]), F::select("enc", t("tools.f_cipher_enc"), &enc_out)]) },
-        ToolSpec { live: false, ..spec("rc4", "crypto", "rc4 arc4 encrypt decrypt", vec![input(), F::text("key", t("tools.f_key"))], vec![F::select("dir", t("tools.f_dir"), &dir), F::select("keymode", t("tools.f_keymode"), &keymode), F::select("enc", t("tools.f_cipher_enc"), &enc_out)]) },
-        ToolSpec { live: false, ..spec("rabbit", "crypto", "rabbit stream cipher encrypt decrypt", vec![input(), F::text("key", t("tools.f_key")), F::text("iv", t("tools.f_iv"))], vec![F::select("dir", t("tools.f_dir"), &dir), F::select("keymode", t("tools.f_keymode"), &keymode), F::select("enc", t("tools.f_cipher_enc"), &enc_out)]) },
+        ToolSpec { live: false, ..spec("rc4", "crypto", "rc4 arc4 encrypt decrypt", vec![short(3, 10), F::text("key", t("tools.f_key"))], vec![F::select("dir", t("tools.f_dir"), &dir), F::select("keymode", t("tools.f_keymode"), &keymode), F::select("enc", t("tools.f_cipher_enc"), &enc_out)]) },
+        ToolSpec { live: false, ..spec("rabbit", "crypto", "rabbit stream cipher encrypt decrypt", vec![short(3, 10), F::text("key", t("tools.f_key")), F::text("iv", t("tools.f_iv"))], vec![F::select("dir", t("tools.f_dir"), &dir), F::select("keymode", t("tools.f_keymode"), &keymode), F::select("enc", t("tools.f_cipher_enc"), &enc_out)]) },
         spec("base64", "crypto", "base64 encode decode", vec![input()], vec![F::select("dir", t("tools.f_dir"), &[("enc", "tools.o_encode"), ("dec", "tools.o_decode")]), F::toggle("url", t("tools.o_url_safe"), false)]),
         spec("url", "crypto", "url encode decode percent", vec![input()], vec![F::select("dir", t("tools.f_dir"), &[("enc", "tools.o_encode"), ("dec", "tools.o_decode"), ("enc_uri", "tools.o_encode_uri")])]),
         spec("unicode", "crypto", "unicode escape chinese", vec![input()], vec![F::select("dir", t("tools.f_dir"), &[("enc", "tools.o_encode"), ("dec", "tools.o_decode")]), F::toggle("ascii", t("tools.o_escape_ascii"), false)]),
@@ -309,13 +366,13 @@ pub fn builtin() -> Vec<ToolSpec> {
         spec("timestamp", "time", "timestamp unix epoch date", vec![F::text("input", t("tools.f_time_or_ts")).ph(t("tools.ph_now"))], vec![]),
         spec("date_calc", "time", "date add subtract diff interval", vec![F::text("a", t("tools.f_date_a")), F::text("b", t("tools.f_date_b"))],
             vec![F::select("mode", t("tools.f_mode"), &[("diff", "tools.o_diff"), ("add", "tools.o_add")]), F::number("n", t("tools.f_amount_n"), "7"), F::select("unit", t("tools.f_unit"), &[("day", "tools.o_day"), ("week", "tools.o_week"), ("month", "tools.o_month"), ("year", "tools.o_year"), ("hour", "tools.o_hour")])]),
-        spec("workday", "time", "workday business day holiday", vec![F::text("start", t("tools.f_start_date")), F::multiline("holidays", t("tools.f_holidays")), F::multiline("workdays", t("tools.f_extra_workdays"))], vec![F::number("n", t("tools.f_workdays_n"), "5")]),
+        spec("workday", "time", "workday business day holiday", vec![F::text("start", t("tools.f_start_date")), F::multiline("holidays", t("tools.f_holidays")).auto(2, 6), F::multiline("workdays", t("tools.f_extra_workdays")).auto(2, 6)], vec![F::number("n", t("tools.f_workdays_n"), "5")]),
         spec("batch_time", "time", "batch timestamp convert lines log", vec![input()], vec![F::select("mode", t("tools.f_mode"), &[("auto", "tools.o_auto"), ("to_date", "tools.o_to_date"), ("to_ts", "tools.o_to_ts")]), F::select("unit", t("tools.f_ts_unit"), &[("s", "tools.o_seconds"), ("ms", "tools.o_millis")])]),
         // 生成
         ToolSpec { live: false, ..spec("password", "gen", "password random generate", vec![], vec![F::number("len", t("tools.f_length"), "16"), F::number("count", t("tools.f_count"), "5"), F::toggle("upper", "A-Z", true), F::toggle("lower", "a-z", true), F::toggle("digit", "0-9", true), F::toggle("symbol", "!@#$", true), F::toggle("no_ambiguous", t("tools.o_no_ambiguous"), false)]) },
         ToolSpec { live: false, ..spec("uuid", "gen", "uuid guid generate", vec![], vec![F::number("count", t("tools.f_count"), "10"), F::toggle("upper", t("tools.o_uppercase"), false), F::toggle("hyphen", t("tools.o_hyphen"), true)]) },
         ToolSpec { live: false, ..spec("random_num", "gen", "random number", vec![], vec![F::number("min", t("tools.f_min"), "1"), F::number("max", t("tools.f_max"), "100"), F::number("count", t("tools.f_count"), "10"), F::number("decimals", t("tools.f_decimals"), "0"), F::toggle("unique", t("tools.o_unique"), false), F::toggle("sort", t("tools.o_sort"), false)]) },
-        ToolSpec { live: false, ..spec("random_group", "gen", "random group shuffle pick name", vec![input()], vec![F::select("mode", t("tools.f_mode"), &[("groups", "tools.o_by_groups"), ("size", "tools.o_by_size"), ("pick", "tools.o_pick_one")]), F::number("n", t("tools.f_n"), "2")]) },
+        ToolSpec { live: false, ..spec("random_group", "gen", "random group shuffle pick name", vec![short(3, 10)], vec![F::select("mode", t("tools.f_mode"), &[("groups", "tools.o_by_groups"), ("size", "tools.o_by_size"), ("pick", "tools.o_pick_one")]), F::number("n", t("tools.f_n"), "2")]) },
     ];
     for s in &mut v { if s.id == "units" { s.options[1].placeholder = "m, km, kg, °C, MB …".into(); } }
     v
@@ -414,6 +471,62 @@ pub fn terminal_targets(sel: &str) -> Vec<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn input_sizes() {
+        let all = builtin();
+        let size = |id: &str, f: &str| all.iter().find(|s| s.id == id).unwrap().inputs.iter().find(|x| x.id == f).unwrap().size();
+        // 短输入按内容增高；大文本占满；单行与文件各按其类型
+        assert_eq!(size("md5", "input"), InSize::Auto(3, 10));
+        assert_eq!(size("aes", "input"), InSize::Auto(3, 10));
+        assert_eq!(size("sum_list", "input"), InSize::Auto(3, 10));
+        assert_eq!(size("naming", "input"), InSize::Auto(2, 8));
+        assert_eq!(size("random_group", "input"), InSize::Auto(3, 10));
+        assert_eq!(size("json", "input"), InSize::Fill);
+        assert_eq!(size("base64", "input"), InSize::Fill);
+        assert_eq!(size("timestamp", "input"), InSize::Line);
+        assert_eq!(size("file_md5", "file"), InSize::Zone);
+        assert_eq!(size("workday", "holidays"), InSize::Auto(2, 6));
+        // 行数提示自带下限，且不会倒挂
+        let f = Field::multiline("x", "x").auto(0, 0);
+        assert_eq!(f.size(), InSize::Auto(1, 1));
+        assert_eq!(Field::multiline("x", "x").auto(5, 2).size(), InSize::Auto(5, 5));
+    }
+
+    #[test]
+    fn pack_hints() {
+        // 清单里没有 rows 的旧扩展包：宿主按 (工具, 字段) 补；大文本工具保持占满
+        let mk = |id: &str, f: &str| ToolSpec { id: id.into(), cat: "x".into(), name: String::new(), desc: String::new(), keywords: String::new(), inputs: vec![Field::multiline(f, "")], options: vec![], interactive: false, heavy: true, live: false, pack: "p".into() };
+        let mut q = mk("qr_gen", "input");
+        apply_hints(&mut q);
+        assert_eq!(q.inputs[0].size(), InSize::Auto(2, 8));
+        for (id, f, want) in [("world_clock", "zones", InSize::Auto(3, 10)), ("tz_convert", "to", InSize::Auto(3, 10)), ("pinyin", "input", InSize::Fill), ("zh_convert", "input", InSize::Fill)] {
+            let mut s = mk(id, f);
+            apply_hints(&mut s);
+            assert_eq!(s.inputs[0].size(), want, "{id}");
+        }
+        // 清单自带 rows 的优先，内置工具不受影响
+        let mut own = mk("qr_gen", "input");
+        own.inputs[0] = own.inputs[0].clone().auto(4, 4);
+        apply_hints(&mut own);
+        assert_eq!(own.inputs[0].size(), InSize::Auto(4, 4));
+        let mut b = mk("qr_gen", "input");
+        b.pack.clear();
+        apply_hints(&mut b);
+        assert_eq!(b.inputs[0].size(), InSize::Fill);
+        // 清单 JSON 里的 rows 能解析，缺省时为大文本
+        let f: Field = serde_json::from_str(r#"{"id":"a","kind":"multiline","rows":[2,6]}"#).unwrap();
+        assert_eq!(f.size(), InSize::Auto(2, 6));
+        let f: Field = serde_json::from_str(r#"{"id":"a","kind":"multiline"}"#).unwrap();
+        assert_eq!(f.size(), InSize::Fill);
+    }
+
+    #[test]
+    fn output_shapes() {
+        // 键值类贴合内容；文本、图片、历史、批量列表、正则占满
+        for id in ["units", "md5", "timestamp", "cron", "workday", "hmac", "world_clock", "pdf_merge"] { assert!(out_fit(id), "{id}"); }
+        for id in ["json", "base64", "regex", "batch_time", "password", "qr_gen", "barcode", "img_compress", "pdf_to_img", "pdf_text", "pinyin"] { assert!(!out_fit(id), "{id}"); }
+    }
+
     #[test]
     fn kv_outputs() {
         let mut a = Args::default();

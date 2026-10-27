@@ -300,7 +300,7 @@ island
 
 #### 文件结果卡片与图片预览（`result_list::file_card`、`tools::fileinfo`）
 - 工具输出是文件时（PDF、压缩包、图片），输出区不再是文本编辑器，而是：文件卡片（类型图标 `IC_LG`、文件名 `fs_body` MEDIUM、说明 `fs_small`：大小 · 像素尺寸 · 页数 · 压缩包文件数）+ 右侧“保存”（主按钮）和“在文件夹中显示”（保存之后才出现，`button_sm`）。
-- 图片结果（二维码、条形码、图片压缩、水印）直接从内存预览：`gpui::Image::from_bytes` + `gpui::img`，不落盘；等比缩进 480×320，小图不放大，放在 `R_MD` 圆角、发丝线边框、`hover_bg` 底的框里。PDF 转图片是 zip，预览取包内第一张 PNG 并注明。
+- 图片结果（二维码、条形码、图片压缩、水印）直接从内存预览：`gpui::Image::from_bytes` + `gpui::img`，不落盘；在剩余空间里等比缩放（`ObjectFit::Contain`），框的宽高再以图片原始像素为上限，所以小图不会被放大；放在 `R_MD` 圆角、发丝线边框、`hover_bg` 底的框里。PDF 转图片是 zip，预览取包内第一张 PNG 并注明。
 - 图片压缩在卡片下给出“压缩前 → 压缩后，节省 x%”（变大时用 `warning` 色）；大小、尺寸、页数、文件数都由宿主从输出文件自身读出（`tools::fileinfo::inspect`），扩展包无需改动。
 - Markdown 转 HTML 分“预览 / 源码”两页：预览用 `gpui_component::text::TextView::markdown` 渲染输入，源码页是生成的 HTML，复制与保存始终是 HTML。
 
@@ -308,6 +308,31 @@ island
 - 多行输入框的标签行右侧、输出卡片标题行里各显示“N 行 · M 字符”（`fs_caption`，`overlay1`）；输出为文本（非文件、非按行结果）时标题行多一个“用结果替换输入”按钮（`IconName::ArrowLeftRight`），把当前结果放回第一个输入框并重新运行，方便加密后再解密这类来回操作；Markdown 转 HTML 不显示。
 - 加解密（AES / DES / RC4 / Rabbit）改为手动运行（`live = false`），输入过程中不再逐字符报“密钥不对”之类的错误；已有结果时改选项仍会自动重算。
 - HMAC、人民币大写、批量时间转换使用键值行（可逐条复制，批量时间最多 300 行，超出退回纯文本；复制全部仍是只含结果的逐行文本）。
+
+#### 工具箱输入 / 输出的高度（`tools_layout.rs`、`tools_view.rs`、`tools::InSize`）
+目标：输入区只占它需要的高度，剩下的给输出；大文本进、大文本出的工具才对半分，并且分配可以拖动。
+
+**输入高度（`Field::size()`）**
+| 形态 | 条件 | 高度 |
+|---|---|---|
+| `Line` | 单行字段（`Text` / `Number`） | `ui::text_field` 的固定行高 |
+| `Auto(min, max)` | 多行字段带 `rows` 提示 | `TextareaState::auto_grow(min, max)`，软换行也计入，超出 max 行后框内滚动 |
+| `Fill` | 多行字段没有 `rows`（大文本，包括旧扩展包） | 占剩余空间，卡片最小高度由 `tools_layout::in_min_h` 按字段算出 |
+| `Zone` | `File` / `Files` | 拖放区最小 `FILE_ZONE_MIN_H`（64），文件多了随列表增高、到 `FILE_ZONE_MAX_H`（160）后区内滚动 |
+- 内置工具：短输入用 `Field::auto(min, max)`——哈希、HMAC、加解密（AES / DES / RC4 / Rabbit）、求和列表、随机分组为 3–10 行，命名转换 2–8 行，工作日的节假日 / 调休 2–6 行；JSON、SQL、文本转换、Base64 等保持 `Fill`。
+- 扩展包：清单字段可选 `"rows": [min, max]`（SDK：`with_rows`），旧宿主忽略。已发布而未重新打包的包由宿主按 (工具 id, 字段 id) 补充：`tools::PACK_ROWS`（二维码内容 2–8 行，世界时钟 / 时区换算 3–10 行，拼音与繁简转换保持大文本）。清单自带的 `rows` 优先于这张表。
+
+**输出高度**
+- 占满剩余空间：文本、图片预览（带预览的文件）、历史列表、批量时间列表、正则结果；输出卡片最小 `OUT_FILL_MIN_H`（120）。
+- 贴合内容（`tools::out_fit`）：键值行结果、没有预览的文件卡片（PDF 类）。卡片高度随内容，放不下时卡片内部滚动（最小 `fit_min_h()`），下方留白；**出结果前不画输出卡片**（出错时仍显示错误条）。
+- 图片预览框占满输出卡片剩余高度，图片等比缩放且不超过原始像素。
+
+**输入与输出共用高度**
+- 输入有 `Fill` 字段时，输出一定占满剩余空间，两者按 `Sidebar.tools_split` 分配（输入占的份额，默认 0.5，范围 0.2–0.8，所有工具共用一个值）。
+- 上下排列时分隔条是输入卡片与下一张卡片之间的 `CARD_PAD` 间隙（`tools_layout::handle`）：悬停 `accent` 35% 高亮、光标 `cursor_row_resize`、拖动换算 `split_ratio`（指针位置减去选项卡片与间隙后的比例）、双击复位 0.5；拖动中使用本地值，松手后保存到配置（做法同右侧卡片的 `dock_split`）。
+- 工具区宽度 ≥ `SIDE_MIN_W`（880）且两边都是大文本时左右并排：选项卡片通栏在上，下面左输入右输出，中间是竖向分隔条（`cursor_col_resize`），两栏最小 `SIDE_PANE_MIN_W`；宽度由画布测量，跨过阈值才重新渲染。
+- 窗口矮到放不下各区最小高度时，整个工具区（`tool-body`）纵向滚动，而不是继续压缩。
+- 新工具的做法：多行输入默认是大文本；输入通常只有几行的就加 `.auto(min, max)`；输出是键值行的把 id 加进 `tools::out_fit`。尺寸只用 `tools_layout` 的常量与 `ui` / `card_layout` 的 token，不写字面量。
 
 ### 5.3 右侧卡片岛
 
@@ -510,7 +535,7 @@ exit $fail
 | 主机工具 | `src/host_tools_view.rs` |
 | 数据库 | `src/db_ui.rs`、`src/db_tree.rs`、`src/db_view.rs`、`src/db_editor.rs`、`src/db_dialog.rs` |
 | Redis / Docker | `src/kv_ui.rs`、`src/kv_tree.rs`、`src/kv_view.rs`、`src/dock_view.rs` |
-| 工具 / 扩展 | `src/tools_ui.rs`、`src/tools_view.rs`、`src/ext_ui.rs` |
+| 工具 / 扩展 | `src/tools_ui.rs`、`src/tools_view.rs`、`src/tools_layout.rs`、`src/ext_ui.rs` |
 | SFTP / 端口 / 文档 / 工作区 | `src/sftp_view.rs`、`src/port_view.rs`、`src/doc_view.rs`、`src/workspace.rs` |
 | 菜单 / 命令面板 / 弹窗 | `src/ctxmenu_view.rs`、`src/palette.rs`、`src/tabs_ui.rs`、`src/host_dialog.rs`、`src/host_picker.rs`、`src/setup_view.rs`、`src/update_ui.rs` |
 | 设置 | `src/settings_view.rs` |

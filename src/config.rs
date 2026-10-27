@@ -339,8 +339,10 @@ pub struct Sidebar {
     pub dock_min: Vec<String>,
     /// 两张卡片展开时上方卡片占的高度比例（0.15–0.85）。
     pub dock_split: f32,
+    /// 工具箱里输入与输出两个大文本区的分配比例（输入占的份额，0.2–0.8），所有工具共用一个值。
+    pub tools_split: f32,
 }
-impl Default for Sidebar { fn default() -> Self { Self { collapsed: vec![], width: SIDEBAR_W, ai_width: AI_DOCK_W, tool: "hosts".into(), bottom_open: false, bottom_height: BOTTOM_H, bottom_tab: "transfers".into(), panel_hidden: false, tools_fav: vec![], tools_recent: vec![], dock_multi: true, dock_open: vec![], dock_min: vec![], dock_split: 0.5 } } }
+impl Default for Sidebar { fn default() -> Self { Self { collapsed: vec![], width: SIDEBAR_W, ai_width: AI_DOCK_W, tool: "hosts".into(), bottom_open: false, bottom_height: BOTTOM_H, bottom_tab: "transfers".into(), panel_hidden: false, tools_fav: vec![], tools_recent: vec![], dock_multi: true, dock_open: vec![], dock_min: vec![], dock_split: 0.5, tools_split: 0.5 } } }
 impl Sidebar { /** left tool window starts collapsed */ pub fn collapsed_panel(&self) -> bool { self.panel_hidden } }
 /// Default bottom tool window height.
 pub const BOTTOM_H: f32 = 220.0;
@@ -435,6 +437,7 @@ impl Settings {
         ssh_term_proto::assets::ensure_asset_groups(&s.db, &mut s.groups);
         if s.sidebar.tool.is_empty() { s.sidebar.tool = "hosts".into(); }
         s.sidebar.dock_split = s.sidebar.dock_split.clamp(0.15, 0.85);
+        s.sidebar.tools_split = if s.sidebar.tools_split.is_finite() { s.sidebar.tools_split.clamp(0.2, 0.8) } else { 0.5 };
         Ok(s)
     }
     pub fn load() -> (Settings, Option<String>) {
@@ -714,7 +717,7 @@ mod tests {
         assert_eq!((s.sidebar.tool.as_str(), s.sidebar.width, s.sidebar.ai_width, s.sidebar.bottom_open), ("hosts", 300.0, AI_DOCK_W, false));
         assert_eq!(s.sidebar.collapsed, vec!["prod".to_string()]);
         // 右侧栏新字段缺省：允许多卡片、无已打开卡片、分割 0.5
-        assert!(s.sidebar.dock_multi && s.sidebar.dock_open.is_empty() && s.sidebar.dock_min.is_empty() && s.sidebar.dock_split == 0.5);
+        assert!(s.sidebar.dock_multi && s.sidebar.dock_open.is_empty() && s.sidebar.dock_min.is_empty() && s.sidebar.dock_split == 0.5 && s.sidebar.tools_split == 0.5);
         // writing it back and reading again is lossless and adds no [[db]] noise
         let text = toml::to_string_pretty(&s).unwrap();
         assert!(!text.contains("[[db]]"));

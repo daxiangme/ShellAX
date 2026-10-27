@@ -138,6 +138,8 @@ pub fn select(id: &str, label: &str, choices: &[(&str, &str)]) -> Value {
     f["choices"] = json!(choices.iter().map(|(v, l)| [v, l]).collect::<Vec<_>>());
     f
 }
+/// 多行输入的高度提示：随内容在 `min`..`max` 行之间增高，超出后框内滚动；不写则是占满剩余空间的大文本框（旧宿主忽略该字段）。
+pub fn with_rows(mut f: Value, min: u8, max: u8) -> Value { f["rows"] = json!([min, max]); f }
 pub fn with_placeholder(mut f: Value, ph: &str) -> Value { f["placeholder"] = json!(ph); f }
 
 pub fn manifest(id: &str, name: &str, version: &str, description: &str, tools: Vec<Value>) -> Value {

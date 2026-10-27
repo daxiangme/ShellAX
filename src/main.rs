@@ -41,6 +41,7 @@ mod theme;
 mod ui;
 mod update_ui;
 mod ctxmenu_view;
+mod tools_layout;
 mod tools_view;
 mod result_list;
 mod tools_ui;

@@ -8,6 +8,7 @@
 - 请求：`{op: "manifest"|"run", lang, tool, args, files: [{field, name, len}], now_ms, utc_offset}`，文件内容按顺序放在附带字节里。
 - 回复：`{text, error, color, file_name}`，输出文件放在附带字节里。
 - 回复的可选字段（旧包不带也能用，仍按 `text` 显示）：`rows: [{label, value, primary, tag, hint, tone}]` 让结果按“每条一行”显示（`tone` 取 `good` / `warn` / `danger` / `accent` / `muted`，`primary` 为主结果，`tag` 为行尾小标签，`hint` 为悬停提示）；`meta` 为一行说明。有 `rows` 时 `text` 作为“复制全部”的文本（缺省由行拼出）。
+- 清单里多行输入字段（`kind: "multiline"`）可选 `rows: [最少行, 最多行]`（SDK：`with_rows`）：输入框随内容在这个范围内增高，超出后框内滚动；不写则是占满剩余空间的大文本框，旧包照常使用。
 - 文件结果的名称、大小、图片尺寸与预览、PDF 页数、压缩包文件数都由宿主从输出文件本身读出，包里不需要另外声明；图片压缩的“压缩前 → 压缩后”也由宿主用输入文件大小算出。因此现有扩展包无需重新打包。
 - 用 `shellax-ext-sdk` 的 `export!(manifest, run)` 即可。
 
