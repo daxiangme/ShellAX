@@ -170,7 +170,7 @@ struct TabDrag { idx: usize, title: SharedString }
 impl Render for TabDrag {
     fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
-        div().px_3().py_1().rounded_lg().bg(c(th.base)).border_1().border_color(c(th.accent)).text_size(px(12.)).text_color(c(th.text)).child(self.title.clone())
+        div().px_3().py_1().rounded(px(ui::R_SUB)).bg(c(th.base)).border_1().border_color(c(th.accent)).text_size(px(ui::fs_body())).text_color(c(th.text)).child(self.title.clone())
     }
 }
 /// Dragging a config host onto a group header moves it into that group.
@@ -179,7 +179,7 @@ struct HostDrag { name: String }
 impl Render for HostDrag {
     fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
-        div().px_3().py_1().rounded_lg().bg(c(th.base)).border_1().border_color(c(th.accent)).text_size(px(12.)).text_color(c(th.text)).child(self.name.clone())
+        div().px_3().py_1().rounded(px(ui::R_SUB)).bg(c(th.base)).border_1().border_color(c(th.accent)).text_size(px(ui::fs_body())).text_color(c(th.text)).child(self.name.clone())
     }
 }
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -1095,69 +1095,74 @@ impl Root {
     }
     fn render_modal(&mut self, m: Modal, cx: &mut Context<Self>) -> impl IntoElement {
         let th = theme::cur();
-        let title = |ic, s: String, col| div().flex().items_center().gap_2().child(icon(ic, 16., col)).child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(s));
-        let note = |s: String| div().text_size(px(12.)).text_color(c(th.subtext)).child(s);
-        let row = |id: SharedString, main: String, sub: String| div().id(id).px_3().py_2().rounded_md().cursor_pointer().bg(c(th.surface0)).hover(|d| d.bg(c(th.surface1)))
-            .flex().flex_col().child(div().text_size(px(13.)).text_color(c(th.text)).child(main)).child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(sub));
+        let note = |s: String| div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(s);
+        let row = |id: SharedString, main: String, sub: String| div().id(id).px_3().py_2().rounded(px(ui::R_MD)).cursor_pointer().bg(theme::sub_bg()).border_1().border_color(theme::divider()).hover(|d| d.bg(theme::menu_sel_bg()))
+            .flex().flex_col().child(div().text_size(px(ui::fs_body())).text_color(c(th.text)).child(main)).child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(sub));
         let cancel = ui::button("modal-cancel", t("ui.cancel"), 0).on_click(cx.listener(|this, _, w, cx| { this.modal = None; this.focus_active(w, cx); cx.notify(); }));
-        let mut card = ui::card(560.).p_5().gap_3();
+        let mut body = div().p(px(ui::SP_5)).flex().flex_col().gap(px(ui::SP_3));
+        let hdr: (IconName, String);
+        let mut foot = ui::dialog_footer(None, vec![]);
         match m {
             Modal::Broadcast(prod) => {
-                card = card.child(title(IconName::TriangleAlert, t("bc.prod_title").into(), c(th.error)))
+                hdr = (IconName::TriangleAlert, t("bc.prod_title").into());
+                body = body
                     .child(note(tf("bc.prod_body", &[("hosts", &prod.join(", "))])))
-                    .child(div().flex().gap_2().justify_end().child(cancel)
-                        .child(ui::button("bc-ok", t("bc.prod_ok"), 2).on_click(cx.listener(|this, _, w, cx| { this.toggle_broadcast(true, cx); this.focus_active(w, cx); }))));
+                    ;
+                foot = foot.child(cancel)
+                        .child(ui::button("bc-ok", t("bc.prod_ok"), 2).on_click(cx.listener(|this, _, w, cx| { this.toggle_broadcast(true, cx); this.focus_active(w, cx); })));
             }
             Modal::Snapshots => {
                 let st = ssh_term_proto::snapshot::Store::load(&Self::snapshots_path());
-                card = card.child(title(IconName::RotateCcw, t("snap.title").into(), c(th.accent))).child(note(t("snap.body").into()));
-                if st.snaps.is_empty() { card = card.child(note(t("snap.none").into())); }
+                hdr = (IconName::RotateCcw, t("snap.title").into());
+                body = body.child(note(t("snap.body").into()));
+                if st.snaps.is_empty() { body = body.child(note(t("snap.none").into())); }
                 for (i, sn) in st.snaps.iter().enumerate() {
                     let when = chrono::DateTime::from_timestamp(sn.at, 0).map(|d| d.with_timezone(&chrono::Local).format("%m-%d %H:%M:%S").to_string()).unwrap_or_default();
-                    card = card.child(row(format!("snap-{i}").into(), sn.name.clone(), when).on_click(cx.listener(move |this, _, w, cx| { this.rollback_to(i, w, cx); cx.notify(); })));
+                    body = body.child(row(format!("snap-{i}").into(), sn.name.clone(), when).on_click(cx.listener(move |this, _, w, cx| { this.rollback_to(i, w, cx); cx.notify(); })));
                 }
-                card = card.child(div().flex().gap_2().justify_end()
+                foot = foot
                     .child(ui::button("snap-save", t("snap.action"), 1).on_click(cx.listener(|this, _, _w, cx| { if this.push_snapshot("manual", cx) { this.toast(t("snap.saved").into(), cx); } cx.notify(); })))
-                    .child(cancel));
+                    .child(cancel);
             }
             Modal::Recordings => {
-                card = card.child(title(IconName::Play, t("rec.play_action").into(), c(th.accent))).child(note(tf("rec.dir", &[("d", &Self::recordings_dir().display())])));
+                hdr = (IconName::Play, t("rec.play_action").into());
+                body = body.child(note(tf("rec.dir", &[("d", &Self::recordings_dir().display())])));
                 let list = Self::list_recordings();
-                if list.is_empty() { card = card.child(note(t("rec.none").into())); }
+                if list.is_empty() { body = body.child(note(t("rec.none").into())); }
                 for (i, p) in list.into_iter().enumerate() {
                     let sz = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
                     let name = p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
-                    card = card.child(row(format!("rec-{i}").into(), name, format!("{} KB", sz.div_ceil(1024))).on_click(cx.listener(move |this, _, w, cx| this.play_recording(p.clone(), w, cx))));
+                    body = body.child(row(format!("rec-{i}").into(), name, format!("{} KB", sz.div_ceil(1024))).on_click(cx.listener(move |this, _, w, cx| this.play_recording(p.clone(), w, cx))));
                 }
-                card = card.child(div().flex().justify_end().child(cancel));
+                foot = foot.child(cancel);
             }
             Modal::QuickStart { dir } => {
-                card = card.child(title(IconName::FolderOpen, t("qs.action").into(), c(th.accent)));
+                hdr = (IconName::FolderOpen, t("qs.action").into());
                 let mut dirs: Vec<String> = vec![dir.clone()];
                 let home = std::env::var("HOME").unwrap_or_default();
                 for d in std::iter::once(home).chain(self.recent_dirs(cx)) { if !d.is_empty() && !dirs.contains(&d) { dirs.push(d); } }
                 let mut dl = div().flex().flex_wrap().gap_1();
                 for (i, d) in dirs.into_iter().take(8).enumerate() {
                     let sel = d == dir;
-                    dl = dl.child(div().id(SharedString::from(format!("qs-dir-{i}"))).px_2().py(px(3.)).rounded_md().cursor_pointer().text_size(px(12.))
-                        .bg(if sel { c(th.accent) } else { c(th.surface0) }).text_color(if sel { c(th.base) } else { c(th.text) }).child(d.clone())
+                    dl = dl.child(ui::chip(SharedString::from(format!("qs-dir-{i}")), d.clone(), sel)
                         .on_click(cx.listener(move |this, _, _w, cx| { this.modal = Some(Modal::QuickStart { dir: d.clone() }); cx.notify(); })));
                 }
-                dl = dl.child(div().id("qs-browse").px_2().py(px(3.)).rounded_md().cursor_pointer().text_size(px(12.)).bg(c(th.surface1)).text_color(c(th.text)).child(t("qs.browse"))
+                dl = dl.child(ui::chip("qs-browse", t("qs.browse"), false)
                     .on_click(cx.listener(|_this, _, _w, cx| {
                         let rx = cx.prompt_for_paths(gpui::PathPromptOptions { files: false, directories: true, multiple: false, prompt: None });
                         cx.spawn(async move |this, cx| { if let Ok(Ok(Some(p))) = rx.await { if let Some(d) = p.first() { let d = d.display().to_string(); let _ = this.update(cx, |this, cx| { this.modal = Some(Modal::QuickStart { dir: d }); cx.notify(); }); } } }).detach();
                     })));
-                card = card.child(note(t("qs.dir").into())).child(dl).child(note(t("qs.layout").into()));
+                body = body.child(note(t("qs.dir").into())).child(dl).child(note(t("qs.layout").into()));
                 let mut pl = div().flex().flex_wrap().gap_2();
                 for (id, key) in [("single", "qs.single"), ("cols2", "qs.cols2"), ("main3", "qs.main3"), ("grid4", "qs.grid4"), ("agent", "qs.agent")] {
                     let d = dir.clone();
                     pl = pl.child(ui::button(SharedString::from(format!("qs-{id}")), t(key), 1).on_click(cx.listener(move |this, _, w, cx| this.quick_start(d.clone(), id, w, cx))));
                 }
-                card = card.child(pl).child(div().flex().justify_end().child(cancel));
+                body = body.child(pl);
+                foot = foot.child(cancel);
             }
         }
-        ui::modal(card)
+        ui::modal(ui::card(560.).child(ui::dialog_header(Some(hdr.0), hdr.1, None, None)).child(body).child(foot))
     }
     /// Recent local working directories (open panes and layout snapshots).
     fn recent_dirs(&self, cx: &App) -> Vec<String> {
@@ -1355,16 +1360,16 @@ impl Root {
                 actions = actions.child(ui::button("upd-offer-open", t("settings.update_download"), 1).on_click(move |_, _w, cx| cx.open_url(&url)));
             }
         }
-        div().id("upd-offer").absolute().bottom(px(40.)).right(px(16.)).w(px(380.)).p_4().rounded(px(ui::R_LG)).bg(c(th.base)).border_1().border_color(c(th.surface1)).shadow_lg()
+        div().id("upd-offer").absolute().bottom(px(40.)).right(px(16.)).w(px(380.)).p_4().rounded(px(ui::R_LG)).bg(c(th.base)).border_1().border_color(theme::divider()).shadow(chrome::soft_shadow(true))
             .flex().flex_col().gap_3().on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(div().flex().items_center().gap_2()
-                .child(icon(IconName::Download, 16., c(th.accent)))
-                .child(div().flex_1().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(tf("main.update_available", &[("v", &m.version)])))
+                .child(icon(IconName::Download, ui::IC_MD, c(th.accent)))
+                .child(div().flex_1().text_size(px(ui::fs_body())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(tf("main.update_available", &[("v", &m.version)])))
                 .child(div().id("upd-offer-x").p_1().rounded(px(ui::R_MD)).cursor_pointer().hover(|s| s.bg(c(th.surface0)))
-                    .child(icon(IconName::X, 14., c(th.overlay1)))
+                    .child(icon(IconName::X, ui::IC_SM, c(th.overlay1)))
                     .on_click(cx.listener(|_, _, _w, cx| { update_ui::dismiss_offer(true); cx.notify(); }))))
             .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(tf("update.offer_body", &[("cur", &ssh_term_proto::update::CURRENT), ("v", &m.version)])))
-            .children(status.map(|(msg, err)| div().text_size(px(12.)).text_color(c(if err { th.error } else { th.overlay1 })).child(msg)))
+            .children(status.map(|(msg, err)| div().text_size(px(ui::fs_small())).text_color(c(if err { th.error } else { th.overlay1 })).child(msg)))
             .child(actions)
     }
 
@@ -2148,15 +2153,16 @@ impl Render for Root {
 
         // host key confirmation (first connection / TOFU)
         if let Some(p) = self.hk_pending.first() {
-            root = root.child(ui::modal(ui::card(560.).p_5().gap_3()
-                .child(div().flex().items_center().gap_2().child(icon(IconName::ShieldCheck, 16., c(th.warning)))
-                    .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("ui.first_connection_verify_host_key"))))
-                .child(div().text_size(px(13.)).text_color(c(th.subtext)).child(tf("main.not_in_kh", &[("host", &p.host), ("port", &p.port), ("path", &s.known_hosts_path().display())])))
-                .child(div().p_3().rounded_md().bg(c(th.mantle)).flex().flex_col().gap_1().text_size(px(12.)).text_color(c(th.text))
+            root = root.child(ui::modal(ui::card(560.)
+                .child(ui::dialog_header(Some(IconName::ShieldCheck), t("ui.first_connection_verify_host_key"), None, None))
+                .child(div().p(px(ui::SP_5)).flex().flex_col().gap(px(ui::SP_3))
+                .child(div().text_size(px(ui::fs_body())).text_color(c(th.subtext)).child(tf("main.not_in_kh", &[("host", &p.host), ("port", &p.port), ("path", &s.known_hosts_path().display())])))
+                .child(div().p_3().rounded(px(ui::R_MD)).bg(theme::sub_bg()).border_1().border_color(theme::divider()).flex().flex_col().gap_1().text_size(px(ui::fs_body())).text_color(c(th.text))
                     .child(tf("main.algorithm", &[("a", &p.algorithm)]))
                     .child(div().font_family(SharedString::from(s.font.family.clone())).child(tf("main.fingerprint", &[("fp", &p.fingerprint)]))))
-                .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ui.verify_the_fingerprint_through_another")))
-                .child(div().flex().gap_2().justify_end()
+                .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(t("ui.verify_the_fingerprint_through_another")))
+)
+                .child(ui::dialog_footer(None, vec![])
                     .child(ui::button("hk-reject", t("ui.deny"), 0).on_click(cx.listener(|this, _, _w, cx| this.answer_hostkey(HostKeyDecision::Reject, cx))))
                     .child(ui::button("hk-once", t("ui.this_time_only"), 0).on_click(cx.listener(|this, _, _w, cx| this.answer_hostkey(HostKeyDecision::AcceptOnce, cx))))
                     .child(ui::button("hk-save", t("ui.accept_and_save"), 1).on_click(cx.listener(|this, _, _w, cx| this.answer_hostkey(HostKeyDecision::AcceptAndSave, cx)))))));
@@ -2181,38 +2187,38 @@ impl Render for Root {
             };
             let can_save = !matches!(p.kind, ssh::AuthKind::Interactive { .. });
             let inp = self.auth_input.clone().unwrap();
-            root = root.child(ui::modal(ui::card(480.).p_5().gap_3()
-                .child(div().flex().items_center().gap_2().child(icon(IconName::KeyRound, 16., c(th.accent)))
-                    .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(title)))
-                .child(div().text_size(px(13.)).text_color(c(th.subtext)).child(detail))
+            root = root.child(ui::modal(ui::card(480.)
+                .child(ui::dialog_header(Some(IconName::KeyRound), title, None, None))
+                .child(div().p(px(ui::SP_5)).flex().flex_col().gap(px(ui::SP_3))
+                .child(div().text_size(px(ui::fs_body())).text_color(c(th.subtext)).child(detail))
                 .child(ui::text_field(&inp, false))
                 .when(can_save, |d| d.child(div().flex().items_center().gap_2()
                     .child(gpui_component::switch::Switch::new("auth-save").checked(self.auth_save).on_click(cx.listener(|this, v: &bool, _w, cx| { this.auth_save = *v; cx.notify(); })))
-                    .child(div().text_size(px(12.)).text_color(c(th.subtext)).child(t("ui.auth_save")))))
-                .child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(t("ui.auth_note")))
-                .child(div().flex().gap_2().justify_end()
+                    .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(t("ui.auth_save")))))
+                .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(t("ui.auth_note")))
+)
+                .child(ui::dialog_footer(None, vec![])
                     .child(ui::button("au-cancel", t("ui.cancel"), 0).on_click(cx.listener(|this, _, _w, cx| this.answer_auth(false, cx))))
                     .child(ui::button("au-ok", t("ui.connect"), 1).on_click(cx.listener(|this, _, _w, cx| this.answer_auth(true, cx)))))));
         }
         // approval card for agent hook requests
         if self.hk_pending.is_empty() { if let Some(a) = self.approvals.first() {
             let left = a.deadline.saturating_duration_since(std::time::Instant::now()).as_secs();
-            let risk_col = if a.risk >= ssh_term_proto::policy::Risk::R3 { th.error } else { th.warning };
-            root = root.child(ui::modal(ui::card(600.).p_5().gap_3()
-                .child(div().flex().items_center().gap_2().child(icon(IconName::TriangleAlert, 16., c(risk_col)))
-                    .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("ui.approval_title")))
-                    .child(div().flex_1())
-                    .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(tf("main.approval_left", &[("n", &left), ("q", &self.approvals.len())]))))
-                .child(div().text_size(px(13.)).text_color(c(th.subtext)).child(tf("main.approval_who", &[("agent", &a.principal), ("host", &a.host), ("tool", &a.req.tool), ("risk", &a.risk.label())])))
-                .child(div().p_3().rounded_md().bg(c(th.mantle)).text_size(px(13.)).text_color(c(th.text)).font_family(SharedString::from(s.font.family.clone())).child(a.req.command.clone()))
-                .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(tf("main.approval_why", &[("why", &a.reason), ("cwd", &a.req.cwd)])))
+            root = root.child(ui::modal(ui::card(600.)
+                .child(ui::dialog_header(Some(IconName::TriangleAlert), t("ui.approval_title"), None, None)
+                    .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(tf("main.approval_left", &[("n", &left), ("q", &self.approvals.len())]))))
+                .child(div().p(px(ui::SP_5)).flex().flex_col().gap(px(ui::SP_3))
+                .child(div().text_size(px(ui::fs_body())).text_color(c(th.subtext)).child(tf("main.approval_who", &[("agent", &a.principal), ("host", &a.host), ("tool", &a.req.tool), ("risk", &a.risk.label())])))
+                .child(div().p_3().rounded(px(ui::R_MD)).bg(theme::sub_bg()).border_1().border_color(theme::divider()).text_size(px(ui::fs_body())).text_color(c(th.text)).font_family(SharedString::from(s.font.family.clone())).child(a.req.command.clone()))
+                .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(tf("main.approval_why", &[("why", &a.reason), ("cwd", &a.req.cwd)])))
                 .when_some(self.deny_reason.clone(), |d, inp| d.child(div().flex().items_center().gap_2()
                     .child(div().flex_1().child(ui::text_field(&inp, false)))
                     .child(ui::button("ap-deny-send", t("ui.deny_send_reason"), 2).on_click(cx.listener(|this, _, _w, cx| {
                         let why = this.deny_reason.as_ref().map(|i| i.read(cx).value().to_string()).unwrap_or_default();
                         this.answer_approval(ssh_term_proto::policy_server::Answer::Deny(why), cx);
                     })))))
-                .child(div().flex().gap_2().justify_end()
+)
+                .child(ui::dialog_footer(None, vec![])
                     .child(ui::button("ap-deny", t("ui.deny"), 0).on_click(cx.listener(|this, _, _w, cx| this.answer_approval(ssh_term_proto::policy_server::Answer::Deny(String::new()), cx))))
                     .child(ui::button("ap-deny-why", t("ui.deny_with_reason"), 0).on_click(cx.listener(|this, _, w, cx| {
                         let inp = cx.new(|cx| InputState::new(w, cx).placeholder(t("ui.deny_reason_placeholder")));
@@ -2226,12 +2232,13 @@ impl Render for Root {
             let agents = self.running_agents(cx);
             let panes = self.tabs.iter().map(|t| t.layout.leaves().len()).sum::<usize>();
             let daemon = self.tabs.iter().flat_map(|t| t.layout.leaves()).filter(|v| v.read(cx).daemon_id.is_some()).count();
-            root = root.child(ui::modal(ui::card(520.).p_5().gap_3()
-                .child(div().flex().items_center().gap_2().child(icon(IconName::TriangleAlert, 16., c(th.warning)))
-                    .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("main.quit_title"))))
-                .child(div().text_size(px(13.)).text_color(c(th.subtext)).child(tf("main.quit_body", &[("p", &panes), ("a", &agents), ("d", &daemon)])))
-                .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t("main.quit_note")))
-                .child(div().flex().gap_2().justify_end()
+            root = root.child(ui::modal(ui::card(520.)
+                .child(ui::dialog_header(Some(IconName::TriangleAlert), t("main.quit_title"), None, None))
+                .child(div().p(px(ui::SP_5)).flex().flex_col().gap(px(ui::SP_3))
+                .child(div().text_size(px(ui::fs_body())).text_color(c(th.subtext)).child(tf("main.quit_body", &[("p", &panes), ("a", &agents), ("d", &daemon)])))
+                .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(t("main.quit_note")))
+)
+                .child(ui::dialog_footer(None, vec![])
                     .child(ui::button("quit-cancel", t("ui.cancel"), 0).on_click(cx.listener(|this, _, _w, cx| { this.quit_confirm = false; cx.notify(); })))
                     .child(ui::button("quit-ok", t("main.quit_ok"), 2).on_click(cx.listener(|this, _, w, cx| {
                         this.quit_ok = true; this.save_layout(cx); this.log("app.quit", "confirmed");
@@ -2240,11 +2247,12 @@ impl Render for Root {
                     }))))));
         }
         if let Some(rec) = update_ui::prompt() {
-            root = root.child(ui::modal(ui::card(440.).p_5().gap_3()
-                .child(div().flex().items_center().gap_2().child(icon(IconName::Download, 16., c(th.accent)))
-                    .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(tf("update.ready_title", &[("v", &rec.version)]))))
-                .child(div().text_size(px(13.)).text_color(c(th.subtext)).child(t("update.ready_body")))
-                .child(div().flex().gap_2().justify_end()
+            root = root.child(ui::modal(ui::card(440.)
+                .child(ui::dialog_header(Some(IconName::Download), tf("update.ready_title", &[("v", &rec.version)]), None, None))
+                .child(div().p(px(ui::SP_5)).flex().flex_col().gap(px(ui::SP_3))
+                .child(div().text_size(px(ui::fs_body())).text_color(c(th.subtext)).child(t("update.ready_body")))
+)
+                .child(ui::dialog_footer(None, vec![])
                     .child(ui::button("upd-later", t("update.later"), 0).on_click(cx.listener(|_, _, _w, cx| { update_ui::dismiss_prompt(); cx.notify(); })))
                     .child(ui::button("upd-quit", t("update.quit_and_update"), 1).on_click(cx.listener(move |this, _, w, cx| { update_ui::dismiss_prompt(); this.apply_update(&rec, w, cx); }))))));
         }
@@ -2261,10 +2269,10 @@ impl Render for Root {
         }
         if let Some((msg, seq)) = &self.toast {
             // info toast: neutral text + info icon, 3px semantic bar on the left
-            let el = div().absolute().bottom(px(40.)).right(px(16.)).min_w(px(320.)).max_w(px(400.)).pl(px(12.)).pr_4().py_2().rounded(px(ui::R_LG)).bg(c(th.base)).border_1().border_color(c(th.surface1)).shadow_lg()
-                .flex().items_center().gap_2().text_size(px(ui::fs_small())).text_color(c(th.text))
+            let el = div().absolute().bottom(px(40.)).right(px(16.)).min_w(px(320.)).max_w(px(400.)).pl(px(12.)).pr_4().py_2().rounded(px(ui::R_LG)).bg(c(th.base)).border_1().border_color(theme::divider()).shadow(chrome::soft_shadow(true))
+                .flex().items_center().gap_2().text_size(px(ui::fs_body())).text_color(c(th.text))
                 .child(div().w(px(3.)).h(px(18.)).rounded_full().bg(c(th.info)))
-                .child(icon(IconName::Info, 14., c(th.info))).child(msg.clone());
+                .child(icon(IconName::Info, ui::IC_SM, c(th.info))).child(msg.clone());
             let el = if motion::reduced() { el.into_any_element() }
                 else if self.toast_out { el.with_animation(("toast-out", *seq as usize), gpui::Animation::new(motion::ms(motion::TOAST_EXIT_MS)).with_easing(gpui::ease_in_out), |d, t| d.opacity(1. - t)).into_any_element() }
                 else { el.with_animation(("toast-in", *seq as usize), gpui::Animation::new(motion::ms(motion::TOAST_ENTER_MS)).with_easing(gpui::ease_out_quint()), |d, t| d.opacity(t).bottom(px(40. - (1. - t) * 8.))).into_any_element() };
@@ -2637,9 +2645,9 @@ impl Render for SftpWindow {
         let v = self.view.clone();
         let title = v.read(_cx).title();
         // own title bar: traffic lights (close = re-attach as tab), drag to move
-        let bar = chrome::drag_region(div().id("sftp-win-titlebar")).h(px(chrome::TITLE_H)).flex_shrink_0().flex().items_center().bg(theme::chrome_bg()).border_b_1().border_color(c(th.surface1).opacity(0.6))
+        let bar = chrome::drag_region(div().id("sftp-win-titlebar")).h(px(chrome::TITLE_H)).flex_shrink_0().flex().items_center().bg(theme::chrome_bg()).border_b_1().border_color(theme::divider())
             .child(chrome::traffic_lights("sftp-lights", w, move |_, cx| v.update(cx, |_, cx| cx.emit(sftp_view::SftpEvent::Move(SftpMode::Tab)))))
-            .child(div().flex_1().text_center().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.subtext)).child(title))
+            .child(div().flex_1().text_center().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.subtext)).child(title))
             .child(div().w(px(chrome::LIGHTS_W)));
         div().size_full().relative().flex().flex_col().bg(c(th.base)).font_family(theme::ui_font()).text_color(c(th.text))
             .child(bar).child(self.view.clone()).children(chrome::resize_edges(w))

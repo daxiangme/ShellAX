@@ -533,7 +533,7 @@ impl Root {
         let sftp_mode = SftpMode::parse(&s.session.sftp_mode);
         match (&m.target, m.sub) {
             (SbTarget::Host(name), SbSub::Move) => {
-                list = list.child(div().px(px(10.)).py(px(4.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.overlay1)).child(t("sb.move_to").to_uppercase()));
+                list = list.child(ui::menu_label(t("sb.move_to")));
                 let cur_g = s.hosts.iter().find(|h| h.name == *name).and_then(|h| h.group.clone()).unwrap_or_default();
                 let mut dests: Vec<(String, String)> = vec![(String::new(), t("sb.top_level").to_string())];
                 for g in &s.groups { dests.push((g.path.clone(), format!("{}{}", "    ".repeat(g.path.matches('/').count()), hosttree::leaf_of(&g.path)))); }
@@ -559,11 +559,11 @@ impl Root {
                     .child(item!(Some(IconName::Pencil), t("sb.edit"), move |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.open_host_dialog(e.clone(), None, w, cx)))
                     .child(item!(Some(IconName::TextCursorInput), t("sb.rename"), move |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.prompt(PromptKind::RenameHost(r.clone()), r.clone(), w, cx)))
                     .child(item!(Some(IconName::CopyPlus), t("sb.duplicate"), move |this: &mut Root, _w: &mut Window, cx: &mut Context<Root>| { let n = du.clone(); this.sb_save("hosts.duplicate", format!("host={n}"), |s| { hosttree::duplicate_host(&mut s.hosts, &n); }, cx); }))
-                    .child(ui::menu_item(id(), Some(IconName::FolderInput), t("sb.move_to"), true, false).child(div().flex_1()).child(icon(IconName::ChevronRight, 11., c(th.overlay1)))
+                    .child(ui::menu_item(id(), Some(IconName::FolderInput), t("sb.move_to"), true, false).child(div().flex_1()).child(icon(IconName::ChevronRight, ui::IC_XS, c(th.overlay1)))
                         .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _w, cx| { this.show_sb_menu(SbMenu { target: SbTarget::Host(mv.clone()), pos: ev.position(), sub: SbSub::Move }); cx.notify(); })));
                 if let Some(h) = h {
                     let hn = h.name.clone();
-                    list = list.child(div().px(px(10.)).py(px(6.)).flex().items_center().gap_2().child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(t("tag.tags")))
+                    list = list.child(div().px(px(10.)).py(px(6.)).flex().items_center().gap_2().child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(t("tag.tags")))
                         .child(ui::tag_picker("sbm-tags", &h.tags, &s.tags.all(), {
                             let me = cx.entity().downgrade();
                             move |color, _w, cx| { let n = hn.clone(); let _ = me.update(cx, |this, cx| this.sb_save("hosts.tag", format!("host={n} tag={color}"), |s| { if let Some(h) = s.hosts.iter_mut().find(|h| h.name == n) { hosttree::toggle(&mut h.tags, &color); } }, cx)); }
@@ -581,7 +581,7 @@ impl Root {
                     .child(item!(Some(IconName::FolderPlus), t("sb.new_subgroup"), move |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.prompt(PromptKind::NewGroup(p3.clone()), String::new(), w, cx)))
                     .child(item!(Some(IconName::TextCursorInput), t("sb.rename"), move |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.prompt(PromptKind::RenameGroup(p4.clone()), hosttree::leaf_of(&p4).to_string(), w, cx)));
                 let tags = s.groups.iter().find(|g| g.path == *path).map(|g| g.tags.clone()).unwrap_or_default();
-                list = list.child(div().px(px(10.)).py(px(6.)).flex().items_center().gap_2().child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(t("tag.tags")))
+                list = list.child(div().px(px(10.)).py(px(6.)).flex().items_center().gap_2().child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(t("tag.tags")))
                     .child(ui::tag_picker("sbm-gtags", &tags, &s.tags.all(), {
                         let me = cx.entity().downgrade();
                         move |color, _w, cx| { let p = p5.clone(); let _ = me.update(cx, |this, cx| this.sb_save("hosts.group_tag", format!("group={p:?} tag={color}"), |s| { if let Some(g) = s.groups.iter_mut().find(|g| g.path == p) { hosttree::toggle(&mut g.tags, &color); } }, cx)); }
@@ -596,7 +596,7 @@ impl Root {
                     .child(item!(Some(IconName::Rows2), t("sb.open_split_down"), |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.split_with(Spec::Local, Dir::Horizontal, w, cx)));
             }
             (SbTarget::Place(i), SbSub::Move) => {
-                list = list.child(div().px(px(10.)).py(px(4.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.overlay1)).child(t("sb.move_to").to_uppercase()));
+                list = list.child(ui::menu_label(t("sb.move_to")));
                 let cur_g = s.places.get(*i).map(|p| p.group.clone()).unwrap_or_default();
                 let mut dests: Vec<(String, String)> = vec![(String::new(), t("sb.top_level").to_string())];
                 for g in &s.groups { dests.push((g.path.clone(), format!("{}{}", "    ".repeat(g.path.matches('/').count()), hosttree::leaf_of(&g.path)))); }
@@ -613,7 +613,7 @@ impl Root {
                 list = list
                     .child(item!(Some(IconName::TextCursorInput), t("sb.rename"), move |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.prompt(PromptKind::RenamePlace(i1), name.clone(), w, cx)))
                     .child(danger!(Some(IconName::Trash), t("place.delete"), move |this: &mut Root, _w: &mut Window, cx: &mut Context<Root>| { this.sb_save("places.delete", format!("i={i2}"), |s| { if i2 < s.places.len() { s.places.remove(i2); } }, cx); }))
-                    .child(ui::menu_item(id(), Some(IconName::FolderInput), t("sb.move_to"), true, false).child(div().flex_1()).child(icon(IconName::ChevronRight, 11., c(th.overlay1)))
+                    .child(ui::menu_item(id(), Some(IconName::FolderInput), t("sb.move_to"), true, false).child(div().flex_1()).child(icon(IconName::ChevronRight, ui::IC_XS, c(th.overlay1)))
                         .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _w, cx| { this.show_sb_menu(SbMenu { target: SbTarget::Place(mv), pos: ev.position(), sub: SbSub::Move }); cx.notify(); })));
             }
             (SbTarget::Empty, _) => {
@@ -635,10 +635,11 @@ impl Root {
     // ------------------------------------------------------------------ modals
     pub(crate) fn sb_modal_el(&mut self, m: SbModal, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
-        let title = |ic, s: String, col| div().flex().items_center().gap_2().child(icon(ic, 16., col)).child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(s));
-        let note = |s: String| div().text_size(px(13.)).text_color(c(th.subtext)).child(s);
+        let note = |s: String| div().text_size(px(ui::fs_body())).text_color(c(th.subtext)).child(s);
         let cancel = ui::button("sbm-cancel", t("ui.cancel"), 0).on_click(cx.listener(|this, _, w, cx| { this.sb_modal = None; this.focus_active(w, cx); cx.notify(); }));
-        let mut card = ui::card(480.).p_5().gap_3();
+        let mut body = div().p(px(ui::SP_5)).flex().flex_col().gap(px(ui::SP_3));
+        let hdr: (IconName, String);
+        let mut foot = ui::dialog_footer(None, vec![]);
         match m {
             SbModal::Prompt { kind, input } => {
                 let head = match &kind {
@@ -649,61 +650,66 @@ impl Root {
                     PromptKind::PlacePath { .. } => t("place.path_title").to_string(),
                 };
                 let (k1, i1, k2, i2) = (kind.clone(), input.clone(), kind, input.clone());
-                card = card.child(title(IconName::TextCursorInput, head, c(th.accent)))
-                    .child(div().on_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, w, cx| if ev.keystroke.key == "enter" { let v = i1.read(cx).value().to_string(); this.prompt_ok(k1.clone(), v, w, cx); cx.notify(); })).child(ui::text_field(&input, false)))
-                    .child(div().flex().gap_2().justify_end().child(cancel)
-                        .child(ui::button("sbm-ok", t("ui.save"), 1).on_click(cx.listener(move |this, _, w, cx| { let v = i2.read(cx).value().to_string(); this.prompt_ok(k2.clone(), v, w, cx); cx.notify(); }))));
+                hdr = (IconName::TextCursorInput, head);
+                body = body
+                    .child(div().on_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, w, cx| if ev.keystroke.key == "enter" { let v = i1.read(cx).value().to_string(); this.prompt_ok(k1.clone(), v, w, cx); cx.notify(); })).child(ui::text_field(&input, false)));
+                foot = foot.child(cancel)
+                        .child(ui::button("sbm-ok", t("ui.save"), 1).on_click(cx.listener(move |this, _, w, cx| { let v = i2.read(cx).value().to_string(); this.prompt_ok(k2.clone(), v, w, cx); cx.notify(); })));
             }
             SbModal::NewTab { spec, label, dont_ask } => {
                 let sp = spec.clone();
-                card = card.child(title(IconName::Plus, tf("sb.confirm_new_tab", &[("name", &label)]), c(th.accent)))
+                hdr = (IconName::Plus, tf("sb.confirm_new_tab", &[("name", &label)]));
+                body = body
                     .child(div().id("sbm-dontask").flex().items_center().gap_2().cursor_pointer()
                         .on_click(cx.listener(|this, _, _w, cx| { if let Some(SbModal::NewTab { dont_ask, .. }) = this.sb_modal.as_mut() { *dont_ask = !*dont_ask; } cx.notify(); }))
-                        .child(div().size(px(16.)).rounded(px(4.)).border_1().border_color(c(th.surface2)).flex().items_center().justify_center()
-                            .when(dont_ask, |d| d.bg(c(th.accent)).child(icon(IconName::Check, 11., c(th.base)))))
-                        .child(div().text_size(px(13.)).text_color(c(th.text)).child(t("sb.dont_ask_again"))))
-                    .child(div().flex().gap_2().justify_end().child(cancel)
+                        .child(div().size(px(16.)).rounded(px(ui::R_SM)).border_1().border_color(c(th.surface2)).flex().items_center().justify_center()
+                            .when(dont_ask, |d| d.bg(c(th.accent)).child(icon(IconName::Check, ui::IC_XS, c(th.base)))))
+                        .child(div().text_size(px(ui::fs_body())).text_color(c(th.text)).child(t("sb.dont_ask_again"))));
+                foot = foot.child(cancel)
                         .child(ui::button("sbm-open", t("sb.open_new_tab"), 1).on_click(cx.listener(move |this, _, w, cx| {
                             if dont_ask { let _ = config::update(|s| s.session.confirm_new_tab = false); }
                             this.sb_modal = None;
                             this.new_tab(sp.clone(), w, cx);
-                        }))));
+                        })));
             }
             SbModal::DeleteHost(name) => {
-                card = card.child(title(IconName::Trash, tf("sb.delete_host_title", &[("name", &name)]), c(th.error))).child(note(t("sb.delete_host_body").into()))
-                    .child(div().flex().gap_2().justify_end().child(cancel)
-                        .child(ui::button("sbm-del", t("ui.delete"), 2).on_click(cx.listener(move |this, _, _w, cx| { let n = name.clone(); this.sb_save("host.delete", n.clone(), |s| s.hosts.retain(|h| h.name != n), cx); this.sb_modal = None; }))));
+                hdr = (IconName::Trash, tf("sb.delete_host_title", &[("name", &name)]));
+                body = body.child(note(t("sb.delete_host_body").into()));
+                foot = foot.child(cancel)
+                        .child(ui::button("sbm-del", t("ui.delete"), 2).on_click(cx.listener(move |this, _, _w, cx| { let n = name.clone(); this.sb_save("host.delete", n.clone(), |s| s.hosts.retain(|h| h.name != n), cx); this.sb_modal = None; })));
             }
             SbModal::DeleteGroup(path) => {
                 let s = config::get();
                 let n_hosts = hosttree::hosts_under(&s.hosts, &path).len();
                 let n_groups = s.groups.iter().filter(|g| hosttree::under(&g.path, &path) && g.path != path).count();
                 let (p1, p2) = (path.clone(), path.clone());
-                card = card.child(title(IconName::Trash, tf("sb.delete_group_title", &[("name", &hosttree::leaf_of(&path))]), c(th.error)))
-                    .child(note(tf("sb.delete_group_body", &[("h", &n_hosts), ("g", &n_groups)])))
-                    .child(div().flex().gap_2().justify_end().child(cancel)
+                hdr = (IconName::Trash, tf("sb.delete_group_title", &[("name", &hosttree::leaf_of(&path))]));
+                body = body
+                    .child(note(tf("sb.delete_group_body", &[("h", &n_hosts), ("g", &n_groups)])));
+                foot = foot.child(cancel)
                         .child(ui::button("sbm-keep", t("sb.delete_keep"), 1).on_click(cx.listener(move |this, _, _w, cx| { let p = p1.clone(); this.sb_save("hosts.group_delete", format!("group={p:?} keep_children=true"), |s| { hosttree::delete_group(&mut s.hosts, &mut s.groups, &p, true); s.sidebar.collapsed.retain(|c| *c != p); }, cx); this.sb_modal = None; })))
-                        .when(n_hosts + n_groups > 0, |d| d.child(ui::button("sbm-all", t("sb.delete_all"), 2).on_click(cx.listener(move |this, _, _w, cx| { let p = p2.clone(); this.sb_save("hosts.group_delete", format!("group={p:?} keep_children=false"), |s| { hosttree::delete_group(&mut s.hosts, &mut s.groups, &p, false); s.sidebar.collapsed.retain(|c| !hosttree::under(c, &p)); }, cx); this.sb_modal = None; })))));
+                        .when(n_hosts + n_groups > 0, |d| d.child(ui::button("sbm-all", t("sb.delete_all"), 2).on_click(cx.listener(move |this, _, _w, cx| { let p = p2.clone(); this.sb_save("hosts.group_delete", format!("group={p:?} keep_children=false"), |s| { hosttree::delete_group(&mut s.hosts, &mut s.groups, &p, false); s.sidebar.collapsed.retain(|c| !hosttree::under(c, &p)); }, cx); this.sb_modal = None; }))));
             }
             SbModal::Import { cands, checked, group } => {
-                card = card.child(title(IconName::Import, t("sb.import").into(), c(th.accent)))
+                hdr = (IconName::Import, t("sb.import").to_string());
+                body = body
                     .child(note(tf("sb.import_body", &[("path", &config::get().ssh.ssh_config)])));
-                if cands.is_empty() { card = card.child(note(t("sb.import_none").into())); }
+                if cands.is_empty() { body = body.child(note(t("sb.import_none").into())); }
                 let mut lst = div().id("imp-list").max_h(px(300.)).overflow_y_scroll().flex().flex_col().gap_1();
                 for (i, h) in cands.iter().enumerate() {
                     let on = checked[i];
-                    lst = lst.child(div().id(("imp", i)).px_2().py(px(5.)).rounded(px(6.)).flex().items_center().gap_2().cursor_pointer().hover(|d| d.bg(c(cur().surface0)))
+                    lst = lst.child(div().id(("imp", i)).px_2().py(px(5.)).rounded(px(ui::R_MD)).flex().items_center().gap_2().cursor_pointer().hover(|d| d.bg(crate::theme::hover_bg()))
                         .on_click(cx.listener(move |this, _, _w, cx| { if let Some(SbModal::Import { checked, .. }) = &mut this.sb_modal { checked[i] = !checked[i]; } cx.notify(); }))
-                        .child(div().size(px(14.)).rounded(px(4.)).border_1().border_color(c(th.overlay0)).flex().items_center().justify_center().when(on, |d| d.bg(c(th.accent)).border_color(c(th.accent)).child(icon(IconName::Check, 10., gpui::white()))))
-                        .child(icon(IconName::Server, 13., c(th.accent)))
-                        .child(div().text_size(px(13.)).text_color(c(th.text)).child(h.name.clone()))
-                        .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(format!("{}{}{}", h.user.as_ref().map(|u| format!("{u}@")).unwrap_or_default(), h.host, h.port.map(|p| format!(":{p}")).unwrap_or_default()))));
+                        .child(div().size(px(14.)).rounded(px(ui::R_SM)).border_1().border_color(c(th.overlay0)).flex().items_center().justify_center().when(on, |d| d.bg(c(th.accent)).border_color(c(th.accent)).child(icon(IconName::Check, ui::IC_XS, gpui::white()))))
+                        .child(icon(IconName::Server, ui::IC_SM, c(th.accent)))
+                        .child(div().text_size(px(ui::fs_body())).text_color(c(th.text)).child(h.name.clone()))
+                        .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(format!("{}{}{}", h.user.as_ref().map(|u| format!("{u}@")).unwrap_or_default(), h.host, h.port.map(|p| format!(":{p}")).unwrap_or_default()))));
                 }
                 let n = checked.iter().filter(|c| **c).count();
                 let g2 = group.clone();
-                card = card.child(lst)
-                    .child(div().flex().items_center().gap_2().child(div().text_size(px(13.)).text_color(c(th.subtext)).child(t("ui.group"))).child(div().flex_1().child(ui::text_field(&group, false))))
-                    .child(div().flex().gap_2().justify_end().child(cancel)
+                body = body.child(lst)
+                    .child(div().flex().items_center().gap_2().child(div().text_size(px(ui::fs_body())).text_color(c(th.subtext)).child(t("ui.group"))).child(div().flex_1().child(ui::text_field(&group, false))));
+                foot = foot.child(cancel)
                         .child(ui::button("sbm-import", tf("sb.import_n", &[("n", &n)]), 1).on_click(cx.listener(move |this, _, _w, cx| {
                             let Some(SbModal::Import { cands, checked, .. }) = this.sb_modal.clone() else { return };
                             let chosen: Vec<HostEntry> = cands.iter().zip(&checked).filter(|(_, c)| **c).map(|(h, _)| h.clone()).collect();
@@ -712,10 +718,10 @@ impl Root {
                             this.sb_save("hosts.import", format!("n={} group={g:?}", chosen.len()), |s| { added = hosttree::import(&mut s.hosts, &chosen, &g); }, cx);
                             this.toast(tf("sb.imported", &[("n", &added)]), cx);
                             this.sb_modal = None;
-                        }))));
+                        })));
             }
         }
-        ui::modal(card).into_any_element()
+        ui::modal(ui::card(480.).child(ui::dialog_header(Some(hdr.0), hdr.1, None, None)).child(body).child(foot)).into_any_element()
     }
 }
 

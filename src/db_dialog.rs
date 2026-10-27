@@ -3,7 +3,7 @@
 //! A connection can go through any saved SSH host; "Test" runs the unsaved form.
 use std::collections::HashMap;
 
-use gpui::{div, prelude::*, px, Context, Entity, EventEmitter, FontWeight, SharedString, Window};
+use gpui::{div, prelude::*, px, Context, Entity, EventEmitter, SharedString, Window};
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::switch::Switch;
 use ssh_term_proto::assets::{self, DbConn, DbKind};
@@ -194,7 +194,7 @@ impl DbDialog {
 impl Render for DbDialog {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
-        let label = |s: &str| div().w(px(84.)).flex_shrink_0().text_size(px(13.)).text_color(c(th.subtext)).child(s.to_string());
+        let label = |s: &str| div().w(px(84.)).flex_shrink_0().text_size(px(ui::fs_body())).text_color(c(th.subtext)).child(s.to_string());
         let line = |l: &str, el: gpui::AnyElement| div().flex().items_center().gap_3().child(label(l)).child(div().flex_1().min_w_0().child(el));
         let mut form = div().p_5().flex().flex_col().gap_3().max_h(px(600.)).id("db-form").overflow_y_scroll();
 
@@ -204,9 +204,9 @@ impl Render for DbDialog {
         form = form.child(div().flex().items_start().gap_3().child(label(t("db.kind")).pt_1())
             .child(div().flex_1().flex().flex_col().gap_1()
                 .child(ui::segmented("db-kind", &kinds, self.kind.id(), move |v, _w, cx| { if let Some(k) = DbKind::from_id(&v) { let _ = me.update(cx, |this, cx| { this.kind = k; this.test = None; cx.notify(); }); } }))
-                .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(t("db.kinds_more")))));
+                .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(t("db.kinds_more")))));
         form = form.child(line(t("db.uri"), ui::text_field(&self.uri, false).into_any_element()));
-        form = form.child(div().h(px(1.)).bg(c(th.surface0)));
+        form = form.child(div().h(px(1.)).bg(crate::theme::divider()));
         form = form.child(line(t("ui.name"), ui::text_field(&self.name, false).into_any_element()));
         if self.kind.is_file() {
             form = form.child(line(t("db.file"), ui::text_field(&self.file, false).into_any_element()));
@@ -226,33 +226,31 @@ impl Render for DbDialog {
         form = form.child(line(t("ui.group"), ui::text_field(&self.group, false).into_any_element()));
         form = form.child(div().flex().items_center().gap_3().child(label(t("db.read_only")))
             .child(Switch::new("db-ro").checked(self.read_only).on_click(cx.listener(|this, on: &bool, _, cx| { this.read_only = *on; cx.notify(); })))
-            .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(t("db.read_only_hint"))));
+            .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(t("db.read_only_hint"))));
         if let Some(r) = &self.test {
             let (col, ic, msg) = match r { None => (th.overlay1, IconName::LoaderCircle, t("db.testing").to_string()), Some(Ok(m)) => (th.success, IconName::CircleCheck, m.clone()), Some(Err(e)) => (th.error, IconName::CircleX, e.clone()) };
-            form = form.child(div().p_3().rounded(px(8.)).bg(c(th.surface0).opacity(0.45)).flex().items_start().gap_2()
-                .child(icon(ic, 14., c(col))).child(div().flex_1().min_w_0().whitespace_normal().text_size(px(12.)).text_color(c(col)).child(msg)));
+            form = form.child(div().p_3().rounded(px(ui::R_SUB)).bg(crate::theme::sub_bg()).border_1().border_color(crate::theme::divider()).flex().items_start().gap_2()
+                .child(icon(ic, ui::IC_SM, c(col))).child(div().flex_1().min_w_0().whitespace_normal().text_size(px(ui::fs_body())).text_color(c(col)).child(msg)));
         }
-        if let Some(e) = &self.error { form = form.child(div().text_size(px(12.)).text_color(c(th.error)).child(e.clone())); }
+        if let Some(e) = &self.error { form = form.child(div().text_size(px(ui::fs_body())).text_color(c(th.error)).child(e.clone())); }
 
         let testing = matches!(self.test, Some(None));
-        let mut footer = div().px_5().py_3().flex().items_center().gap_2().border_t_1().border_color(c(th.surface0)).bg(c(th.mantle))
-            .child(ui::button("db-test", t("host.test"), 0).when(testing, |b| b.opacity(0.5)).on_click(cx.listener(move |this, _, _w, cx| if !testing { this.run_test(cx) })))
-            .child(div().flex_1());
+        let test_btn = ui::button("db-test", t("host.test"), 0).when(testing, |b| b.opacity(0.5)).on_click(cx.listener(move |this, _, _w, cx| if !testing { this.run_test(cx) }));
+        let mut btns: Vec<gpui::AnyElement> = Vec::new();
         if let Some(d) = self.editing.clone() {
-            footer = footer.child(ui::button("db-del", t("ui.delete"), 2).on_click(cx.listener(move |_, _, _w, cx| {
+            btns.push(ui::button("db-del", t("ui.delete"), 2).on_click(cx.listener(move |_, _, _w, cx| {
                 let id = d.id.clone();
                 crate::secret_store().delete(&d.password_secret());
                 let _ = config::update(|s| s.db.retain(|x| x.id != id));
                 cx.emit(DbDialogEvent::Deleted(id));
-            })));
+            })).into_any_element());
         }
-        footer = footer.child(ui::button("db-cancel", t("ui.cancel"), 0).on_click(cx.listener(|_, _, _w, cx| cx.emit(DbDialogEvent::Close))))
-            .child(ui::button("db-save", t("ui.save"), 1).on_click(cx.listener(|this, _, _w, cx| this.save(cx))));
+        btns.push(ui::button("db-cancel", t("ui.cancel"), 0).on_click(cx.listener(|_, _, _w, cx| cx.emit(DbDialogEvent::Close))).into_any_element());
+        btns.push(ui::button("db-save", t("ui.save"), 1).on_click(cx.listener(|this, _, _w, cx| this.save(cx))).into_any_element());
+        let footer = ui::dialog_footer(Some(test_btn.into_any_element()), btns);
         let title: SharedString = if self.editing.is_some() { t("db.edit_connection").into() } else { t("db.new_connection").into() };
         ui::modal(ui::card(600.)
-            .child(div().h(px(48.)).px_5().flex().items_center().gap_2().border_b_1().border_color(c(th.surface0))
-                .child(icon(IconName::Database, 16., c(th.accent)))
-                .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(title)))
+            .child(ui::dialog_header(Some(IconName::Database), title, None, None))
             .child(form).child(footer))
     }
 }

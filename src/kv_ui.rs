@@ -1,6 +1,6 @@
 //! Redis and container tool windows: saved connections / endpoints, their edit dialog,
 //! and opening Redis, container, log and exec tabs.
-use gpui::{div, prelude::*, px, AnyElement, Context, Entity, EventEmitter, FontWeight, SharedString, Window};
+use gpui::{div, prelude::*, px, AnyElement, Context, Entity, EventEmitter, SharedString, Window};
 use gpui_component::input::InputState;
 use gpui_component::switch::Switch;
 use ssh_term_proto::assets::{self, DockerEndpoint};
@@ -117,7 +117,7 @@ impl AssetDialog {
 impl Render for AssetDialog {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
-        let label = |s: &str| div().w(px(96.)).flex_shrink_0().text_size(px(13.)).text_color(c(th.subtext)).child(s.to_string());
+        let label = |s: &str| div().w(px(96.)).flex_shrink_0().text_size(px(ui::fs_body())).text_color(c(th.subtext)).child(s.to_string());
         let line = |l: &str, el: AnyElement| div().flex().items_center().gap_3().child(label(l)).child(div().flex_1().min_w_0().child(el));
         let mut form = div().p_5().flex().flex_col().gap_3().max_h(px(600.)).id("kv-form").overflow_y_scroll();
         form = form.child(line(&t("ui.name"), ui::text_field(&self.name, false).into_any_element()));
@@ -139,21 +139,20 @@ impl Render for AssetDialog {
             form = form.child(line(&t("kv.socket"), ui::text_field(&self.socket, false).into_any_element()));
         }
         form = form.child(line(&t("kv.via"), self.via.clone().into_any_element()));
-        if self.hosts.is_empty() { form = form.child(div().pl(px(108.)).text_size(px(11.)).text_color(c(th.overlay0)).child(t("kv.no_hosts"))); }
-        if self.kind == AssetKind::Redis && self.mode != "standalone" { form = form.child(div().pl(px(108.)).text_size(px(11.)).text_color(c(th.warning)).child(t("redis.err_cluster_ssh"))); }
+        if self.hosts.is_empty() { form = form.child(div().pl(px(108.)).text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(t("kv.no_hosts"))); }
+        if self.kind == AssetKind::Redis && self.mode != "standalone" { form = form.child(div().pl(px(108.)).text_size(px(ui::fs_small())).text_color(c(th.warning)).child(t("redis.err_cluster_ssh"))); }
         form = form.child(line(&t("ui.group"), ui::text_field(&self.group, false).into_any_element()))
             .child(div().flex().items_center().gap_3().child(label(&t("tag.production"))).child(Switch::new("kv-prod").checked(self.production).on_click(cx.listener(|d, on: &bool, _, cx| { d.production = *on; cx.notify(); }))))
             .child(div().flex().items_center().gap_3().child(label(&t("db.read_only"))).child(Switch::new("kv-ro").checked(self.read_only).on_click(cx.listener(|d, on: &bool, _, cx| { d.read_only = *on; cx.notify(); }))));
-        if let Some(e) = &self.error { form = form.child(div().text_size(px(12.)).text_color(c(th.error)).child(e.clone())); }
-        let mut footer = div().px_5().py_3().flex().items_center().gap_2().border_t_1().border_color(c(th.surface0)).bg(c(th.mantle)).child(div().flex_1());
-        if self.id.is_some() { footer = footer.child(ui::button("kv-d-del", t("ui.delete"), 2).on_click(cx.listener(|d, _, _w, cx| d.delete(cx)))); }
-        footer = footer.child(ui::button("kv-d-cancel", t("ui.cancel"), 0).on_click(cx.listener(|_, _, _w, cx| cx.emit(AssetEvent::Close))))
-            .child(ui::button("kv-d-save", t("ui.save"), 1).on_click(cx.listener(|d, _, _w, cx| d.save(cx))));
+        if let Some(e) = &self.error { form = form.child(div().text_size(px(ui::fs_body())).text_color(c(th.error)).child(e.clone())); }
+        let mut btns: Vec<AnyElement> = Vec::new();
+        if self.id.is_some() { btns.push(ui::button("kv-d-del", t("ui.delete"), 2).on_click(cx.listener(|d, _, _w, cx| d.delete(cx))).into_any_element()); }
+        btns.push(ui::button("kv-d-cancel", t("ui.cancel"), 0).on_click(cx.listener(|_, _, _w, cx| cx.emit(AssetEvent::Close))).into_any_element());
+        btns.push(ui::button("kv-d-save", t("ui.save"), 1).on_click(cx.listener(|d, _, _w, cx| d.save(cx))).into_any_element());
+        let footer = ui::dialog_footer(None, btns);
         let title: SharedString = match self.kind { AssetKind::Redis => t("kv.redis_conn").into(), AssetKind::Docker => t("kv.docker_ep").into() };
         ui::modal(ui::card(580.)
-            .child(div().h(px(48.)).px_5().flex().items_center().gap_2().border_b_1().border_color(c(th.surface0))
-                .child(icon(if self.kind == AssetKind::Redis { IconName::Database } else { IconName::Container }, 16., c(th.accent)))
-                .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(title)))
+            .child(ui::dialog_header(Some(if self.kind == AssetKind::Redis { IconName::Database } else { IconName::Container }), title, None, None))
             .child(form).child(footer))
     }
 }
@@ -338,8 +337,8 @@ impl Render for GoneView {
     fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
         div().size_full().flex().flex_col().items_center().justify_center().gap_2().bg(c(th.base))
-            .child(icon(IconName::TriangleAlert, 20., c(th.warning)))
-            .child(div().text_size(px(13.)).text_color(c(th.text)).child(t("kv.gone")))
-            .child(div().text_size(px(12.)).text_color(c(th.overlay0)).child(self.what.clone()))
+            .child(icon(IconName::TriangleAlert, ui::IC_LG, c(th.warning)))
+            .child(div().text_size(px(ui::fs_body())).text_color(c(th.text)).child(t("kv.gone")))
+            .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(self.what.clone()))
     }
 }

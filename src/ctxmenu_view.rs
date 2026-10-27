@@ -10,6 +10,7 @@ use ssh_term_proto::ssh::{self, SshTarget};
 
 use crate::config;
 use crate::theme::{c, cur};
+use crate::ui;
 
 static RT: OnceLock<(tokio::runtime::Handle, ssh::Prompts)> = OnceLock::new();
 /// Called once at startup so views can probe remote hosts through the shared connection pool.
@@ -74,22 +75,22 @@ pub fn render<V: 'static>(st: &MenuState, cx: &mut Context<V>, pick: fn(&mut V, 
     let mut list = div().id("ctxmenu-list").max_h(px(560.)).overflow_y_scroll().flex().flex_col().py_1();
     let mut last_group = None;
     for (i, it) in st.menu.items.iter().enumerate() {
-        if last_group.is_some_and(|g| g != it.group) { list = list.child(div().mx(px(10.)).my(px(4.)).h(px(1.)).bg(c(th.surface1).opacity(0.6))); }
+        if last_group.is_some_and(|g| g != it.group) { list = list.child(ui::menu_sep()); }
         last_group = Some(it.group);
         let enabled = it.enabled();
-        let mut row = div().id(("ctxmenu-item", i)).px(px(10.)).py(px(4.)).flex().flex_col().gap(px(1.)).rounded(px(6.)).mx(px(5.))
-            .child(div().flex().items_center().gap_2().text_size(px(13.)).text_color(if enabled { c(th.text) } else { c(th.overlay0) })
+        let mut row = div().id(("ctxmenu-item", i)).px(px(10.)).py(px(4.)).flex().flex_col().gap(px(1.)).rounded(px(ui::R_MD)).mx(px(ui::LIST_INSET))
+            .child(div().flex().items_center().gap_2().text_size(px(ui::fs_body())).text_color(if enabled { c(th.text) } else { c(th.overlay0) })
                 .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().child(it.label.clone()))
-                .children(it.custom.then(|| div().px_1().rounded_sm().text_size(px(11.)).text_color(c(th.accent)).border_1().border_color(c(th.accent).opacity(0.5)).child("custom")))
-                .children((it.unknown && probing).then(|| div().text_size(px(11.)).text_color(c(th.overlay0)).child(t("cm.probing")))));
+                .children(it.custom.then(|| div().px_1().rounded(px(ui::R_SM)).text_size(px(ui::fs_caption())).text_color(c(th.accent)).border_1().border_color(c(th.accent).opacity(0.5)).child("custom")))
+                .children((it.unknown && probing).then(|| div().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(t("cm.probing")))));
         if let Some(p) = it.preview() {
-            row = row.child(div().text_size(px(11.)).font_family(mono.clone()).text_color(if enabled { c(th.accent) } else { c(th.overlay0) }).whitespace_nowrap().overflow_hidden().text_ellipsis().child(format!("$ {p}")));
+            row = row.child(div().text_size(px(ui::fs_mono())).font_family(mono.clone()).text_color(if enabled { c(th.accent) } else { c(th.overlay0) }).whitespace_nowrap().overflow_hidden().text_ellipsis().child(format!("$ {p}")));
         }
         if !enabled {
             let tool = it.missing.join(", ");
-            row = row.child(div().text_size(px(11.)).text_color(c(th.warning)).child(tf("cm.missing", &[("tool", &tool), ("cmd", &it.hint.clone().unwrap_or_default())])));
+            row = row.child(div().text_size(px(ui::fs_small())).text_color(c(th.warning)).child(tf("cm.missing", &[("tool", &tool), ("cmd", &it.hint.clone().unwrap_or_default())])));
         } else {
-            row = row.cursor_pointer().hover(|d| d.bg(c(cur().surface0))).on_click(cx.listener(move |v, _, w, cx| pick(v, i, w, cx)));
+            row = row.cursor_pointer().hover(|d| d.bg(crate::theme::menu_sel_bg())).on_click(cx.listener(move |v, _, w, cx| pick(v, i, w, cx)));
         }
         list = list.child(row);
     }
@@ -100,11 +101,11 @@ pub fn render<V: 'static>(st: &MenuState, cx: &mut Context<V>, pick: fn(&mut V, 
             if opened.elapsed() < Duration::from_millis(250) { return; }
             close(v, cx);
         }))
-        .child(div().px_3().pt_2().pb_1().flex().flex_col().gap(px(2.)).border_b_1().border_color(c(th.surface0))
-            .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(st.menu.header.clone()))
-            .children(st.note.clone().map(|n| div().text_size(px(11.)).text_color(c(th.info)).child(n)))
-            .children((st.errors > 0).then(|| div().text_size(px(11.)).text_color(c(th.error)).child(tf("cm.custom_errors", &[("n", &st.errors)])))))
+        .child(div().px_3().pt_2().pb_1().flex().flex_col().gap(px(2.)).border_b_1().border_color(crate::theme::divider())
+            .child(div().text_size(px(ui::fs_small())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(st.menu.header.clone()))
+            .children(st.note.clone().map(|n| div().text_size(px(ui::fs_small())).text_color(c(th.info)).child(n)))
+            .children((st.errors > 0).then(|| div().text_size(px(ui::fs_small())).text_color(c(th.error)).child(tf("cm.custom_errors", &[("n", &st.errors)])))))
         .child(list)
-        .when(has_insert, |d| d.child(div().px_3().py_1().border_t_1().border_color(c(th.surface1).opacity(0.5)).text_size(px(11.)).text_color(c(th.overlay1)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(t("cm.insert_hint"))));
+        .when(has_insert, |d| d.child(div().px_3().py_1().border_t_1().border_color(crate::theme::divider()).text_size(px(ui::fs_small())).text_color(c(th.overlay1)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(t("cm.insert_hint"))));
     deferred(anchored().position(st.pos).snap_to_window_with_margin(px(8.)).child(crate::chrome::pop_in("ctxmenu-pop", menu))).with_priority(10).into_any_element()
 }

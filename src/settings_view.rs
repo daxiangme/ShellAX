@@ -34,15 +34,6 @@ impl Cat {
             Cat::Audit => t("ui.audit"), Cat::Session => t("ui.sessions_layout"), Cat::Keys => t("ui.keyboard_shortcuts"), Cat::Notify => t("ui.notifications"), Cat::ContextMenu => t("cm.settings_title"), Cat::Extensions => t("ext.title"), Cat::About => t("ui.about"),
         }
     }
-    /// System Settings-style colored rounded-square icon background (PRD 5.22).
-    fn color(self) -> u32 {
-        match self {
-            Cat::General => 0x8e8e93, Cat::Appearance => 0x5856d6, Cat::Terminal => 0x3a3a3c, Cat::Suggest => 0xffb300, Cat::Ssh => 0x007aff,
-            Cat::Proxy => 0x5ac8fa,
-            Cat::Credentials => 0xa2845e, Cat::Ai => 0xaf52de, Cat::Agents => 0x34c759, Cat::Permissions => 0xff3b30, Cat::Tags => 0xff9f0a, Cat::Audit => 0xff9500,
-            Cat::Session => 0x30b0c7, Cat::Keys => 0x636366, Cat::Notify => 0xff2d55, Cat::ContextMenu => 0x32ade6, Cat::Extensions => 0x5e5ce6, Cat::About => 0x0a84ff,
-        }
-    }
     fn icon(self) -> IconName {
         match self {
             Cat::General => IconName::SlidersHorizontal, Cat::Appearance => IconName::Palette, Cat::Terminal => IconName::SquareTerminal,
@@ -405,7 +396,7 @@ impl SettingsView {
                 div().w(px(w)).flex_shrink_0().child(ui::text_field(&e, false)).into_any_element()
             }
             Ctl::Font(path) => self.font_picker(path, window, cx).into_any_element(),
-            Ctl::Info(text) => div().max_w(px(360.)).text_size(px(12.)).text_color(c(th.subtext)).text_align(gpui::TextAlign::Right).child(text.clone()).into_any_element(),
+            Ctl::Info(text) => div().max_w(px(360.)).text_size(px(ui::fs_small())).text_color(c(th.subtext)).text_align(gpui::TextAlign::Right).child(text.clone()).into_any_element(),
         }
     }
 
@@ -445,7 +436,7 @@ impl SettingsView {
             .w_full()
             .h(px(32.))
             .px_3()
-            .rounded(px(6.))
+            .rounded(px(ui::R_MD))
             .bg(c(th.surface0).opacity(0.85))
             .border_1()
             .border_color(if open { c(th.accent) } else { c(th.surface1) })
@@ -463,14 +454,14 @@ impl SettingsView {
             }))
             .child(
                 div().flex().items_center().gap_2().min_w_0()
-                    .child(icon(IconName::SquareTerminal, 13., c(th.accent)))
+                    .child(icon(IconName::SquareTerminal, ui::IC_SM, c(th.accent)))
                     .child(
-                        div().text_size(px(13.)).text_color(c(th.text))
+                        div().text_size(px(ui::fs_body())).text_color(c(th.text))
                             .overflow_hidden().text_ellipsis().whitespace_nowrap()
                             .child(current_display)
                     )
             )
-            .child(icon(if open { IconName::ChevronUp } else { IconName::ChevronDown }, 12., c(th.overlay1)));
+            .child(icon(if open { IconName::ChevronUp } else { IconName::ChevronDown }, ui::IC_XS, c(th.overlay1)));
         trigger = trigger.child(button);
 
         if open {
@@ -500,7 +491,7 @@ impl SettingsView {
             let show_all_val = self.font_show_all;
             popover = popover.child(
                 div().flex().items_center().justify_between().px_1().py(px(2.))
-                    .child(div().text_size(px(12.)).text_color(c(th.subtext)).child(t("ui.monospace_only")))
+                    .child(div().text_size(px(ui::fs_mono())).text_color(c(th.subtext)).child(t("ui.monospace_only")))
                     .child(Switch::new("font-mono-only").small().checked(!show_all_val).on_click(cx.listener(|this, on: &bool, _, cx| {
                         this.font_show_all = !*on;
                         cx.notify();
@@ -514,7 +505,7 @@ impl SettingsView {
                 let is_current = det.family.eq_ignore_ascii_case(&current);
                 popover = popover.child(
                     div().id("font-detected-item")
-                        .px_2().py(px(5.)).rounded(px(6.))
+                        .px_2().py(px(5.)).rounded(px(ui::R_MD))
                         .bg(crate::theme::selected_bg())
                         .border_1().border_color(c(th.accent).opacity(0.35))
                         .flex().items_center().justify_between().cursor_pointer()
@@ -528,14 +519,14 @@ impl SettingsView {
                             div().flex().flex_col().gap(px(1.)).min_w_0()
                                 .child(
                                     div().flex().items_center().gap_1()
-                                        .child(icon(IconName::Sparkles, 11., c(th.accent)))
-                                        .child(div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.accent)).child(format!("{} ({})", t("ui.system_terminal_font"), det_src)))
+                                        .child(icon(IconName::Sparkles, ui::IC_XS, c(th.accent)))
+                                        .child(div().text_size(px(ui::fs_small())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.accent)).child(format!("{} ({})", t("ui.system_terminal_font"), det_src)))
                                 )
-                                .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(det.family.clone()))
+                                .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(det.family.clone()))
                         )
                         .child(
                             if is_current {
-                                icon(IconName::Check, 13., c(th.accent)).into_any_element()
+                                icon(IconName::Check, ui::IC_SM, c(th.accent)).into_any_element()
                             } else {
                                 ui::tag(t("ui.use_detected"), c(th.accent)).into_any_element()
                             }
@@ -546,7 +537,7 @@ impl SettingsView {
             // Font list
             let mut list = div().id("font-list-scroll").max_h(px(200.)).overflow_y_scroll().flex().flex_col().gap(px(2.));
             if filtered.is_empty() {
-                list = list.child(div().p_3().text_center().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ui.no_matching_fonts")));
+                list = list.child(div().p_3().text_center().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(t("ui.no_matching_fonts")));
             } else {
                 for (i, font_name) in filtered.into_iter().take(200).enumerate() {
                     let fam = font_name.clone();
@@ -554,10 +545,10 @@ impl SettingsView {
                     let is_nerd = font_name.to_lowercase().contains("nerd font") || font_name.ends_with(" NF") || font_name.ends_with(" NFM");
                     list = list.child(
                         div().id(("font-opt", i))
-                            .px_2().py(px(5.)).rounded(px(6.))
+                            .px_2().py(px(5.)).rounded(px(ui::R_MD))
                             .flex().items_center().justify_between().cursor_pointer()
                             .when(is_active, |d| d.bg(crate::theme::selected_bg()))
-                            .hover(|d| d.bg(c(cur().surface0)))
+                            .hover(|d| d.bg(crate::theme::hover_bg()))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.set(path, toml::Value::String(fam.clone()), cx);
                                 this.font_dropdown = false;
@@ -566,13 +557,13 @@ impl SettingsView {
                             .child(
                                 div().flex().items_center().gap_2().min_w_0()
                                     .child(
-                                        div().text_size(px(13.)).text_color(if is_active { c(th.accent) } else { c(th.text) })
+                                        div().text_size(px(ui::fs_body())).text_color(if is_active { c(th.accent) } else { c(th.text) })
                                             .overflow_hidden().text_ellipsis().whitespace_nowrap()
                                             .child(font_name)
                                     )
                                     .when(is_nerd, |d| d.child(ui::tag("NF", c(th.info))))
                             )
-                            .when(is_active, |d| d.child(icon(IconName::Check, 12., c(th.accent))))
+                            .when(is_active, |d| d.child(icon(IconName::Check, ui::IC_XS, c(th.accent))))
                     );
                 }
             }
@@ -584,17 +575,17 @@ impl SettingsView {
                 let custom_label = tf("ui.use_custom_font_name", &[("name", &custom_q)]);
                 popover = popover.child(
                     div().id("font-custom-use")
-                        .px_2().py(px(4.)).rounded(px(6.))
-                        .border_t_1().border_color(c(th.surface1).opacity(0.5))
+                        .px_2().py(px(4.)).rounded(px(ui::R_MD))
+                        .border_t_1().border_color(crate::theme::divider())
                         .flex().items_center().gap_2().cursor_pointer()
-                        .hover(|d| d.bg(c(cur().surface0)))
+                        .hover(|d| d.bg(crate::theme::hover_bg()))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.set(path, toml::Value::String(custom_q.clone()), cx);
                             this.font_dropdown = false;
                             cx.notify();
                         }))
-                        .child(icon(IconName::Plus, 12., c(th.subtext)))
-                        .child(div().text_size(px(12.)).text_color(c(th.subtext)).child(custom_label))
+                        .child(icon(IconName::Plus, ui::IC_XS, c(th.subtext)))
+                        .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(custom_label))
                 );
             }
 
@@ -613,12 +604,12 @@ impl SettingsView {
         };
         let err = path.and_then(|p| self.errors.get(p).cloned());
         let mut left = div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
-            .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).whitespace_normal().child(row.label));
+            .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).whitespace_normal().child(row.label));
         if !row.desc.is_empty() {
-            left = left.child(div().text_size(px(12.)).text_color(c(th.overlay1)).whitespace_normal().child(row.desc));
+            left = left.child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).whitespace_normal().child(row.desc));
         }
         if let Some(e) = err {
-            left = left.child(div().text_size(px(12.)).text_color(c(th.error)).whitespace_normal().child(e));
+            left = left.child(div().text_size(px(ui::fs_body())).text_color(c(th.error)).whitespace_normal().child(e));
         }
         div().id(("row", idx))
             .px(px(16.))
@@ -634,13 +625,11 @@ impl SettingsView {
     }
     /// Grouped inset card (System Settings): rows separated by inset hairlines.
     fn group_card(rows: Vec<AnyElement>) -> gpui::Div {
-        let th = cur();
-        let dark = th.appearance == crate::theme::Appearance::Dark;
-        let mut card = div().mt_2().rounded(px(10.)).bg(if dark { c(th.surface0).opacity(0.55) } else { c(th.base) }).border_1().border_color(c(th.surface1).opacity(0.6)).flex().flex_col().overflow_hidden();
+        let mut card = div().mt_2().rounded(px(ui::R_LG)).bg(crate::theme::sub_bg()).border_1().border_color(crate::theme::divider()).flex().flex_col().overflow_hidden();
         let n = rows.len();
         for (i, r) in rows.into_iter().enumerate() {
             card = card.child(r);
-            if i + 1 < n { card = card.child(div().mx(px(12.)).h(px(1.)).bg(c(th.surface1).opacity(0.55))); }
+            if i + 1 < n { card = card.child(div().mx(px(12.)).h(px(1.)).bg(crate::theme::divider())); }
         }
         card
     }
@@ -648,7 +637,7 @@ impl SettingsView {
     // ---------------------------------------------------------------- custom sections
     fn section_title(t: &str) -> impl IntoElement {
         let th = cur();
-        div().pt_5().pb_1().px(px(12.)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.subtext)).child(t.to_string())
+        div().pt_5().pb_1().px(px(12.)).text_size(px(ui::fs_small())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.subtext)).child(t.to_string())
     }
 
 /// Tag definitions (PRD 5.23): built-in color tags (rename / delete) and custom tags
@@ -662,7 +651,7 @@ impl SettingsView {
             let builtin = ssh_term_proto::hosttree::COLORS.contains(&id.as_str());
             let used = s.hosts.iter().filter(|h| h.tags.contains(&id)).count() + s.groups.iter().filter(|g| g.tags.contains(&id)).count();
             let name_in = self.input(&format!("tagdef.name.{id}"), &name, if builtin { s.tags.names.get(&id).cloned().unwrap_or_default() } else { name.clone() }, window, cx);
-            let mut row = div().flex().items_center().gap_2().px_3().py(px(6.)).rounded(px(6.)).bg(c(th.surface0).opacity(0.5))
+            let mut row = div().flex().items_center().gap_2().px_3().py(px(6.)).rounded(px(ui::R_MD)).bg(crate::theme::sub_bg())
                 .child(div().size(px(14.)).flex_shrink_0().rounded_full().bg(c(s.tags.rgb(&id))))
                 .child(div().w(px(180.)).child(ui::text_field(&name_in, false)));
             if !builtin {
@@ -682,7 +671,7 @@ impl SettingsView {
                 }
             }
             let idd = id.clone();
-            row = row.child(div().flex_1()).child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(tf("tag.used_n", &[("n", &used)])))
+            row = row.child(div().flex_1()).child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(tf("tag.used_n", &[("n", &used)])))
                 .when(id != s.tags.production, |r| r.child(ui::button(SharedString::from(format!("tagdel-{id}")), t("sb.delete"), 2).on_click(cx.listener(move |this, _, _w, cx| {
                     let idd = idd.clone();
                     this.notice = config::update(|s| {
@@ -719,21 +708,21 @@ impl SettingsView {
         let mut modes = div().flex().gap_2();
         for m in Mode::ALL {
             let active = s.permissions.mode == m;
-            modes = modes.child(div().id(("mode-card", m as usize)).flex_1().p_3().rounded_lg().cursor_pointer().border_1()
-                .border_color(if active { c(th.accent) } else { c(th.surface0) }).bg(if active { c(th.accent).opacity(0.08) } else { c(th.mantle) })
+            modes = modes.child(div().id(("mode-card", m as usize)).flex_1().p_3().rounded(px(ui::R_SUB)).cursor_pointer().border_1()
+                .border_color(if active { c(th.accent) } else { crate::theme::divider() }).bg(if active { crate::theme::selected_bg() } else { crate::theme::sub_bg() })
                 .on_click(cx.listener(move |this, _, _w, cx| this.set("permissions.mode", toml::Value::String(format!("{m:?}").to_lowercase()), cx)))
-                .child(div().flex().items_center().gap_2().child(icon(IconName::Shield, 14., if active { c(th.accent) } else { c(th.overlay1) }))
-                    .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(m.label())))
-                .child(div().pt_1().text_size(px(12.)).text_color(c(th.overlay1)).child(m.desc())));
+                .child(div().flex().items_center().gap_2().child(icon(IconName::Shield, ui::IC_SM, if active { c(th.accent) } else { c(th.overlay1) }))
+                    .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(m.label())))
+                .child(div().pt_1().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(m.desc())));
         }
         out = out.child(Self::section_title(t("ui.permission_mode"))).child(modes);
 
         // rule table
         out = out.child(Self::section_title(t("ui.rules_evaluated_top_to_bottom")));
-        let header = div().flex().items_center().gap_2().px_3().py(px(6.)).text_size(px(11.)).text_color(c(th.overlay1)).bg(c(th.mantle)).rounded_t_lg()
+        let header = ui::table_header().gap_2().px_3()
             .child(div().w(px(24.)).child("#")).child(div().w(px(130.)).child("ID")).child(div().w(px(70.)).child(t("ui.principal")))
             .child(div().w(px(60.)).child(t("ui.action"))).child(div().flex_1().child(t("ui.command_glob"))).child(div().w(px(176.)).child(t("ui.effect"))).child(div().w(px(56.)));
-        let mut table = div().flex().flex_col().rounded_lg().border_1().border_color(c(th.surface0)).child(header);
+        let mut table = div().flex().flex_col().rounded(px(ui::R_SUB)).border_1().border_color(crate::theme::divider()).overflow_hidden().child(header);
         let tester_cmd = self.tester.read(cx).value().to_string();
         let hit = policy::evaluate(&s.permissions.rules, "ai", "exec", &tester_cmd).map(|(i, _)| i);
         for (i, rule) in s.permissions.rules.iter().enumerate() {
@@ -742,15 +731,15 @@ impl SettingsView {
             let cur_eff = format!("{:?}", rule.effect).to_lowercase();
             let seg_id: &'static str = Box::leak(format!("rule-eff-{i}").into_boxed_str());
             let eff_col = match rule.effect { Effect::Allow => c(th.success), Effect::Ask => c(th.warning), Effect::Deny => c(th.error) };
-            table = table.child(div().flex().items_center().gap_2().px_3().py(px(6.)).border_t_1().border_color(c(th.surface0)).text_size(px(12.)).text_color(c(th.text))
+            table = table.child(div().flex().items_center().gap_2().px_3().py(px(6.)).border_t_1().border_color(crate::theme::divider()).text_size(px(ui::fs_body())).text_color(c(th.text))
                 .when(hit == Some(i), |d| d.bg(c(th.accent).opacity(0.08)))
                 .child(div().w(px(24.)).flex().items_center().child(div().size(px(6.)).rounded_full().bg(eff_col)).child(div().pl_1().text_color(c(th.overlay1)).child(format!("{}", i + 1))))
                 .child(div().w(px(130.)).overflow_hidden().child(rule.id.clone()))
                 .child(div().w(px(70.)).text_color(c(th.subtext)).child(rule.principal.clone()))
                 .child(div().w(px(60.)).text_color(c(th.subtext)).child(rule.action.clone()))
                 .child(div().flex_1().flex().flex_col().min_w_0()
-                    .child(div().font_family(SharedString::from(s.font.family.clone())).text_size(px(12.)).child(rule.command.clone()))
-                    .when(!rule.reason.is_empty(), |d| d.child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(rule.reason.clone()))))
+                    .child(div().font_family(SharedString::from(s.font.family.clone())).text_size(px(ui::fs_mono())).child(rule.command.clone()))
+                    .when(!rule.reason.is_empty(), |d| d.child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(rule.reason.clone()))))
                 .child(div().w(px(176.)).child(ui::segmented(seg_id, &eff_opts, &cur_eff, move |v, _w, cx| {
                     let _ = me.update(cx, |this, cx| {
                         let e = match v.as_str() { "allow" => Effect::Allow, "deny" => Effect::Deny, _ => Effect::Ask };
@@ -761,21 +750,21 @@ impl SettingsView {
                     });
                 })))
                 .child(div().w(px(56.)).flex().gap_1()
-                    .child(div().id(("rule-up", i)).size(px(22.)).rounded_md().flex().items_center().justify_center().cursor_pointer().text_color(c(th.overlay1)).hover(|d| d.bg(c(cur().surface0)))
+                    .child(div().id(("rule-up", i)).size(px(22.)).rounded(px(ui::R_MD)).flex().items_center().justify_center().cursor_pointer().text_color(c(th.overlay1)).hover(|d| d.bg(crate::theme::hover_bg()))
                         .on_click(cx.listener(move |this, _, _w, cx| { if i > 0 { this.notice = config::update(|s| s.permissions.rules.swap(i, i - 1)); cx.emit(SettingsEvent::Changed("permissions.rules".into())); cx.notify(); } }))
                         .child("↑"))
-                    .child(div().id(("rule-del", i)).size(px(22.)).rounded_md().flex().items_center().justify_center().cursor_pointer().hover(|d| d.bg(c(cur().error).opacity(0.15)))
+                    .child(div().id(("rule-del", i)).size(px(22.)).rounded(px(ui::R_MD)).flex().items_center().justify_center().cursor_pointer().hover(|d| d.bg(c(cur().error).opacity(0.15)))
                         .on_click(cx.listener(move |this, _, _w, cx| { this.notice = config::update(|s| { s.permissions.rules.remove(i); }); cx.emit(SettingsEvent::Changed("permissions.rules".into())); cx.notify(); }))
-                        .child(icon(IconName::Trash, 13., c(th.error))))));
+                        .child(icon(IconName::Trash, ui::IC_SM, c(th.error))))));
         }
         // add-rule row
         let me = cx.entity().downgrade();
         let new_eff = format!("{:?}", self.new_effect).to_lowercase();
-        table = table.child(div().flex().items_center().gap_2().px_3().py(px(8.)).border_t_1().border_color(c(th.surface0)).bg(c(th.mantle)).rounded_b_lg()
-            .child(div().w(px(24.)).child(icon(IconName::Plus, 13., c(th.overlay1))))
+        table = table.child(div().flex().items_center().gap_2().px_3().py(px(8.)).border_t_1().border_color(crate::theme::divider()).bg(crate::theme::sub_bg())
+            .child(div().w(px(24.)).child(icon(IconName::Plus, ui::IC_SM, c(th.overlay1))))
             .child(div().w(px(130.)).child(ui::text_field(&self.new_rule[0], false)))
             .child(div().w(px(70.)).child(ui::text_field(&self.new_rule[1], false)))
-            .child(div().w(px(60.)).text_size(px(12.)).text_color(c(th.subtext)).child("exec"))
+            .child(div().w(px(60.)).text_size(px(ui::fs_small())).text_color(c(th.subtext)).child("exec"))
             .child(div().flex_1().child(ui::text_field(&self.new_rule[2], false)))
             .child(div().w(px(176.)).child(ui::segmented("new-eff", &opts(&[("allow", t("ui.allow")), ("ask", t("ui.ask")), ("deny", t("ui.deny"))]), &new_eff, move |v, _w, cx| {
                 let _ = me.update(cx, |this, cx| { this.new_effect = match v.as_str() { "allow" => Effect::Allow, "deny" => Effect::Deny, _ => Effect::Ask }; cx.notify(); });
@@ -783,27 +772,27 @@ impl SettingsView {
             .child(div().w(px(56.)).child(ui::button("rule-add", t("ui.add"), 1).on_click(cx.listener(|this, _, window, cx| this.add_rule(window, cx))))));
         out = out.child(table);
         out = out.child(div().pt_2().flex().items_center().gap_2().child(div().w(px(300.)).child(ui::text_field(&self.new_rule[3], false)))
-            .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(t("ui.glob_matches_anything_one_character"))));
-        if let Some(n) = &self.notice { out = out.child(div().pt_1().text_size(px(12.)).text_color(c(th.error)).child(n.clone())); }
+            .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(t("ui.glob_matches_anything_one_character"))));
+        if let Some(n) = &self.notice { out = out.child(div().pt_1().text_size(px(ui::fs_body())).text_color(c(th.error)).child(n.clone())); }
 
         // tester
         let max_auto: Risk = s.permissions.max_auto_risk.parse().unwrap_or(Risk::R1);
         let (eff, why) = policy::decide(s.permissions.mode, max_auto, &s.permissions.rules, "ai", "exec", &tester_cmd, s.permissions.dangerous_confirm);
         let eff_col = match eff { Effect::Allow => c(th.success), Effect::Ask => c(th.warning), Effect::Deny => c(th.error) };
         out = out.child(Self::section_title(t("ui.rule_tester")))
-            .child(div().p_3().rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.surface0)).flex().flex_col().gap_2()
+            .child(div().p_3().rounded(px(ui::R_SUB)).bg(crate::theme::sub_bg()).border_1().border_color(crate::theme::divider()).flex().flex_col().gap_2()
                 .child(div().flex().items_center().gap_3().child(div().flex_1().child(ui::text_field(&self.tester, false)))
                     .child(div().flex().items_center().gap_2().child(ui::tag(policy::classify(&tester_cmd).label(), c(th.info))).child(ui::tag(eff.label(), eff_col))))
-                .child(div().text_size(px(12.)).text_color(c(th.subtext)).child(tf("settings.tester_result", &[("mode", &s.permissions.mode.label()), ("effect", &eff.label()), ("why", &why)]))));
+                .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(tf("settings.tester_result", &[("mode", &s.permissions.mode.label()), ("effect", &eff.label()), ("why", &why)]))));
 
         // risk levels
         out = out.child(Self::section_title(t("ui.risk_levels")));
-        let mut risks = div().flex().flex_col().rounded_lg().border_1().border_color(c(th.surface0));
+        let mut risks = div().flex().flex_col().rounded(px(ui::R_SUB)).border_1().border_color(crate::theme::divider());
         for (i, r) in [Risk::R0, Risk::R1, Risk::R2, Risk::R3, Risk::R4, Risk::Hard].into_iter().enumerate() {
             let col = match r { Risk::R0 => c(th.success), Risk::R1 => c(th.info), Risk::R2 => c(th.accent), Risk::R3 => c(th.warning), _ => c(th.error) };
-            risks = risks.child(div().flex().items_center().gap_3().px_3().py(px(7.)).when(i > 0, |d| d.border_t_1().border_color(c(th.surface0)))
+            risks = risks.child(div().flex().items_center().gap_3().px_3().py(px(7.)).when(i > 0, |d| d.border_t_1().border_color(crate::theme::divider()))
                 .child(div().w(px(44.)).flex().child(ui::tag(r.label(), col)))
-                .child(div().text_size(px(12.)).text_color(c(th.text)).child(r.desc())));
+                .child(div().text_size(px(ui::fs_body())).text_color(c(th.text)).child(r.desc())));
         }
         out = out.child(risks);
         let _ = window;
@@ -823,15 +812,15 @@ impl SettingsView {
 
     fn credentials_extra(&self, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
-        let mut list = div().flex().flex_col().rounded_lg().border_1().border_color(c(th.surface0));
+        let mut list = div().flex().flex_col().rounded(px(ui::R_SUB)).border_1().border_color(crate::theme::divider());
         let keys = scan_keys();
-        if keys.is_empty() { list = list.child(div().p_3().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ui.no_private_keys_found_in"))); }
+        if keys.is_empty() { list = list.child(div().p_3().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(t("ui.no_private_keys_found_in"))); }
         for (i, (name, kind, fp)) in keys.iter().enumerate() {
             let copy_name = name.clone();
-            list = list.child(div().flex().items_center().gap_3().px_3().py(px(8.)).when(i > 0, |d| d.border_t_1().border_color(c(th.surface0)))
-                .child(icon(IconName::KeyRound, 14., c(th.warning)))
-                .child(div().flex_1().min_w_0().flex().flex_col().child(div().text_size(px(13.)).text_color(c(th.text)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(name.clone()))
-                    .child(div().text_size(px(11.)).text_color(c(th.overlay1)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(fp.clone())))
+            list = list.child(div().flex().items_center().gap_3().px_3().py(px(8.)).when(i > 0, |d| d.border_t_1().border_color(crate::theme::divider()))
+                .child(icon(IconName::KeyRound, ui::IC_SM, c(th.warning)))
+                .child(div().flex_1().min_w_0().flex().flex_col().child(div().text_size(px(ui::fs_body())).text_color(c(th.text)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(name.clone()))
+                    .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(fp.clone())))
                 .child(ui::button(("key-copy", i), t("settings.copy_pubkey"), 0).on_click(cx.listener(move |this, _, _, cx| {
                     let stem = copy_name.rsplit(['/', '\\']).next().unwrap_or(copy_name.as_str()).to_string();
                     let path = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".ssh").join(format!("{stem}.pub"));
@@ -878,9 +867,9 @@ impl SettingsView {
                     this.key_import.update(cx, |i, cx| i.set_value("", window, cx));
                     cx.notify();
                 }))))
-            .children(self.notice.clone().map(|n| div().pt_2().text_size(px(12.)).text_color(c(th.subtext)).child(n)))
+            .children(self.notice.clone().map(|n| div().pt_2().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(n)))
             .child(Self::section_title("ssh-agent"))
-            .child(div().text_size(px(12.)).text_color(c(th.subtext)).child(match agent {
+            .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(match agent {
                 Some(p) => tf("settings.agent_sock", &[("p", &p)]),
                 None => t("ui.no_running_ssh_agent_detected").into(),
             }))
@@ -891,15 +880,15 @@ impl SettingsView {
         use ssh_term_proto::hooks::{self, Agent};
         let th = cur();
         let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
-        let mut list = div().flex().flex_col().rounded_lg().border_1().border_color(c(th.surface0));
+        let mut list = div().flex().flex_col().rounded(px(ui::R_SUB)).border_1().border_color(crate::theme::divider());
         for (i, (agent, name)) in [(Agent::Claude, "Claude Code"), (Agent::Codex, "Codex"), (Agent::Grok, "Grok Build")].into_iter().enumerate() {
             let ok = hooks::installed(agent, &home);
             let path = hooks::config_path(agent, &home);
             let h2 = home.clone();
-            list = list.child(div().flex().items_center().gap_3().px_3().py(px(8.)).when(i > 0, |d| d.border_t_1().border_color(c(th.surface0)))
-                .child(icon(IconName::Bot, 14., c(th.accent)))
-                .child(div().flex_1().flex().flex_col().child(div().text_size(px(13.)).text_color(c(th.text)).child(name))
-                    .child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(path.display().to_string())))
+            list = list.child(div().flex().items_center().gap_3().px_3().py(px(8.)).when(i > 0, |d| d.border_t_1().border_color(crate::theme::divider()))
+                .child(icon(IconName::Bot, ui::IC_SM, c(th.accent)))
+                .child(div().flex_1().flex().flex_col().child(div().text_size(px(ui::fs_body())).text_color(c(th.text)).child(name))
+                    .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(path.display().to_string())))
                 .child(if ok { ui::tag(t("ui.hook_installed"), c(th.success)).into_any_element() } else { ui::tag(t("ui.hook_not_installed"), c(th.overlay1)).into_any_element() })
                 .child(ui::button(("hook-install", i), if ok { t("ui.uninstall") } else { t("ui.install") }, if ok { 0 } else { 1 }).on_click(cx.listener(move |this, _, _w, cx| {
                     let cli = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(format!("shellax-cli{}", std::env::consts::EXE_SUFFIX)))).filter(|p| p.exists()).map(|p| p.display().to_string()).unwrap_or_else(|| "shellax-cli".into());
@@ -916,14 +905,14 @@ impl SettingsView {
         }
         let ep = crate::data_dir().join("policy-endpoint.json");
         div().flex().flex_col().child(Self::section_title(t("ui.agent_hooks"))).child(list)
-            .children(self.notice.clone().map(|n| div().pt_2().text_size(px(12.)).text_color(c(th.subtext)).child(n)))
-            .child(div().pt_2().text_size(px(12.)).text_color(c(th.overlay1)).child(tf("settings.hooks_note", &[("ep", &ep.display())])))
+            .children(self.notice.clone().map(|n| div().pt_2().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(n)))
+            .child(div().pt_2().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(tf("settings.hooks_note", &[("ep", &ep.display())])))
             .into_any_element()
     }
 
     fn keys_extra(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
-        let mut list = div().flex().flex_col().rounded_lg().border_1().border_color(c(th.surface0));
+        let mut list = div().flex().flex_col().rounded(px(ui::R_SUB)).border_1().border_color(crate::theme::divider());
         let mut seen: HashMap<String, &'static str> = HashMap::new();
         for (i, a) in Action::ALL.iter().enumerate() {
             let info = a.info();
@@ -932,12 +921,12 @@ impl SettingsView {
             let key = format!("keys.{}", info.id);
             let initial = config::get().keys.get(info.id).cloned().unwrap_or_default();
             let e = self.input(&key, if info.key.is_empty() { t("ui.unbound") } else { info.key }, initial, window, cx);
-            list = list.child(div().flex().items_center().gap_3().px_3().py(px(6.)).when(i > 0, |d| d.border_t_1().border_color(c(th.surface0)))
-                .child(icon(info.icon, 14., c(th.overlay1)))
-                .child(div().flex_1().flex().flex_col().child(div().text_size(px(13.)).text_color(c(th.text)).child(info.label))
-                    .when_some(conflict, |d, other| d.child(div().text_size(px(11.)).text_color(c(th.error)).child(tf("settings.key_conflict", &[("other", &other)]))))
-                    .when_some(self.errors.get(&key).cloned(), |d, e| d.child(div().text_size(px(11.)).text_color(c(th.error)).child(e))))
-                .child(div().w(px(150.)).flex().justify_end().child(if b.is_empty() { div().text_size(px(11.)).text_color(c(th.overlay0)).child("—").into_any_element() } else { ui::kbd(&b) }))
+            list = list.child(div().flex().items_center().gap_3().px_3().py(px(6.)).when(i > 0, |d| d.border_t_1().border_color(crate::theme::divider()))
+                .child(icon(info.icon, ui::IC_SM, c(th.overlay1)))
+                .child(div().flex_1().flex().flex_col().child(div().text_size(px(ui::fs_body())).text_color(c(th.text)).child(info.label))
+                    .when_some(conflict, |d, other| d.child(div().text_size(px(ui::fs_small())).text_color(c(th.error)).child(tf("settings.key_conflict", &[("other", &other)]))))
+                    .when_some(self.errors.get(&key).cloned(), |d, e| d.child(div().text_size(px(ui::fs_small())).text_color(c(th.error)).child(e))))
+                .child(div().w(px(150.)).flex().justify_end().child(if b.is_empty() { div().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child("—").into_any_element() } else { ui::kbd(&b) }))
                 .child(div().w(px(170.)).child(ui::text_field(&e, false))));
         }
         div().flex().flex_col().child(Self::section_title(t("ui.app_shortcuts_ctrl_shift_c"))).child(list).into_any_element()
@@ -948,16 +937,16 @@ impl SettingsView {
         use std::sync::atomic::Ordering;
         let th = cur();
         let g = config::get().general.clone();
-        let card = || div().w_full().p_4().rounded(px(ui::R_LG)).bg(c(th.mantle)).border_1().border_color(c(th.surface0)).flex().flex_col().gap_2();
-        let muted = |s: String| div().text_size(px(11.)).text_color(c(th.overlay1)).child(s);
+        let card = || div().w_full().p_4().rounded(px(ui::R_LG)).bg(crate::theme::sub_bg()).border_1().border_color(crate::theme::divider()).flex().flex_col().gap_2();
+        let muted = |s: String| div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(s);
         let channel = if g.update_channel == "beta" { t("update.channel_beta") } else { t("update.channel_stable") };
         let checked = crate::update_ui::last_checked().map(crate::update_ui::when).map_or_else(|| t("update.never_checked").to_string(), |w| tf("update.last_checked", &[("t", &w)]));
         let source = if g.custom_update_url().is_some() { g.update_source() } else { "GitHub Releases".into() };
         // 版本卡片
         let version_card = card()
             .child(div().flex().items_center().gap_2()
-                .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(tf("update.current", &[("v", &ssh_term_proto::update::CURRENT)])))
-                .child(div().px_2().py(px(1.)).rounded_full().bg(c(th.surface0)).text_size(px(11.)).text_color(c(th.subtext)).child(channel))
+                .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(tf("update.current", &[("v", &ssh_term_proto::update::CURRENT)])))
+                .child(div().px_2().py(px(1.)).rounded_full().bg(c(th.surface0)).text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(channel))
                 .child(div().flex_1())
                 .child(ui::button("check-update", t("ui.check_now"), 0).on_click(cx.listener(|this, _, _w, cx| {
                     this.notice = Some(t("settings.update_checking").into());
@@ -979,7 +968,7 @@ impl SettingsView {
                 }))))
             .child(muted(checked))
             .child(muted(tf("update.source", &[("s", &source)])))
-            .children(self.notice.clone().map(|n| div().text_size(px(12.)).text_color(c(th.subtext)).whitespace_normal().child(n)));
+            .children(self.notice.clone().map(|n| div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).whitespace_normal().child(n)));
 
         // 新版本卡片
         let phase = crate::update_ui::phase();
@@ -990,10 +979,10 @@ impl SettingsView {
             let browser_url = if m.url.is_empty() { notes_url.clone() } else { m.url.clone() };
             let mut body = card()
                 .child(div().flex().items_center().gap_2()
-                    .child(ui::icon(ui::IconName::Download, 15., c(th.accent)))
-                    .child(div().px_2().py(px(1.)).rounded_full().bg(crate::theme::selected_bg()).text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.accent)).child(tf("update.new_badge", &[("v", &m.version)])))
+                    .child(ui::icon(ui::IconName::Download, ui::IC_MD, c(th.accent)))
+                    .child(div().px_2().py(px(1.)).rounded_full().bg(crate::theme::selected_bg()).text_size(px(ui::fs_body())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.accent)).child(tf("update.new_badge", &[("v", &m.version)])))
                     .child(div().flex_1())
-                    .child(div().id("upd-notes").text_size(px(12.)).text_color(c(th.accent)).cursor_pointer().hover(|s| s.underline()).child(t("update.view_notes")).on_click(move |_, _w, cx| cx.open_url(&notes_url))));
+                    .child(div().id("upd-notes").text_size(px(ui::fs_body())).text_color(c(th.accent)).cursor_pointer().hover(|s| s.underline()).child(t("update.view_notes")).on_click(move |_, _w, cx| cx.open_url(&notes_url))));
             let ready = crate::update_ui::ready_for(&m.version);
             let mut action = div().flex().items_center().gap_3();
             match (&phase, ready) {
@@ -1008,22 +997,22 @@ impl SettingsView {
                     let spd = crate::update_ui::speed(done).map(|b| format!(" · {}/s", crate::update_ui::human(b))).unwrap_or_default();
                     body = body.child(div().flex().items_center().gap_2()
                         .child(div().flex_1().h(px(6.)).rounded_full().bg(c(th.surface1)).child(div().h_full().rounded_full().bg(c(th.accent)).w(gpui::relative(frac.clamp(0., 1.)))))
-                        .child(div().text_size(px(12.)).text_color(c(th.subtext)).child(format!("{pct} · {size}{spd}"))));
+                        .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(format!("{pct} · {size}{spd}"))));
                     action = action.child(ui::button("dl-cancel", t("ui.cancel"), 0).on_click(|_, _, _| crate::update_ui::cancel()));
                 }
                 (Phase::Failed { version, error }, _) if *version == m.version => {
                     let open = self.update_err_open;
                     body = body.child(div().flex().items_start().gap_2()
-                        .child(ui::icon(ui::IconName::TriangleAlert, 14., c(th.error)))
-                        .child(div().flex_1().min_w_0().text_size(px(12.)).text_color(c(th.error)).whitespace_normal().child(crate::update_ui::friendly(error)))
-                        .child(div().id("upd-err-toggle").text_size(px(12.)).text_color(c(th.subtext)).cursor_pointer().hover(|s| s.underline())
+                        .child(ui::icon(ui::IconName::TriangleAlert, ui::IC_SM, c(th.error)))
+                        .child(div().flex_1().min_w_0().text_size(px(ui::fs_body())).text_color(c(th.error)).whitespace_normal().child(crate::update_ui::friendly(error)))
+                        .child(div().id("upd-err-toggle").text_size(px(ui::fs_small())).text_color(c(th.subtext)).cursor_pointer().hover(|s| s.underline())
                             .child(if open { t("update.hide_details") } else { t("update.details") })
                             .on_click(cx.listener(|this, _, _w, cx| { this.update_err_open = !this.update_err_open; cx.notify(); }))));
                     if open {
                         let full = error.clone();
-                        body = body.child(div().id("upd-err-full").w_full().max_h(px(160.)).overflow_y_scroll().p_2().rounded(px(ui::R_MD)).bg(c(th.base)).border_1().border_color(c(th.surface1))
-                            .text_size(px(11.)).font_family("monospace").text_color(c(th.subtext)).whitespace_normal().child(full.clone()))
-                            .child(div().flex().child(div().id("upd-err-copy").text_size(px(12.)).text_color(c(th.accent)).cursor_pointer().hover(|s| s.underline()).child(t("update.copy_details"))
+                        body = body.child(div().id("upd-err-full").w_full().max_h(px(160.)).overflow_y_scroll().p_2().rounded(px(ui::R_MD)).bg(c(th.base)).border_1().border_color(crate::theme::divider())
+                            .text_size(px(ui::fs_small())).font_family(ui::mono_family()).text_color(c(th.subtext)).whitespace_normal().child(full.clone()))
+                            .child(div().flex().child(div().id("upd-err-copy").text_size(px(ui::fs_body())).text_color(c(th.accent)).cursor_pointer().hover(|s| s.underline()).child(t("update.copy_details"))
                                 .on_click(move |_, _w, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(full.clone())))));
                     }
                     let mm = m.clone();
@@ -1035,7 +1024,7 @@ impl SettingsView {
                 }
                 _ => {}
             }
-            action = action.child(div().id("upd-browser").text_size(px(12.)).text_color(c(th.subtext)).cursor_pointer().hover(|s| s.underline().text_color(c(th.accent)))
+            action = action.child(div().id("upd-browser").text_size(px(ui::fs_small())).text_color(c(th.subtext)).cursor_pointer().hover(|s| s.underline().text_color(c(th.accent)))
                 .child(t("update.open_in_browser")).on_click(move |_, _w, cx| cx.open_url(&browser_url)));
             body.child(action)
         });
@@ -1045,11 +1034,11 @@ impl SettingsView {
             Phase::Ready(rec) => {
                 let (r1, r2) = (rec.clone(), rec.file.clone());
                 Some(div().flex().flex_col().gap_1()
-                    .child(div().pt_2().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.subtext)).child(t("update.downloaded_title")))
-                    .child(div().w_full().px_3().py_2().rounded(px(ui::R_MD)).bg(c(th.mantle)).border_1().border_color(c(th.surface0)).flex().items_center().gap_3()
-                        .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(format!("v{}", rec.version.trim_start_matches('v'))))
-                        .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(crate::update_ui::human(rec.size)))
-                        .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(crate::update_ui::when(rec.downloaded_at)))
+                    .child(div().pt_2().text_size(px(ui::fs_small())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.subtext)).child(t("update.downloaded_title")))
+                    .child(div().w_full().px_3().py_2().rounded(px(ui::R_MD)).bg(crate::theme::sub_bg()).border_1().border_color(crate::theme::divider()).flex().items_center().gap_3()
+                        .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(format!("v{}", rec.version.trim_start_matches('v'))))
+                        .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(crate::update_ui::human(rec.size)))
+                        .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(crate::update_ui::when(rec.downloaded_at)))
                         .child(div().flex_1())
                         .child(ui::button("dl-reveal", t("update.show_in_folder"), 3).on_click(move |_, _, _| { let _ = ssh_term_proto::updater::reveal(&r2); }))
                         .child(ui::button("dl-install-h", t("update.install_now"), 0).on_click(cx.listener(move |_, _, _w, cx| cx.emit(SettingsEvent::ApplyUpdate(r1.clone())))))))
@@ -1070,9 +1059,9 @@ impl SettingsView {
         for (i, col) in sc.ansi.iter().enumerate() {
             dots = dots.child(div().id(("scheme-dot", i)).size(px(12.)).rounded_full().bg(c(*col)));
         }
-        div().mb_2().p(px(10.)).rounded(px(6.)).bg(c(sc.bg)).flex().items_center().gap_3().overflow_hidden()
-            .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(sc.fg)).child(t("ui.scheme_preview")))
-            .child(div().text_size(px(13.)).text_color(c(sc.fg)).child(crate::theme::display_name(&sc.name)))
+        div().mb_2().p(px(10.)).rounded(px(ui::R_MD)).bg(c(sc.bg)).flex().items_center().gap_3().overflow_hidden()
+            .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::SEMIBOLD).text_color(c(sc.fg)).child(t("ui.scheme_preview")))
+            .child(div().text_size(px(ui::fs_body())).text_color(c(sc.fg)).child(crate::theme::display_name(&sc.name)))
             .child(div().flex_1())
             .child(dots)
             .into_any_element()
@@ -1081,7 +1070,7 @@ impl SettingsView {
     fn appearance_extra(&self, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
         div().flex().flex_col().child(Self::section_title(t("ui.theme_import")))
-            .child(div().text_size(px(12.)).text_color(c(th.subtext)).pb_2().child(t("ui.theme_import_desc")))
+            .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).pb_2().child(t("ui.theme_import_desc")))
             .child(div().flex().items_center().gap_2()
                 .child(div().flex_1().child(ui::text_field(&self.theme_import, false)))
                 .child(ui::button("theme-import", t("ui.import"), 0).on_click(cx.listener(move |this, _, window, cx| {
@@ -1105,7 +1094,7 @@ impl SettingsView {
                     this.theme_import.update(cx, |i, cx| i.set_value("", window, cx));
                     cx.notify();
                 }))))
-            .children(self.notice.clone().map(|n| div().pt_2().text_size(px(12.)).text_color(c(th.subtext)).child(n)))
+            .children(self.notice.clone().map(|n| div().pt_2().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(n)))
             .into_any_element()
     }
 
@@ -1114,7 +1103,7 @@ impl SettingsView {
         let path = config::get().audit_path();
         let n = ssh_term_proto::audit::read_all(&path).len();
         div().flex().flex_col().child(Self::section_title(t("ui.log")))
-            .child(div().text_size(px(12.)).text_color(c(th.subtext)).child(tf("settings.audit_count", &[("path", &path.display()), ("n", &n)])))
+            .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(tf("settings.audit_count", &[("path", &path.display()), ("n", &n)])))
             .child(div().pt_2().flex().gap_2()
                 .child(ui::button("open-audit", t("ui.open_audit_log_viewer"), 1).on_click(cx.listener(|_, _, _w, cx| cx.emit(SettingsEvent::OpenAudit)))))
             .into_any_element()
@@ -1131,7 +1120,7 @@ impl SettingsView {
                     cx.emit(SettingsEvent::Changed("suggest.clear_history".into()));
                     cx.notify();
                 })))
-                .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(self.notice.clone().unwrap_or_else(|| t("ui.clears_history_saved_by_this").into()))))
+                .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(self.notice.clone().unwrap_or_else(|| t("ui.clears_history_saved_by_this").into()))))
             .into_any_element()
     }
 
@@ -1146,10 +1135,10 @@ impl SettingsView {
             self.cm_editor = Some(e.clone()); e
         } };
         let (_, errs) = ctxmenu::load_custom();
-        let mut col = div().pt_3().flex().flex_col().gap_2().text_size(px(12.)).text_color(c(th.text))
+        let mut col = div().pt_3().flex().flex_col().gap_2().text_size(px(ui::fs_body())).text_color(c(th.text))
             .child(div().text_color(c(th.overlay1)).child(tf("cm.settings_file", &[("path", &path.display())])))
-            .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t("cm.settings_help")))
-            .child(div().h(px(360.)).border_1().border_color(c(th.surface0)).rounded_lg().overflow_hidden().child(gpui_component::input::Editor::new(&ed).h_full()))
+            .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(t("cm.settings_help")))
+            .child(div().h(px(360.)).border_1().border_color(crate::theme::divider()).rounded(px(ui::R_SUB)).overflow_hidden().child(gpui_component::input::Editor::new(&ed).h_full()))
             .child(div().flex().gap_2()
                 .child(ui::button("cm-save", t("cm.settings_save"), 1).on_click(cx.listener(|v, _, _w, cx| v.ctxmenu_save(cx))))
                 .child(ui::button("cm-example", t("cm.settings_example"), 0).on_click(cx.listener(|v, _, w, cx| {
@@ -1181,25 +1170,25 @@ impl SettingsView {
     fn about_extra(&self) -> AnyElement {
         let th = cur();
         let notices = include_str!("../THIRD_PARTY_NOTICES.md");
-        let mut list = div().flex().flex_col().gap_1().p_3().rounded_lg().bg(c(th.mantle)).border_1().border_color(c(th.surface0));
+        let mut list = div().flex().flex_col().gap_1().p_3().rounded(px(ui::R_SUB)).bg(crate::theme::sub_bg()).border_1().border_color(crate::theme::divider());
         for line in notices.lines() {
             if line.starts_with("|---") || line.starts_with("| Our file") || line.trim().is_empty() { continue; }
             let cleaned = line.trim_end().replace("**", "").replace('`', "");
             let cleaned = if cleaned.starts_with('|') { cleaned.trim_matches('|').split(" | ").map(str::trim).collect::<Vec<_>>().join("  ·  ") } else { cleaned };
             let l = cleaned.as_str();
-            let el = if let Some(h) = l.strip_prefix("### ") { div().pt_1().text_size(px(12.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(h.to_string()) }
-                else if let Some(h) = l.strip_prefix("## ") { div().pt_2().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(h.to_string()) }
-                else if let Some(h) = l.strip_prefix("# ") { div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(h.to_string()) }
-                else { div().text_size(px(12.)).text_color(c(th.subtext)).child(l.to_string()) };
+            let el = if let Some(h) = l.strip_prefix("### ") { div().pt_1().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(h.to_string()) }
+                else if let Some(h) = l.strip_prefix("## ") { div().pt_2().text_size(px(ui::fs_body())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(h.to_string()) }
+                else if let Some(h) = l.strip_prefix("# ") { div().text_size(px(ui::fs_body())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(h.to_string()) }
+                else { div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(l.to_string()) };
             list = list.child(el);
         }
         div().flex().flex_col()
             .child(div().flex().items_center().gap_3().py_3()
-                .child(div().size(px(40.)).rounded_lg().bg(crate::theme::selected_bg()).flex().items_center().justify_center().child(icon(IconName::SquareTerminal, 22., c(th.accent))))
-                .child(div().flex().flex_col().child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child("shellax"))
-                    .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(tf("settings.version", &[("v", &env!("CARGO_PKG_VERSION"))])))))
+                .child(div().size(px(40.)).rounded(px(ui::R_SUB)).bg(crate::theme::selected_bg()).flex().items_center().justify_center().child(icon(IconName::SquareTerminal, ui::IC_XL, c(th.accent))))
+                .child(div().flex().flex_col().child(div().text_size(px(ui::fs_title())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child("shellax"))
+                    .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(tf("settings.version", &[("v", &env!("CARGO_PKG_VERSION"))])))))
             .child(Self::section_title(t("ui.quick_start")))
-            .child(div().text_size(px(12.)).text_color(c(th.subtext)).flex().flex_col().gap_1()
+            .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).flex().flex_col().gap_1()
                 .child(t("ui.ctrl_shift_p_opens_the")).child(t("ui.tab_accepts_grey_suggestions_shift"))
                 .child(t("ui.ctrl_shift_c_v_copy")))
             .child(Self::section_title(t("ui.third_party_licenses_third_party"))).child(list)
@@ -1264,12 +1253,12 @@ impl Render for SettingsView {
         if config::get().appearance.theme != "system" { rows.retain(|r| !matches!(r.ctl, Ctl::Choice("appearance.light_theme", _) | Ctl::Choice("appearance.dark_theme", _))); }
 
         // ---- left: search + categories
-        let mut nav = div().id("settings-nav").w(px(if compact { 168. } else { 224. })).flex_shrink_0().h_full().overflow_y_scroll().flex().flex_col().gap(px(1.)).p(px(10.)).bg(sheet).border_r_1().border_color(c(th.surface1).opacity(0.6))
+        let mut nav = div().id("settings-nav").w(px(if compact { 168. } else { 224. })).flex_shrink_0().h_full().overflow_y_scroll().flex().flex_col().gap(px(1.)).p(px(10.)).bg(sheet).border_r_1().border_color(crate::theme::divider())
             .child(div().pb_2().child(ui::search_field(&self.search, false)));
         for (i, cat) in Cat::ALL.iter().copied().enumerate() {
             let active = query.is_empty() && cat == self.cat;
-            nav = nav.child(div().id(("cat", i)).h(px(28.)).px(px(6.)).rounded(px(6.)).flex().items_center().gap(px(8.)).cursor_pointer()
-                .when(active, |d| d.bg(c(th.accent)))
+            nav = nav.child(div().id(("cat", i)).h(px(30.)).px(px(8.)).rounded(px(ui::R_MD)).flex().items_center().gap(px(8.)).cursor_pointer()
+                .when(active, |d| d.bg(crate::theme::selected_bg()).font_weight(FontWeight::MEDIUM))
                 .when(!active, |d| d.hover(|d| d.bg(crate::theme::hover_bg())))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.cat = cat;
@@ -1277,15 +1266,15 @@ impl Render for SettingsView {
                     if cat == Cat::Proxy { this.start_proxy_detect(false, cx); }
                     cx.notify();
                 }))
-                .child(div().size(px(20.)).rounded(px(6.)).flex().items_center().justify_center().bg(c(cat.color())).child(icon(cat.icon(), 12., gpui::white())))
-                .child(div().text_size(px(13.)).text_color(if active { gpui::white() } else { c(th.text) }).child(cat.name())));
+                .child(icon(cat.icon(), ui::IC_MD, if active { c(th.accent) } else { c(th.overlay1) }))
+                .child(div().text_size(px(ui::fs_body())).text_color(c(th.text)).child(cat.name())));
         }
 
         // ---- right: form
         let mut body = div().flex().flex_col();
         if query.is_empty() {
-            body = body.child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(self.cat.name()))
-                .child(div().pt_1().pb_2().text_size(px(12.)).text_color(c(th.overlay1)).child(self.cat.desc()));
+            body = body.child(div().text_size(px(ui::fs_page())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(self.cat.name()))
+                .child(div().pt_1().pb_2().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(self.cat.desc()));
             let cur_cat = self.cat;
             if cur_cat == Cat::Appearance { body = body.child(self.scheme_preview()); }
             if cur_cat == Cat::Proxy {
@@ -1315,7 +1304,7 @@ impl Render for SettingsView {
             let hits: Vec<(usize, &Row)> = rows.iter().enumerate().filter(|(_, r)| {
                 format!("{} {} {} {}", r.label, r.desc, r.cat.name(), match &r.ctl { Ctl::Toggle(p) | Ctl::Choice(p, _) | Ctl::Text(p, _) | Ctl::Font(p) => *p, _ => "" }).to_lowercase().contains(&query)
             }).collect();
-            body = body.child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(tf("settings.search_results", &[("n", &hits.len())])));
+            body = body.child(div().text_size(px(ui::fs_page())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(tf("settings.search_results", &[("n", &hits.len())])));
             let mut last = None;
             let mut group: Vec<AnyElement> = vec![];
             for (i, row) in hits {
@@ -1328,21 +1317,16 @@ impl Render for SettingsView {
             if !group.is_empty() { body = body.child(Self::group_card(group)); }
         }
 
-        let header = div().h(px(44.)).flex_shrink_0().px_4().flex().items_center().gap_2().border_b_1().border_color(c(th.surface1).opacity(0.6))
-            .child(div().size(px(20.)).rounded(px(6.)).flex().items_center().justify_center().bg(c(0x8e8e93)).child(icon(IconName::Settings, 12., gpui::white())))
-            .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("ui.settings")))
-            .when(!compact, |d| d.child(div().pl_2().text_size(px(11.)).text_color(c(th.overlay0)).child(t("ui.changes_are_saved_to_config"))));
+        let header = ui::dialog_header(Some(IconName::Settings), t("ui.settings"), (!compact).then(|| t("ui.changes_are_saved_to_config").into()), None);
         // The tab strip carries the close affordance; this footer keeps a visible "Done" even when
         // many tabs push the settings tab out of view.
-        let footer = div().h(px(44.)).flex_shrink_0().px_4().flex().items_center().justify_end()
-            .border_t_1().border_color(c(th.surface1).opacity(0.6))
-            .child(ui::button("settings-done", t("ui.done"), 1)
-                .on_click(cx.listener(|_, _, _w, cx| cx.emit(SettingsEvent::Close))));
+        let footer = ui::dialog_footer(None, vec![ui::button("settings-done", t("ui.done"), 1)
+            .on_click(cx.listener(|_, _, _w, cx| cx.emit(SettingsEvent::Close))).into_any_element()]);
         div().size_full().min_w_0().flex().flex_col().bg(sheet)
             .child(header)
             .child(div().flex_1().min_h_0().flex().flex_row().bg(sheet)
                 .child(nav)
-                .child(div().id("settings-scroll").flex_1().min_w_0().h_full().overflow_y_scroll().px_6().py_4().bg(sheet).child(body.w_full())))
+                .child(div().id("settings-scroll").flex_1().min_w_0().h_full().overflow_y_scroll().px(px(ui::SP_6)).py_4().bg(sheet).child(body.w_full().max_w(px(760.)))))
             .child(footer)
     }
 }
@@ -1426,30 +1410,29 @@ impl SettingsView {
     fn proxy_extra(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         use ssh_term_proto::proxy::{candidate_label, Candidate, DetectSource};
         let th = cur();
-        let dark = th.appearance == crate::theme::Appearance::Dark;
-        let card = |body: gpui::Div| body.rounded(px(10.)).p(px(12.)).flex().flex_col().gap(px(8.))
-            .bg(if dark { c(th.surface0).opacity(0.55) } else { c(th.base) }).border_1().border_color(c(th.surface1).opacity(0.6));
-        let lab = |text: &str| div().w(px(72.)).flex_shrink_0().text_size(px(13.)).text_color(c(cur().subtext)).child(text.to_string());
+        let card = |body: gpui::Div| body.rounded(px(ui::R_LG)).p(px(12.)).flex().flex_col().gap(px(8.))
+            .bg(crate::theme::sub_bg()).border_1().border_color(crate::theme::divider());
+        let lab = |text: &str| div().w(px(72.)).flex_shrink_0().text_size(px(ui::fs_body())).text_color(c(cur().subtext)).child(text.to_string());
         let saved = config::get().ssh.proxy.clone();
         let current = match ssh_term_proto::proxy::parse(saved.trim()) {
             Ok(p) => tf("proxy.current", &[("url", &candidate_label(&Candidate { kind: p.kind, host: p.host, port: p.port, user: p.user, source: DetectSource::System }))]),
             Err(_) => t("proxy.current_none").into(),
         };
-        let para = |s: &str| div().text_size(px(12.)).text_color(c(th.subtext)).whitespace_normal().child(s.to_string());
+        let para = |s: &str| div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).whitespace_normal().child(s.to_string());
         let guide = card(div())
             .child(div().flex().items_center().gap_2()
-                .child(icon(IconName::Info, 14., c(th.accent)))
-                .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("proxy.howto_title"))))
+                .child(icon(IconName::Info, ui::IC_SM, c(th.accent)))
+                .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("proxy.howto_title"))))
             .child(para(t("proxy.howto_1")))
             .child(para(t("proxy.howto_2")))
             .child(para(t("proxy.howto_3")));
         let mut detect = card(div()).child(div().flex().items_center().gap_2()
-            .child(div().flex_1().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("proxy.detected")))
+            .child(div().flex_1().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("proxy.detected")))
             .child(ui::button("proxy-redetect", t("proxy.redetect"), 0).on_click(cx.listener(|this, _, _, cx| this.start_proxy_detect(true, cx)))));
         if self.proxy_detecting {
-            detect = detect.child(div().flex().items_center().gap_2().text_size(px(12.)).text_color(c(th.subtext)).child(icon(IconName::LoaderCircle, 14., c(th.accent))).child(t("proxy.detecting")));
+            detect = detect.child(div().flex().items_center().gap_2().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(icon(IconName::LoaderCircle, ui::IC_SM, c(th.accent))).child(t("proxy.detecting")));
         } else if self.proxy_candidates.is_empty() {
-            detect = detect.child(div().text_size(px(12.)).text_color(c(th.subtext)).whitespace_normal().child(t("proxy.none")));
+            detect = detect.child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).whitespace_normal().child(t("proxy.none")));
         } else {
             for (i, cnd) in self.proxy_candidates.clone().into_iter().enumerate() {
                 let src = match cnd.source { DetectSource::System => t("proxy.source_system"), DetectSource::Env => t("proxy.source_env"), DetectSource::Listen => t("proxy.source_listen") };
@@ -1457,14 +1440,14 @@ impl SettingsView {
                 let chosen = cnd.clone();
                 detect = detect.child(div().flex().items_center().gap_2()
                     .child(ui::tag(src, c(th.info)))
-                    .child(div().flex_1().min_w_0().text_size(px(13.)).text_color(c(th.text)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(label))
+                    .child(div().flex_1().min_w_0().text_size(px(ui::fs_body())).text_color(c(th.text)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(label))
                     .child(ui::button(SharedString::from(format!("proxy-use-{i}")), t("proxy.use"), 1).on_click(cx.listener(move |this, _, w, cx| this.apply_proxy_candidate(&chosen, w, cx)))));
             }
         }
         if !self.proxy_bypass_suggest.is_empty() && config::get().ssh.no_proxy.trim().is_empty() {
             let hint = self.proxy_bypass_suggest.clone();
             detect = detect.child(div().flex().items_center().gap_2()
-                .child(div().flex_1().min_w_0().text_size(px(12.)).text_color(c(th.overlay1)).whitespace_normal().child(tf("proxy.bypass_suggest", &[("list", &hint)])))
+                .child(div().flex_1().min_w_0().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).whitespace_normal().child(tf("proxy.bypass_suggest", &[("list", &hint)])))
                 .child(ui::button("proxy-bypass", t("proxy.use_bypass"), 0).on_click(cx.listener(move |this, _, w, cx| {
                     let list = this.proxy_bypass_suggest.clone();
                     if let Some(e) = this.inputs.get("ssh.no_proxy").cloned() { e.update(cx, |s, cx| s.set_value(list, w, cx)); }
@@ -1475,7 +1458,7 @@ impl SettingsView {
         let kinds = vec![("socks5".to_string(), t("proxy.socks5").to_string()), ("http".to_string(), t("proxy.http").to_string())];
         let me = cx.entity().downgrade();
         let mut form = card(div())
-            .child(div().text_size(px(13.)).text_color(c(th.text)).child(current))
+            .child(div().text_size(px(ui::fs_body())).text_color(c(th.text)).child(current))
             .child(div().flex().items_center().gap_3().child(lab(t("proxy.kind"))).child(div().flex_1().child(ui::segmented("proxy-kind", &kinds, if self.proxy_http { "http" } else { "socks5" }, move |v, _, cx| { let _ = me.update(cx, |this, cx| { this.proxy_http = v == "http"; cx.notify(); }); }))))
             .child(div().flex().items_center().gap_3().child(lab(t("proxy.addr"))).child(div().flex_1().child(ui::text_field(&self.proxy_host, false))).child(lab(t("proxy.port"))).child(div().w(px(88.)).child(ui::text_field(&self.proxy_port, false))))
             .child(div().flex().items_center().gap_3().child(lab(t("proxy.auth"))).child(Switch::new("proxy-auth").checked(self.proxy_auth).on_click(cx.listener(|this, on: &bool, _, cx| { this.proxy_auth = *on; cx.notify(); }))));
@@ -1485,14 +1468,14 @@ impl SettingsView {
         let no_proxy = self.input("ssh.no_proxy", "10.*, 192.168.*, localhost", config::get().ssh.no_proxy.clone(), window, cx);
         form = form.child(div().flex().items_start().gap_3().child(lab(t("proxy.no_proxy"))).child(div().flex_1().flex().flex_col().gap(px(2.))
             .child(ui::text_field(&no_proxy, false))
-            .child(div().text_size(px(12.)).text_color(c(th.overlay1)).whitespace_normal().child(t("proxy.no_proxy_desc")))));
-        form = form.child(div().text_size(px(12.)).text_color(c(th.overlay1)).whitespace_normal().child(t("proxy.ai_note")));
+            .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).whitespace_normal().child(t("proxy.no_proxy_desc")))));
+        form = form.child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).whitespace_normal().child(t("proxy.ai_note")));
         form = form.child(div().flex().items_center().gap_2()
             .child(ui::button("proxy-save", t("proxy.save"), 1).on_click(cx.listener(|this, _, _, cx| this.save_proxy_form(cx))))
             .child(ui::button("proxy-clear", t("proxy.clear"), 0).on_click(cx.listener(|this, _, w, cx| this.clear_proxy(w, cx)))));
         if let Some((ok, msg)) = &self.proxy_note {
             let col = if *ok { c(th.success) } else { c(th.error) };
-            form = form.child(div().text_size(px(12.)).text_color(col).whitespace_normal().child(msg.clone()));
+            form = form.child(div().text_size(px(ui::fs_body())).text_color(col).whitespace_normal().child(msg.clone()));
         }
         div().flex().flex_col().gap_3().mt_1().child(guide).child(detect).child(form).into_any_element()
     }
@@ -1547,8 +1530,8 @@ impl SettingsView {
         let backend = self.ai_keys.values().flatten().next().map(|(_, l)| location_label(l))
             .unwrap_or_else(|| tf("ai.loc_pending", &[("path", &probe.file_path().display())]));
         out = out.child(
-            div().flex().items_center().gap_2().p_2().rounded_md().bg(c(th.mantle)).text_size(px(12.)).text_color(c(th.subtext))
-                .child(icon(IconName::KeyRound, 13., c(th.accent))).child(tf("ai.key_storage", &[("where", &backend)]))
+            div().flex().items_center().gap_2().p_2().rounded(px(ui::R_MD)).bg(crate::theme::sub_bg()).text_size(px(ui::fs_small())).text_color(c(th.subtext))
+                .child(icon(IconName::KeyRound, ui::IC_SM, c(th.accent))).child(tf("ai.key_storage", &[("where", &backend)]))
         );
 
         // Provider list header
@@ -1558,9 +1541,9 @@ impl SettingsView {
         out = out.child(list_header);
 
         // Provider list
-        let mut list = div().flex().flex_col().rounded_lg().border_1().border_color(c(th.surface1).opacity(0.6)).bg(c(th.surface0).opacity(0.3)).overflow_hidden();
+        let mut list = div().flex().flex_col().rounded(px(ui::R_SUB)).border_1().border_color(crate::theme::divider()).bg(crate::theme::sub_bg()).overflow_hidden();
         if s.ai.providers.is_empty() {
-            list = list.child(div().p_4().text_center().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ai.no_providers")));
+            list = list.child(div().p_4().text_center().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(t("ai.no_providers")));
         }
         for (i, p) in s.ai.providers.iter().enumerate() {
             let sel = self.ai_sel.as_deref() == Some(p.id.as_str());
@@ -1570,17 +1553,17 @@ impl SettingsView {
             let pid2 = p.id.clone();
             let pid3 = p.id.clone();
             list = list.child(div().id(("aip", i)).flex().items_center().gap_3().px_3().py(px(9.)).cursor_pointer()
-                .when(i > 0, |d| d.border_t_1().border_color(c(th.surface1).opacity(0.5)))
+                .when(i > 0, |d| d.border_t_1().border_color(crate::theme::divider()))
                 .when(sel, |d| d.bg(crate::theme::selected_bg()))
                 .hover(|d| d.bg(crate::theme::hover_bg()))
                 .on_click(cx.listener(move |this, _, _w, cx| { this.ai_sel = Some(pid.clone()); this.ai_key_reset(cx); this.ai_dropdown = None; this.load_models(&pid, false, cx); cx.notify(); }))
-                .child(icon(if p.kind == Kind::Anthropic { IconName::Bot } else { IconName::Sparkles }, 15., if sel { c(th.accent) } else { c(th.overlay1) }))
+                .child(icon(if p.kind == Kind::Anthropic { IconName::Bot } else { IconName::Sparkles }, ui::IC_MD, if sel { c(th.accent) } else { c(th.overlay1) }))
                 .child(div().flex_1().min_w_0().flex().flex_col()
-                    .child(div().flex().items_center().gap_2().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(if p.name.is_empty() { p.id.clone() } else { p.name.clone() })
+                    .child(div().flex().items_center().gap_2().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(if p.name.is_empty() { p.id.clone() } else { p.name.clone() })
                         .child(ui::tag(if p.kind == Kind::Anthropic { "Anthropic" } else { t("ai.kind_openai") }, c(th.overlay1)))
                         .when(is_def, |d| d.child(ui::tag(t("ai.default"), c(th.accent)))))
-                    .child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(format!("{} · {}", p.model, p.base_url))))
-                .child(div().text_size(px(11.)).font_family(SharedString::from(s.font.family.clone()))
+                    .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(format!("{} · {}", p.model, p.base_url))))
+                .child(div().text_size(px(ui::fs_small())).font_family(SharedString::from(s.font.family.clone()))
                     .text_color(if key.is_some() { c(th.success) } else { c(th.warning) })
                     .child(key.as_ref().map(|k| k.0.clone()).unwrap_or_else(|| t("ai.no_key").into())))
                 .when(!is_def, |d| d.child(ui::button(SharedString::from(format!("aip-def-{i}")), t("ai.make_default"), 0)
@@ -1588,7 +1571,7 @@ impl SettingsView {
                         this.notice = config::update(|s| s.ai.default_provider = pid2.clone());
                         cx.emit(SettingsEvent::Changed("ai.default_provider".into())); cx.notify();
                     }))))
-                .child(div().id(("aip-del", i)).size(px(24.)).rounded_md().flex().items_center().justify_center().cursor_pointer().hover(|d| d.bg(c(cur().error).opacity(0.15)))
+                .child(div().id(("aip-del", i)).size(px(24.)).rounded(px(ui::R_MD)).flex().items_center().justify_center().cursor_pointer().hover(|d| d.bg(c(cur().error).opacity(0.15)))
                     .on_click(cx.listener(move |this, _, _w, cx| {
                         let name = config::get().ai.providers.iter().find(|p| p.id == pid3).map(|p| p.secret_name());
                         if let Some(n) = name { crate::secret_store().delete(&n); }
@@ -1598,7 +1581,7 @@ impl SettingsView {
                         this.refresh_keys();
                         cx.emit(SettingsEvent::Changed("ai.providers".into())); cx.notify();
                     }))
-                    .child(icon(IconName::Trash, 13., c(th.error)))));
+                    .child(icon(IconName::Trash, ui::IC_SM, c(th.error)))));
         }
         out = out.child(list);
 
@@ -1610,25 +1593,25 @@ impl SettingsView {
             .child(self.preset_menu("apply", window, cx));
         out = out.child(edit_title);
 
-        let mut editor_card = div().flex().flex_col().rounded_lg().border_1().border_color(c(th.surface1).opacity(0.6)).bg(c(th.surface0).opacity(0.3)).overflow_hidden();
+        let mut editor_card = div().flex().flex_col().rounded(px(ui::R_SUB)).border_1().border_color(crate::theme::divider()).bg(crate::theme::sub_bg()).overflow_hidden();
 
         // 1. Name
         let name_input = self.provider_input(&p.id, "name", "OpenAI", p.name.clone(), window, cx);
         editor_card = editor_card.child(
-            div().px_4().py(px(10.)).flex().items_center().justify_between().gap_4().border_b_1().border_color(c(th.surface1).opacity(0.4))
+            div().px_4().py(px(10.)).flex().items_center().justify_between().gap_4().border_b_1().border_color(crate::theme::divider())
                 .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
-                    .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ui.name")))
-                    .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ai.name_desc"))))
+                    .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ui.name")))
+                    .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(t("ai.name_desc"))))
                 .child(div().w(px(280.)).flex_shrink_0().child(ui::text_field(&name_input, false)))
         );
 
         // 2. Base URL
         let url_input = self.provider_input(&p.id, "base_url", "https://api.openai.com/v1", p.base_url.clone(), window, cx);
         editor_card = editor_card.child(
-            div().px_4().py(px(10.)).flex().items_center().justify_between().gap_4().border_b_1().border_color(c(th.surface1).opacity(0.4))
+            div().px_4().py(px(10.)).flex().items_center().justify_between().gap_4().border_b_1().border_color(crate::theme::divider())
                 .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
-                    .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ui.base_url")))
-                    .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ai.base_url_desc"))))
+                    .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ui.base_url")))
+                    .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(t("ai.base_url_desc"))))
                 .child(div().w(px(320.)).flex_shrink_0().child(ui::text_field(&url_input, false)))
         );
 
@@ -1691,21 +1674,21 @@ impl SettingsView {
         };
 
         editor_card = editor_card.child(
-            div().px_4().py(px(10.)).flex().flex_col().gap(px(6.)).border_b_1().border_color(c(th.surface1).opacity(0.4))
+            div().px_4().py(px(10.)).flex().flex_col().gap(px(6.)).border_b_1().border_color(crate::theme::divider())
                 .child(
                     div().flex().items_center().justify_between().gap_4()
                         .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
-                            .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child("API Key"))
-                            .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(key_desc)))
+                            .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child("API Key"))
+                            .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(key_desc)))
                         .child(key_right)
                 )
-                .when_some(res, |d, (ok, msg)| d.child(div().text_size(px(12.)).text_color(if ok { c(th.success) } else { c(th.error) }).child(msg)))
-                .when_some(self.ai_note.clone(), |d, (ok, n)| d.child(div().text_size(px(12.)).text_color(if ok { c(th.subtext) } else { c(th.warning) }).child(n)))
+                .when_some(res, |d, (ok, msg)| d.child(div().text_size(px(ui::fs_body())).text_color(if ok { c(th.success) } else { c(th.error) }).child(msg)))
+                .when_some(self.ai_note.clone(), |d, (ok, n)| d.child(div().text_size(px(ui::fs_small())).text_color(if ok { c(th.subtext) } else { c(th.warning) }).child(n)))
         );
 
         // 4. Model picker
         editor_card = editor_card.child(
-            div().px_4().py(px(8.)).border_b_1().border_color(c(th.surface1).opacity(0.4))
+            div().px_4().py(px(8.)).border_b_1().border_color(crate::theme::divider())
                 .child(self.model_picker(&p, "model", window, cx))
         );
 
@@ -1722,11 +1705,11 @@ impl SettingsView {
                 // Title and hint share one shrinking column, so a narrow pane ellipsizes the hint
                 // instead of pushing 展开 / 收起 off the card.
                 div().flex_1().min_w_0().flex().items_center().gap_2()
-                    .child(icon(if adv_open { IconName::ChevronDown } else { IconName::ChevronRight }, 13., c(th.overlay1)))
-                    .child(div().flex_shrink_0().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ai.advanced_settings")))
-                    .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ai.advanced_settings_desc")))
+                    .child(icon(if adv_open { IconName::ChevronDown } else { IconName::ChevronRight }, ui::IC_SM, c(th.overlay1)))
+                    .child(div().flex_shrink_0().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ai.advanced_settings")))
+                    .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(t("ai.advanced_settings_desc")))
             )
-            .child(div().flex_shrink_0().text_size(px(12.)).text_color(c(th.accent)).child(if adv_open { t("ai.collapse") } else { t("ai.expand") }));
+            .child(div().flex_shrink_0().text_size(px(ui::fs_body())).text_color(c(th.accent)).child(if adv_open { t("ai.collapse") } else { t("ai.expand") }));
         editor_card = editor_card.child(adv_header);
 
         if adv_open {
@@ -1736,10 +1719,10 @@ impl SettingsView {
 
             // Protocol kind
             editor_card = editor_card.child(
-                div().px_4().py(px(10.)).flex().items_center().justify_between().gap_4().border_t_1().border_color(c(th.surface1).opacity(0.4))
+                div().px_4().py(px(10.)).flex().items_center().justify_between().gap_4().border_t_1().border_color(crate::theme::divider())
                     .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
-                        .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ai.kind")))
-                        .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ai.kind.d"))))
+                        .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ai.kind")))
+                        .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(t("ai.kind.d"))))
                     // Right-hand column like every settings row: the control keeps its own width, so
                     // the segmented control's `w_full` cannot starve the label of its column.
                     .child(div().flex_shrink_0().flex().items_center().justify_end()
@@ -1758,37 +1741,37 @@ impl SettingsView {
 
             // Fast / Command Model
             editor_card = editor_card.child(
-                div().px_4().py(px(8.)).border_t_1().border_color(c(th.surface1).opacity(0.4))
+                div().px_4().py(px(8.)).border_t_1().border_color(crate::theme::divider())
                     .child(self.model_picker(&p, "fast_model", window, cx))
             );
 
             // Timeout
             let timeout_in = self.provider_input(&p.id, "timeout_secs", "30", p.timeout_secs.to_string(), window, cx);
             editor_card = editor_card.child(
-                div().px_4().py(px(10.)).flex().items_center().justify_between().gap_4().border_t_1().border_color(c(th.surface1).opacity(0.4))
+                div().px_4().py(px(10.)).flex().items_center().justify_between().gap_4().border_t_1().border_color(crate::theme::divider())
                     .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
-                        .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ai.timeout")))
-                        .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ai.timeout.d"))))
+                        .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ai.timeout")))
+                        .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(t("ai.timeout.d"))))
                     .child(div().w(px(200.)).flex_shrink_0().child(ui::text_field(&timeout_in, false)))
             );
 
             // Temperature
             let temp_in = self.provider_input(&p.id, "temperature", "0.2", p.temperature.to_string(), window, cx);
             editor_card = editor_card.child(
-                div().px_4().py(px(10.)).flex().items_center().justify_between().gap_4().border_t_1().border_color(c(th.surface1).opacity(0.4))
+                div().px_4().py(px(10.)).flex().items_center().justify_between().gap_4().border_t_1().border_color(crate::theme::divider())
                     .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
-                        .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ai.temperature")))
-                        .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ai.temperature.d"))))
+                        .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ai.temperature")))
+                        .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(t("ai.temperature.d"))))
                     .child(div().w(px(200.)).flex_shrink_0().child(ui::text_field(&temp_in, false)))
             );
 
             // Max Tokens
             let tokens_in = self.provider_input(&p.id, "max_tokens", "512", p.max_tokens.to_string(), window, cx);
             editor_card = editor_card.child(
-                div().px_4().py(px(10.)).flex().items_center().justify_between().gap_4().border_t_1().border_color(c(th.surface1).opacity(0.4))
+                div().px_4().py(px(10.)).flex().items_center().justify_between().gap_4().border_t_1().border_color(crate::theme::divider())
                     .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
-                        .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ai.max_tokens")))
-                        .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t("ai.max_tokens.d"))))
+                        .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("ai.max_tokens")))
+                        .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(t("ai.max_tokens.d"))))
                     .child(div().w(px(200.)).flex_shrink_0().child(ui::text_field(&tokens_in, false)))
             );
         }
@@ -1806,8 +1789,8 @@ impl SettingsView {
         let cur_name = cur_preset.as_deref().and_then(|id| models::PRESETS.iter().find(|p| p.id == id)).map(|p| p.name).unwrap_or(t("models.preset_custom"));
 
         let btn = if mode == "add" {
-            div().id("ai-add-btn").px_3().py(px(6.)).rounded(px(6.)).cursor_pointer()
-                .bg(c(th.accent)).text_color(gpui::white()).text_size(px(12.)).font_weight(FontWeight::MEDIUM)
+            div().id("ai-add-btn").px_3().py(px(6.)).rounded(px(ui::R_MD)).cursor_pointer()
+                .bg(c(th.accent)).text_color(gpui::white()).text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM)
                 .flex().items_center().gap_1()
                 .hover(|d| d.opacity(0.9))
                 .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _, cx| {
@@ -1816,13 +1799,13 @@ impl SettingsView {
                     this.ai_template_dropdown = false;
                     cx.notify();
                 }))
-                .child(icon(IconName::Plus, 13., gpui::white()))
+                .child(icon(IconName::Plus, ui::IC_SM, gpui::white()))
                 .child(t("ai.add_provider"))
-                .child(icon(if open { IconName::ChevronUp } else { IconName::ChevronDown }, 11., gpui::white()))
+                .child(icon(if open { IconName::ChevronUp } else { IconName::ChevronDown }, ui::IC_XS, gpui::white()))
         } else {
-            div().id("ai-tpl-btn").px_3().py(px(5.)).rounded(px(6.)).cursor_pointer()
-                .bg(c(th.surface0)).border_1().border_color(c(th.surface1))
-                .text_color(c(th.text)).text_size(px(12.)).font_weight(FontWeight::MEDIUM)
+            div().id("ai-tpl-btn").px_3().py(px(5.)).rounded(px(ui::R_MD)).cursor_pointer()
+                .bg(c(th.surface0)).border_1().border_color(crate::theme::divider())
+                .text_color(c(th.text)).text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM)
                 .flex().items_center().gap_2()
                 .hover(|d| d.bg(c(th.surface1)))
                 .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _, cx| {
@@ -1831,9 +1814,9 @@ impl SettingsView {
                     this.ai_add_dropdown = false;
                     cx.notify();
                 }))
-                .child(div().text_color(c(th.overlay1)).text_size(px(11.)).child(t("models.template")))
+                .child(div().text_color(c(th.overlay1)).text_size(px(ui::fs_small())).child(t("models.template")))
                 .child(div().child(cur_name))
-                .child(icon(if open { IconName::ChevronUp } else { IconName::ChevronDown }, 11., c(th.overlay1)))
+                .child(icon(if open { IconName::ChevronUp } else { IconName::ChevronDown }, ui::IC_XS, c(th.overlay1)))
         };
         let anchor_slot = if mode == "add" { self.ai_add_anchor.clone() } else { self.ai_tpl_anchor.clone() };
         let record = anchor_slot.clone();
@@ -1864,10 +1847,10 @@ impl SettingsView {
                 popover = popover.child(
                     div().id(SharedString::from(format!("pr-opt-{mode}-{i}")))
                         .flex_shrink_0()
-                        .px_2().py(px(6.)).rounded(px(6.)).cursor_pointer()
+                        .px_2().py(px(6.)).rounded(px(ui::R_MD)).cursor_pointer()
                         .flex().items_center().justify_between()
                         .when(active, |d| d.bg(crate::theme::selected_bg()))
-                        .hover(|d| d.bg(c(cur().surface0)))
+                        .hover(|d| d.bg(crate::theme::hover_bg()))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             let pr = &models::PRESETS[i];
                             if mode == "add" {
@@ -1909,11 +1892,11 @@ impl SettingsView {
                         }))
                         .child(
                             div().flex().items_center().gap_2().min_w_0()
-                                .child(icon(if is_anthropic { IconName::Bot } else { IconName::Sparkles }, 13., if active { c(th.accent) } else { c(th.overlay1) }))
-                                .child(div().min_w_0().text_size(px(13.)).whitespace_nowrap().overflow_hidden().text_ellipsis()
+                                .child(icon(if is_anthropic { IconName::Bot } else { IconName::Sparkles }, ui::IC_SM, if active { c(th.accent) } else { c(th.overlay1) }))
+                                .child(div().min_w_0().text_size(px(ui::fs_body())).whitespace_nowrap().overflow_hidden().text_ellipsis()
                                     .text_color(if active { c(th.accent) } else { c(th.text) }).child(label))
                         )
-                        .when(active, |d| d.child(icon(IconName::Check, 12., c(th.accent))))
+                        .when(active, |d| d.child(icon(IconName::Check, ui::IC_XS, c(th.accent))))
                 );
             }
             trigger = trigger.child(
@@ -1995,10 +1978,10 @@ impl SettingsView {
             } else { (c(th.overlay1), t("models.none_yet").into()) };
         let label = if field == "model" { t("ui.model") } else { t("models.fast") };
         let desc = if field == "model" { t("models.model.d") } else { t("models.fast.d") };
-        let mut col = div().py(px(8.)).flex().flex_col().gap_1().border_b_1().border_color(c(th.surface0))
+        let mut col = div().py(px(8.)).flex().flex_col().gap_1().border_b_1().border_color(crate::theme::divider())
             .child(div().flex().items_center().gap_3()
-                .child(div().flex_1().min_w_0().flex().flex_col().text_size(px(13.)).text_color(c(th.text)).child(label)
-                    .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(desc)))
+                .child(div().flex_1().min_w_0().flex().flex_col().text_size(px(ui::fs_body())).text_color(c(th.text)).child(label)
+                    .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(desc)))
                 .child(div().w(px(240.)).flex_shrink_0().child(ui::text_field(&e, false)))
                 .child(ui::button(SharedString::from(format!("mdl-open-{field}")), if open { t("models.close_list") } else { t("models.pick") }, 0)
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -2008,7 +1991,7 @@ impl SettingsView {
                     })))
                 .when(field == "model", |d| d.child(ui::button("mdl-refresh", if st.loading { t("models.loading_short") } else { t("models.refresh") }, 1)
                     .on_click(cx.listener(move |this, _, _w, cx| this.load_models(&pid, true, cx))))))
-            .when(field == "model", |d| d.child(div().flex().items_center().gap_2().text_size(px(12.))
+            .when(field == "model", |d| d.child(div().flex().items_center().gap_2().text_size(px(ui::fs_body()))
                 .child(div().flex_1().min_w_0().text_color(status.0).child(status.1))
                 .child(div().text_color(c(th.overlay1)).child(t("models.chat_only")))
                 .child(Switch::new("mdl-chat-only").small().checked(chat_only).on_click(cx.listener(|this, v: &bool, _w, cx| this.set("ai.chat_models_only", toml::Value::Boolean(*v), cx))))));
@@ -2017,7 +2000,7 @@ impl SettingsView {
             let hits = models::search(&shown, &q);
             let mut list = div().id(SharedString::from(format!("mdl-list-{field}"))).max_h(px(260.)).overflow_y_scroll().flex().flex_col();
             if hits.is_empty() {
-                list = list.child(div().p_2().text_size(px(12.)).text_color(c(th.overlay1)).child(if st.list.is_empty() { t("models.empty_manual") } else { t("models.no_match") }));
+                list = list.child(div().p_2().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(if st.list.is_empty() { t("models.empty_manual") } else { t("models.no_match") }));
             }
             for (i, m) in hits.iter().take(300).enumerate() {
                 let id = m.id.clone();
@@ -2027,9 +2010,9 @@ impl SettingsView {
                 if let Some(c) = m.context { meta.push(if c >= 1000 { format!("{}K ctx", c / 1000) } else { format!("{c} ctx") }); }
                 if let (Some(a), Some(b)) = (m.price_in, m.price_out) { meta.push(format!("${a:.2} / ${b:.2} per 1M")); }
                 if m.usage != models::Use::Chat { meta.push(format!("{:?}", m.usage).to_lowercase()); }
-                list = list.child(div().id(("mdl", i)).flex_shrink_0().px_2().py(px(5.)).flex().items_center().gap_2().cursor_pointer().rounded_md()
+                list = list.child(div().id(("mdl", i)).flex_shrink_0().px_2().py(px(5.)).flex().items_center().gap_2().cursor_pointer().rounded(px(ui::R_MD))
                     .when(sel, |d| d.bg(crate::theme::selected_bg()))
-                    .hover(|d| d.bg(c(cur().surface0)))
+                    .hover(|d| d.bg(crate::theme::hover_bg()))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         let v = id.clone();
                         this.update_provider(&pid, |p| if field == "model" { p.model = v.clone() } else { p.fast_model = v.clone() }, cx);
@@ -2038,13 +2021,13 @@ impl SettingsView {
                         cx.notify();
                     }))
                     .child(div().flex_1().min_w_0().flex().flex_col()
-                        .child(div().text_size(px(13.)).text_color(c(th.text)).child(m.id.clone()))
-                        .when(!m.name.is_empty(), |d| d.child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(m.name.clone()))))
-                    .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(meta.join(" · "))));
+                        .child(div().text_size(px(ui::fs_body())).text_color(c(th.text)).child(m.id.clone()))
+                        .when(!m.name.is_empty(), |d| d.child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(m.name.clone()))))
+                    .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(meta.join(" · "))));
             }
-            col = col.child(div().mt_1().p_2().rounded_lg().border_1().border_color(c(th.surface1)).bg(c(th.mantle)).flex().flex_col().gap_1()
+            col = col.child(div().mt_1().p_2().rounded(px(ui::R_SUB)).border_1().border_color(crate::theme::divider()).bg(crate::theme::sub_bg()).flex().flex_col().gap_1()
                 .child(ui::search_field(&self.ai_model_search, false))
-                .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(tf("models.list_hint", &[("n", &hits.len())])))
+                .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(tf("models.list_hint", &[("n", &hits.len())])))
                 .child(list));
         }
         col

@@ -153,8 +153,8 @@ impl Render for SetupView {
         let mut page = div().w(px(560.)).h(px(440.)).flex().flex_col().gap(px(18.));
         page = page.child(progress)
             .child(div().min_h(px(72.)).flex_shrink_0().flex().flex_col().gap(px(6.))
-                .child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(self.page_title()))
-                .child(div().text_size(px(13.)).text_color(c(th.subtext)).line_height(px(20.)).child(self.page_body())));
+                .child(div().text_size(px(ui::fs_page())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(self.page_title()))
+                .child(div().text_size(px(ui::fs_body())).text_color(c(th.subtext)).line_height(px(20.)).child(self.page_body())));
 
         // The look page opens on "follow the system", which was never applied, so paint it now
         // rather than waiting for the row to be clicked.
@@ -195,7 +195,7 @@ impl SetupView {
         } else {
             bar = bar.pl_3();
         }
-        bar = bar.child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.subtext)).child("ShellAX"))
+        bar = bar.child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.subtext)).child("ShellAX"))
             .child(crate::chrome::drag_spacer("setup-drag"));
         // The window close handler opens the main window and records that setup was dismissed, so
         // the button only has to close this window. Quitting here would take the app down with it.
@@ -209,14 +209,14 @@ impl SetupView {
     fn welcome(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
         let font = crate::config::get().font.family.clone();
-        let prompt = div().p(px(16.)).rounded(px(10.)).bg(c(th.crust)).border_1().border_color(c(th.surface1).opacity(0.7))
+        let prompt = div().p(px(16.)).rounded(px(ui::R_LG)).bg(c(th.crust)).border_1().border_color(crate::theme::divider())
             .flex().flex_col().gap(px(8.)).font_family(gpui::SharedString::from(font)).text_size(px(self.font_size))
             .child(div().flex().items_center().gap(px(8.))
                 .child(div().text_color(c(th.success)).child("shellax@local"))
                 .child(div().text_color(c(th.overlay1)).child(":"))
                 .child(div().text_color(c(th.accent)).child("~"))
                 .child(div().text_color(c(th.text)).child("$")))
-            .child(div().text_size(px(12.)).font_family(crate::theme::ui_font()).text_color(c(th.overlay1)).child(t("setup.welcome_hint")));
+            .child(div().text_size(px(ui::fs_mono())).font_family(crate::theme::ui_font()).text_color(c(th.overlay1)).child(t("setup.welcome_hint")));
         let zh = self.language == "zh-CN";
         div().flex().flex_col().gap(px(12.))
             .child(prompt)
@@ -228,13 +228,13 @@ impl SetupView {
 
     fn lang_choice(&self, id: &'static str, selected: bool, label: &str, on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static) -> AnyElement {
         let th = cur();
-        div().id(id).flex_1().h(px(44.)).rounded(px(10.)).cursor_pointer().flex().items_center().justify_center().gap(px(8.))
-            .border_1().border_color(if selected { c(th.accent) } else { c(th.surface1) })
-            .bg(if selected { c(th.accent).opacity(0.1) } else { c(th.mantle) })
-            .text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text))
+        div().id(id).flex_1().h(px(44.)).rounded(px(ui::R_LG)).cursor_pointer().flex().items_center().justify_center().gap(px(8.))
+            .border_1().border_color(if selected { c(th.accent) } else { crate::theme::divider() })
+            .bg(if selected { c(th.accent).opacity(0.1) } else { crate::theme::sub_bg() })
+            .text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.text))
             .hover(|d| d.border_color(c(cur().accent).opacity(0.6)))
             .on_click(on_click)
-            .when(selected, |d| d.child(icon(IconName::Check, 14., c(th.accent))))
+            .when(selected, |d| d.child(icon(IconName::Check, ui::IC_SM, c(th.accent))))
             .child(label.to_string())
             .into_any_element()
     }
@@ -262,7 +262,7 @@ impl SetupView {
     fn terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
         let family = self.font_family.clone();
-        let sample = div().p(px(14.)).rounded(px(10.)).bg(c(th.crust)).border_1().border_color(c(th.surface1).opacity(0.7))
+        let sample = div().p(px(14.)).rounded(px(ui::R_LG)).bg(c(th.crust)).border_1().border_color(crate::theme::divider())
             .font_family(gpui::SharedString::from(family.clone())).text_size(px(self.font_size)).text_color(c(th.text))
             .child(format!("ls  cd  git status   {}", t("setup.sample_cjk")));
 
@@ -275,7 +275,7 @@ impl SetupView {
 
         // The sample stays put while the font list below it scrolls, so it is not part of that list.
         let mut page = div().flex_1().min_h_0().flex().flex_col().gap(px(12.)).child(sample)
-            .when(!usable, |d| d.child(div().text_size(px(12.)).text_color(c(th.warning)).child(t("setup.font_not_mono"))));
+            .when(!usable, |d| d.child(div().text_size(px(ui::fs_mono())).text_color(c(th.warning)).child(t("setup.font_not_mono"))));
 
         if self.font_picking {
             let query = self.font_search.read(cx).value().to_string();
@@ -293,7 +293,7 @@ impl SetupView {
                     cx.listener(move |this, _, w, cx| this.choose_font(&chosen, w, cx))));
             }
             if shown == 0 {
-                list = list.child(div().px(px(14.)).py(px(12.)).text_size(px(13.)).text_color(c(th.overlay1)).child(t("setup.font_none")));
+                list = list.child(div().px(px(14.)).py(px(12.)).text_size(px(ui::fs_body())).text_color(c(th.overlay1)).child(t("setup.font_none")));
             }
             // One element for both states, so the width animates between them instead of the field
             // popping in at full size. xsmall is the 20px input; the icon button is the same height.
@@ -301,8 +301,8 @@ impl SetupView {
             let field = self.font_search.clone();
             // Set on render so the placeholder follows the language chosen on the first step.
             field.update(cx, |s, cx| s.set_placeholder(t("setup.font_search"), window, cx));
-            let search = div().id("setup-font-search").h(px(32.)).rounded(px(6.)).flex().items_center().overflow_hidden().cursor_pointer()
-                .border_1().border_color(if open { c(th.accent) } else { c(th.surface1) }).bg(c(th.mantle))
+            let search = div().id("setup-font-search").h(px(32.)).rounded(px(ui::R_MD)).flex().items_center().overflow_hidden().cursor_pointer()
+                .border_1().border_color(if open { c(th.accent) } else { crate::theme::divider() }).bg(crate::theme::sub_bg())
                 .when(!open, |d| d.hover(|d| d.border_color(c(cur().accent).opacity(0.6))))
                 .on_click(cx.listener(|this, _, w, cx| {
                     if this.font_search_open { return; }
@@ -311,19 +311,19 @@ impl SetupView {
                     w.focus(&fh, cx);
                     cx.notify();
                 }))
-                .child(div().flex_shrink_0().w(px(32.)).h_full().flex().items_center().justify_center().child(icon(IconName::Search, 14., c(th.overlay1))))
+                .child(div().flex_shrink_0().w(px(32.)).h_full().flex().items_center().justify_center().child(icon(IconName::Search, ui::IC_SM, c(th.overlay1))))
                 .when(open, |d| d.child(div().flex_1().min_w_0().pr(px(6.)).child(Input::new(&field).small().appearance(false).cleanable(true))))
                 .with_animation("setup-font-search-w", gpui::Animation::new(std::time::Duration::from_millis(180)).with_easing(gpui::ease_out_quint()),
                     move |d, t| d.w(px(32. + (if open { t } else { 1. - t }) * 188.)));
             page = page.child(div().flex().justify_end().child(search)).child(list);
         } else {
-            page = page.child(div().px(px(14.)).py(px(12.)).rounded(px(10.)).flex().items_center().gap(px(12.))
+            page = page.child(div().px(px(14.)).py(px(12.)).rounded(px(ui::R_LG)).flex().items_center().gap(px(12.))
                 .border_1().border_color(c(th.accent)).bg(c(th.accent).opacity(0.08))
-                .child(div().size(px(30.)).flex_shrink_0().rounded(px(6.)).flex().items_center().justify_center().bg(crate::theme::selected_bg())
-                    .child(icon(if detected { IconName::Sparkles } else { IconName::Type }, 15., c(th.accent))))
+                .child(div().size(px(30.)).flex_shrink_0().rounded(px(ui::R_MD)).flex().items_center().justify_center().bg(crate::theme::selected_bg())
+                    .child(icon(if detected { IconName::Sparkles } else { IconName::Type }, ui::IC_MD, c(th.accent))))
                 .child(div().flex_1().min_w_0().flex().flex_col().gap(px(1.))
-                    .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(family.clone()))
-                    .when(!origin.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(origin))))
+                    .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(family.clone()))
+                    .when(!origin.is_empty(), |d| d.child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(origin))))
                 .child(ui::button("setup-font-change", t("setup.font_change"), 0)
                     .on_click(cx.listener(|this, _, _w, cx| { this.font_picking = true; cx.notify(); }))));
         }
@@ -339,31 +339,31 @@ impl SetupView {
             (IconName::Palette, t("setup.summary_look"), theme),
             (IconName::SquareTerminal, t("setup.summary_terminal"), self.font_family.clone()),
         ];
-        let mut card = div().rounded(px(10.)).bg(c(th.mantle)).border_1().border_color(c(th.surface1).opacity(0.6)).flex().flex_col().overflow_hidden();
+        let mut card = div().rounded(px(ui::R_LG)).bg(crate::theme::sub_bg()).border_1().border_color(crate::theme::divider()).flex().flex_col().overflow_hidden();
         for (i, (ic, label, value)) in rows.into_iter().enumerate() {
-            if i > 0 { card = card.child(div().mx(px(14.)).h(px(1.)).bg(c(th.surface1).opacity(0.6))); }
+            if i > 0 { card = card.child(div().mx(px(14.)).h(px(1.)).bg(crate::theme::divider())); }
             card = card.child(div().px(px(14.)).py(px(12.)).flex().items_center().gap(px(12.))
-                .child(icon(ic, 15., c(th.accent)))
-                .child(div().w(px(120.)).text_size(px(13.)).text_color(c(th.subtext)).child(label))
-                .child(div().flex_1().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(value)));
+                .child(icon(ic, ui::IC_MD, c(th.accent)))
+                .child(div().w(px(120.)).text_size(px(ui::fs_body())).text_color(c(th.subtext)).child(label))
+                .child(div().flex_1().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(value)));
         }
         card.into_any_element()
     }
 
     fn choice(&self, id: &'static str, selected: bool, ic: IconName, title: &str, body: &str, on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static) -> AnyElement {
         let th = cur();
-        div().id(id).w_full().px(px(14.)).py(px(12.)).rounded(px(10.)).cursor_pointer().flex().items_center().gap(px(12.))
-            .border_1().border_color(if selected { c(th.accent) } else { c(th.surface1) })
-            .bg(if selected { c(th.accent).opacity(0.08) } else { c(th.mantle) })
+        div().id(id).w_full().px(px(14.)).py(px(12.)).rounded(px(ui::R_LG)).cursor_pointer().flex().items_center().gap(px(12.))
+            .border_1().border_color(if selected { c(th.accent) } else { crate::theme::divider() })
+            .bg(if selected { c(th.accent).opacity(0.08) } else { crate::theme::sub_bg() })
             .hover(|d| d.border_color(c(cur().accent).opacity(0.6)))
             .on_click(on_click)
-            .child(div().size(px(30.)).flex_shrink_0().rounded(px(6.)).flex().items_center().justify_center()
+            .child(div().size(px(30.)).flex_shrink_0().rounded(px(ui::R_MD)).flex().items_center().justify_center()
                 .bg(if selected { c(th.accent).opacity(0.16) } else { c(th.surface0) })
-                .child(icon(ic, 15., if selected { c(th.accent) } else { c(th.overlay1) })))
+                .child(icon(ic, ui::IC_MD, if selected { c(th.accent) } else { c(th.overlay1) })))
             .child(div().flex_1().min_w_0().flex().flex_col().gap(px(1.))
-                .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(title.to_string()))
-                .when(!body.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(body.to_string()))))
-            .when(selected, |d| d.child(icon(IconName::Check, 15., c(th.accent))))
+                .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(title.to_string()))
+                .when(!body.is_empty(), |d| d.child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(body.to_string()))))
+            .when(selected, |d| d.child(icon(IconName::Check, ui::IC_MD, c(th.accent))))
             .into_any_element()
     }
 

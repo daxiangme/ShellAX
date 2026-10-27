@@ -46,22 +46,22 @@ impl Render for HostPicker {
         let th = cur();
         let label = if self.value.is_empty() { t("db.via_direct").to_string() } else { self.value.clone() };
         let mut root = div().relative().w_full()
-            .child(div().id(self.id).h(px(28.)).px_2().rounded(px(6.)).flex().items_center().gap_2().cursor_pointer().bg(c(th.mantle)).border_1().border_color(c(th.surface1))
+            .child(div().id(self.id).h(px(ui::H_DEFAULT)).px(px(ui::INPUT_PX)).rounded(px(ui::R_MD)).flex().items_center().gap_2().cursor_pointer().bg(crate::theme::sub_bg()).border_1().border_color(crate::theme::divider())
                 .on_click(cx.listener(|this, _, w, cx| { this.open = !this.open; if this.open { this.search.update(cx, |s, cx| { s.set_value("", w, cx); s.focus(w, cx); }); } cx.notify(); }))
-                .child(icon(if self.value.is_empty() { IconName::Plug } else { IconName::Waypoints }, 13., c(th.overlay1)))
-                .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(12.)).child(label))
-                .child(icon(IconName::ChevronDown, 12., c(th.overlay0))));
+                .child(icon(if self.value.is_empty() { IconName::Plug } else { IconName::Waypoints }, ui::IC_SM, c(th.overlay1)))
+                .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(ui::fs_body())).child(label))
+                .child(icon(IconName::ChevronDown, ui::IC_XS, c(th.overlay0))));
         if self.open {
             let q = self.search.read(cx).value().to_string();
-            let m = ui::popover().absolute().top(px(32.)).left_0().w_full().p_1().flex().flex_col().gap_1()
+            let m = ui::popover().absolute().top(px(ui::H_DEFAULT + 4.)).left_0().w_full().p_1().flex().flex_col().gap_1()
                 .child(ui::search_field(&self.search, false));
             let mut list = div().id("hp-list").max_h(px(220.)).overflow_y_scroll().flex().flex_col();
             let opts = filter_hosts(&self.hosts, &q);
-            if opts.is_empty() { list = list.child(div().p_2().text_size(px(12.)).text_color(c(th.overlay0)).child(t("kv.no_match"))); }
+            if opts.is_empty() { list = list.child(div().p_2().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(t("kv.no_match"))); }
             for (i, h) in opts.into_iter().enumerate() {
                 let lbl = if h.is_empty() { t("db.via_direct").to_string() } else { h.clone() };
                 let sel = h == self.value;
-                list = list.child(ui::menu_item(("hp-o", i), None, lbl, true, false).when(sel, |d| d.bg(c(th.surface0))).on_click(cx.listener(move |this, _, _w, cx| this.pick(h.clone(), cx))));
+                list = list.child(ui::menu_item(("hp-o", i), None, lbl, true, false).when(sel, |d| d.bg(crate::theme::menu_sel_bg())).on_click(cx.listener(move |this, _, _w, cx| this.pick(h.clone(), cx))));
             }
             root = root.child(gpui::deferred(m.child(list)).with_priority(3));
             let _ = window;

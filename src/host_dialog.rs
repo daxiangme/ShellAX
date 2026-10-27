@@ -180,7 +180,7 @@ fn same_key(a: &str, b: &str) -> bool {
 impl Render for HostDialog {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
-        let label = |t: &str| div().w(px(76.)).flex_shrink_0().text_size(px(13.)).text_color(c(th.subtext)).child(t.to_string());
+        let label = |t: &str| div().w(px(76.)).flex_shrink_0().text_size(px(ui::fs_body())).text_color(c(th.subtext)).child(t.to_string());
         let mut form = div().p_5().flex().flex_col().gap_3().max_h(px(560.)).id("host-form").overflow_y_scroll();
         for (l, key, e) in self.fields.iter() {
             if *key == "user" { break; }
@@ -188,19 +188,19 @@ impl Render for HostDialog {
         }
         // ---- credentials card
         let user = self.fields.iter().find(|f| f.1 == "user").map(|f| f.2.clone()).unwrap();
-        let mut cred = div().flex().flex_col().gap_2().p_3().rounded(px(10.)).bg(c(th.surface0).opacity(0.45)).border_1().border_color(c(th.surface1).opacity(0.6))
-            .child(div().text_size(px(12.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("host.credentials")))
+        let mut cred = div().flex().flex_col().gap_2().p_3().rounded(px(ui::R_SUB)).bg(crate::theme::sub_bg()).border_1().border_color(crate::theme::divider())
+            .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("host.credentials")))
             .child(div().flex().items_center().gap_3().child(label(t("host.username"))).child(div().flex_1().child(ui::text_field(&user, false))));
         let n = self.methods.len();
         for (i, m) in self.methods.clone().into_iter().enumerate() {
-            let small = |id: String, ic: IconName| div().id(SharedString::from(id)).size(px(22.)).rounded(px(6.)).flex().items_center().justify_center().cursor_pointer().hover(|d| d.bg(c(cur().surface1))).child(icon(ic, 12., c(th.overlay1)));
+            let small = |id: String, ic: IconName| div().id(SharedString::from(id)).size(px(22.)).rounded(px(ui::R_MD)).flex().items_center().justify_center().cursor_pointer().hover(|d| d.bg(crate::theme::hover_bg())).child(icon(ic, ui::IC_XS, c(th.overlay1)));
             let head = div().flex().items_center().gap_2()
-                .child(div().w(px(18.)).text_size(px(11.)).text_color(c(th.overlay0)).child(format!("{}.", i + 1)))
-                .child(div().flex_1().text_size(px(12.)).text_color(c(th.subtext)).child(m.label()))
+                .child(div().w(px(18.)).text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(format!("{}.", i + 1)))
+                .child(div().flex_1().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(m.label()))
                 .when(i > 0, |d| d.child(small(format!("am-up-{i}"), IconName::ChevronUp).on_click(cx.listener(move |this, _, _w, cx| { this.methods.swap(i, i - 1); cx.notify(); }))))
                 .when(i + 1 < n, |d| d.child(small(format!("am-dn-{i}"), IconName::ChevronDown).on_click(cx.listener(move |this, _, _w, cx| { this.methods.swap(i, i + 1); cx.notify(); }))))
                 .when(n > 1, |d| d.child(small(format!("am-rm-{i}"), IconName::X).on_click(cx.listener(move |this, _, _w, cx| { this.methods.remove(i); cx.notify(); }))));
-            let mut block = div().flex().flex_col().gap(px(6.)).pt_2().border_t_1().border_color(c(th.surface1).opacity(0.5)).child(head);
+            let mut block = div().flex().flex_col().gap(px(6.)).pt_2().border_t_1().border_color(crate::theme::divider()).child(head);
             match m {
                 Method::Password => block = block.child(ui::text_field(&self.password, false).mask_toggle()),
                 Method::Key | Method::Cert => {
@@ -213,26 +213,26 @@ impl Render for HostDialog {
                             let mut menu = ui::popover().id("key-pick").occlude().absolute().top(px(32.)).right_0().w(px(420.)).max_h(px(260.)).overflow_y_scroll().p(px(5.)).flex().flex_col()
                                 .on_mouse_down_out(cx.listener(|this, _, _, cx| { this.key_menu = false; cx.notify(); }));
                             if keys.is_empty() {
-                                menu = menu.child(div().px_2().py_2().text_size(px(12.)).text_color(c(th.subtext)).child(t("host.no_keys")));
+                                menu = menu.child(div().px_2().py_2().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(t("host.no_keys")));
                             }
                             for (k, (path, kind, fp)) in keys.iter().enumerate() {
                                 let chosen = path.clone();
                                 let on = same_key(&current, path);
-                                menu = menu.child(div().id(("keypick", k)).px_2().py_1().rounded(px(6.)).flex().items_center().gap_2().cursor_pointer()
+                                menu = menu.child(div().id(("keypick", k)).px_2().py_1().rounded(px(ui::R_MD)).flex().items_center().gap_2().cursor_pointer()
                                     .when(on, |d| d.bg(crate::theme::selected_bg()))
-                                    .hover(|d| d.bg(c(cur().surface0)))
+                                    .hover(|d| d.bg(crate::theme::menu_sel_bg()))
                                     .on_click(cx.listener(move |this, _, w, cx| {
                                         this.key_menu = false;
                                         let path = chosen.clone();
                                         this.key_path.update(cx, |s, cx| s.set_value(path, w, cx));
                                         cx.notify();
                                     }))
-                                    .child(icon(IconName::KeyRound, 13., c(th.warning)))
+                                    .child(icon(IconName::KeyRound, ui::IC_SM, c(th.warning)))
                                     .child(div().flex_1().min_w_0().flex().flex_col()
-                                        .child(div().text_size(px(12.)).text_color(c(th.text)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(path.clone()))
-                                        .child(div().text_size(px(11.)).text_color(c(th.overlay1)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(fp.clone())))
+                                        .child(div().text_size(px(ui::fs_body())).text_color(c(th.text)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(path.clone()))
+                                        .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(fp.clone())))
                                     .child(ui::tag(kind.clone(), c(th.info)))
-                                    .when(on, |d| d.child(icon(IconName::Check, 12., c(th.accent)))));
+                                    .when(on, |d| d.child(icon(IconName::Check, ui::IC_XS, c(th.accent)))));
                             }
                             pick = pick.child(gpui::deferred(menu).with_priority(2));
                         }
@@ -247,7 +247,7 @@ impl Render for HostDialog {
                     }
                     if m == Method::Cert { block = block.child(ui::text_field(&self.cert_path, false)); }
                 }
-                Method::Agent => block = block.child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(t("host.agent_hint"))),
+                Method::Agent => block = block.child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(t("host.agent_hint"))),
             }
             cred = cred.child(block);
         }
@@ -270,10 +270,10 @@ impl Render for HostDialog {
         form = form.child(div().flex().items_start().gap_3()
             .child(label(t("host.use_proxy")))
             .child(Switch::new("host-use-proxy").checked(self.use_proxy).on_click(cx.listener(|this, on: &bool, _, cx| { this.use_proxy = *on; cx.notify(); })))
-            .child(div().flex_1().min_w_0().pt(px(2.)).text_size(px(12.)).text_color(c(th.overlay1)).whitespace_normal().child(t("host.use_proxy_desc"))));
+            .child(div().flex_1().min_w_0().pt(px(2.)).text_size(px(ui::fs_small())).text_color(c(th.overlay1)).whitespace_normal().child(t("host.use_proxy_desc"))));
         if proxy_missing {
-            form = form.child(div().p_3().rounded(px(6.)).bg(c(th.warning).opacity(0.14)).flex().flex_col().gap_2()
-                .child(div().text_size(px(12.)).text_color(c(th.text)).whitespace_normal().child(t("host.proxy_missing")))
+            form = form.child(div().p_3().rounded(px(ui::R_MD)).bg(c(th.warning).opacity(0.14)).flex().flex_col().gap_2()
+                .child(div().text_size(px(ui::fs_body())).text_color(c(th.text)).whitespace_normal().child(t("host.proxy_missing")))
                 .child(div().flex().child(ui::button("host-proxy-settings", t("host.proxy_settings"), 1).on_click(cx.listener(|_, _, _, cx| cx.emit(HostEvent::OpenProxySettings))))));
         }
         form = form.child(cred);
@@ -283,42 +283,40 @@ impl Render for HostDialog {
         form = form.child(div().flex().items_start().gap_3().child(label(t("tag.tags")))
             .child(div().flex_1().min_w_0().flex().flex_col().gap(px(6.))
                 .child(crate::ui::tag_chips("host-tags", &self.tags, &tags_cfg.all(), move |color, _w, cx| { let _ = me.update(cx, |this, cx| { ssh_term_proto::hosttree::toggle(&mut this.tags, &color); cx.notify(); }); }))
-                .child(div().w_full().whitespace_normal().text_size(px(11.)).text_color(c(th.overlay1)).child(tf("tag.prod_hint", &[("name", &tags_cfg.name(&tags_cfg.production))])))));
+                .child(div().w_full().whitespace_normal().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(tf("tag.prod_hint", &[("name", &tags_cfg.name(&tags_cfg.production))])))));
         // ---- test results
         if let Some(rows) = &self.test {
             let names = [t("host.test_dns"), t("host.test_tcp"), t("host.test_ssh"), t("host.test_auth")];
-            let mut box_ = div().flex().flex_col().gap(px(4.)).p_3().rounded(px(10.)).bg(c(th.surface0).opacity(0.45));
+            let mut box_ = div().flex().flex_col().gap(px(4.)).p_3().rounded(px(ui::R_SUB)).bg(crate::theme::sub_bg()).border_1().border_color(crate::theme::divider());
             for (i, r) in rows.iter().enumerate() {
                 let (ic, col) = match (r.started, r.ok) { (false, _) => (IconName::Circle, c(th.overlay0)), (true, None) => (IconName::LoaderCircle, c(th.accent)), (true, Some(true)) => (IconName::CircleCheck, c(th.success)), (true, Some(false)) => (IconName::CircleX, c(th.error)) };
                 box_ = box_.child(div().flex().items_start().gap_2()
-                    .child(icon(ic, 14., col))
-                    .child(div().w(px(110.)).flex_shrink_0().text_size(px(12.)).text_color(c(th.text)).child(names[i]))
-                    .child(div().flex_1().min_w_0().whitespace_normal().text_size(px(12.)).text_color(if r.ok == Some(false) { c(th.error) } else { c(th.subtext) }).child(r.detail.clone()))
-                    .when(r.ok.is_some(), |d| d.child(div().flex_shrink_0().text_size(px(11.)).text_color(c(th.overlay0)).child(format!("{} ms", r.ms)))));
+                    .child(icon(ic, ui::IC_SM, col))
+                    .child(div().w(px(110.)).flex_shrink_0().text_size(px(ui::fs_body())).text_color(c(th.text)).child(names[i]))
+                    .child(div().flex_1().min_w_0().whitespace_normal().text_size(px(ui::fs_small())).text_color(if r.ok == Some(false) { c(th.error) } else { c(th.subtext) }).child(r.detail.clone()))
+                    .when(r.ok.is_some(), |d| d.child(div().flex_shrink_0().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(format!("{} ms", r.ms)))));
             }
             form = form.child(box_);
         }
-        if let Some(e) = &self.error { form = form.child(div().text_size(px(12.)).text_color(c(th.error)).child(e.clone())); }
+        if let Some(e) = &self.error { form = form.child(div().text_size(px(ui::fs_body())).text_color(c(th.error)).child(e.clone())); }
 
         let title = if self.editing.is_some() { t("ui.edit_host") } else { t("ui.new_host") };
         let testing = self.test_task.is_some();
-        let mut footer = div().px_5().py_3().flex().items_center().gap_2().border_t_1().border_color(c(th.surface0)).bg(c(th.mantle))
-            .child(if testing { ui::button("host-test", t("host.test_cancel"), 0).on_click(cx.listener(|this, _, _w, cx| this.cancel_test(cx))) }
-                   else { ui::button("host-test", t("host.test"), 0).on_click(cx.listener(|this, _, _w, cx| this.run_test(cx))) })
-            .child(div().flex_1());
+        let test_btn = if testing { ui::button("host-test", t("host.test_cancel"), 0).on_click(cx.listener(|this, _, _w, cx| this.cancel_test(cx))) }
+                       else { ui::button("host-test", t("host.test"), 0).on_click(cx.listener(|this, _, _w, cx| this.run_test(cx))) };
+        let mut btns: Vec<gpui::AnyElement> = Vec::new();
         if let Some(name) = self.editing.clone() {
-            footer = footer.child(ui::button("host-del", t("ui.delete"), 2).on_click(cx.listener(move |_, _, _w, cx| {
+            btns.push(ui::button("host-del", t("ui.delete"), 2).on_click(cx.listener(move |_, _, _w, cx| {
                 let n = name.clone();
                 let _ = config::update(|s| s.hosts.retain(|h| h.name != n));
                 cx.emit(HostEvent::Deleted(name.clone()));
-            })));
+            })).into_any_element());
         }
-        footer = footer.child(ui::button("host-cancel", t("ui.cancel"), 0).on_click(cx.listener(|_, _, _w, cx| cx.emit(HostEvent::Close))))
-            .child(ui::button("host-save", t("ui.save"), 1).on_click(cx.listener(|this, _, _w, cx| this.save(cx))));
+        btns.push(ui::button("host-cancel", t("ui.cancel"), 0).on_click(cx.listener(|_, _, _w, cx| cx.emit(HostEvent::Close))).into_any_element());
+        btns.push(ui::button("host-save", t("ui.save"), 1).on_click(cx.listener(|this, _, _w, cx| this.save(cx))).into_any_element());
+        let footer = ui::dialog_footer(Some(test_btn.into_any_element()), btns);
         ui::modal(ui::card(580.)
-            .child(div().h(px(48.)).px_5().flex().items_center().gap_2().border_b_1().border_color(c(th.surface0))
-                .child(icon(IconName::Server, 16., c(th.accent)))
-                .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(title)))
+            .child(ui::dialog_header(Some(IconName::Server), title, None, None))
             .child(form).child(footer))
     }
 }

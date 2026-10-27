@@ -1,25 +1,19 @@
 //! Side tools opened from the sidebar function area: audit log viewer, SFTP, port forwarding,
 //! AI / Agent overview. SFTP and port forwarding live in sftp_view.rs / port_view.rs.
 use ssh_term_proto::i18n::{t, tf};
-use gpui::{div, prelude::*, px, AnyElement, Context, FontWeight, SharedString};
+use gpui::{div, prelude::*, px, AnyElement, Context, SharedString};
 use ssh_term_proto::audit;
 
 use crate::config;
 use crate::theme::{c, cur};
-use crate::ui::{self, icon, IconName};
+use crate::ui::{self, IconName};
 use crate::{Overlay, Root};
 
 fn panel_shell(title: &str, ic: IconName, sub: &str, cx: &mut Context<Root>) -> gpui::Div {
-    let th = cur();
+    let me = cx.entity().downgrade();
     ui::card(980.).h(px(640.))
-        .child(div().h(px(48.)).px_5().flex().items_center().gap_2().border_b_1().border_color(c(th.surface0))
-            .child(icon(ic, 16., c(th.accent)))
-            .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(title.to_string()))
-            .child(div().pl_2().text_size(px(11.)).text_color(c(th.overlay0)).child(sub.to_string()))
-            .child(div().flex_1())
-            .child(div().id("panel-close").size(px(28.)).rounded_md().flex().items_center().justify_center().cursor_pointer()
-                .hover(|d| d.bg(c(cur().surface0))).on_click(cx.listener(|this, _, w, cx| this.close_overlay(w, cx)))
-                .child(icon(IconName::X, 16., c(th.overlay1)))))
+        .child(ui::dialog_header(Some(ic), title.to_string(), Some(sub.to_string().into()),
+            Some(ui::dialog_close("panel-close", move |w, cx| { let _ = me.update(cx, |this, cx| this.close_overlay(w, cx)); }))))
 }
 
 impl Root {
@@ -30,30 +24,29 @@ impl Root {
         let (hosts, sessions) = audit::facets(&all);
         let filter = self.audit_filter.clone();
         let records: Vec<audit::Record> = filter.apply(&all).into_iter().cloned().collect();
-        let mono = SharedString::from(config::get().font.family.clone());
         let mut list = div().id("audit-list").flex_1().min_h_0().overflow_y_scroll().flex().flex_col();
-        list = list.child(div().flex().items_center().gap_3().px_4().py(px(6.)).bg(c(th.mantle)).text_size(px(11.)).text_color(c(th.overlay1))
+        list = list.child(ui::table_header().gap_3().px_4()
             .child(div().w(px(40.)).child("#")).child(div().w(px(150.)).child(t("ui.time_utc_8"))).child(div().w(px(130.)).child(t("ui.kind")))
             .child(div().w(px(70.)).child(t("ui.principal"))).child(div().flex_1().child(t("ui.detail"))).child(div().w(px(90.)).child("hash")));
-        if records.is_empty() { list = list.child(div().p_5().text_size(px(13.)).text_color(c(th.overlay1)).child(t("ui.no_audit_records_yet"))); }
+        if records.is_empty() { list = list.child(ui::empty_state(IconName::ScrollText, t("ui.no_audit_records_yet"), None, vec![], false)); }
         for r in records.iter().rev().take(500) {
             let col = if r.kind.starts_with("permission") { c(th.warning) } else if r.kind.starts_with("hostkey") { c(th.error) } else if r.kind.starts_with("ssh") { c(th.info) } else { c(th.accent) };
-            list = list.child(div().flex().items_center().gap_3().px_4().py(px(6.)).border_t_1().border_color(c(th.surface0)).text_size(px(12.)).text_color(c(th.text))
+            list = list.child(div().flex().items_center().gap_3().px_4().py(px(6.)).border_t_1().border_color(crate::theme::divider()).text_size(px(ui::fs_small())).text_color(c(th.text))
                 .child(div().w(px(40.)).text_color(c(th.overlay1)).child(r.seq.to_string()))
                 .child(div().w(px(150.)).text_color(c(th.subtext)).child(r.ts.replace('T', " ").chars().take(19).collect::<String>()))
                 .child(div().w(px(130.)).flex().child(ui::tag(r.kind.clone(), col)))
                 .child(div().w(px(70.)).text_color(c(th.subtext)).child(r.actor.clone()))
                 .child(div().flex_1().min_w_0().overflow_hidden().child(r.detail.clone()))
-                .child(div().w(px(90.)).font_family(mono.clone()).text_size(px(11.)).text_color(c(th.overlay0)).child(r.hash[..10].to_string())));
+                .child(div().w(px(90.)).font_family(ui::mono_family()).text_size(px(ui::fs_caption())).text_color(c(th.overlay0)).child(r.hash[..10].to_string())));
         }
         let verify_el = match &self.audit_verify {
             Some(Ok(n)) => ui::tag(tf("panels.chain_ok", &[("n", &n)]), c(th.success)).into_any_element(),
             Some(Err((line, why))) => ui::tag(tf("panels.chain_bad", &[("line", &line), ("why", &why)]), c(th.error)).into_any_element(),
             None => div().into_any_element(),
         };
-        let toolbar = div().px_4().py_3().flex().items_center().gap_2().border_b_1().border_color(c(th.surface0))
-            .child(div().text_size(px(12.)).text_color(c(th.subtext)).child(tf("panels.audit_total", &[("path", &path.display()), ("n", &records.len())])))
-            .child(div().text_size(px(12.)).text_color(c(th.overlay0)).child(tf("panels.audit_of", &[("n", &all.len())])))
+        let toolbar = ui::toolbar().px_4()
+            .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(tf("panels.audit_total", &[("path", &path.display()), ("n", &records.len())])))
+            .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(tf("panels.audit_of", &[("n", &all.len())])))
             .child(div().flex_1()).child(verify_el)
             .child(ui::button("audit-verify", t("ui.verify_hash_chain"), 0).on_click(cx.listener(|this, _, _w, cx| {
                 this.audit_verify = Some(audit::verify(&config::get().audit_path()));
@@ -66,8 +59,8 @@ impl Root {
                 this.toast(match std::fs::copy(&src, &dst) { Ok(_) => tf("panels.exported", &[("path", &dst.display())]), Err(e) => tf("panels.export_failed", &[("e", &e)]) }, cx);
             })));
         // filter chips: decision / host / session (PRD 6.x audit filtering)
-        let chip = |id: (&'static str, usize), label: String, on: bool| ui::button(gpui::ElementId::from((SharedString::from(id.0), id.1)), label, if on { 1 } else { 3 }).h(px(24.));
-        let mut frow = div().px_4().py_2().flex().flex_wrap().items_center().gap_1().border_b_1().border_color(c(th.surface0)).text_size(px(11.))
+        let chip = |id: (&'static str, usize), label: String, on: bool| ui::chip(gpui::ElementId::from((SharedString::from(id.0), id.1)), label, on);
+        let mut frow = div().px_4().py_2().flex().flex_wrap().items_center().gap_1().border_b_1().border_color(crate::theme::divider()).text_size(px(ui::fs_small()))
             .child(div().text_color(c(th.overlay1)).pr_1().child(t("panels.filter_decision").to_string()));
         for (i, (val, key)) in [(None, "panels.filter_all"), (Some("allow"), "panels.filter_allow"), (Some("ask"), "panels.filter_ask"), (Some("deny"), "panels.filter_deny")].into_iter().enumerate() {
             let on = filter.decision.as_deref() == val;
@@ -89,10 +82,7 @@ impl Root {
 
     pub(crate) fn sftp_panel(&mut self, cx: &mut Context<Root>) -> AnyElement {
         if let Some(v) = self.sftp_current.clone() { return ui::modal(v).into_any_element(); }
-        let th = cur();
-        let body = div().flex_1().flex().flex_col().items_center().justify_center().gap_2()
-            .child(icon(IconName::FolderSync, 28., c(th.overlay0)))
-            .child(div().text_size(px(13.)).text_color(c(th.subtext)).child(t("sftp.need_ssh")));
+        let body = ui::empty_state(IconName::FolderSync, t("sftp.need_ssh"), None, vec![], false);
         ui::modal(panel_shell(t("ui.sftp_files"), IconName::FolderSync, t("ui.remote_browsing_reuses_the_sftp"), cx).child(body)).into_any_element()
     }
 
