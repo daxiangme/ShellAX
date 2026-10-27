@@ -1296,7 +1296,7 @@ impl DbView {
         let preview: String = preview.chars().take(if matches!(ask, Ask::Alter(_)) { 20000 } else { 1200 }).collect();
         let show_pre = !preview.is_empty();
         Some(ui::modal(ui::card(520.)
-            .child(ui::dialog_header(Some(IconName::TriangleAlert), t("db.confirm_title"), None, None))
+            .child(ui::dialog_header(Some(IconName::TriangleAlert), c(cur().warning), t("db.confirm_title"), None, None))
             .child(div().p(px(ui::SP_5)).flex().flex_col().gap(px(ui::SP_3))
                 .child(div().text_size(px(ui::fs_body())).text_color(c(th.subtext)).child(msg))
                 .when(show_pre, |d| d.child(div().id("dbv-cf-pre").max_h(px(320.)).overflow_y_scroll().p_2().rounded(px(ui::R_MD)).bg(crate::theme::sub_bg()).font_family(ui::mono_family()).text_size(px(ui::fs_mono())).text_color(c(th.text)).whitespace_normal().child(preview))))

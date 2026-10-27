@@ -632,7 +632,7 @@ impl KvView {
         };
         let prod = self.production.then(|| ui::tag(t("tag.production"), c(th.error)));
         Some(ui::modal(ui::card(520.)
-            .child(ui::dialog_header(Some(IconName::TriangleAlert), t("db.confirm_title"), None, prod.map(|p| p.into_any_element())))
+            .child(ui::dialog_header(Some(IconName::TriangleAlert), c(cur().warning), t("db.confirm_title"), None, prod.map(|p| p.into_any_element())))
             .child(div().p(px(ui::SP_5)).flex().flex_col().gap(px(ui::SP_3))
                 .child(small(msg))
                 .child(div().id("kv-cf-pre").max_h(px(300.)).overflow_y_scroll().p_2().rounded(px(ui::R_MD)).bg(crate::theme::sub_bg()).child(mono(preview).whitespace_normal())))

@@ -12,7 +12,7 @@ use crate::{Overlay, Root};
 fn panel_shell(title: &str, ic: IconName, sub: &str, cx: &mut Context<Root>) -> gpui::Div {
     let me = cx.entity().downgrade();
     ui::card(980.).h(px(640.))
-        .child(ui::dialog_header(Some(ic), title.to_string(), Some(sub.to_string().into()),
+        .child(ui::dialog_header(Some(ic), c(cur().accent), title.to_string(), Some(sub.to_string().into()),
             Some(ui::dialog_close("panel-close", move |w, cx| { let _ = me.update(cx, |this, cx| this.close_overlay(w, cx)); }))))
 }
 

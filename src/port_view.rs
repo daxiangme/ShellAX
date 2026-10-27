@@ -129,7 +129,7 @@ impl Render for PortView {
                 .child(ui::button(("pf-del", i), t("sftp.delete"), 2).on_click(cx.listener(move |v, _, _, cx| { let r = r2.clone(); v.stop(r.clone(), cx); v.items.retain(|x| !Arc::ptr_eq(x, &r)); v.save(); cx.notify() }))));
         }
         ui::card(980.).h(px(640.))
-            .child(ui::dialog_header(Some(IconName::ArrowLeftRight), t("ui.port_forwarding"), Some(t("pf.subtitle").into()), Some(ui::dialog_close("pf-close", { let me2 = cx.entity().downgrade(); move |_w, cx| { let _ = me2.update(cx, |_, cx| cx.emit(PortEvent::Close)); } }))))
+            .child(ui::dialog_header(Some(IconName::ArrowLeftRight), c(cur().accent), t("ui.port_forwarding"), Some(t("pf.subtitle").into()), Some(ui::dialog_close("pf-close", { let me2 = cx.entity().downgrade(); move |_w, cx| { let _ = me2.update(cx, |_, cx| cx.emit(PortEvent::Close)); } }))))
             .child(form).child(list).child(div().h(px(16.)))
     }
 }

@@ -601,7 +601,7 @@ impl Render for ChatView {
         } else {
             let me = cx.entity();
             ui::card(900.).h(px(680.))
-                .child(ui::dialog_header(Some(IconName::Sparkles), t("ui.built_in_ai_assistant"), Some(t("chat.subtitle").into()),
+                .child(ui::dialog_header(Some(IconName::Sparkles), c(cur().accent), t("ui.built_in_ai_assistant"), Some(t("chat.subtitle").into()),
                     Some(ui::dialog_close("chat-close", move |_, cx| { me.update(cx, |_, cx| cx.emit(ChatEvent::Close)); }))))
                 .child(column)
         }

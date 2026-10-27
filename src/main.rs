@@ -1100,11 +1100,11 @@ impl Root {
             .flex().flex_col().child(div().text_size(px(ui::fs_body())).text_color(c(th.text)).child(main)).child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(sub));
         let cancel = ui::button("modal-cancel", t("ui.cancel"), 0).on_click(cx.listener(|this, _, w, cx| { this.modal = None; this.focus_active(w, cx); cx.notify(); }));
         let mut body = div().p(px(ui::SP_5)).flex().flex_col().gap(px(ui::SP_3));
-        let hdr: (IconName, String);
+        let hdr: (IconName, gpui::Hsla, String);
         let mut foot = ui::dialog_footer(None, vec![]);
         match m {
             Modal::Broadcast(prod) => {
-                hdr = (IconName::TriangleAlert, t("bc.prod_title").into());
+                hdr = (IconName::TriangleAlert, c(cur().warning), t("bc.prod_title").into());
                 body = body
                     .child(note(tf("bc.prod_body", &[("hosts", &prod.join(", "))])))
                     ;
@@ -1113,7 +1113,7 @@ impl Root {
             }
             Modal::Snapshots => {
                 let st = ssh_term_proto::snapshot::Store::load(&Self::snapshots_path());
-                hdr = (IconName::RotateCcw, t("snap.title").into());
+                hdr = (IconName::RotateCcw, c(cur().accent), t("snap.title").into());
                 body = body.child(note(t("snap.body").into()));
                 if st.snaps.is_empty() { body = body.child(note(t("snap.none").into())); }
                 for (i, sn) in st.snaps.iter().enumerate() {
@@ -1125,7 +1125,7 @@ impl Root {
                     .child(cancel);
             }
             Modal::Recordings => {
-                hdr = (IconName::Play, t("rec.play_action").into());
+                hdr = (IconName::Play, c(cur().accent), t("rec.play_action").into());
                 body = body.child(note(tf("rec.dir", &[("d", &Self::recordings_dir().display())])));
                 let list = Self::list_recordings();
                 if list.is_empty() { body = body.child(note(t("rec.none").into())); }
@@ -1137,7 +1137,7 @@ impl Root {
                 foot = foot.child(cancel);
             }
             Modal::QuickStart { dir } => {
-                hdr = (IconName::FolderOpen, t("qs.action").into());
+                hdr = (IconName::FolderOpen, c(cur().accent), t("qs.action").into());
                 let mut dirs: Vec<String> = vec![dir.clone()];
                 let home = std::env::var("HOME").unwrap_or_default();
                 for d in std::iter::once(home).chain(self.recent_dirs(cx)) { if !d.is_empty() && !dirs.contains(&d) { dirs.push(d); } }
@@ -1162,7 +1162,7 @@ impl Root {
                 foot = foot.child(cancel);
             }
         }
-        ui::modal(ui::card(560.).child(ui::dialog_header(Some(hdr.0), hdr.1, None, None)).child(body).child(foot))
+        ui::modal(ui::card(560.).child(ui::dialog_header(Some(hdr.0), hdr.1, hdr.2, None, None)).child(body).child(foot))
     }
     /// Recent local working directories (open panes and layout snapshots).
     fn recent_dirs(&self, cx: &App) -> Vec<String> {
@@ -2154,7 +2154,7 @@ impl Render for Root {
         // host key confirmation (first connection / TOFU)
         if let Some(p) = self.hk_pending.first() {
             root = root.child(ui::modal(ui::card(560.)
-                .child(ui::dialog_header(Some(IconName::ShieldCheck), t("ui.first_connection_verify_host_key"), None, None))
+                .child(ui::dialog_header(Some(IconName::ShieldCheck), c(cur().warning), t("ui.first_connection_verify_host_key"), None, None))
                 .child(div().p(px(ui::SP_5)).flex().flex_col().gap(px(ui::SP_3))
                 .child(div().text_size(px(ui::fs_body())).text_color(c(th.subtext)).child(tf("main.not_in_kh", &[("host", &p.host), ("port", &p.port), ("path", &s.known_hosts_path().display())])))
                 .child(div().p_3().rounded(px(ui::R_MD)).bg(theme::sub_bg()).border_1().border_color(theme::divider()).flex().flex_col().gap_1().text_size(px(ui::fs_body())).text_color(c(th.text))
@@ -2188,7 +2188,7 @@ impl Render for Root {
             let can_save = !matches!(p.kind, ssh::AuthKind::Interactive { .. });
             let inp = self.auth_input.clone().unwrap();
             root = root.child(ui::modal(ui::card(480.)
-                .child(ui::dialog_header(Some(IconName::KeyRound), title, None, None))
+                .child(ui::dialog_header(Some(IconName::KeyRound), c(cur().accent), title, None, None))
                 .child(div().p(px(ui::SP_5)).flex().flex_col().gap(px(ui::SP_3))
                 .child(div().text_size(px(ui::fs_body())).text_color(c(th.subtext)).child(detail))
                 .child(ui::text_field(&inp, false))
@@ -2205,7 +2205,7 @@ impl Render for Root {
         if self.hk_pending.is_empty() { if let Some(a) = self.approvals.first() {
             let left = a.deadline.saturating_duration_since(std::time::Instant::now()).as_secs();
             root = root.child(ui::modal(ui::card(600.)
-                .child(ui::dialog_header(Some(IconName::TriangleAlert), t("ui.approval_title"), None, None)
+                .child(ui::dialog_header(Some(IconName::TriangleAlert), c(cur().warning), t("ui.approval_title"), None, None)
                     .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(tf("main.approval_left", &[("n", &left), ("q", &self.approvals.len())]))))
                 .child(div().p(px(ui::SP_5)).flex().flex_col().gap(px(ui::SP_3))
                 .child(div().text_size(px(ui::fs_body())).text_color(c(th.subtext)).child(tf("main.approval_who", &[("agent", &a.principal), ("host", &a.host), ("tool", &a.req.tool), ("risk", &a.risk.label())])))
@@ -2233,7 +2233,7 @@ impl Render for Root {
             let panes = self.tabs.iter().map(|t| t.layout.leaves().len()).sum::<usize>();
             let daemon = self.tabs.iter().flat_map(|t| t.layout.leaves()).filter(|v| v.read(cx).daemon_id.is_some()).count();
             root = root.child(ui::modal(ui::card(520.)
-                .child(ui::dialog_header(Some(IconName::TriangleAlert), t("main.quit_title"), None, None))
+                .child(ui::dialog_header(Some(IconName::TriangleAlert), c(cur().warning), t("main.quit_title"), None, None))
                 .child(div().p(px(ui::SP_5)).flex().flex_col().gap(px(ui::SP_3))
                 .child(div().text_size(px(ui::fs_body())).text_color(c(th.subtext)).child(tf("main.quit_body", &[("p", &panes), ("a", &agents), ("d", &daemon)])))
                 .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(t("main.quit_note")))
@@ -2248,7 +2248,7 @@ impl Render for Root {
         }
         if let Some(rec) = update_ui::prompt() {
             root = root.child(ui::modal(ui::card(440.)
-                .child(ui::dialog_header(Some(IconName::Download), tf("update.ready_title", &[("v", &rec.version)]), None, None))
+                .child(ui::dialog_header(Some(IconName::Download), c(cur().accent), tf("update.ready_title", &[("v", &rec.version)]), None, None))
                 .child(div().p(px(ui::SP_5)).flex().flex_col().gap(px(ui::SP_3))
                 .child(div().text_size(px(ui::fs_body())).text_color(c(th.subtext)).child(t("update.ready_body")))
 )

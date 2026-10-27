@@ -316,7 +316,7 @@ impl Render for HostDialog {
         btns.push(ui::button("host-save", t("ui.save"), 1).on_click(cx.listener(|this, _, _w, cx| this.save(cx))).into_any_element());
         let footer = ui::dialog_footer(Some(test_btn.into_any_element()), btns);
         ui::modal(ui::card(580.)
-            .child(ui::dialog_header(Some(IconName::Server), title, None, None))
+            .child(ui::dialog_header(Some(IconName::Server), c(cur().accent), title, None, None))
             .child(form).child(footer))
     }
 }

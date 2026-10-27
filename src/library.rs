@@ -42,6 +42,11 @@ pub(crate) enum LibMenu {
     History { key: String, cmd: String },
 }
 
+impl LibMenu {
+    /// 菜单归属：片段卡片为 true，历史卡片为 false。
+    fn owner_is_snippets(&self) -> bool { matches!(self, LibMenu::Snippet { .. }) }
+}
+
 struct HistRow {
     key: String,
     cmd: String,
@@ -111,7 +116,8 @@ impl Root {
         if !notice.is_empty() {
             body = body.child(ui::notice(ui::Notice::Warn, notice).my(px(ui::SP_2)));
         }
-        if let Some((target, pos)) = self.lib_menu.clone() {
+        // 菜单只由发起它的卡片渲染，避免两张卡片同时打开时重复渲染同 ID 的菜单
+        if let Some((target, pos)) = self.lib_menu.clone().filter(|(t, _)| t.owner_is_snippets() == snippets_mode) {
             body = body.child(self.lib_menu_el(target, pos, cx));
         }
         let (id, title, sub, ic) = if snippets_mode { ("snip-dock", t("lib.snippets"), Some(SharedString::from(module_label(module))), IconName::Code) } else { ("hist-dock", t("lib.history"), None, IconName::Clock) };

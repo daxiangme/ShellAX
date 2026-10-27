@@ -340,11 +340,11 @@ pub fn small(s: impl Into<SharedString>) -> Div { div().text_size(px(fs_small())
 /// 等宽文字（命令、SQL、键值）：`mono_family` + `fs_mono` + `text`。
 pub fn mono(s: impl Into<SharedString>) -> Div { div().font_family(mono_family()).text_size(px(fs_mono())).text_color(c(cur().text)).child(s.into()) }
 
-/// 弹窗头部：高 48，可选强调色图标、标题 + 副标题、右侧关闭按钮（`dialog_close`）。
-pub fn dialog_header(ic: Option<IconName>, title: impl Into<SharedString>, subtitle: Option<SharedString>, close: Option<AnyElement>) -> Div {
+/// 弹窗头部：高 48，可选图标（颜色由 `ic_color` 指定：默认 `accent`，确认类 `warning`，删除类 `error`）、标题 + 副标题、右侧关闭按钮（`dialog_close`）。
+pub fn dialog_header(ic: Option<IconName>, ic_color: gpui::Hsla, title: impl Into<SharedString>, subtitle: Option<SharedString>, close: Option<AnyElement>) -> Div {
     let th = cur();
     div().w_full().h(px(DIALOG_HEAD_H)).flex_shrink_0().px(px(SP_5)).flex().items_center().gap(px(SP_2)).border_b_1().border_color(divider())
-        .children(ic.map(|i| icon(i, IC_MD, c(th.accent))))
+        .children(ic.map(|i| icon(i, IC_MD, ic_color)))
         .child(div().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(fs_title())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(title.into()))
         .children(subtitle.map(|s| div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(fs_small())).text_color(c(th.subtext)).child(s)))
         .child(div().flex_1())

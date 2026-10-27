@@ -250,7 +250,7 @@ impl Render for DbDialog {
         let footer = ui::dialog_footer(Some(test_btn.into_any_element()), btns);
         let title: SharedString = if self.editing.is_some() { t("db.edit_connection").into() } else { t("db.new_connection").into() };
         ui::modal(ui::card(600.)
-            .child(ui::dialog_header(Some(IconName::Database), title, None, None))
+            .child(ui::dialog_header(Some(IconName::Database), c(cur().accent), title, None, None))
             .child(form).child(footer))
     }
 }

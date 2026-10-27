@@ -1348,7 +1348,7 @@ impl Render for SftpView {
                 .child(div().flex_1().min_h_0().border_1().border_color(crate::theme::divider()).rounded(px(ui::R_LG)).overflow_hidden().child(Editor::new(&st).h_full()));
             let status = div().px_4().py_2().text_size(px(fs_small())).text_color(if self.error { c(th.error) } else { c(th.overlay1) }).child(self.status.clone());
             return self.frame()
-                .child(ui::dialog_header(Some(IconName::FolderSync), t("sftp.editor_title"), None, None).child(self.mode_bar(cx)))
+                .child(ui::dialog_header(Some(IconName::FolderSync), c(cur().accent), t("sftp.editor_title"), None, None).child(self.mode_bar(cx)))
                 .child(ed).child(status);
         }
         let sync = self.sync_panel(cx);
@@ -1367,7 +1367,7 @@ impl Render for SftpView {
         let ctx = self.ctx_menu.as_ref().map(|(_, m)| crate::ctxmenu_view::render(m, cx, Self::ctx_pick, Self::ctx_close));
         let ops = self.ops_menu_el(cx);
         self.frame()
-            .child(ui::dialog_header(Some(IconName::FolderSync), t("ui.sftp_files"), None, None)
+            .child(ui::dialog_header(Some(IconName::FolderSync), c(cur().accent), t("ui.sftp_files"), None, None)
                 .child(self.mode_bar(cx))
                 .when(popup, |d| d.child(ui::dialog_close("sftp-close", { let me = cx.entity().downgrade(); move |_w, cx| { let _ = me.update(cx, |_, cx| cx.emit(SftpEvent::Close)); } }))))
             .children(ctx).children(ops)

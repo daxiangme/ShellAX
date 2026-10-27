@@ -492,7 +492,7 @@ impl DockView {
         let pols: Vec<(String, String)> = [("no", "docker.rp_no"), ("always", "docker.rp_always"), ("unless-stopped", "docker.rp_unless"), ("on-failure", "docker.rp_failure")].iter().map(|(a, b)| (a.to_string(), t(b).to_string())).collect();
         let start = f.start;
         Some(ui::modal(ui::card(560.)
-            .child(ui::dialog_header(Some(IconName::Container), t("docker.create"), None, None))
+            .child(ui::dialog_header(Some(IconName::Container), c(cur().accent), t("docker.create"), None, None))
             .child(div().p(px(ui::SP_5)).flex().flex_col().gap(px(ui::SP_3))
                 .child(row("docker.f_image", ui::text_field(&f.image, false).into_any_element()))
                 .child(row("docker.f_name", ui::text_field(&f.name, false).into_any_element()))
@@ -518,7 +518,7 @@ impl DockView {
         if b.output.is_empty() { out = out.child(small(t("docker.exec_hint"))); }
         for l in b.output.lines().rev().take(2000).collect::<Vec<_>>().into_iter().rev() { out = out.child(mono(l.to_string()).whitespace_normal()); }
         Some(ui::modal(ui::card(640.)
-            .child(ui::dialog_header(Some(IconName::SquareTerminal), tf("docker.exec_title", &[("name", &b.name)]), None, None)
+            .child(ui::dialog_header(Some(IconName::SquareTerminal), c(cur().accent), tf("docker.exec_title", &[("name", &b.name)]), None, None)
                 .when(self.production, |d| d.child(ui::tag(t("tag.production"), c(th.error)))))
             .child(div().p(px(ui::SP_5)).flex().flex_col().gap(px(ui::SP_3))
                 .child(div().flex().gap_2().child(div().flex_1().child(ui::text_field(&b.input, false)))
@@ -542,7 +542,7 @@ impl DockView {
         };
         let prod = self.production.then(|| ui::tag(t("tag.production"), c(th.error)));
         Some(ui::modal(ui::card(460.)
-            .child(ui::dialog_header(Some(IconName::TriangleAlert), t("db.confirm_title"), None, None).children(prod))
+            .child(ui::dialog_header(Some(IconName::TriangleAlert), c(cur().warning), t("db.confirm_title"), None, None).children(prod))
             .child(div().p(px(ui::SP_5)).flex().flex_col().gap(px(ui::SP_3))
                 .child(small(msg)))
             .child(ui::dialog_footer(None, vec![])

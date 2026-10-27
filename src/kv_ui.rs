@@ -152,7 +152,7 @@ impl Render for AssetDialog {
         let footer = ui::dialog_footer(None, btns);
         let title: SharedString = match self.kind { AssetKind::Redis => t("kv.redis_conn").into(), AssetKind::Docker => t("kv.docker_ep").into() };
         ui::modal(ui::card(580.)
-            .child(ui::dialog_header(Some(if self.kind == AssetKind::Redis { IconName::Database } else { IconName::Container }), title, None, None))
+            .child(ui::dialog_header(Some(if self.kind == AssetKind::Redis { IconName::Database } else { IconName::Container }), c(cur().accent), title, None, None))
             .child(form).child(footer))
     }
 }

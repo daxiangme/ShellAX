@@ -255,7 +255,7 @@ impl Root {
                                 let (i2, key2, s1) = (id.clone(), key.clone(), kk.clone());
                                 list.child(row(SharedString::from(format!("kvk:{kk}")), depth + 2, self.kvp.selected.as_deref() == Some(kk.as_str()))
                                     .on_click(cx.listener(move |this, e: &ClickEvent, w, cx| { this.kvp.selected = Some(s1.clone()); if e.click_count() >= 2 { this.kv_open_tab(&i2, Some(n), Some(key2.clone()), w, cx); } cx.notify(); }))
-                                    .child(chev(false, false)).child(icon(IconName::KeyRound, ui::IC_MD, c(th.accent)))
+                                    .child(chev(false, false)).child(icon(IconName::KeyRound, ui::IC_MD, c(th.overlay1)))
                                     .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_color(c(th.text)).child(name)))
                             }
                         };

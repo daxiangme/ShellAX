@@ -1317,7 +1317,7 @@ impl Render for SettingsView {
             if !group.is_empty() { body = body.child(Self::group_card(group)); }
         }
 
-        let header = ui::dialog_header(Some(IconName::Settings), t("ui.settings"), (!compact).then(|| t("ui.changes_are_saved_to_config").into()), None);
+        let header = ui::dialog_header(Some(IconName::Settings), c(cur().accent), t("ui.settings"), (!compact).then(|| t("ui.changes_are_saved_to_config").into()), None);
         // The tab strip carries the close affordance; this footer keeps a visible "Done" even when
         // many tabs push the settings tab out of view.
         let footer = ui::dialog_footer(None, vec![ui::button("settings-done", t("ui.done"), 1)

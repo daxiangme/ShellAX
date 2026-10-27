@@ -638,7 +638,7 @@ impl Root {
         let note = |s: String| div().text_size(px(ui::fs_body())).text_color(c(th.subtext)).child(s);
         let cancel = ui::button("sbm-cancel", t("ui.cancel"), 0).on_click(cx.listener(|this, _, w, cx| { this.sb_modal = None; this.focus_active(w, cx); cx.notify(); }));
         let mut body = div().p(px(ui::SP_5)).flex().flex_col().gap(px(ui::SP_3));
-        let hdr: (IconName, String);
+        let hdr: (IconName, gpui::Hsla, String);
         let mut foot = ui::dialog_footer(None, vec![]);
         match m {
             SbModal::Prompt { kind, input } => {
@@ -650,7 +650,7 @@ impl Root {
                     PromptKind::PlacePath { .. } => t("place.path_title").to_string(),
                 };
                 let (k1, i1, k2, i2) = (kind.clone(), input.clone(), kind, input.clone());
-                hdr = (IconName::TextCursorInput, head);
+                hdr = (IconName::TextCursorInput, c(cur().accent), head);
                 body = body
                     .child(div().on_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, w, cx| if ev.keystroke.key == "enter" { let v = i1.read(cx).value().to_string(); this.prompt_ok(k1.clone(), v, w, cx); cx.notify(); })).child(ui::text_field(&input, false)));
                 foot = foot.child(cancel)
@@ -658,7 +658,7 @@ impl Root {
             }
             SbModal::NewTab { spec, label, dont_ask } => {
                 let sp = spec.clone();
-                hdr = (IconName::Plus, tf("sb.confirm_new_tab", &[("name", &label)]));
+                hdr = (IconName::Plus, c(cur().accent), tf("sb.confirm_new_tab", &[("name", &label)]));
                 body = body
                     .child(div().id("sbm-dontask").flex().items_center().gap_2().cursor_pointer()
                         .on_click(cx.listener(|this, _, _w, cx| { if let Some(SbModal::NewTab { dont_ask, .. }) = this.sb_modal.as_mut() { *dont_ask = !*dont_ask; } cx.notify(); }))
@@ -673,7 +673,7 @@ impl Root {
                         })));
             }
             SbModal::DeleteHost(name) => {
-                hdr = (IconName::Trash, tf("sb.delete_host_title", &[("name", &name)]));
+                hdr = (IconName::Trash, c(cur().error), tf("sb.delete_host_title", &[("name", &name)]));
                 body = body.child(note(t("sb.delete_host_body").into()));
                 foot = foot.child(cancel)
                         .child(ui::button("sbm-del", t("ui.delete"), 2).on_click(cx.listener(move |this, _, _w, cx| { let n = name.clone(); this.sb_save("host.delete", n.clone(), |s| s.hosts.retain(|h| h.name != n), cx); this.sb_modal = None; })));
@@ -683,7 +683,7 @@ impl Root {
                 let n_hosts = hosttree::hosts_under(&s.hosts, &path).len();
                 let n_groups = s.groups.iter().filter(|g| hosttree::under(&g.path, &path) && g.path != path).count();
                 let (p1, p2) = (path.clone(), path.clone());
-                hdr = (IconName::Trash, tf("sb.delete_group_title", &[("name", &hosttree::leaf_of(&path))]));
+                hdr = (IconName::Trash, c(cur().error), tf("sb.delete_group_title", &[("name", &hosttree::leaf_of(&path))]));
                 body = body
                     .child(note(tf("sb.delete_group_body", &[("h", &n_hosts), ("g", &n_groups)])));
                 foot = foot.child(cancel)
@@ -691,7 +691,7 @@ impl Root {
                         .when(n_hosts + n_groups > 0, |d| d.child(ui::button("sbm-all", t("sb.delete_all"), 2).on_click(cx.listener(move |this, _, _w, cx| { let p = p2.clone(); this.sb_save("hosts.group_delete", format!("group={p:?} keep_children=false"), |s| { hosttree::delete_group(&mut s.hosts, &mut s.groups, &p, false); s.sidebar.collapsed.retain(|c| !hosttree::under(c, &p)); }, cx); this.sb_modal = None; }))));
             }
             SbModal::Import { cands, checked, group } => {
-                hdr = (IconName::Import, t("sb.import").to_string());
+                hdr = (IconName::Import, c(cur().accent), t("sb.import").to_string());
                 body = body
                     .child(note(tf("sb.import_body", &[("path", &config::get().ssh.ssh_config)])));
                 if cands.is_empty() { body = body.child(note(t("sb.import_none").into())); }
@@ -721,7 +721,7 @@ impl Root {
                         })));
             }
         }
-        ui::modal(ui::card(480.).child(ui::dialog_header(Some(hdr.0), hdr.1, None, None)).child(body).child(foot)).into_any_element()
+        ui::modal(ui::card(480.).child(ui::dialog_header(Some(hdr.0), hdr.1, hdr.2, None, None)).child(body).child(foot)).into_any_element()
     }
 }
 
