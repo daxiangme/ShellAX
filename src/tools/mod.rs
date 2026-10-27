@@ -169,6 +169,14 @@ pub fn rows_text(rows: &[Row], fmt: RowFmt) -> String {
     out.join("\n")
 }
 
+/// 判定横幅：通过 / 失败 / 提示，界面画在输出卡片顶部。
+#[derive(Clone, Debug, PartialEq)]
+pub struct Verdict { pub tone: Tone, pub text: String }
+
+/// 原文预览：高亮其中的若干字节区间（正则匹配位置）。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Source { pub text: String, pub marks: Vec<(usize, usize)> }
+
 /// 运行结果：文本，及可选的颜色色块、二进制文件、按行结果。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Output {
@@ -178,8 +186,14 @@ pub struct Output {
     pub file: Option<(String, Vec<u8>)>,
     pub kind: OutKind,
     pub rows: Vec<Row>,
-    /// 批次的参数摘要（`Rows` 形态用）。
+    /// 批次的参数摘要（`Rows` 形态用）；扩展包的键值回复里也可带一行说明。
     pub meta: String,
+    /// 判定横幅（有效 / 无效、匹配数……）。
+    pub verdict: Option<Verdict>,
+    /// 原文预览与高亮（正则）。
+    pub source: Option<Source>,
+    /// 第二个结果页的文本（正则的“替换”页）。
+    pub alt: Option<String>,
 }
 impl Output {
     pub fn text(s: impl Into<String>) -> Output { Output { text: s.into(), ..Default::default() } }
@@ -191,6 +205,21 @@ impl Output {
     pub fn kv(rows: Vec<Row>, fmt: RowFmt) -> Output {
         if rows.is_empty() { return Output::default(); }
         Output { text: rows_text(&rows, fmt), kind: OutKind::Kv, rows, ..Default::default() }
+    }
+}
+impl Output {
+    /// 带判定横幅；键值形态的横幅文字同时作为全文第一行，复制时也带上。
+    pub fn verdict(mut self, tone: Tone, text: impl Into<String>) -> Output {
+        let text = text.into();
+        // 文本形态的内容就是结果本身（如格式化后的 JSON），不混入横幅
+        if self.kind != OutKind::Text { self.text = if self.text.is_empty() { text.clone() } else { format!("{text}\n{}", self.text) }; }
+        self.verdict = Some(Verdict { tone, text });
+        self
+    }
+    /// 校验失败：红色横幅 + 若干说明行（没有输出文本）。
+    pub fn fail(text: impl Into<String>, rows: Vec<Row>) -> Output {
+        let text = text.into();
+        Output { text: format!("{text}\n{}", rows_text(&rows, RowFmt::Colon)).trim_end().to_string(), kind: OutKind::Kv, rows, verdict: Some(Verdict { tone: Tone::Danger, text }), ..Default::default() }
     }
 }
 impl From<String> for Output { fn from(s: String) -> Output { Output::text(s) } }
@@ -289,7 +318,7 @@ pub fn run(id: &str, a: &Args) -> Result<Output> {
     Ok(match id {
         "units" => Output::kv(num::units_rows(a)?, RowFmt::Suffix),
         "en_amount" => Output::kv(num::en_amount_rows(a.get("input"), a.get("currency"))?, RowFmt::Colon),
-        "rmb" => num::rmb(a.get("input"))?.into(),
+        "rmb" => Output::kv(vec![Row::item(num::rmb(a.get("input"))?).primary()], RowFmt::Colon),
         "sum_list" => { let r = num::sum_rows(a.get("input")); if r.is_empty() { num::sum_list(a.get("input")).into() } else { Output::kv(r, RowFmt::Colon) } }
         "loan" => Output::kv(num::loan_rows(a)?, RowFmt::Colon),
         "dedupe" => text::dedupe(a.get("input"), a.on("ignore_case"), a.on("trim"), a.on("drop_empty"), a.on("sort")).into(),
@@ -297,24 +326,32 @@ pub fn run(id: &str, a: &Args) -> Result<Output> {
         "case" => text::case(a.get("input"), a.get("mode")).into(),
         "plural" => text::plural_lines(a.get("input"), a.get("mode") != "singular").into(),
         "cjk_space" => text::cjk_space(a.get("input")).into(),
-        "regex" => text::regex_test(a.get("pattern"), a.get("input"), a.get("replace"), a.on("i"), a.on("m"), a.on("s"))?.into(),
-        "id_card" => Output::kv(text::id_card_rows(a.get("input"), chrono::Local::now().date_naive())?, RowFmt::Colon),
+        "regex" => text::regex_run(a.get("pattern"), a.get("input"), a.get("replace"), a.on("i"), a.on("m"), a.on("s"))?,
+        "id_card" => match text::id_card_check(a.get("input"), chrono::Local::now().date_naive()) {
+            Ok((ok, rows)) => Output::kv(rows, RowFmt::Colon).verdict(if ok { Tone::Good } else { Tone::Danger }, if ok { t("tools.id_valid_banner") } else { t("tools.id_invalid_banner") }),
+            Err(e) if a.get("input").trim().is_empty() => return Err(e),
+            Err(e) => Output::fail(e.to_string(), vec![]),
+        },
         "emoji" => text::strip_emoji(a.get("input")).into(),
         "md_html" => text::md_html(a.get("input")).into(),
-        "json" => dev::json(a.get("input"), a.get("mode") == "minify", a.get("indent"), a.on("sort"))?.into(),
+        "json" => dev::json_output(a.get("input"), a.get("mode") == "minify", a.get("indent"), a.on("sort")),
         "json_ts" => dev::json_ts(a.get("input"), a.get("root"))?.into(),
         "go_json" => if a.get("mode") == "go2json" { dev::go_to_json(a.get("input"))? } else { dev::json_to_go(a.get("input"), a.get("root"))? }.into(),
         "sql" => dev::sql(a.get("input"), a.get("mode") == "minify", a.on("upper")).into(),
         "css" => dev::css(a.get("input"), a.get("mode") == "minify").into(),
         "html" => dev::html(a.get("input"), a.get("mode") == "minify").into(),
-        "cron" => Output::kv(dev::cron_rows(a.get("input"), a.int("count", 1, 100).unwrap_or(10) as usize, chrono::Local::now())?, RowFmt::Pad(4)),
+        "cron" => match dev::cron_rows(a.get("input"), a.int("count", 1, 100).unwrap_or(10) as usize, chrono::Local::now()) {
+            Ok(rows) => Output::kv(rows, RowFmt::Pad(4)).verdict(Tone::Good, t("tools.cron_valid")),
+            Err(e) if a.get("input").trim().is_empty() => return Err(e),
+            Err(e) => Output::fail(e.to_string(), vec![]),
+        },
         "naming" => Output::kv(dev::naming_rows(a.get("input")), RowFmt::Pad(16)),
         "color" => { let (rows, rgba) = dev::color_rows(a.get("input"))?; Output { color: Some(rgba), ..Output::kv(rows, RowFmt::Pad(5)) } }
         "radix" => Output::kv(dev::radix_rows(a.get("input"), a.get("from"))?, RowFmt::Pad(4)),
         "md5" => Output::kv(crypto::md5_rows(a.get("input")), RowFmt::Colon),
         "file_md5" => { let p = a.file("file").ok_or_else(|| anyhow::anyhow!(t("tools.err_need_file")))?; Output::kv(crypto::file_hash_rows(p, a.get("algo"))?, RowFmt::Colon) }
         "sha" => Output::kv(crypto::sha_rows(a.get("input"), a.on("upper")), RowFmt::Pad(8)),
-        "hmac" => crypto::hmac(a.get("input"), a.get("key"), a.get("algo"))?.into(),
+        "hmac" => Output::kv(crypto::hmac_rows(a.get("input"), a.get("key"), a.get("algo"))?, RowFmt::Pad(7)),
         "aes" | "des" | "rc4" | "rabbit" => crypto::cipher(id, a)?.into(),
         "base64" => crypto::base64(a.get("input"), a.get("dir") == "dec", a.on("url"))?.into(),
         "url" => crypto::url(a.get("input"), a.get("dir"))?.into(),
@@ -322,7 +359,11 @@ pub fn run(id: &str, a: &Args) -> Result<Output> {
         "timestamp" => Output::kv(time::timestamp_rows(a.get("input"), chrono::Local::now())?, RowFmt::Colon),
         "date_calc" => Output::kv(time::date_calc_rows(a)?, RowFmt::Colon),
         "workday" => Output::kv(time::workday_rows(a)?, RowFmt::Colon),
-        "batch_time" => time::batch(a.get("input"), a.get("mode"), a.get("unit") == "ms").into(),
+        "batch_time" => match time::batch_rows(a.get("input"), a.get("mode"), a.get("unit") == "ms") {
+            // 复制全部仍是只含结果的逐行文本
+            Some(rows) => Output { text: time::batch(a.get("input"), a.get("mode"), a.get("unit") == "ms"), kind: OutKind::Kv, rows, ..Default::default() },
+            None => time::batch(a.get("input"), a.get("mode"), a.get("unit") == "ms").into(),
+        },
         "password" => gen::password_output(a)?,
         "uuid" => gen::uuid_output(a)?,
         "random_num" => gen::number_output(a)?,
@@ -400,10 +441,11 @@ mod tests {
         // 空进制输入没有行
         a.set("input", "").set("from", "auto");
         assert!(run("radix", &a).unwrap().rows.is_empty());
-        // 身份证：无效时主结果为危险色
+        // 身份证：无效时横幅为危险色，明细行仍在
         a.set("input", "110101199003070000");
         let o = run("id_card", &a).unwrap();
-        assert!(o.rows[0].primary && o.rows[0].tone.is_some());
+        assert_eq!(o.verdict.as_ref().unwrap().tone, Tone::Danger);
+        assert!(!o.rows.is_empty());
     }
     use super::*;
     #[test]
@@ -468,5 +510,88 @@ mod i18n_tests {
         }
         missing.sort(); missing.dedup();
         assert!(missing.is_empty(), "missing: {missing:?}");
+    }
+}
+
+#[cfg(test)]
+mod verdict_tests {
+    use super::*;
+
+    fn go(id: &str, kv: &[(&str, &str)]) -> Output {
+        let mut a = Args::default();
+        for (k, v) in kv { a.set(k, *v); }
+        run(id, &a).unwrap()
+    }
+
+    #[test]
+    fn regex_matches_and_marks() {
+        let o = go("regex", &[("pattern", r"(\d+)-(?P<b>\d+)"), ("input", "1-2 x 30-40"), ("replace", "<$1>")]);
+        assert_eq!(o.verdict.as_ref().unwrap().tone, Tone::Good);
+        assert_eq!(o.kind, OutKind::Kv);
+        // 每处匹配一行（主结果）+ 每个捕获组一行
+        assert_eq!(o.rows.iter().filter(|r| r.primary).count(), 2);
+        assert_eq!(o.rows.len(), 6);
+        assert_eq!(o.source.as_ref().unwrap().marks, vec![(0, 3), (6, 11)]);
+        assert_eq!(o.alt.as_deref(), Some("<1> x <30>"));
+        // 没填替换内容时没有替换页文本
+        assert!(go("regex", &[("pattern", "a"), ("input", "b")]).alt.is_none());
+    }
+
+    #[test]
+    fn regex_no_match_and_invalid() {
+        let o = go("regex", &[("pattern", "z"), ("input", "abc")]);
+        assert_eq!(o.verdict.as_ref().unwrap().tone, Tone::Warn);
+        assert!(o.rows.is_empty() && o.source.is_some());
+        let o = go("regex", &[("pattern", "("), ("input", "abc")]);
+        assert_eq!(o.verdict.as_ref().unwrap().tone, Tone::Danger);
+        assert!(o.source.is_none() && !o.rows.is_empty());
+        // 没填表达式仍是输入错误
+        let mut a = Args::default();
+        a.set("input", "x");
+        assert!(run("regex", &a).is_err());
+    }
+
+    #[test]
+    fn regex_marks_are_cut_at_preview() {
+        let big = "ab".repeat(5000);
+        let o = go("regex", &[("pattern", "a"), ("input", &big)]);
+        let src = o.source.unwrap();
+        assert!(src.text.len() <= 4000 && src.marks.iter().all(|m| m.1 <= src.text.len()));
+        assert!(o.rows.iter().any(|r| r.value.contains("200")));
+    }
+
+    #[test]
+    fn id_card_verdict() {
+        let ok = go("id_card", &[("input", "11010519491231002X")]);
+        assert_eq!(ok.verdict.as_ref().unwrap().tone, Tone::Good);
+        assert!(ok.rows.iter().all(|r| !r.primary));
+        let bad = go("id_card", &[("input", "110105194912310021")]);
+        assert_eq!(bad.verdict.as_ref().unwrap().tone, Tone::Danger);
+        assert!(!bad.rows.is_empty());
+        let fmt = go("id_card", &[("input", "123")]);
+        assert_eq!(fmt.verdict.as_ref().unwrap().tone, Tone::Danger);
+        assert!(run("id_card", &Args::default()).is_err());
+    }
+
+    #[test]
+    fn json_verdict_and_location() {
+        let ok = go("json", &[("input", r#"{"a":1}"#), ("mode", "format"), ("indent", "2")]);
+        assert_eq!(ok.verdict.as_ref().unwrap().tone, Tone::Good);
+        assert!(!ok.text.contains(&ok.verdict.as_ref().unwrap().text), "复制内容不混入横幅");
+        let bad = go("json", &[("input", "{\n  \"a\": 1,\n  \"b\": \n}"), ("mode", "format"), ("indent", "2")]);
+        let v = bad.verdict.unwrap();
+        assert_eq!(v.tone, Tone::Danger);
+        assert!(v.text.contains('4'), "{}", v.text);
+        // 出错行标红，前后行作为上下文
+        assert!(bad.rows.iter().any(|r| r.tone == Some(Tone::Danger)));
+        assert!(go("json", &[("input", "  ")]).verdict.is_none());
+    }
+
+    #[test]
+    fn cron_verdict() {
+        assert_eq!(go("cron", &[("input", "*/5 * * * *"), ("count", "3")]).verdict.unwrap().tone, Tone::Good);
+        let bad = go("cron", &[("input", "99 * * * *")]);
+        assert_eq!(bad.verdict.unwrap().tone, Tone::Danger);
+        assert!(run("cron", &Args::default()).is_err());
     }
 }

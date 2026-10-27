@@ -2,10 +2,41 @@
 use anyhow::{anyhow, bail, Result};
 use serde_json::Value;
 
-use super::{rows_text, Row, RowFmt, Tone};
+use super::{rows_text, Output, Row, RowFmt, Tone};
 use crate::i18n::{t, tf};
 
 fn json_err(e: serde_json::Error) -> anyhow::Error { anyhow!(tf("tools.err_json", &[("line", &e.line()), ("col", &e.column()), ("msg", &e)])) }
+
+/// JSON 格式化 / 压缩，并给出有效性横幅；写错时给出位置（行、列）和附近几行，不再只报一条错误。
+pub fn json_output(s: &str, minify: bool, indent: &str, sort: bool) -> Output {
+    if s.trim().is_empty() { return Output::default(); }
+    match serde_json::from_str::<Value>(s) {
+        Ok(_) => match json(s, minify, indent, sort) {
+            Ok(text) => Output::text(text).verdict(Tone::Good, t("tools.json_valid")),
+            Err(e) => Output::fail(e.to_string(), vec![]),
+        },
+        Err(e) => {
+            let (line, col) = (e.line().max(1), e.column().max(1));
+            let mut rows = vec![Row::kv(t("tools.json_reason"), e.to_string()), Row::kv(t("tools.json_pos"), tf("tools.json_pos_v", &[("line", &line), ("col", &col)]))];
+            let lines: Vec<&str> = s.lines().collect();
+            for n in line.saturating_sub(1).max(1)..=(line + 1).min(lines.len()) {
+                let r = Row::kv(n.to_string(), json_excerpt(lines[n - 1], if n == line { col } else { 1 }));
+                rows.push(if n == line { r.tone(Tone::Danger) } else { r });
+            }
+            Output::fail(tf("tools.json_invalid_at", &[("line", &line), ("col", &col)]), rows)
+        }
+    }
+}
+
+/// 长行只留出错位置附近的一段。
+fn json_excerpt(line: &str, col: usize) -> String {
+    const SPAN: usize = 60;
+    let chars: Vec<char> = line.chars().collect();
+    if chars.len() <= SPAN * 2 { return line.to_string(); }
+    let c = col.saturating_sub(1).min(chars.len());
+    let (a, b) = (c.saturating_sub(SPAN), (c + SPAN).min(chars.len()));
+    format!("{}{}{}", if a > 0 { "…" } else { "" }, chars[a..b].iter().collect::<String>(), if b < chars.len() { "…" } else { "" })
+}
 
 fn sort_value(v: Value) -> Value {
     match v {

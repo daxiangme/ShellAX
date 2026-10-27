@@ -1,7 +1,7 @@
 //! 文本类工具。
 use anyhow::{bail, Result};
 
-use super::{rows_text, Row, RowFmt, Tone};
+use super::{rows_text, Output, Row, RowFmt, Source, Tone};
 use crate::i18n::{t, tf};
 
 pub fn dedupe(s: &str, ignore_case: bool, trim: bool, drop_empty: bool, sort: bool) -> String {
@@ -138,11 +138,62 @@ pub fn regex_test(pat: &str, text: &str, replace: &str, i: bool, m: bool, s: boo
     Ok(if out.is_empty() { t("tools.no_match").to_string() } else { format!("{}\n{}", tf("tools.n_matches", &[("n", &re.find_iter(text).count())]), out.join("\n")) })
 }
 
+/// 正则测试：匹配页（匹配数横幅、逐处匹配与捕获组、原文高亮）和替换页。
+/// 表达式本身写错时给出失败横幅而不是报错，输入还没填时才报错。
+pub fn regex_run(pat: &str, text: &str, replace: &str, i: bool, m: bool, s: bool) -> Result<Output> {
+    const SHOW: usize = 200;
+    if pat.is_empty() { bail!(t("tools.err_need_pattern")); }
+    let re = match regex::RegexBuilder::new(pat).case_insensitive(i).multi_line(m).dot_matches_new_line(s).build() {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = e.to_string();
+            let reason = msg.lines().last().unwrap_or("").trim().trim_start_matches("error:").trim().to_string();
+            return Ok(Output::fail(t("tools.rx_invalid"), vec![Row::kv(t("tools.rx_reason"), if reason.is_empty() { msg } else { reason })]));
+        }
+    };
+    let names: Vec<Option<&str>> = re.capture_names().collect();
+    let mut rows = vec![];
+    let mut marks = vec![];
+    let mut total = 0usize;
+    for (n, c) in re.captures_iter(text).enumerate().take(1000) {
+        total = n + 1;
+        let m0 = c.get(0).unwrap();
+        if m0.start() < m0.end() { marks.push((m0.start(), m0.end())); }
+        if n < SHOW {
+            rows.push(Row::kv(format!("#{}", n + 1), m0.as_str()).primary().tag(format!("{}–{}", m0.start(), m0.end()), Tone::Muted));
+            for (gi, g) in c.iter().enumerate().skip(1) {
+                let label = names[gi].map(|s| s.to_string()).unwrap_or_else(|| gi.to_string());
+                let r = Row::kv(format!("    ${label}"), g.map(|x| x.as_str()).unwrap_or("—"));
+                rows.push(if g.is_none() { r.tone(Tone::Muted) } else { r });
+            }
+        }
+    }
+    if total > SHOW { rows.push(Row::item(tf("tools.rx_more", &[("n", &SHOW)])).tone(Tone::Muted)); }
+    let (tone, banner) = if total == 0 { (Tone::Warn, t("tools.no_match").to_string()) } else { (Tone::Good, tf("tools.n_matches", &[("n", &total)])) };
+    // 原文预览只取前面一段；高亮区间超出预览的丢掉
+    let mut cut = text.len().min(4000);
+    while !text.is_char_boundary(cut) { cut -= 1; }
+    let marks: Vec<(usize, usize)> = marks.into_iter().filter(|m| m.1 <= cut).collect();
+    let mut o = Output::kv(rows, RowFmt::Colon);
+    o.kind = super::OutKind::Kv;
+    o.source = Some(Source { text: text[..cut].to_string(), marks });
+    if !replace.is_empty() { o.alt = Some(re.replace_all(text, replace).into_owned()); }
+    Ok(o.verdict(tone, banner))
+}
+
 /// 大陆 18 位身份证号校验。
 pub fn id_card(s: &str, today: chrono::NaiveDate) -> Result<String> { Ok(rows_text(&id_card_rows(s, today)?, RowFmt::Colon)) }
 
-/// 校验结果（主结果，有效绿色/无效红色）+ 校验位、地区、生日、年龄、性别。
+/// 校验结果一行（有效绿色 / 无效红色）+ 明细行；旧的整段文本由它拼出。
 pub fn id_card_rows(s: &str, today: chrono::NaiveDate) -> Result<Vec<Row>> {
+    let (valid, details) = id_card_check(s, today)?;
+    let mut rows = vec![Row::kv(t("tools.id_result"), if valid { t("tools.id_valid") } else { t("tools.id_invalid") }).primary().tone(if valid { Tone::Good } else { Tone::Danger })];
+    rows.extend(details);
+    Ok(rows)
+}
+
+/// 是否有效 + 明细行（校验位、地区、生日、年龄、性别）。结果横幅由界面画。
+pub fn id_card_check(s: &str, today: chrono::NaiveDate) -> Result<(bool, Vec<Row>)> {
     use chrono::Datelike;
     let id: String = s.trim().to_uppercase().chars().filter(|c| !c.is_whitespace()).collect();
     if id.len() != 18 || !id[..17].chars().all(|c| c.is_ascii_digit()) || !id[17..].chars().all(|c| c.is_ascii_digit() || c == 'X') { bail!(t("tools.id_bad_format")); }
@@ -155,7 +206,6 @@ pub fn id_card_rows(s: &str, today: chrono::NaiveDate) -> Result<Vec<Row>> {
     let male = (id.as_bytes()[16] - b'0') % 2 == 1;
     let valid = ok && birth.is_some();
     let mut lines = vec![
-        Row::kv(t("tools.id_result"), if valid { t("tools.id_valid") } else { t("tools.id_invalid") }).primary().tone(if valid { Tone::Good } else { Tone::Danger }),
         Row::kv(t("tools.id_check"), format!("{} ({})", if ok { "✓" } else { "✗" }, tf("tools.id_expect", &[("c", &expect)]))),
         Row::kv(t("tools.id_region"), &id[..6]),
     ];
@@ -169,7 +219,7 @@ pub fn id_card_rows(s: &str, today: chrono::NaiveDate) -> Result<Vec<Row>> {
         None => lines.push(Row::kv(t("tools.id_birth"), "✗")),
     }
     lines.push(Row::kv(t("tools.id_gender"), if male { t("tools.id_male") } else { t("tools.id_female") }));
-    Ok(lines)
+    Ok((valid, lines))
 }
 
 fn is_emoji(c: char) -> bool {

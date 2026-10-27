@@ -58,11 +58,15 @@ pub fn sha_rows(s: &str, upper: bool) -> Vec<Row> {
         .into_iter().map(|(k, v)| Row::kv(k, if upper { v.to_uppercase() } else { v })).collect()
 }
 
-pub fn hmac(s: &str, key: &str, algo: &str) -> Result<String> {
+pub fn hmac(s: &str, key: &str, algo: &str) -> Result<String> { Ok(rows_text(&hmac_rows(s, key, algo)?, RowFmt::Pad(7))) }
+
+/// 三行：小写十六进制（主结果）、大写十六进制、Base64。
+pub fn hmac_rows(s: &str, key: &str, algo: &str) -> Result<Vec<Row>> {
     use hmac::{Hmac, Mac};
     macro_rules! mac { ($d:ty) => {{ let mut m = <Hmac<$d> as Mac>::new_from_slice(key.as_bytes()).map_err(|e| anyhow!(e.to_string()))?; m.update(s.as_bytes()); m.finalize().into_bytes().to_vec() }} }
     let out = match algo { "md5" => mac!(md5::Md5), "sha1" => mac!(sha1::Sha1), "sha224" => mac!(sha2::Sha224), "sha384" => mac!(sha2::Sha384), "sha512" => mac!(sha2::Sha512), _ => mac!(sha2::Sha256) };
-    Ok(format!("Hex     {}\nHEX     {}\nBase64  {}", hex::encode(&out), hex::encode(&out).to_uppercase(), b64().encode(&out)))
+    let hex = hex::encode(&out);
+    Ok(vec![Row::kv("Hex", hex.clone()).primary(), Row::kv("HEX", hex.to_uppercase()), Row::kv("Base64", b64().encode(&out))])
 }
 
 fn b64() -> base64::engine::GeneralPurpose { base64::engine::general_purpose::STANDARD }

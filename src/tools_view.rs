@@ -40,6 +40,8 @@ pub struct ToolView {
     /// 刚复制过的行（用于短暂显示对勾）与其计时序号。
     copied: Option<String>,
     copy_seq: u64,
+    /// 正则工具的结果页：`match` / `replace`。
+    tab: &'static str,
     ws: Option<WsState>,
     rt: tokio::runtime::Handle,
     _subs: Vec<gpui::Subscription>,
@@ -85,7 +87,7 @@ impl ToolView {
             subs.push(cx.subscribe_in(&w.msg, window, |this: &mut Self, _, ev: &InputEvent, w, cx| if let InputEvent::PressEnter { .. } = ev { this.ws_send(w, cx) }));
         }
         let title = spec.name.clone();
-        let mut me = Self { spec, title, texts, areas, picks, files: HashMap::new(), out_ed, output: Output::default(), error: None, notice: None, busy: false, seq: 0, pending_out: None, hist, copied: None, copy_seq: 0, ws, rt, _subs: subs };
+        let mut me = Self { spec, title, texts, areas, picks, files: HashMap::new(), out_ed, output: Output::default(), error: None, notice: None, busy: false, seq: 0, pending_out: None, hist, copied: None, copy_seq: 0, tab: "match", ws, rt, _subs: subs };
         if me.spec.live && !me.spec.interactive && !me.spec.heavy { me.run(cx); }
         me
     }
@@ -139,7 +141,8 @@ impl ToolView {
                     // 生成类：追加一批到历史，旧结果保留
                     OutKind::Rows => { self.hist.borrow_mut().push(chrono::Local::now().format("%H:%M:%S").to_string(), o.meta.clone(), o.rows.clone()); }
                     OutKind::Text => self.pending_out = Some(o.text.clone()),
-                    OutKind::Kv => {}
+                    // 带原文预览的键值结果（正则）：替换页的文本放进输出编辑器
+                    OutKind::Kv => if o.source.is_some() { self.pending_out = Some(o.alt.clone().unwrap_or_default()); },
                 }
                 self.output = o;
             }
@@ -181,6 +184,7 @@ impl ToolView {
     /// 复制/保存/发送到终端用的文本：生成类取最新一批，其余取输出全文。
     fn output_text(&self) -> String {
         if tools::has_history(&self.spec.id) { return self.hist.borrow().latest().map(|b| b.text()).unwrap_or_default(); }
+        if self.tab == "replace" && self.output.source.is_some() { return self.output.alt.clone().unwrap_or_default(); }
         self.output.text.clone()
     }
 
@@ -374,6 +378,25 @@ impl ToolView {
         list.into_any_element()
     }
 
+    /// 正则结果：匹配 / 替换两页。匹配页是原文高亮预览 + 逐处匹配；替换页是替换后的全文。
+    fn render_regex(&self, cx: &mut Context<Self>) -> AnyElement {
+        let me = cx.entity().downgrade();
+        let tabs = [("match".to_string(), t("tools.tab_match").to_string()), ("replace".to_string(), t("tools.tab_replace").to_string())];
+        let bar = div().mx(px(SUB_PAD)).mt(px(ui::SP_2)).flex_shrink_0()
+            .child(ui::segmented("rx-tab", &tabs, self.tab, move |v, _w, cx| { let _ = me.update(cx, |this, cx| { this.tab = if v == "replace" { "replace" } else { "match" }; cx.notify(); }); }));
+        let body: AnyElement = if self.tab == "replace" {
+            if self.output.alt.is_none() {
+                div().flex_1().min_h_0().p(px(SUB_PAD)).text_size(px(ui::fs_small())).text_color(c(cur().subtext)).child(t("tools.rx_replace_hint")).into_any_element()
+            } else {
+                sub_card_body().flex_1().min_h_0().child(Editor::new(&self.out_ed).h_full()).into_any_element()
+            }
+        } else {
+            let src = self.output.source.as_ref().map(|s| result_list::source_preview("rx-src", s));
+            div().flex_1().min_h_0().flex().flex_col().children(src).child(self.render_kv(cx)).into_any_element()
+        };
+        div().flex_1().min_h_0().flex().flex_col().child(bar).child(body).into_any_element()
+    }
+
     fn field_label(s: &str) -> impl IntoElement {
         div().text_size(px(ui::fs_small())).text_color(c(cur().overlay1)).child(s.to_string())
     }
@@ -458,8 +481,11 @@ impl Render for ToolView {
         // 输出卡片
         let mut out = sub_card().flex().flex_col().min_h(px(120.)).child(self.out_head(true, cx));
         if let Some(e) = &self.error { out = out.child(ui::notice(ui::Notice::Error, e.clone()).mx(px(SUB_PAD)).my(px(ui::SP_2))); }
+        if let (Some(v), false) = (&self.output.verdict, self.error.is_some()) { out = out.child(result_list::verdict_banner(v)); }
         if tools::has_history(&self.spec.id) {
             out = out.child(self.render_history(cx));
+        } else if self.output.kind == OutKind::Kv && self.output.source.is_some() {
+            out = out.child(self.render_regex(cx));
         } else if self.output.kind == OutKind::Kv {
             out = out.child(self.render_kv(cx));
         } else {

@@ -2,7 +2,7 @@
 use anyhow::{anyhow, bail, Result};
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
 
-use super::{rows_text, Args, Row, RowFmt};
+use super::{rows_text, Args, Row, RowFmt, Tone};
 use crate::i18n::{t, tf};
 
 /// 解析常见日期时间写法（本地时区）。
@@ -122,21 +122,42 @@ pub fn workday_rows(a: &Args) -> Result<Vec<Row>> {
         Row::kv(t("tools.wk_start_is"), if is_workday(start, &hol, &extra) { t("tools.wk_workday") } else { t("tools.wk_restday") })])
 }
 
+/// 单行转换；`None` 表示这一行转换失败。
+fn batch_line(x: &str, mode: &str, ms: bool, num: &regex::Regex, re: &regex::Regex) -> Option<String> {
+    let is_ts = num.is_match(x);
+    if (mode == "to_date" || (mode == "auto" && is_ts)) && is_ts {
+        return x.parse::<i64>().ok().and_then(from_ts).map(|d| d.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string());
+    }
+    if mode == "to_date" { return None; }
+    // 行内可能含日志前缀：取第一个能解析的日期时间片段
+    let cand = re.find(x).map(|m| m.as_str()).unwrap_or(x);
+    parse_dt(cand).map(|d| if ms { d.timestamp_millis().to_string() } else { d.timestamp().to_string() })
+}
+
+fn batch_regexes() -> (regex::Regex, regex::Regex) {
+    (regex::Regex::new(r"^-?\d{9,19}$").unwrap(),
+     regex::Regex::new(r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}(?:[ T]\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?(?:Z|[+-]\d{2}:?\d{2})?").unwrap())
+}
+
 pub fn batch(s: &str, mode: &str, ms: bool) -> String {
-    let num = regex::Regex::new(r"^-?\d{9,19}$").unwrap();
+    let (num, re) = batch_regexes();
     s.lines().map(|l| {
         let x = l.trim();
         if x.is_empty() { return String::new(); }
-        let is_ts = num.is_match(x);
-        if (mode == "to_date" || (mode == "auto" && is_ts)) && is_ts {
-            return x.parse::<i64>().ok().and_then(from_ts).map(|d| d.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_else(|| format!("{x}  ✗"));
-        }
-        if mode == "to_date" { return format!("{x}  ✗"); }
-        // 行内可能含日志前缀：取第一个能解析的日期时间片段
-        let re = regex::Regex::new(r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}(?:[ T]\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?(?:Z|[+-]\d{2}:?\d{2})?").unwrap();
-        let cand = re.find(x).map(|m| m.as_str()).unwrap_or(x);
-        match parse_dt(cand) { Some(d) => if ms { d.timestamp_millis().to_string() } else { d.timestamp().to_string() }, None => format!("{x}  ✗") }
+        batch_line(x, mode, ms, &num, &re).unwrap_or_else(|| format!("{x}  ✗"))
     }).collect::<Vec<_>>().join("\n")
+}
+
+/// 每个非空输入行一行结果：左侧原文，右侧转换结果，失败的标红。行数过多时返回 `None`，界面退回纯文本。
+pub fn batch_rows(s: &str, mode: &str, ms: bool) -> Option<Vec<Row>> {
+    const MAX: usize = 300;
+    let (num, re) = batch_regexes();
+    let lines: Vec<&str> = s.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    if lines.is_empty() || lines.len() > MAX { return None; }
+    Some(lines.into_iter().map(|x| match batch_line(x, mode, ms, &num, &re) {
+        Some(v) => Row::kv(x, v),
+        None => Row::kv(x, "✗").tone(Tone::Danger),
+    }).collect())
 }
 
 #[cfg(test)]

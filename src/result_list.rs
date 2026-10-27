@@ -95,3 +95,25 @@ pub fn batch_head(h: BatchHead) -> Div {
         .child(ui::icon_button(SharedString::from(format!("bh-{id}-cp")), IconName::Copy, IconBtn::Sm, t("tools.hist_copy_batch")).on_click(h.on_copy))
         .child(ui::icon_button_state(SharedString::from(format!("bh-{id}-del")), IconName::Trash, IconBtn::Sm, t("tools.hist_delete_batch"), false, true).on_click(h.on_delete))
 }
+
+/// 判定横幅：淡底色块 + 图标 + 一句话结论（通过 / 失败 / 提示），画在输出卡片顶部。
+pub fn verdict_banner(v: &ssh_term_proto::tools::Verdict) -> Div {
+    let col = tone_color(v.tone);
+    let ic = match v.tone { Tone::Good => IconName::CircleCheck, Tone::Danger => IconName::CircleX, Tone::Warn => IconName::TriangleAlert, _ => IconName::Info };
+    div().mx(px(crate::card_layout::SUB_PAD)).mt(px(crate::card_layout::SUB_PAD)).px(px(ui::ROW_PX)).py(px(ui::SP_2)).rounded(px(ui::R_MD)).bg(col.opacity(0.10))
+        .flex().items_center().gap(px(ui::SP_2)).flex_shrink_0()
+        .child(ui::icon(ic, ui::IC_SM, col))
+        .child(div().flex_1().min_w_0().whitespace_normal().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(col).child(v.text.clone()))
+}
+
+/// 原文预览：等宽字体，匹配到的片段用强调色底高亮；内容多时在框内滚动。
+pub fn source_preview(id: &'static str, src: &ssh_term_proto::tools::Source) -> Div {
+    let th = cur();
+    let hl: Vec<(std::ops::Range<usize>, gpui::HighlightStyle)> = src.marks.iter()
+        .map(|&(a, b)| (a..b, gpui::HighlightStyle { background_color: Some(c(th.accent).opacity(0.28)), font_weight: Some(FontWeight::BOLD), ..Default::default() })).collect();
+    div().mx(px(crate::card_layout::SUB_PAD)).mt(px(ui::SP_2)).flex_shrink_0()
+        .child(div().text_size(px(ui::fs_caption())).text_color(c(th.overlay1)).pb(px(ui::SP_1)).child(t("tools.rx_src")))
+        .child(div().id(id).max_h(px(120.)).overflow_y_scroll().px(px(ui::ROW_PX)).py(px(ui::SP_2)).rounded(px(ui::R_MD)).bg(crate::theme::hover_bg())
+            .font_family(ui::mono_family()).text_size(px(ui::fs_mono())).text_color(c(th.text)).whitespace_normal()
+            .child(gpui::StyledText::new(SharedString::from(src.text.clone())).with_highlights(hl)))
+}
