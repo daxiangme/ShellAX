@@ -21,6 +21,7 @@ use crate::ui::{self, fs_body, fs_small, icon, IconName, H_COMPACT, H_DEFAULT, R
 
 // 左右留白：只由工作区包裹层的 `card_layout::CARD_PAD` 提供（与数据库等模块一致）。
 // 标题栏、双栏面板、传输队列、状态行都不再叠加自己的左右内边距，所以标题图标的左边缘与面板卡片左边缘对齐，右侧同理。
+// 页面标题不是弹窗：行高用工具栏高度，标题与下方内容之间只留 `CARD_PAD`，避免 48px 弹窗头在文字上下留出大块空白。
 
 #[derive(Clone)]
 pub struct DragFile { pub pane: usize, pub path: String, pub name: String }
@@ -923,6 +924,13 @@ impl SftpView {
         }
         bar
     }
+    /// 页内标题行：沿用弹窗头的图标和字号，但高度改为工具栏，并取消左右内边距以与下方卡片对齐。
+    fn page_head(&self, title: &str, cx: &mut Context<Self>) -> gpui::Div {
+        ui::dialog_header(Some(IconName::FolderSync), c(cur().accent), title, None, None)
+            .px_0()
+            .h(px(ui::TOOLBAR_H))
+            .child(self.follow_bar(cx))
+    }
     fn frame(&self) -> gpui::Div {
         let th = cur();
         div().size_full().min_h_0().flex().flex_col().bg(c(th.base)).overflow_hidden()
@@ -1323,7 +1331,7 @@ impl Render for SftpView {
                 .child(ui::button("del-cancel", t("ui.cancel"), 3).on_click(cx.listener(|v, _, _, cx| { v.confirm_delete = None; cx.notify() })))
         });
         if let Some((pi, path, _, st, force)) = self.editor.clone() {
-            let ed = div().flex_1().min_h_0().pt_3().flex().flex_col().gap_2()
+            let ed = div().flex_1().min_h_0().pt(px(crate::card_layout::CARD_PAD)).flex().flex_col().gap_2()
                 .child(div().flex().items_center().gap_2().text_size(px(fs_small())).text_color(c(th.text))
                     .child(icon(IconName::FileText, ui::IC_SM, c(th.accent)))
                     .child(div().flex_1().min_w_0().overflow_hidden().child(format!("{}:{path}", self.panes[pi].label())))
@@ -1332,7 +1340,7 @@ impl Render for SftpView {
                 .child(div().flex_1().min_h_0().border_1().border_color(crate::theme::divider()).rounded(px(ui::R_LG)).overflow_hidden().child(Editor::new(&st).h_full()));
             let status = div().py_2().text_size(px(fs_small())).text_color(if self.error { c(th.error) } else { c(th.overlay1) }).child(self.status.clone());
             return self.frame()
-                .child(ui::dialog_header(Some(IconName::FolderSync), c(cur().accent), t("sftp.editor_title"), None, None).px_0().child(self.follow_bar(cx)))
+                .child(self.page_head(t("sftp.editor_title"), cx))
                 .child(ed).child(status);
         }
         let sync = self.sync_panel(cx);
@@ -1345,13 +1353,12 @@ impl Render for SftpView {
             .child(arrow("sftp-to-right", IconName::ArrowRight, 0))
             .child(arrow("sftp-to-left", IconName::ArrowLeft, 1));
         let (left, right) = (self.pane(0, cx), self.pane(1, cx));
-        let body = div().flex_1().min_h_0().pt_3().flex().gap(px(ui::SP_1)).child(left).child(mid).child(right);
+        let body = div().flex_1().min_h_0().pt(px(crate::card_layout::CARD_PAD)).flex().gap(px(ui::SP_1)).child(left).child(mid).child(right);
         let status = div().py_2().text_size(px(fs_small())).text_color(if self.error { c(th.error) } else { c(th.overlay1) }).child(if self.status.is_empty() { t("sftp.dnd_hint").to_string() } else { format!("{} · {}", self.status, t("sftp.dnd_hint")) });
         let ctx = self.ctx_menu.as_ref().map(|(_, m)| crate::ctxmenu_view::render(m, cx, Self::ctx_pick, Self::ctx_close));
         let ops = self.ops_menu_el(cx);
         self.frame()
-            .child(ui::dialog_header(Some(IconName::FolderSync), c(cur().accent), t("ui.sftp_files"), None, None).px_0()
-                .child(self.follow_bar(cx)))
+            .child(self.page_head(t("ui.sftp_files"), cx))
             .children(ctx).children(ops)
             .children(edit_bar).children(confirm).children(sync)
             .child(body)
