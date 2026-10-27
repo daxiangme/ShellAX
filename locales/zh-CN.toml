@@ -2130,3 +2130,5 @@
 "tools.tab_preview" = "预览"
 "tools.tab_source" = "源码"
 "tools.preview_zip_note" = "预览：压缩包内第一张图片"
+"tools.ui_stat" = "{lines} 行 · {chars} 字符"
+"tools.ui_swap" = "用结果替换输入"

@@ -178,6 +178,15 @@ impl ToolView {
         cx.notify();
     }
 
+    /// 把当前结果放回第一个输入框并重新运行（加密后再解密、格式化后再压缩等来回操作）。
+    fn swap(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.output_text();
+        let Some(f) = self.spec.inputs.first().cloned() else { return };
+        let Some(a) = self.areas.get(&f.id) else { return };
+        a.update(cx, |e, cx| e.set_value(text, window, cx));
+        self.run(cx);
+    }
+
     /// 清空历史（只清结果，输入与选项都保留）。
     fn clear_history(&mut self, cx: &mut Context<Self>) {
         self.hist.borrow_mut().clear();
@@ -328,11 +337,16 @@ impl ToolView {
         let small = |id: &'static str, ic: IconName, tip: &'static str| div().id(id).h(px(ui::H_COMPACT)).px_2().rounded(px(ui::R_MD)).flex().items_center().gap_1().cursor_pointer()
             .text_size(px(ui::fs_small())).text_color(c(cur().subtext)).hover(|s| s.bg(crate::theme::hover_bg()))
             .child(icon(ic, ui::IC_XS, c(cur().overlay1))).child(tip);
+        let plain = self.output.kind == OutKind::Text && self.output.file.is_none() && !self.output.text.is_empty() && self.ws.is_none() && !tools::has_history(&self.spec.id);
+        let stat = plain.then(|| tools::text_stats(&self.output.text));
+        let can_swap = plain && self.spec.id != "md_html" && self.spec.inputs.first().is_some_and(|f| f.kind == FieldKind::Multiline);
         ui::toolbar()
             .child(div().flex_1().text_size(px(ui::fs_small())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.overlay1)).child(t("tools.ui_output")))
+            .when_some(stat, |d, (l, n)| d.child(div().text_size(px(ui::fs_caption())).text_color(c(th.overlay1)).child(tf("tools.ui_stat", &[("lines", &l), ("chars", &n)]))))
             .when_some(self.notice.clone(), |d, n| d.child(div().text_size(px(ui::fs_small())).text_color(c(th.success)).child(n)))
             .when(self.busy, |d| d.child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(t("tools.ui_running"))))
             .child(small("out-copy", IconName::Copy, t("tools.ui_copy")).on_click(cx.listener(|this, _, _w, cx| this.copy(cx))))
+            .when(full && can_swap, |d| d.child(small("out-swap", IconName::ArrowLeftRight, t("tools.ui_swap")).on_click(cx.listener(|this, _, w, cx| this.swap(w, cx)))))
             .when(full, |d| d.child(small("out-save", IconName::Save, t("tools.ui_save")).on_click(cx.listener(|this, _, _w, cx| this.save(cx))))
                 .child(small("out-term", IconName::SquareTerminal, t("tools.ui_send_term")).on_click(cx.listener(|this, _, _w, cx| { let s = this.output_text(); if !s.is_empty() { cx.emit(ToolEvent::SendToTerminal(s)); } }))))
             .when(self.ws.is_some(), |d| d.child(small("out-clear", IconName::Eraser, t("tools.ui_clear")).on_click(cx.listener(|this, _, _w, cx| this.clear_log(cx)))))
@@ -502,7 +516,11 @@ impl Render for ToolView {
         let mut input = sub_card().p(px(SUB_PAD)).flex().flex_col().gap_2();
         let mut tall = false;
         for f in self.spec.inputs.clone() {
-            let mut row = div().flex().flex_col().gap_1().child(Self::field_label(&f.label));
+            let mut row = div().flex().flex_col().gap_1();
+            // 多行输入的标签行右侧显示行数与字符数
+            let stat = if f.kind == FieldKind::Multiline { self.areas.get(&f.id).map(|a| tools::text_stats(&a.read(cx).value())).filter(|s| s.1 > 0) } else { None };
+            row = row.child(div().flex().items_center().child(div().flex_1().child(Self::field_label(&f.label)))
+                .children(stat.map(|(l, n)| div().text_size(px(ui::fs_caption())).text_color(c(th.overlay1)).child(tf("tools.ui_stat", &[("lines", &l), ("chars", &n)])))));
             match f.kind {
                 FieldKind::Multiline => { tall = true; row = row.flex_1().min_h(px(90.)).child(div().flex_1().min_h(px(80.)).child(Editor::new(&self.areas[&f.id]).h_full())); }
                 FieldKind::Text | FieldKind::Number => { row = row.child(ui::text_field(&self.texts[&f.id], false)); }

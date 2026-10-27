@@ -227,6 +227,9 @@ impl Output {
         Output { text: format!("{text}\n{}", rows_text(&rows, RowFmt::Colon)).trim_end().to_string(), kind: OutKind::Kv, rows, verdict: Some(Verdict { tone: Tone::Danger, text }), ..Default::default() }
     }
 }
+/// 文本的行数与字符数（空文本为 0 行）。
+pub fn text_stats(s: &str) -> (usize, usize) { (s.lines().count(), s.chars().count()) }
+
 impl From<String> for Output { fn from(s: String) -> Output { Output::text(s) } }
 
 /// 带会话历史的工具（生成类）：每次运行追加一批，不覆盖旧结果。
@@ -291,14 +294,14 @@ pub fn builtin() -> Vec<ToolSpec> {
         ToolSpec { heavy: true, live: false, ..spec("file_md5", "crypto", "file md5 sha checksum hash", vec![F::file("file", t("tools.f_file"))], vec![F::select("algo", t("tools.f_algo"), &[("md5", "MD5"), ("sha1", "SHA-1"), ("sha256", "SHA-256"), ("sha512", "SHA-512")])]) },
         spec("sha", "crypto", "sha1 sha256 sha512 hash", vec![input()], vec![F::toggle("upper", t("tools.o_uppercase"), false)]),
         spec("hmac", "crypto", "hmac hash", vec![input(), F::text("key", t("tools.f_key"))], vec![F::select("algo", t("tools.f_algo"), &[("sha256", "SHA-256"), ("sha1", "SHA-1"), ("sha512", "SHA-512"), ("sha384", "SHA-384"), ("sha224", "SHA-224"), ("md5", "MD5")])]),
-        spec("aes", "crypto", "aes encrypt decrypt", vec![input(), F::text("key", t("tools.f_key")), F::text("iv", t("tools.f_iv"))],
+        ToolSpec { live: false, ..spec("aes", "crypto", "aes encrypt decrypt", vec![input(), F::text("key", t("tools.f_key")), F::text("iv", t("tools.f_iv"))],
             vec![F::select("dir", t("tools.f_dir"), &dir), F::select("keymode", t("tools.f_keymode"), &keymode), F::select("mode", t("tools.f_cipher_mode"), &[("cbc", "CBC"), ("ecb", "ECB"), ("ctr", "CTR"), ("cfb", "CFB"), ("ofb", "OFB")]),
-                 F::select("pad", t("tools.f_padding"), &[("pkcs7", "PKCS7"), ("zero", "ZeroPadding"), ("none", "NoPadding")]), F::select("enc", t("tools.f_cipher_enc"), &enc_out)]),
-        spec("des", "crypto", "des 3des tripledes encrypt decrypt", vec![input(), F::text("key", t("tools.f_key")), F::text("iv", t("tools.f_iv"))],
+                 F::select("pad", t("tools.f_padding"), &[("pkcs7", "PKCS7"), ("zero", "ZeroPadding"), ("none", "NoPadding")]), F::select("enc", t("tools.f_cipher_enc"), &enc_out)]) },
+        ToolSpec { live: false, ..spec("des", "crypto", "des 3des tripledes encrypt decrypt", vec![input(), F::text("key", t("tools.f_key")), F::text("iv", t("tools.f_iv"))],
             vec![F::select("algo", t("tools.f_algo"), &[("des", "DES"), ("3des", "3DES")]), F::select("dir", t("tools.f_dir"), &dir), F::select("keymode", t("tools.f_keymode"), &keymode), F::select("mode", t("tools.f_cipher_mode"), &[("cbc", "CBC"), ("ecb", "ECB")]),
-                 F::select("pad", t("tools.f_padding"), &[("pkcs7", "PKCS7"), ("zero", "ZeroPadding"), ("none", "NoPadding")]), F::select("enc", t("tools.f_cipher_enc"), &enc_out)]),
-        spec("rc4", "crypto", "rc4 arc4 encrypt decrypt", vec![input(), F::text("key", t("tools.f_key"))], vec![F::select("dir", t("tools.f_dir"), &dir), F::select("keymode", t("tools.f_keymode"), &keymode), F::select("enc", t("tools.f_cipher_enc"), &enc_out)]),
-        spec("rabbit", "crypto", "rabbit stream cipher encrypt decrypt", vec![input(), F::text("key", t("tools.f_key")), F::text("iv", t("tools.f_iv"))], vec![F::select("dir", t("tools.f_dir"), &dir), F::select("keymode", t("tools.f_keymode"), &keymode), F::select("enc", t("tools.f_cipher_enc"), &enc_out)]),
+                 F::select("pad", t("tools.f_padding"), &[("pkcs7", "PKCS7"), ("zero", "ZeroPadding"), ("none", "NoPadding")]), F::select("enc", t("tools.f_cipher_enc"), &enc_out)]) },
+        ToolSpec { live: false, ..spec("rc4", "crypto", "rc4 arc4 encrypt decrypt", vec![input(), F::text("key", t("tools.f_key"))], vec![F::select("dir", t("tools.f_dir"), &dir), F::select("keymode", t("tools.f_keymode"), &keymode), F::select("enc", t("tools.f_cipher_enc"), &enc_out)]) },
+        ToolSpec { live: false, ..spec("rabbit", "crypto", "rabbit stream cipher encrypt decrypt", vec![input(), F::text("key", t("tools.f_key")), F::text("iv", t("tools.f_iv"))], vec![F::select("dir", t("tools.f_dir"), &dir), F::select("keymode", t("tools.f_keymode"), &keymode), F::select("enc", t("tools.f_cipher_enc"), &enc_out)]) },
         spec("base64", "crypto", "base64 encode decode", vec![input()], vec![F::select("dir", t("tools.f_dir"), &[("enc", "tools.o_encode"), ("dec", "tools.o_decode")]), F::toggle("url", t("tools.o_url_safe"), false)]),
         spec("url", "crypto", "url encode decode percent", vec![input()], vec![F::select("dir", t("tools.f_dir"), &[("enc", "tools.o_encode"), ("dec", "tools.o_decode"), ("enc_uri", "tools.o_encode_uri")])]),
         spec("unicode", "crypto", "unicode escape chinese", vec![input()], vec![F::select("dir", t("tools.f_dir"), &[("enc", "tools.o_encode"), ("dec", "tools.o_decode")]), F::toggle("ascii", t("tools.o_escape_ascii"), false)]),
@@ -590,6 +593,38 @@ mod verdict_tests {
         // 出错行标红，前后行作为上下文
         assert!(bad.rows.iter().any(|r| r.tone == Some(Tone::Danger)));
         assert!(go("json", &[("input", "  ")]).verdict.is_none());
+    }
+
+    #[test]
+    fn stats() {
+        assert_eq!(text_stats(""), (0, 0));
+        assert_eq!(text_stats("a\nb\n"), (2, 4));
+        assert_eq!(text_stats("你好"), (1, 2));
+    }
+
+    #[test]
+    fn crypto_tools_run_manually() {
+        for id in ["aes", "des", "rc4", "rabbit"] { assert!(!builtin().iter().find(|t| t.id == id).unwrap().live, "{id}"); }
+        assert!(builtin().iter().find(|t| t.id == "hmac").unwrap().live);
+    }
+
+    #[test]
+    fn small_tools_use_rows() {
+        let o = go("hmac", &[("input", "The quick brown fox jumps over the lazy dog"), ("key", "key"), ("algo", "sha256")]);
+        assert_eq!(o.kind, OutKind::Kv);
+        assert_eq!(o.rows.len(), 3);
+        assert!(o.rows[0].primary && o.rows[0].value.starts_with("f7bc83f4"));
+        assert_eq!(o.rows[1].value, o.rows[0].value.to_uppercase());
+        let o = go("rmb", &[("input", "1234.56")]);
+        assert_eq!((o.kind, o.text.as_str()), (OutKind::Kv, "壹仟贰佰叁拾肆元伍角陆分"));
+        assert!(o.rows[0].primary);
+        let o = go("batch_time", &[("input", "1700000000\nbad\n\n"), ("mode", "auto"), ("unit", "s")]);
+        assert_eq!(o.kind, OutKind::Kv);
+        assert_eq!(o.rows.len(), 2);
+        assert_eq!(o.rows[1].tone, Some(Tone::Danger));
+        // 复制全部仍是只含结果的逐行文本
+        assert_eq!(o.text.lines().count(), 2);
+        assert!(o.text.lines().nth(1).unwrap().ends_with("✗"));
     }
 
     #[test]
