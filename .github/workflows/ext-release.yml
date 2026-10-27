@@ -41,7 +41,7 @@ jobs:
           echo '{"packs":[' > dist/index.json
           first=1
           for dir in extensions/*/; do
-            name=$(basename "$dir"); [ "$name" = sdk ] || [ "$name" = target ] && continue
+            name=$(basename "$dir"); [ -f "$dir/Cargo.toml" ] || continue; [ "$name" = sdk ] && continue
             id="$name"; crate=$(echo "ext_$id" | tr - _)
             ver=$(grep -m1 '^version' "$dir/Cargo.toml" | cut -d'"' -f2)
             src="extensions/target/wasm32-unknown-unknown/release/$crate.wasm"
@@ -66,10 +66,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # 标签推送：只发布该标签对应的包；手动触发（dry_run=false）：发布索引里全部包，缺的 Release 补建（标签不存在时在当前提交上创建）。
           if [ "${GITHUB_EVENT_NAME}" = push ]; then
-            tag="${GITHUB_REF_NAME}"; id=$(echo "$tag" | sed -E 's/^ext-(.*)-v[^-]+$/\1/')
-            gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --title "$tag" --notes "扩展包 $id" --latest=false
-            gh release upload "$tag" "dist/$id.wasm" --clobber
+            ids=$(echo "${GITHUB_REF_NAME}" | sed -E 's/^ext-(.*)-v[^-]+$/\1/')
+          else
+            ids=$(python3 -c "import json;print(' '.join(p['id'] for p in json.load(open('dist/index.json'))['packs']))")
           fi
-          gh release view ext-index >/dev/null 2>&1 || gh release create ext-index --title ext-index --notes "扩展包索引" --latest=false
+          for id in $ids; do
+            ver=$(python3 -c "import json,sys;print(next(p['version'] for p in json.load(open('dist/index.json'))['packs'] if p['id']==sys.argv[1]))" "$id")
+            tag="ext-$id-v$ver"
+            gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --target "${GITHUB_SHA}" --title "$tag" --notes "扩展包 $id $ver" --latest=false
+            gh release upload "$tag" "dist/$id.wasm" --clobber
+          done
+          gh release view ext-index >/dev/null 2>&1 || gh release create ext-index --target "${GITHUB_SHA}" --title ext-index --notes "扩展包索引" --latest=false
           gh release upload ext-index dist/index.json --clobber
