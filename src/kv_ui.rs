@@ -6,7 +6,6 @@ use gpui_component::switch::Switch;
 use ssh_term_proto::assets::{self, DockerEndpoint};
 use ssh_term_proto::i18n::t;
 
-use crate::activity::panel_title;
 use crate::config;
 use crate::dock_view::{DockEvent, DockView, LogView};
 use crate::kv_view::KvView;
@@ -290,13 +289,15 @@ impl Root {
             AssetKind::Docker => s.docker.iter().map(|d| (d.id.clone(), d.name.clone(), if d.is_ssh() { format!("ssh ⇢ {}", d.ssh_host) } else { t("docker.local").to_string() }, d.group_path(), Self::production_of(&d.tags, &d.group_path()))).collect(),
         };
         let (title, ic) = match kind { AssetKind::Redis => (t("tool.redis"), IconName::Database), AssetKind::Docker => (t("tool.docker"), IconName::Container) };
-        let add = div().id("kv-add").size(px(22.)).rounded(px(5.)).flex().items_center().justify_center().cursor_pointer().hover(|d| d.bg(c(cur().surface0))).child(icon(IconName::Plus, 13., c(cur().overlay1)))
+        let add_tip = match kind { AssetKind::Redis => t("kv.add_redis"), AssetKind::Docker => t("kv.add_docker") };
+        let add = ui::icon_button("kv-add", IconName::Plus, ui::IconBtn::Md, add_tip)
             .on_click(cx.listener(move |this, _, w, cx| this.open_asset_dialog(kind, None, w, cx))).into_any_element();
-        let mut col = div().flex_1().min_h_0().flex().flex_col().child(panel_title(title, Some(add)));
+        let mut col = div().flex_1().min_h_0().flex().flex_col().child(ui::panel_header(title, None, None, vec![add]));
         if items.is_empty() {
             let (msg, btn) = match kind { AssetKind::Redis => (t("kv.redis_empty"), t("kv.redis_conn")), AssetKind::Docker => (t("kv.docker_empty"), t("kv.docker_ep")) };
-            return col.child(div().p_3().flex().flex_col().gap_3().text_size(px(12.)).text_color(c(th.subtext)).child(msg)
-                .child(ui::button("kv-empty-add", btn, 1).on_click(cx.listener(move |this, _, w, cx| this.open_asset_dialog(kind, None, w, cx))))).into_any_element();
+            return col.child(ui::empty_state(ic, msg, None, vec![
+                ui::button("kv-empty-add", btn, 1).w_full().on_click(cx.listener(move |this, _, w, cx| this.open_asset_dialog(kind, None, w, cx))).into_any_element(),
+            ], false)).into_any_element();
         }
         if kind == AssetKind::Redis {
             col = col.child(self.kv_tree_list(cx));
@@ -305,22 +306,24 @@ impl Root {
         }
         let mut sorted = items;
         sorted.sort_by(|a, b| (a.3.clone(), a.1.to_lowercase()).cmp(&(b.3.clone(), b.1.to_lowercase())));
-        let mut list = div().id("kv-list").flex_1().min_h_0().overflow_y_scroll().pb_2().flex().flex_col();
+        let mut list = div().id("kv-list").flex_1().min_h_0().overflow_y_scroll().pb(px(ui::SP_2)).flex().flex_col();
         let mut last: Option<String> = None;
         for (i, (id, name, addr, group, prod)) in sorted.into_iter().enumerate() {
             if last.as_ref() != Some(&group) && !group.is_empty() {
-                list = list.child(div().h(px(24.)).px_3().flex().items_center().gap_1().child(icon(IconName::Folder, 12., c(th.overlay1))).child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(group.clone())));
+                list = list.child(ui::section_header(SharedString::from(format!("kvg:{group}")), group.clone(), None, None));
             }
             last = Some(group.clone());
             let (oid, eid) = (id.clone(), id.clone());
-            list = list.child(div().id(("kv-it", i)).min_h(px(36.)).mx_1().px_2().rounded(px(6.)).flex().items_center().gap_2().cursor_pointer().hover(|d| d.bg(crate::theme::hover_bg()))
+            let gid = SharedString::from(format!("kv-it-g-{i}"));
+            list = list.child(ui::list_row(("kv-it", i), 0, false).min_h(px(ui::row2_h())).group(gid.clone())
                 .on_click(cx.listener(move |this, _, w, cx| match kind { AssetKind::Redis => this.open_redis_tab(&oid, w, cx), AssetKind::Docker => this.open_docker_tab(&oid, w, cx) }))
-                .child(icon(ic, 13., c(if prod { th.error } else { th.accent })))
+                .child(icon(ic, ui::IC_MD, c(if prod { th.error } else { th.overlay1 })))
                 .child(div().flex_1().min_w_0().flex().flex_col()
-                    .child(div().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(12.)).text_color(c(th.text)).child(name))
-                    .child(div().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(11.)).text_color(c(th.overlay0)).child(addr)))
-                .child(div().id(("kv-edit", i)).p_1().rounded(px(4.)).hover(|d| d.bg(c(cur().surface1))).child(icon(IconName::Pencil, 12., c(th.overlay1)))
-                    .on_click(cx.listener(move |this, _, w, cx| { cx.stop_propagation(); this.open_asset_dialog(kind, Some(eid.clone()), w, cx); }))));
+                    .child(ui::row_title(name))
+                    .child(ui::row_meta(addr)))
+                .child(ui::row_actions(gid)
+                    .child(ui::icon_button(("kv-edit", i), IconName::Pencil, ui::IconBtn::Sm, t("menu.edit"))
+                        .on_click(cx.listener(move |this, _, w, cx| { cx.stop_propagation(); this.open_asset_dialog(kind, Some(eid.clone()), w, cx); })))));
         }
         col = col.child(list);
         col.into_any_element()

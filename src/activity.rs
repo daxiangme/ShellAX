@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use gpui::{div, prelude::*, px, AnyElement, Context, FontWeight, Window};
+use gpui::{div, prelude::*, px, AnyElement, Context, Window};
 use ssh_term_proto::i18n::{t, tf};
 use ssh_term_proto::sftp::JobState;
 
@@ -151,31 +151,22 @@ impl Root {
             }
             other => {
                 let body = self.empty_tool(other, cx);
-                self.sb_frame(cx).bg(crate::theme::card_bg()).child(panel_title(other.label(), None)).child(body).into_any_element()
+                self.sb_frame(cx).child(body).into_any_element()
             }
         }
     }
 
-    /// Modules whose full window is not built yet: what it will do plus the existing entry points.
+    /// 尚无完整窗口的模块（端口 / Docker）：标题行 + 空状态，说明用途并给出现有入口。
     fn empty_tool(&mut self, tool: Tool, cx: &mut Context<Self>) -> AnyElement {
-        let th = cur();
-        let (desc, soon) = match tool {
-            Tool::Redis => (t("tool.redis_desc"), true),
-            Tool::Docker => (t("tool.docker_desc"), false),
-            Tool::Ports => (t("tool.ports_desc"), false),
-            _ => (t("tool.snippets_desc"), false),
+        let (ic, desc, open_label, open_action, open_id) = match tool {
+            Tool::Docker => (IconName::Container, t("tool.docker_desc"), t("tool.docker_open"), Action::OpenHostTools, "tool-docker-open"),
+            _ => (IconName::ArrowLeftRight, t("tool.ports_desc"), t("tool.ports_open"), Action::OpenPortForward, "tool-ports-open"),
         };
-        let full = |b: gpui::Stateful<gpui::Div>| b.w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().justify_center();
-        let mut card = div().mx_3().my_2().p_3().min_w_0().overflow_hidden().rounded(px(10.)).bg(c(th.surface0).opacity(0.5)).flex().flex_col().gap_2()
-            .child(div().flex().items_center().gap_2().child(icon(tool.icon(), 18., c(th.accent))).child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(tool.label().to_string()))
-                .when(soon, |d| d.child(div().px(px(6.)).rounded(px(4.)).bg(c(th.surface1)).text_size(px(10.)).text_color(c(th.subtext)).child(t("tool.soon")))))
-            .child(div().w_full().min_w_0().whitespace_normal().text_size(px(12.)).text_color(c(th.subtext)).child(desc));
-        card = match tool {
-            Tool::Docker => card.child(full(ui::button("tool-docker-open", t("tool.docker_open"), 1)).on_click(cx.listener(|this, _, w, cx| this.run(Action::OpenHostTools, w, cx)))),
-            Tool::Ports => card.child(full(ui::button("tool-ports-open", t("tool.ports_open"), 1)).on_click(cx.listener(|this, _, w, cx| this.run(Action::OpenPortForward, w, cx)))),
-            _ => card,
-        };
-        div().flex_1().min_h_0().flex().flex_col().child(card).into_any_element()
+        let open = ui::button(open_id, open_label, 1).w_full().justify_center().on_click(cx.listener(move |this, _, w, cx| this.run(open_action, w, cx))).into_any_element();
+        div().flex_1().min_h_0().flex().flex_col()
+            .child(ui::panel_header(tool.label(), None, None, vec![]))
+            .child(ui::empty_state(ic, desc, None, vec![open], false))
+            .into_any_element()
     }
 
     pub(crate) fn transfers_active(&self, cx: &gpui::App) -> bool {
@@ -264,12 +255,4 @@ impl Root {
         let h = self.bottom_h.round();
         if (config::get().sidebar.bottom_height - h).abs() >= 1.0 { let _ = config::update(|s| s.sidebar.bottom_height = h); }
     }
-}
-
-/// Title row of a tool window: name on the left, optional actions on the right.
-pub fn panel_title(label: &str, actions: Option<AnyElement>) -> impl IntoElement {
-    let th = cur();
-    div().h(px(28.)).px(px(10.)).flex_shrink_0().flex().items_center().gap_1()
-        .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.overlay1)).child(label.to_uppercase()))
-        .when_some(actions, |d, a| d.child(a))
 }

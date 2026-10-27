@@ -164,7 +164,6 @@ impl Root {
 
     /// Tree rows of all Redis connections (grouped by group path).
     pub(crate) fn kv_tree_list(&mut self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
-        let th = cur();
         let mut conns = config::get().redis.clone();
         conns.sort_by(|a, b| (a.group_path(), a.name.to_lowercase()).cmp(&(b.group_path(), b.name.to_lowercase())));
         let mut list = div().id("kv-tree").flex_1().min_h_0().overflow_y_scroll().pb_2().flex().flex_col();
@@ -172,7 +171,7 @@ impl Root {
         for conn in conns {
             let g = conn.group_path();
             if last.as_ref() != Some(&g) && !g.is_empty() {
-                list = list.child(div().h(px(26.)).px_3().flex().items_center().gap(px(6.)).child(icon(IconName::Folder, 14., c(th.overlay1))).child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(g.clone())));
+                list = list.child(ui::section_header(SharedString::from(format!("kvg:{g}")), g.clone(), None, None));
             }
             last = Some(g);
             list = self.kv_conn_rows(list, &conn, cx);
@@ -197,14 +196,14 @@ impl Root {
             }))
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, e: &MouseDownEvent, _w, cx| this.kv_menu_to(k2.clone(), e, cx)))
             .child(chev(open && ready, true))
-            .child(crate::file_icon::db_glyph("redis", 18., if ready { crate::file_icon::db_tint("redis") } else { c(th.overlay0) }))
+            .child(crate::file_icon::db_glyph("redis", ui::IC_MD, if ready { crate::file_icon::db_tint("redis") } else { c(th.overlay0) }))
             .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_color(if ready { c(th.text) } else { c(th.subtext) }).child(conn.name.clone()))
-            .child(div().text_size(px(11.)).text_color(c(th.overlay0)).whitespace_nowrap().child(conn.address()));
+            .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).whitespace_nowrap().child(conn.address()));
         if prod { r = r.child(div().size(px(7.)).rounded_full().bg(c(th.error))); }
-        if conn.read_only { r = r.child(icon(IconName::Lock, 12., c(th.warning))); }
+        if conn.read_only { r = r.child(icon(IconName::Lock, ui::IC_XS, c(th.warning))); }
         if let Some(col) = dot { r = r.child(div().size(px(7.)).rounded_full().bg(col)); }
         list = list.child(r);
-        let note = |s: String, depth: usize, err: bool| div().min_h(px(24.)).pl(px(8. + depth as f32 * 16. + 18.)).pr_2().flex().items_center().text_size(px(12.)).text_color(if err { c(cur().error) } else { c(cur().overlay0) }).child(s);
+        let note = |s: String, depth: usize, err: bool| div().min_h(px(ui::H_COMPACT)).pl(px(ui::ROW_PX + (depth + 1) as f32 * ui::INDENT)).pr_2().flex().items_center().text_size(px(ui::fs_small())).text_color(if err { c(cur().error) } else { c(cur().subtext) }).child(s);
         match state {
             Some(KvLive::Connecting) => return list.child(note(t("db.connecting").to_string(), 1, false)),
             Some(KvLive::Failed(e)) => { let e = e.chars().take(300).collect(); return if open { list.child(note(e, 1, true)) } else { list }; }
@@ -227,9 +226,9 @@ impl Root {
                 }))
                 .on_mouse_down(MouseButton::Right, cx.listener(move |this, e: &MouseDownEvent, _w, cx| this.kv_menu_to(d2.clone(), e, cx)))
                 .child(chev(dopen, true))
-                .child(icon(IconName::Database, 16., if opened { c(th.accent) } else { c(th.overlay0) }))
+                .child(icon(IconName::Database, ui::IC_MD, if opened { c(th.accent) } else { c(th.overlay1) }))
                 .child(div().flex_1().text_color(if opened { c(th.text) } else { c(th.subtext) }).child(format!("db{n}")))
-                .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(counts.get(&n).map(|c| c.to_string()).unwrap_or_default())));
+                .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(counts.get(&n).map(|c| c.to_string()).unwrap_or_default())));
             if !dopen { continue; }
             match self.kvp.dbs.get(&dk) {
                 Some(KvDb::Loading) | None => { list = list.child(note(t("db.loading").to_string(), 2, false)); }
@@ -247,16 +246,16 @@ impl Root {
                                 let f1 = fk.clone();
                                 list.child(row(SharedString::from(format!("kvf:{fk}")), depth + 2, false)
                                     .on_click(cx.listener(move |this, _, _w, cx| this.kv_toggle(&f1, cx)))
-                                    .child(chev(open, true)).child(icon(if open { IconName::FolderOpen } else { IconName::Folder }, 15., c(th.overlay1)))
+                                    .child(chev(open, true)).child(icon(if open { IconName::FolderOpen } else { IconName::Folder }, ui::IC_MD, c(th.overlay1)))
                                     .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_color(c(th.subtext)).child(name))
-                                    .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(count.to_string())))
+                                    .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(count.to_string())))
                             }
                             tree::Row::Key { key, name, depth } => {
                                 let kk = format!("{pre}\u{1d}{key}");
                                 let (i2, key2, s1) = (id.clone(), key.clone(), kk.clone());
                                 list.child(row(SharedString::from(format!("kvk:{kk}")), depth + 2, self.kvp.selected.as_deref() == Some(kk.as_str()))
                                     .on_click(cx.listener(move |this, e: &ClickEvent, w, cx| { this.kvp.selected = Some(s1.clone()); if e.click_count() >= 2 { this.kv_open_tab(&i2, Some(n), Some(key2.clone()), w, cx); } cx.notify(); }))
-                                    .child(chev(false, false)).child(icon(IconName::KeyRound, 14., c(th.accent)))
+                                    .child(chev(false, false)).child(icon(IconName::KeyRound, ui::IC_MD, c(th.accent)))
                                     .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_color(c(th.text)).child(name)))
                             }
                         };
@@ -273,19 +272,19 @@ impl Root {
         list = list.child(row(SharedString::from(format!("kvq:{qk}")), 1, false)
             .on_click(cx.listener(move |this, _, _w, cx| this.kv_toggle(&q1, cx)))
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, e: &MouseDownEvent, _w, cx| this.kv_menu_to(q2.clone(), e, cx)))
-            .child(chev(qopen, true)).child(icon(IconName::FileCode, 16., c(th.overlay1)))
+            .child(chev(qopen, true)).child(icon(IconName::FileCode, ui::IC_MD, c(th.overlay1)))
             .child(div().flex_1().text_color(c(th.subtext)).child(t("dbt.g_queries")))
-            .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(names.len().to_string())));
+            .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(names.len().to_string())));
         if qopen {
             if names.is_empty() { list = list.child(note(t("dbt.no_queries").to_string(), 2, false)); }
             for name in names {
-                if let Some((eid, old, st)) = &self.kvp.edit { if *eid == id && *old == name { list = list.child(div().pl(px(8. + 2. * 16.)).pr_2().py_1().child(ui::text_field(st, false))); continue; } }
+                if let Some((eid, old, st)) = &self.kvp.edit { if *eid == id && *old == name { list = list.child(div().pl(px(ui::ROW_PX + 2. * ui::INDENT)).pr_2().py_1().child(ui::text_field(st, false))); continue; } }
                 let mk = format!("{qk}\u{1d}{name}");
                 let (i2, n2, m2, m3) = (id.clone(), name.clone(), mk.clone(), mk.clone());
                 list = list.child(row(SharedString::from(format!("kvs:{mk}")), 2, self.kvp.selected.as_deref() == Some(mk.as_str()))
                     .on_click(cx.listener(move |this, e: &ClickEvent, w, cx| { this.kvp.selected = Some(m2.clone()); if e.click_count() >= 2 { this.kv_open_saved(&i2, &n2, w, cx); } cx.notify(); }))
                     .on_mouse_down(MouseButton::Right, cx.listener(move |this, e: &MouseDownEvent, _w, cx| this.kv_menu_to(m3.clone(), e, cx)))
-                    .child(chev(false, false)).child(icon(IconName::FileCode, 15., c(th.info)))
+                    .child(chev(false, false)).child(icon(IconName::FileCode, ui::IC_MD, c(th.info)))
                     .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_color(c(th.text)).child(name)));
             }
         }

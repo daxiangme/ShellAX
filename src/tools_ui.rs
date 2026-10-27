@@ -1,7 +1,7 @@
 //! 工具模块的左侧面板（搜索、收藏、最近使用、分类）与标签页打开逻辑。
 use std::collections::HashSet;
 
-use gpui::{div, prelude::*, px, AnyElement, Context, Entity, FontWeight, SharedString, Window};
+use gpui::{div, prelude::*, px, AnyElement, Context, Entity, SharedString, Window};
 use gpui_component::input::{InputEvent, InputState};
 use ssh_term_proto::i18n::{t, tf};
 use ssh_term_proto::tools::{self, ToolSpec};
@@ -10,7 +10,7 @@ use crate::ext_ui::{ExtEvent, ExtManager};
 use crate::termview::Embed;
 use crate::theme::{c, cur};
 use crate::tools_view::{ToolEvent, ToolView};
-use crate::ui::{self, icon, IconName};
+use crate::ui::{self, IconName};
 use crate::{config, Root};
 
 const RECENT_MAX: usize = 8;
@@ -26,7 +26,6 @@ pub fn spec_of(id: &str) -> Option<ToolSpec> { all_tools().into_iter().find(|s| 
 
 impl Root {
     pub(crate) fn tools_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let th = cur();
         let search = match &self.toolsp.search {
             Some(s) => s.clone(),
             None => {
@@ -40,13 +39,11 @@ impl Root {
         let all = all_tools();
         let extm = self.ext_manager(cx);
         if self.toolsp.manage {
-            let back = div().id("tools-ext-back").size(px(20.)).flex().items_center().justify_center().rounded(px(4.)).cursor_pointer().hover(|s| s.bg(crate::theme::hover_bg()))
-                .tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(t("ext.back_to_tools")).build(w, cx))
-                .on_click(cx.listener(|this, _, _w, cx| { this.toolsp.manage = false; cx.notify(); }))
-                .child(icon(IconName::ChevronLeft, 13., c(cur().overlay1)));
+            let back = ui::icon_button("tools-ext-back", IconName::ChevronLeft, ui::IconBtn::Md, t("ext.back_to_tools"))
+                .on_click(cx.listener(|this, _, _w, cx| { this.toolsp.manage = false; cx.notify(); }));
             return div().flex_1().min_h_0().flex().flex_col()
-                .child(crate::activity::panel_title(t("ext.title"), Some(back.into_any_element())))
-                .child(div().id("tools-ext").flex_1().min_h_0().overflow_y_scroll().px_2().pb_2().child(extm))
+                .child(ui::panel_header(t("ext.title"), None, None, vec![back.into_any_element()]))
+                .child(div().id("tools-ext").flex_1().min_h_0().overflow_y_scroll().px(px(ui::LIST_INSET)).pb(px(ui::SP_2)).child(extm))
                 .into_any_element();
         }
         let placeholders = ssh_term_proto::ext::placeholders(&ssh_term_proto::ext::installed());
@@ -59,17 +56,15 @@ impl Root {
             let id2 = sp.id.clone();
             let open = open_ids.contains(&sp.id);
             let _ = this;
-            div().id(SharedString::from(key)).group("tool-row").h(px(26.)).mx_2().px_2().rounded(px(6.)).flex().items_center().gap_2().cursor_pointer()
-                .when(open, |d| d.bg(crate::theme::selected_bg()))
-                .when(!open, |d| d.hover(|s| s.bg(crate::theme::hover_bg())))
+            let gid = SharedString::from(format!("tr-{key}"));
+            ui::list_row(SharedString::from(key), 0, open).group(gid.clone())
                 .tooltip({ let d = sp.desc.clone(); move |w, cx| gpui_component::tooltip::Tooltip::new(d.clone()).build(w, cx) })
                 .on_click(cx.listener(move |this, _, w, cx| this.open_tool(&id, None, w, cx)))
-                .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(ui::fs_small())).text_color(c(cur().text)).child(sp.name.clone()))
-                .child(div().id(SharedString::from(format!("fav-{}", sp.id))).size(px(18.)).flex().items_center().justify_center().rounded(px(4.))
-                    .when(!fav, |d| d.invisible().group_hover("tool-row", |s| s.visible()))
-                    .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(if fav { t("tools.ui_fav_remove") } else { t("tools.ui_fav_add") }).build(w, cx))
-                    .on_click(cx.listener(move |this, _, _w, cx| { cx.stop_propagation(); this.toggle_tool_fav(&id2, cx); }))
-                    .child(icon(if fav { IconName::Star } else { IconName::StarOff }, 12., if fav { c(cur().warning) } else { c(cur().overlay1) })))
+                .child(ui::row_title(sp.name.clone()))
+                .child(div().flex_1())
+                .child(ui::row_actions(gid).when(fav || open, |d| d.visible())
+                    .child(ui::icon_button_state(SharedString::from(format!("fav-{}", sp.id)), if fav { IconName::Star } else { IconName::StarOff }, ui::IconBtn::Sm, if fav { t("tools.ui_fav_remove") } else { t("tools.ui_fav_add") }, fav, false)
+                        .on_click(cx.listener(move |this, _, _w, cx| { cx.stop_propagation(); this.toggle_tool_fav(&id2, cx); }))))
                 .into_any_element()
         };
         let ghost = |this: &Self, key: String, sp: &ToolSpec, cx: &mut Context<Self>| -> AnyElement {
@@ -78,27 +73,25 @@ impl Root {
             let prog = m.and_then(|m| m.progress(&pack));
             let busy = m.is_some_and(|m| m.busy(&pack));
             let tip = tf("ext.needs_pack", &[("p", &ssh_term_proto::ext::pack_name(&pack))]);
-            div().id(SharedString::from(key)).h(px(26.)).mx_2().px_2().rounded(px(6.)).flex().items_center().gap_2()
+            let label = match prog { Some(p) => format!("{:.0}%", p * 100.), None if busy => t("ext.preparing").to_string(), None => t("ext.download").to_string() };
+            // 未安装的扩展工具：只读行，文字用提示色，右侧是下载按钮
+            div().id(SharedString::from(key)).min_h(px(ui::row_h())).mx(px(ui::LIST_INSET)).pl(px(ui::ROW_PX)).pr(px(4.)).rounded(px(ui::R_MD)).flex().items_center().gap(px(6.))
                 .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
-                .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(ui::fs_small())).text_color(c(cur().overlay1)).opacity(0.6).child(sp.name.clone()))
-                .child(div().id(SharedString::from(format!("dl-{}-{}", sp.pack, sp.id))).px_1p5().h(px(18.)).flex().items_center().rounded(px(4.)).cursor_pointer()
-                    .text_size(px(ui::fs_caption())).text_color(c(cur().accent)).hover(|s| s.bg(crate::theme::hover_bg()))
-                    .on_click(cx.listener(move |this, _, _w, cx| { cx.stop_propagation(); if let Some(e) = this.extm.clone() { e.update(cx, |m, cx| m.install(&pack, cx)); } }))
-                    .child(match prog { Some(p) => format!("{:.0}%", p * 100.), None if busy => t("ext.preparing").to_string(), None => t("ext.download").to_string() }))
+                .child(ui::row_title(sp.name.clone()).text_color(c(cur().overlay1)))
+                .child(div().flex_1())
+                .child(ui::button_sm(SharedString::from(format!("dl-{}-{}", sp.pack, sp.id)), label, 3)
+                    .on_click(cx.listener(move |this, _, _w, cx| { cx.stop_propagation(); if let Some(e) = this.extm.clone() { e.update(cx, |m, cx| m.install(&pack, cx)); } })))
                 .into_any_element()
         };
-        let head = |label: String, key: Option<String>, collapsed: bool, cx: &mut Context<Self>| {
+        let head = |label: String, key: String, count: Option<usize>, collapsed: bool, cx: &mut Context<Self>| {
             let k = key.clone();
-            div().id(SharedString::from(format!("th-{}", key.clone().unwrap_or(label.clone())))).h(px(24.)).mx_2().px_1().mt_1().flex().items_center().gap_1().cursor_pointer()
-                .text_size(px(ui::fs_caption())).font_weight(FontWeight::SEMIBOLD).text_color(c(cur().overlay1))
-                .when_some(k, |d, k| d.on_click(cx.listener(move |this, _, _w, cx| { if !this.toolsp.collapsed.remove(&k) { this.toolsp.collapsed.insert(k.clone()); } cx.notify(); })))
-                .child(icon(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown }, 12., c(cur().overlay1)))
-                .child(label)
+            ui::section_header(SharedString::from(format!("th-{key}")), label, count, Some(collapsed)).mt(px(ui::SP_1))
+                .on_click(cx.listener(move |this, _, _w, cx| { if !this.toolsp.collapsed.remove(&k) { this.toolsp.collapsed.insert(k.clone()); } cx.notify(); }))
         };
-        let mut list = div().id("tools-list").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().pb_2();
+        let mut list = div().id("tools-list").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().pb(px(ui::SP_2));
         if !q.trim().is_empty() {
             let hits: Vec<&ToolSpec> = all.iter().filter(|s| tools::matches(s, &q)).collect();
-            if hits.is_empty() { list = list.child(div().p_3().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(t("tools.ui_no_match"))); }
+            if hits.is_empty() { list = list.child(ui::empty_state(IconName::Search, t("tools.ui_no_match"), None, vec![], false)); }
             for sp in hits { let f = favs.contains(&sp.id); list = list.child(row(self, format!("q-{}", sp.id), sp, f, cx)); }
             for sp in placeholders.iter().filter(|s| tools::matches(s, &q)) { list = list.child(ghost(self, format!("qg-{}", sp.id), sp, cx)); }
         } else {
@@ -107,7 +100,7 @@ impl Root {
                 let items: Vec<&ToolSpec> = ids.iter().filter_map(|i| all.iter().find(|s| &s.id == i)).collect();
                 if items.is_empty() { continue; }
                 let collapsed = self.toolsp.collapsed.contains(key);
-                list = list.child(head(if key == "fav" { t("tools.ui_fav") } else { t("tools.ui_recent") }.to_string(), Some(key.to_string()), collapsed, cx));
+                list = list.child(head(if key == "fav" { t("tools.ui_fav") } else { t("tools.ui_recent") }.to_string(), key.to_string(), None, collapsed, cx));
                 if !collapsed { for sp in items { let f = favs.contains(&sp.id); list = list.child(row(self, format!("{key}-{}", sp.id), sp, f, cx)); } }
             }
             for (cat, _) in tools::CATEGORIES {
@@ -115,7 +108,7 @@ impl Root {
                 let ghosts: Vec<&ToolSpec> = placeholders.iter().filter(|s| s.cat == *cat).collect();
                 if items.is_empty() && ghosts.is_empty() { continue; }
                 let collapsed = self.toolsp.collapsed.contains(*cat);
-                list = list.child(head(format!("{} · {}", tools::cat_label(cat), items.len() + ghosts.len()), Some(cat.to_string()), collapsed, cx));
+                list = list.child(head(tools::cat_label(cat).to_string(), cat.to_string(), Some(items.len() + ghosts.len()), collapsed, cx));
                 if !collapsed {
                     for sp in items { let f = favs.contains(&sp.id); list = list.child(row(self, format!("c-{}", sp.id), sp, f, cx)); }
                     for sp in ghosts { list = list.child(ghost(self, format!("cg-{}", sp.id), sp, cx)); }
@@ -123,12 +116,11 @@ impl Root {
             }
         }
         div().flex_1().min_h_0().flex().flex_col()
-            .child(crate::activity::panel_title(t("tool.tools"), Some(div().id("tools-ext-open").size(px(20.)).flex().items_center().justify_center().rounded(px(4.)).cursor_pointer()
-                .hover(|s| s.bg(crate::theme::hover_bg()))
-                .tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(t("ext.title")).build(w, cx))
-                .on_click(cx.listener(|this, _, _w, cx| { this.toolsp.manage = true; cx.notify(); }))
-                .child(icon(IconName::Puzzle, 13., c(cur().overlay1))).into_any_element())))
-            .child(ui::field_row().pb_1().child(ui::search_field(&search, false)))
+            .child(ui::panel_header(t("tool.tools"), None, None, vec![
+                ui::icon_button("tools-ext-open", IconName::Puzzle, ui::IconBtn::Md, t("ext.title"))
+                    .on_click(cx.listener(|this, _, _w, cx| { this.toolsp.manage = true; cx.notify(); })).into_any_element(),
+            ]))
+            .child(ui::field_row().pb(px(ui::SP_2)).child(ui::search_field(&search, false)))
             .child(list)
             .into_any_element()
     }

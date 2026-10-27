@@ -73,12 +73,10 @@ pub(crate) struct GroupDrag { pub path: String }
 impl Render for GroupDrag {
     fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
-        div().px_3().py_1().rounded_lg().bg(c(th.base)).border_1().border_color(c(th.accent)).flex().items_center().gap_1()
-            .child(icon(IconName::Folder, 12., c(th.accent))).text_size(px(13.)).text_color(c(th.text)).child(hosttree::leaf_of(&self.path).to_string())
+        div().px_3().py_1().rounded(px(ui::R_MD)).bg(c(th.base)).border_1().border_color(c(th.accent)).flex().items_center().gap_1()
+            .child(icon(IconName::Folder, ui::IC_XS, c(th.accent))).text_size(px(ui::fs_body())).text_color(c(th.text)).child(hosttree::leaf_of(&self.path).to_string())
     }
 }
-
-const ROW_H: f32 = 30.;
 
 impl Root {
     fn show_sb_menu(&mut self, menu: SbMenu) {
@@ -230,8 +228,22 @@ impl Root {
     }
 
     // ------------------------------------------------------------------ rows
-    fn sb_host_row(&self, idx: usize, h: &HostEntry, depth: usize, ctx: &RowCtx, cx: &mut Context<Self>) -> AnyElement {
+    /// 实体图标 + 右上角连接状态点（灰空闲 / 绿已连接 / 琥珀呼吸连接中 / 红失败），生产环境另在右下加盾牌。
+    fn entity_icon(ic: IconName, st: u8, anim_id: usize, shield: Option<gpui::Hsla>) -> gpui::Div {
         let th = cur();
+        // 状态点描边用卡片底色，与岛融为一体
+        let dot = div().absolute().top(px(-2.)).right(px(-2.)).size(px(7.)).rounded_full().border_1().border_color(crate::theme::card_bg())
+            .bg(match st { 2 => c(th.success), 1 => c(th.warning), 3 => c(th.error), _ => c(th.overlay0) });
+        let dot = if st == 1 && !crate::motion::reduced() {
+            dot.with_animation(("host-dot", anim_id), gpui::Animation::new(crate::motion::ms(crate::motion::BREATHE_MS)).repeat().with_max_fps(30.).with_easing(|t| (t * std::f32::consts::PI).sin()), |d, t| d.opacity(0.35 + 0.65 * t)).into_any_element()
+        } else { dot.into_any_element() };
+        div().relative().size(px(ui::IC_MD)).flex_shrink_0()
+            .child(icon(ic, ui::IC_MD, c(th.overlay1)))
+            .child(dot)
+            .children(shield.map(|col| div().absolute().bottom(px(-3.)).right(px(-4.)).child(icon(IconName::ShieldAlert, ui::IC_BADGE, col))))
+    }
+
+    fn sb_host_row(&self, idx: usize, h: &HostEntry, depth: usize, ctx: &RowCtx, cx: &mut Context<Self>) -> AnyElement {
         let s = config::get();
         let target = ctx.targets.iter().find(|(e, _)| e.name == h.name).map(|(_, t)| t.clone());
         let label = target.as_ref().map(|t| t.label()).unwrap_or_else(|| h.host.clone());
@@ -242,28 +254,16 @@ impl Root {
         let detail = match os { Some(o) => format!("{label} · {}", ssh_term_proto::outline::badge(&o).1), None => label.clone() };
         let gid = SharedString::from(format!("hr-g-{idx}"));
         let name = h.name.clone();
-        let mut row = div().id(("host", idx)).group(gid.clone()).mx(px(4.)).pr(px(4.)).pl(px(6. + 10. * depth as f32 + 12.)).min_h(px(32.)).py(px(2.)).rounded(px(6.)).flex().items_center().gap(px(8.)).cursor_pointer()
-            .when(sel, |d| d.bg(crate::theme::selected_bg()))
-            .when(!sel, |d| d.hover(|s| s.bg(crate::theme::hover_bg())))
-            // one signal per job: monochrome server icon, 6px connection dot on its top-right corner,
-            // small shield badge bottom-right for production; tags as up to 3 dots after the name (+N)
-            .child(div().relative().size(px(16.)).flex_shrink_0()
-                .child(icon(IconName::Server, 16., c(th.overlay1)))
-                .child({
-                    // gray idle, green connected, amber breathing while connecting, red failed
-                    let dot = div().absolute().top(px(-2.)).right(px(-2.)).size(px(7.)).rounded_full().border_1().border_color(c(th.crust))
-                        .bg(match st { 2 => c(th.success), 1 => c(th.warning), 3 => c(th.error), _ => c(th.overlay0) });
-                    if st == 1 && !crate::motion::reduced() {
-                        dot.with_animation(("host-dot", idx), gpui::Animation::new(crate::motion::ms(crate::motion::BREATHE_MS)).repeat().with_max_fps(30.).with_easing(|t| (t * std::f32::consts::PI).sin()), |d, t| d.opacity(0.35 + 0.65 * t)).into_any_element()
-                    } else { dot.into_any_element() }
-                })
-                .when(prod, |d| d.child(div().absolute().bottom(px(-3.)).right(px(-4.)).child(icon(IconName::ShieldAlert, 9., c(s.tags.rgb(&s.tags.production)))))))
-            .child(div().flex_1().min_w_0().flex().flex_col().gap(px(1.)).overflow_hidden()
+        // 比同级分组多一级缩进（对齐分组的展开箭头槽位）
+        let mut row = ui::list_row(("host", idx), depth + 1, sel).min_h(px(ui::row2_h())).group(gid.clone())
+            // 一个信号一件事：单色服务器图标，右上角连接状态点，生产环境右下盾牌；标签最多 3 个色点（+N）
+            .child(Self::entity_icon(IconName::Server, st, idx, prod.then(|| c(s.tags.rgb(&s.tags.production)))))
+            .child(div().flex_1().min_w_0().flex().flex_col().overflow_hidden()
                 .child(div().flex().items_center().gap(px(4.))
-                    .child(div().min_w_0().text_size(px(13.)).line_height(px(16.)).text_color(c(th.text)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(h.name.clone()))
+                    .child(ui::row_title(h.name.clone()))
                     .children(h.tags.iter().take(3).map(|t| div().size(px(6.)).flex_shrink_0().rounded_full().bg(c(s.tags.rgb(t)))))
-                    .when(h.tags.len() > 3, |d| d.child(div().text_size(px(11.)).text_color(c(th.subtext)).child(format!("+{}", h.tags.len() - 3)))))
-                .child(div().text_size(px(11.)).line_height(px(14.)).text_color(c(th.subtext)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(detail.clone())));
+                    .when(h.tags.len() > 3, |d| d.child(div().text_size(px(ui::fs_caption())).text_color(c(cur().subtext)).child(format!("+{}", h.tags.len() - 3)))))
+                .child(ui::row_meta(detail.clone())));
         {
             // full name + user@host:port on hover (names are often truncated)
             let tip = format!("{}\n{}", h.name, label);
@@ -288,24 +288,21 @@ impl Root {
                 this.sb_save("hosts.move", format!("host={n} group={g:?} before={b:?}"), |s| { hosttree::move_host(&mut s.hosts, &n, &g, Some(&b)); }, cx);
             }));
         let edit = h.clone();
-        row = row.child(div().id(("host-edit", idx)).size(px(22.)).rounded_md().flex().items_center().justify_center().invisible()
-            .group_hover(gid, |s| s.visible()).hover(|s| s.bg(c(cur().surface1)))
-            .on_click(cx.listener(move |this, _, w, cx| { cx.stop_propagation(); this.open_host_dialog(Some(edit.clone()), None, w, cx); }))
-            .child(icon(IconName::Pencil, 12., c(th.overlay1))));
+        row = row.child(ui::row_actions(gid).when(sel, |d| d.visible())
+            .child(ui::icon_button(("host-edit", idx), IconName::Pencil, ui::IconBtn::Sm, t("menu.edit"))
+                .on_click(cx.listener(move |this, _, w, cx| { cx.stop_propagation(); this.open_host_dialog(Some(edit.clone()), None, w, cx); }))));
         row.into_any_element()
     }
 
     fn place_row(&self, idx: usize, p: &config::Place, depth: usize, cx: &mut Context<Self>) -> AnyElement {
-        let th = cur();
         let sub = if p.host.is_empty() { p.path.clone() } else { format!("{} · {}", p.host, p.path) };
-        div().id(("place", idx)).mx(px(4.)).pr(px(4.)).pl(px(6. + 10. * depth as f32 + 12.)).min_h(px(34.)).py(px(3.)).rounded(px(6.)).flex().items_center().gap(px(6.)).cursor_pointer()
-            .hover(|d| d.bg(crate::theme::hover_bg()))
+        ui::list_row(("place", idx), depth + 1, false).min_h(px(ui::row2_h()))
             .on_click(cx.listener(move |this, _, w, cx| this.open_place(idx, w, cx)))
             .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.show_sb_menu(SbMenu { target: SbTarget::Place(idx), pos: ev.position, sub: SbSub::Main }); cx.notify(); }))
-            .child(icon(IconName::Folder, 15., c(th.warning)))
-            .child(div().flex_1().min_w_0().flex().flex_col().gap(px(1.)).overflow_hidden()
-                .child(div().text_size(px(13.)).line_height(px(17.)).text_color(c(th.text)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(p.name.clone()))
-                .child(div().text_size(px(11.)).line_height(px(14.)).text_color(c(th.subtext)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(sub)))
+            .child(icon(IconName::Bookmark, ui::IC_MD, c(cur().overlay1)))
+            .child(div().flex_1().min_w_0().flex().flex_col().overflow_hidden()
+                .child(ui::row_title(p.name.clone()))
+                .child(ui::row_meta(sub)))
             .into_any_element()
     }
 
@@ -314,8 +311,7 @@ impl Root {
         let s = config::get();
         let tags = s.groups.iter().find(|g| g.path == path).map(|g| g.tags.clone()).unwrap_or_default();
         let (p1, p2, p3, p4) = (path.to_string(), path.to_string(), path.to_string(), path.to_string());
-        div().id(SharedString::from(format!("grp-{path}"))).mx(px(4.)).pr(px(4.)).pl(px(6. + 10. * depth as f32)).h(px(ROW_H)).flex().items_center().gap(px(4.)).cursor_pointer().rounded(px(6.))
-            .hover(|s| s.bg(crate::theme::hover_bg()))
+        ui::list_row(SharedString::from(format!("grp-{path}")), depth, false)
             .on_click(cx.listener(move |this, _, _w, cx| this.toggle_collapsed(&p1, cx)))
             .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.show_sb_menu(SbMenu { target: SbTarget::Group(p2.clone()), pos: ev.position, sub: SbSub::Main }); cx.notify(); }))
             .on_drag(GroupDrag { path: path.to_string() }, |d: &GroupDrag, _, _, cx| cx.new(|_| d.clone()))
@@ -327,28 +323,13 @@ impl Root {
                 if hosttree::under(&to, &from) { return; }
                 this.sb_save("hosts.group_move", format!("group={from:?} into={to:?}"), |s| { hosttree::move_group(&mut s.hosts, &mut s.groups, &from, &to, None); }, cx);
             }))
-            .child(icon(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown }, 11., c(th.overlay1)))
-            .child(icon(IconName::Folder, 16., match tags.first() { Some(t0) => c(config::get().tags.rgb(t0)), None => c(th.accent).opacity(0.85) }))
+            .child(div().w(px(ui::INDENT)).flex_shrink_0().flex().items_center().child(icon(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown }, ui::IC_XS, c(th.overlay1))))
+            .child(icon(IconName::Folder, ui::IC_MD, c(th.overlay1)))
+            .child(ui::row_title(name.to_string()).font_weight(FontWeight::MEDIUM))
             .children(ui::tag_dot(tags.first()))
-            .child(div().min_w_0().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(name.to_string()))
             .child(div().flex_1())
-            .child(div().text_size(px(11.)).text_color(c(th.subtext)).child(count.to_string()))
+            .child(div().text_size(px(ui::fs_caption())).text_color(c(th.overlay1)).child(count.to_string()))
             .into_any_element()
-    }
-
-    fn section_header(&self, id: &'static str, label: &str, cx: &mut Context<Self>, top_drop: bool) -> AnyElement {
-        let th = cur();
-        let top = if id == "sec-local" { px(2.) } else { px(8.) };
-        let mut d = div().id(id).mx(px(4.)).mt(top).px(px(6.)).h(px(18.)).rounded(px(6.)).flex().items_center()
-            .child(div().text_size(px(11.)).font_weight(FontWeight::MEDIUM).text_color(c(th.overlay1)).child(label.to_string()));
-        if top_drop {
-            // dropping on the section header moves to the top level
-            d = d.drag_over::<HostDrag>(|st, _, _, _| st.bg(c(cur().accent).opacity(0.22)))
-                .drag_over::<GroupDrag>(|st, _, _, _| st.bg(c(cur().accent).opacity(0.22)))
-                .on_drop(cx.listener(|this, d: &HostDrag, _w, cx| { let n = d.name.clone(); this.sb_save("hosts.move", format!("host={n} group=\"\""), |s| { hosttree::move_host(&mut s.hosts, &n, "", None); }, cx); }))
-                .on_drop(cx.listener(|this, d: &GroupDrag, _w, cx| { let p = d.path.clone(); this.sb_save("hosts.group_move", format!("group={p:?} into=\"\""), |s| { hosttree::move_group(&mut s.hosts, &mut s.groups, &p, "", None); }, cx); }));
-        }
-        d.into_any_element()
     }
 
     // --------------------------------------------------------------- sidebar
@@ -375,84 +356,88 @@ impl Root {
         for t in &self.tag_filter { if !q.tags.contains(t) { q.tags.push(t.clone()); } }
         let searching = !q.words.is_empty() || !q.tags.is_empty();
 
-        // ---- title row (PRD 5.23): macOS = traffic lights + collapse; Windows/Linux = collapse,
-        // search and "+" share the title row, so there is no blank strip above the list
-        let search_box = div().flex_1().min_w_0().child(ui::search_field(&self.host_search, false));
-        let plus = div().id("new-host").size(px(24.)).flex_shrink_0().rounded(px(6.)).flex().items_center().justify_center().cursor_pointer()
+        // ---- 标题行：模块名 + 右侧「+」（点击弹出添加菜单）；搜索框独占一行
+        // 菜单展开期间不挂提示，避免遮住第一项
+        let plus = ui::icon_button("new-host", IconName::Plus, ui::IconBtn::Md, if self.sb_menu.is_none() { t("sb.add") } else { "" })
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .hover(|d| d.bg(c(cur().surface0)))
-            // no tooltip while the Add menu is open, so it never covers the first menu item
-            .when(self.sb_menu.is_none(), |d| d.tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(t("sb.add")).build(w, cx)))
             .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _w, cx| {
                 let p = ev.position();
                 this.show_sb_menu(SbMenu { target: SbTarget::Empty, pos: gpui::point(p.x, p.y + px(14.)), sub: SbSub::Main });
                 cx.notify();
-            }))
-            .child(icon(IconName::Plus, 15., c(th.text)));
+            }));
         let mut col = self.sb_frame(cx);
-        col = col.child(div().px(px(4.)).pb(px(2.)).flex().items_center().gap(px(4.)).child(search_box).child(plus));
+        col = col.child(ui::panel_header(self.tool.label(), None, None, vec![plus.into_any_element()]))
+            .child(ui::field_row().pb(px(ui::SP_2)).child(ui::search_field(&self.host_search, false)));
 
         // ---- list
-        let mut list = div().id("host-list").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().pb_2()
+        let mut list = div().id("host-list").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().pb(px(ui::SP_2))
             .on_mouse_down(gpui::MouseButton::Right, cx.listener(|this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.show_sb_menu(SbMenu { target: SbTarget::Empty, pos: ev.position, sub: SbSub::Main }); cx.notify(); }));
         // SFTP module: remote hosts only (no local terminal, no local folders)
         let remote_only = self.tool == crate::activity::Tool::Sftp;
         // pinned: local terminal (+ $SSH_HOST target in dev setups)
         if !remote_only {
-        list = list.child(self.section_header("sec-local", t("sb.local"), cx, false));
-        let sh = crate::shell_display_name();
-        let local_sel = ctx.selected.as_deref() == Some("local");
-        let local_on = ctx.open.iter().any(|(l, on)| l == "local" && *on == 2);
-        list = list.child(div().id("host-local").mx(px(4.)).pr(px(4.)).pl(px(6.)).min_h(px(34.)).py(px(3.)).rounded(px(6.)).flex().items_center().gap(px(6.)).cursor_pointer()
-            .when(local_sel, |d| d.bg(crate::theme::selected_bg())).when(!local_sel, |d| d.hover(|s| s.bg(crate::theme::hover_bg())))
-            .on_click(cx.listener(|this, ev: &gpui::ClickEvent, w, cx| this.sb_activate(Spec::Local, t("ui.local_terminal").to_string(), ev.click_count() >= 2, w, cx)))
-            .on_mouse_down(gpui::MouseButton::Right, cx.listener(|this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.show_sb_menu(SbMenu { target: SbTarget::Local, pos: ev.position, sub: SbSub::Main }); cx.notify(); }))
-            .child(icon(IconName::Monitor, 15., c(th.info)))
-            .child(div().size(px(6.)).flex_shrink_0().rounded_full().bg(if local_on { c(th.success) } else { c(th.surface2) }))
-            .child(div().flex_1().min_w_0().flex().flex_col().gap(px(1.)).overflow_hidden()
-                .child(div().text_size(px(13.)).line_height(px(17.)).text_color(c(th.text)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(t("ui.local_terminal")))
-                .child(div().text_size(px(11.)).line_height(px(14.)).text_color(c(th.subtext)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(sh))));
+            list = list.child(ui::section_header("sec-local", t("sb.local"), None, None));
+            let sh = crate::shell_display_name();
+            let local_sel = ctx.selected.as_deref() == Some("local");
+            let local_on = ctx.open.iter().any(|(l, on)| l == "local" && *on == 2);
+            list = list.child(ui::list_row("host-local", 0, local_sel).min_h(px(ui::row2_h()))
+                .on_click(cx.listener(|this, ev: &gpui::ClickEvent, w, cx| this.sb_activate(Spec::Local, t("ui.local_terminal").to_string(), ev.click_count() >= 2, w, cx)))
+                .on_mouse_down(gpui::MouseButton::Right, cx.listener(|this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.show_sb_menu(SbMenu { target: SbTarget::Local, pos: ev.position, sub: SbSub::Main }); cx.notify(); }))
+                .child(Self::entity_icon(IconName::Monitor, if local_on { 2 } else { 0 }, usize::MAX, None))
+                .child(div().flex_1().min_w_0().flex().flex_col().overflow_hidden()
+                    .child(ui::row_title(t("ui.local_terminal")))
+                    .child(ui::row_meta(sh))));
         }
         if let Some(dt) = self.default_target.clone() {
             let l = dt.label();
             let on = ctx.open.iter().any(|(x, o)| *x == l && *o == 2);
-            list = list.child(div().id("host-env").mx(px(4.)).pr(px(4.)).pl(px(6.)).min_h(px(34.)).py(px(3.)).rounded(px(6.)).flex().items_center().gap(px(6.)).cursor_pointer()
-                .hover(|s| s.bg(crate::theme::hover_bg()))
+            list = list.child(ui::list_row("host-env", 0, false).min_h(px(ui::row2_h()))
                 .on_click(cx.listener(move |this, _, w, cx| this.new_tab(Spec::Ssh(dt.clone()), w, cx)))
-                .child(icon(IconName::Server, 15., c(th.accent)))
-                .child(div().size(px(6.)).flex_shrink_0().rounded_full().bg(if on { c(th.success) } else { c(th.surface2) }))
-                .child(div().flex_1().min_w_0().flex().flex_col().gap(px(1.)).overflow_hidden().child(div().text_size(px(13.)).line_height(px(17.)).text_color(c(th.text)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(l)).child(div().text_size(px(11.)).line_height(px(14.)).text_color(c(th.subtext)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(t("ui.ssh_host_environment_variable")))));
+                .child(Self::entity_icon(IconName::Server, if on { 2 } else { 0 }, usize::MAX - 1, None))
+                .child(div().flex_1().min_w_0().flex().flex_col().overflow_hidden()
+                    .child(ui::row_title(l))
+                    .child(ui::row_meta(t("ui.ssh_host_environment_variable")))));
         }
 
-        list = list.child(self.section_header("sec-conn", t("sb.connections"), cx, true));
+        // 「连接」分区可折叠（只存内存）；拖到标题上移到顶层，逻辑不变
+        let conn_fold = self.sb_fold.contains("sec-conn");
+        let mut conn_head = ui::section_header("sec-conn", t("sb.connections"), Some(s.hosts.len()), Some(conn_fold)).mt(px(ui::SP_2))
+            .on_click(cx.listener(|this, _, _w, cx| { if !this.sb_fold.remove("sec-conn") { this.sb_fold.insert("sec-conn"); } cx.notify(); }));
+        // dropping on the section header moves to the top level
+        conn_head = conn_head.drag_over::<HostDrag>(|st, _, _, _| st.bg(c(cur().accent).opacity(0.22)))
+            .drag_over::<GroupDrag>(|st, _, _, _| st.bg(c(cur().accent).opacity(0.22)))
+            .on_drop(cx.listener(|this, d: &HostDrag, _w, cx| { let n = d.name.clone(); this.sb_save("hosts.move", format!("host={n} group=\"\""), |s| { hosttree::move_host(&mut s.hosts, &n, "", None); }, cx); }))
+            .on_drop(cx.listener(|this, d: &GroupDrag, _w, cx| { let p = d.path.clone(); this.sb_save("hosts.group_move", format!("group={p:?} into=\"\""), |s| { hosttree::move_group(&mut s.hosts, &mut s.groups, &p, "", None); }, cx); }));
+        list = list.child(conn_head);
         let places = if remote_only { vec![] } else { s.places.clone() };
         let rows = hosttree::rows(&s.hosts, &s.groups, &s.sidebar.collapsed, &q);
-        if s.hosts.is_empty() && s.groups.is_empty() {
-            // text wraps; buttons stack full-width and ellipsize instead of overflowing the sidebar
-            let full = |b: gpui::Stateful<gpui::Div>| b.w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().justify_center();
-            list = list.child(div().mx_3().my_2().p_3().min_w_0().overflow_hidden().rounded(px(10.)).bg(c(th.surface0).opacity(0.5)).flex().flex_col().gap_2()
-                .child(div().w_full().min_w_0().whitespace_normal().text_size(px(13.)).text_color(c(th.subtext)).child(t("sb.empty")))
-                .child(div().w_full().min_w_0().flex().flex_col().gap(px(6.))
-                    .child(full(ui::button("sb-empty-new", t("sb.new_connection"), 1)).on_click(cx.listener(|this, _, w, cx| this.open_host_dialog(None, None, w, cx))))
-                    .child(full(ui::button("sb-empty-import", t("sb.import"), 0)).on_click(cx.listener(|this, _, w, cx| this.open_import(w, cx))))));
+        if conn_fold {
+            // 折叠：不渲染连接列表
+        } else if s.hosts.is_empty() && s.groups.is_empty() {
+            list = list.child(ui::empty_state(IconName::Server, t("sb.empty_title"), Some(t("sb.empty_desc").into()), vec![
+                ui::button("sb-empty-new", t("sb.new_connection"), 1).w_full().on_click(cx.listener(|this, _, w, cx| this.open_host_dialog(None, None, w, cx))).into_any_element(),
+                ui::button("sb-empty-import", t("sb.import"), 0).w_full().on_click(cx.listener(|this, _, w, cx| this.open_import(w, cx))).into_any_element(),
+            ], false));
         } else if rows.is_empty() {
-            list = list.child(div().px_4().py_3().text_size(px(13.)).text_color(c(th.subtext)).child(t("ui.no_matching_hosts")));
+            list = list.child(ui::empty_state(IconName::Search, t("ui.no_matching_hosts"), None, vec![], false));
         }
-        for (i, p) in places.iter().enumerate().filter(|(_, p)| p.group.is_empty()) {
-            list = list.child(self.place_row(i, p, 0, cx));
-        }
-        for r in rows {
-            match r {
-                Row::Group { path, name, depth, count, collapsed } => {
-                    let extra = places.iter().filter(|p| p.group == path).count();
-                    list = list.child(self.sb_group_row(&path, &name, depth, count + extra, collapsed, cx));
-                    if !collapsed {
-                        for (i, p) in places.iter().enumerate().filter(|(_, p)| p.group == path) {
-                            list = list.child(self.place_row(i, p, depth + 1, cx));
+        if !conn_fold {
+            for (i, p) in places.iter().enumerate().filter(|(_, p)| p.group.is_empty()) {
+                list = list.child(self.place_row(i, p, 0, cx));
+            }
+            for r in rows {
+                match r {
+                    Row::Group { path, name, depth, count, collapsed } => {
+                        let extra = places.iter().filter(|p| p.group == path).count();
+                        list = list.child(self.sb_group_row(&path, &name, depth, count + extra, collapsed, cx));
+                        if !collapsed {
+                            for (i, p) in places.iter().enumerate().filter(|(_, p)| p.group == path) {
+                                list = list.child(self.place_row(i, p, depth + 1, cx));
+                            }
                         }
                     }
+                    Row::Host { index, depth } => { let h = s.hosts[index].clone(); list = list.child(self.sb_host_row(index, &h, depth, &ctx, cx)); }
                 }
-                Row::Host { index, depth } => { let h = s.hosts[index].clone(); list = list.child(self.sb_host_row(index, &h, depth, &ctx, cx)); }
             }
         }
 
@@ -461,21 +446,25 @@ impl Root {
             let n = s.hosts.iter().filter(|h| h.tags.contains(&id)).count() + s.groups.iter().filter(|g| g.tags.contains(&id)).count();
             (id, name, n)
         }).filter(|(_, _, n)| *n > 0).collect();
-        if !used.is_empty() { list = list.child(self.section_header("sec-tags", t("tag.tags"), cx, false)); }
-        for (i, (color, name, n)) in used.into_iter().enumerate() {
+        let tags_fold = self.sb_fold.contains("sec-tags");
+        if !used.is_empty() {
+            list = list.child(ui::section_header("sec-tags", t("tag.tags"), None, Some(tags_fold)).mt(px(ui::SP_2))
+                .on_click(cx.listener(|this, _, _w, cx| { if !this.sb_fold.remove("sec-tags") { this.sb_fold.insert("sec-tags"); } cx.notify(); })));
+        }
+        for (i, (color, name, n)) in used.into_iter().enumerate().filter(|_| !tags_fold) {
             let on = self.tag_filter.contains(&color);
             let cc = color.clone();
             let is_prod = color == s.tags.production;
-            list = list.child(div().id(("tagf", i)).mx(px(4.)).pr(px(4.)).pl(px(6.)).h(px(28.)).rounded(px(6.)).flex().items_center().gap(px(6.)).cursor_pointer()
-                .when(on, |d| d.bg(crate::theme::selected_bg())).when(!on, |d| d.hover(|s| s.bg(crate::theme::hover_bg())))
+            list = list.child(ui::list_row(("tagf", i), 0, on)
                 .on_click(cx.listener(move |this, _, _w, cx| { if let Some(p) = this.tag_filter.iter().position(|t| *t == cc) { this.tag_filter.remove(p); } else { this.tag_filter.push(cc.clone()); } cx.notify(); }))
-                .child(div().size(px(10.)).flex_shrink_0().rounded_full().bg(c(s.tags.rgb(&color))))
-                .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(13.)).text_color(c(th.text)).child(name))
-                .when(is_prod, |d| d.child(icon(IconName::ShieldAlert, 11., c(th.overlay0))))
-                .child(div().flex_shrink_0().text_size(px(11.)).text_color(c(th.subtext)).child(n.to_string())));
+                .child(div().size(px(8.)).flex_shrink_0().rounded_full().bg(c(s.tags.rgb(&color))))
+                .child(ui::row_title(name))
+                .when(is_prod, |d| d.child(icon(IconName::ShieldAlert, ui::IC_XS, c(th.overlay1))))
+                .child(div().flex_1())
+                .child(div().flex_shrink_0().text_size(px(ui::fs_caption())).text_color(c(th.overlay1)).child(n.to_string())));
         }
         let _ = searching;
-        col.bg(crate::theme::card_bg()).child(list)
+        col.child(list)
     }
 
     /// Left tool-window frame: fixed width, resize handle on the right edge (double click resets).

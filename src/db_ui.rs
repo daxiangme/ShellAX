@@ -9,7 +9,7 @@ use ssh_term_proto::assets::{self, DbConn, TreeRow};
 use ssh_term_proto::db::live::Live;
 use ssh_term_proto::i18n::{t, tf};
 
-use crate::activity::{log_push, panel_title};
+use crate::activity::log_push;
 use crate::config;
 use crate::db_dialog::{DbDialog, DbDialogEvent};
 use crate::db_view::{DbView, Target};
@@ -221,19 +221,19 @@ impl Root {
         let s = config::get();
         let dbs = s.db.clone();
 
-        let act = |id: &'static str, ic: IconName| div().id(id).size(px(22.)).rounded(px(5.)).flex().items_center().justify_center().cursor_pointer().hover(|d| d.bg(c(cur().surface0))).child(icon(ic, 13., c(cur().overlay1)));
-        let actions = div().flex().items_center().gap(px(2.))
-            .child(act("db-add", IconName::Plus).on_click(cx.listener(|this, _, w, cx| this.open_db_dialog(None, w, cx))))
-            .child(act("db-query", IconName::SquareTerminal).on_click(cx.listener(|this, _, w, cx| this.db_new_query(None, w, cx))))
-            .child(act("db-collapse", IconName::ChevronsDownUp).on_click(cx.listener(|this, _, _w, cx| { this.dbp.open.clear(); cx.notify(); })))
-            .into_any_element();
+        let actions = vec![
+            ui::icon_button("db-add", IconName::Plus, ui::IconBtn::Md, t("db.new_connection")).on_click(cx.listener(|this, _, w, cx| this.open_db_dialog(None, w, cx))).into_any_element(),
+            ui::icon_button("db-query", IconName::SquareTerminal, ui::IconBtn::Md, t("db.new_query")).on_click(cx.listener(|this, _, w, cx| this.db_new_query(None, w, cx))).into_any_element(),
+            ui::icon_button("db-collapse", IconName::ChevronsDownUp, ui::IconBtn::Md, t("db.collapse_all")).on_click(cx.listener(|this, _, _w, cx| { this.dbp.open.clear(); cx.notify(); })).into_any_element(),
+        ];
         let mut col = div().flex_1().min_h_0().flex().flex_col()
-            .child(panel_title(t("tool.database"), Some(actions)))
-            .child(ui::field_row().pb_2().child(ui::search_field(&search, false)));
+            .child(ui::panel_header(t("tool.database"), None, None, actions))
+            .child(ui::field_row().pb(px(ui::SP_2)).child(ui::search_field(&search, false)));
 
         if dbs.is_empty() {
-            col = col.child(div().p_3().flex().flex_col().gap_3().text_size(px(12.)).text_color(c(th.subtext)).child(t("db.empty"))
-                .child(ui::button("db-empty-add", t("db.new_connection"), 1).on_click(cx.listener(|this, _, w, cx| this.open_db_dialog(None, w, cx)))));
+            col = col.child(ui::empty_state(IconName::Database, t("db.empty"), None, vec![
+                ui::button("db-empty-add", t("db.new_connection"), 1).w_full().on_click(cx.listener(|this, _, w, cx| this.open_db_dialog(None, w, cx))).into_any_element(),
+            ], false));
             return col.into_any_element();
         }
 
@@ -241,7 +241,7 @@ impl Root {
         let keep = |i: usize| q.is_empty() || { let d = &dbs[i]; d.name.to_lowercase().contains(&q) || d.host.to_lowercase().contains(&q) || d.database.to_lowercase().contains(&q) };
         let rows = assets::tree_rows(&s.groups, &self.dbp.collapsed_groups, &item_groups, &keep, false);
 
-        let mut list = div().id("db-tree").flex_1().min_h_0().overflow_y_scroll().pb_2().flex().flex_col();
+        let mut list = div().id("db-tree").flex_1().min_h_0().overflow_y_scroll().pb(px(ui::SP_2)).flex().flex_col();
         use crate::db_tree::{chev as chevron, row as row_base};
         for r in rows {
             match r {
@@ -249,11 +249,12 @@ impl Root {
                     let open = !self.dbp.collapsed_groups.contains(&path);
                     let name = path.rsplit('/').next().unwrap_or(&path).to_string();
                     let p2 = path.clone();
-                    list = list.child(row_base(SharedString::from(format!("dbg:{path}")), depth, false).text_color(c(th.subtext))
+                    list = list.child(row_base(SharedString::from(format!("dbg:{path}")), depth, false)
                         .on_click(cx.listener(move |this, _, _w, cx| { let g = &mut this.dbp.collapsed_groups; if let Some(i) = g.iter().position(|x| *x == p2) { g.remove(i); } else { g.push(p2.clone()); } cx.notify(); }))
-                        .child(chevron(open, true)).child(icon(if open { IconName::FolderOpen } else { IconName::Folder }, 16., c(th.overlay1)))
-                        .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_color(c(th.subtext)).child(name))
-                        .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(count.to_string())));
+                        .child(chevron(open, true)).child(icon(if open { IconName::FolderOpen } else { IconName::Folder }, ui::IC_MD, c(th.overlay1)))
+                        .child(ui::row_title(name).font_weight(gpui::FontWeight::MEDIUM))
+                        .child(div().flex_1())
+                        .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(count.to_string())));
                 }
                 TreeRow::Item { index, depth } => {
                     let d = &dbs[index];

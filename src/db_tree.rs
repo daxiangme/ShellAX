@@ -17,27 +17,26 @@ use crate::Root;
 
 /// Separates a node key from an object-group id.
 const GSEP: char = '\u{1e}';
-pub const ROW_H: f32 = 28.;
-const TEXT: f32 = 13.;
-const ICON: f32 = 18.;
+/// 树每级缩进（行左内边距 + 层级 × INDENT）。
+fn indent(depth: usize) -> Pixels { px(ui::ROW_PX + depth as f32 * ui::INDENT) }
 
-fn indent(depth: usize) -> Pixels { px(8. + depth as f32 * 16.) }
-
+/// 树的一行：共用列表行（悬停淡底、选中淡强调底），正文字号与行高取 token。
 pub fn row(id: SharedString, depth: usize, selected: bool) -> gpui::Stateful<gpui::Div> {
-    div().id(id).h(px(ROW_H)).pl(indent(depth)).pr_2().mx_1().rounded(px(6.)).flex().items_center().gap(px(6.)).cursor_pointer().flex_shrink_0()
-        .text_size(px(TEXT)).bg(if selected { c(cur().surface0) } else { gpui::transparent_black() }).hover(|d| d.bg(crate::theme::hover_bg()))
+    ui::list_row(id, depth, selected).flex_shrink_0().text_size(px(ui::fs_body())).line_height(px(ui::lh(ui::fs_body())))
 }
+/// 展开箭头槽位：固定 INDENT 宽，叶子行用空槽位对齐。
 pub fn chev(open: bool, show: bool) -> gpui::Div {
-    div().w(px(12.)).flex_shrink_0().when(show, |d| d.child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 12., c(cur().overlay0))))
+    div().w(px(ui::INDENT)).flex_shrink_0().when(show, |d| d.child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, ui::IC_XS, c(cur().overlay1))))
 }
 fn label(s: impl Into<SharedString>, col: gpui::Hsla) -> gpui::Div {
     div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_color(col).child(s.into())
 }
+/// 树中的说明行（加载中、无对象等）：次要字号 + 次文本色。
 fn note_row(s: &str, depth: usize) -> gpui::Div {
-    div().h(px(24.)).pl(indent(depth) + px(18.)).flex().items_center().text_size(px(12.)).text_color(c(cur().overlay0)).child(s.to_string())
+    div().min_h(px(ui::H_COMPACT)).pl(indent(depth) + px(ui::INDENT)).flex().items_center().text_size(px(ui::fs_small())).text_color(c(cur().subtext)).child(s.to_string())
 }
 fn err_row(s: &str, depth: usize) -> gpui::Div {
-    div().pl(indent(depth) + px(18.)).pr_2().py_1().text_size(px(12.)).text_color(c(cur().error)).child(s.chars().take(300).collect::<String>())
+    div().pl(indent(depth) + px(ui::INDENT)).pr_2().py_1().text_size(px(ui::fs_small())).text_color(c(cur().error)).child(s.chars().take(300).collect::<String>())
 }
 
 pub fn group_key(node: &str, g: Group) -> String { format!("{node}{GSEP}{}", g.id()) }
@@ -328,11 +327,11 @@ impl Root {
             }))
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, e: &MouseDownEvent, _w, cx| { this.dbp.selected = Some(k2.clone()); this.dbp.arm = None; this.dbp.menu = Some((k2.clone(), e.position)); cx.notify(); }))
             .child(chev(open, true))
-            .child(crate::file_icon::db_glyph(kind.id(), ICON, glyph_col))
+            .child(crate::file_icon::db_glyph(kind.id(), ui::IC_MD, glyph_col))
             .child(label(d.name.clone(), if ready { c(th.text) } else { c(th.subtext) }))
-            .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(kind.label()));
-        if !d.ssh_via.is_empty() { r = r.child(icon(IconName::Waypoints, 12., c(th.overlay0))); }
-        if d.read_only { r = r.child(icon(IconName::Lock, 12., c(th.warning))); }
+            .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(kind.label()));
+        if !d.ssh_via.is_empty() { r = r.child(icon(IconName::Waypoints, ui::IC_XS, c(th.overlay1))); }
+        if d.read_only { r = r.child(icon(IconName::Lock, ui::IC_XS, c(th.warning))); }
         if let Some(col) = dot { r = r.child(div().size(px(7.)).rounded_full().bg(col)); }
         list = list.child(r);
         if let Some(LiveState::Failed(e)) = state { if self.dbp.open.contains(&id) { return list.child(err_row(e, depth + 1)); } }
@@ -368,7 +367,7 @@ impl Root {
                 }))
                 .on_mouse_down(MouseButton::Right, cx.listener(move |this, e: &MouseDownEvent, _w, cx| { this.dbp.selected = Some(k2.clone()); this.dbp.arm = None; this.dbp.menu = Some((k2.clone(), e.position)); cx.notify(); }))
                 .child(chev(open, true))
-                .child(icon(ic, 16., if opened { c(th.accent) } else { c(th.overlay0) }))
+                .child(icon(ic, ui::IC_MD, if opened { c(th.accent) } else { c(th.overlay1) }))
                 .child(label(name.clone(), if opened { c(th.text) } else { c(th.subtext) })));
             if !open { continue; }
             if Self::holds_groups(&ck) {
@@ -398,10 +397,10 @@ impl Root {
             .on_click(cx.listener(move |this, _, _w, cx| { this.dbp.selected = Some(k1.clone()); this.db_toggle_expand(&k1, cx); }))
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, e: &MouseDownEvent, _w, cx| { this.dbp.selected = Some(k2.clone()); this.dbp.arm = None; this.dbp.menu = Some((k2.clone(), e.position)); cx.notify(); }))
             .child(chev(open, true))
-            .child(icon(group_icon(g), 16., c(th.overlay1)))
+            .child(icon(group_icon(g), ui::IC_MD, c(th.overlay1)))
             .child(label(t(&g.label_key()), c(th.subtext)))
-            .when(!q.is_empty(), |d| d.child(icon(IconName::Search, 11., c(th.accent))))
-            .child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(count)));
+            .when(!q.is_empty(), |d| d.child(icon(IconName::Search, ui::IC_XS, c(th.accent))))
+            .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(count)));
         if let Some((ek, None, st)) = self.dbp.edit.clone() { if ek == gk { list = list.child(div().pl(indent(depth + 1)).pr_2().py_1().child(ui::text_field(&st, false))); } }
         if !open { return list; }
         if g == Group::Backups { return list.child(note_row(&t("dbt.backup_soon"), depth + 1)); }
@@ -429,7 +428,7 @@ impl Root {
                 }))
                 .on_mouse_down(MouseButton::Right, cx.listener(move |this, e: &MouseDownEvent, _w, cx| { this.dbp.selected = Some(k2.clone()); this.dbp.arm = None; this.dbp.menu = Some((k2.clone(), e.position)); cx.notify(); }))
                 .child(chev(false, false))
-                .child(icon(group_icon(g), 15., c(match g { Group::Views | Group::MatViews => th.warning, Group::Queries => th.info, _ => th.accent })))
+                .child(icon(group_icon(g), ui::IC_MD, c(match g { Group::Views | Group::MatViews => th.warning, Group::Queries => th.info, _ => th.accent })))
                 .child(label(name, c(th.text))));
         }
         list

@@ -141,31 +141,31 @@ impl ExtManager {
         let key = |s: &str| SharedString::from(format!("ext-{s}-{id}"));
         if prog.is_some() {
             let i = id.clone();
-            actions = actions.child(ui::button(key("cancel"), t("ui.cancel"), 0).on_click(cx.listener(move |m, _, _w, cx| { m.cancel(&i); cx.notify(); })));
+            actions = actions.child(ui::button_sm(key("cancel"), t("ui.cancel"), 0).on_click(cx.listener(move |m, _, _w, cx| { m.cancel(&i); cx.notify(); })));
         } else {
             if r.installed.is_none() || r.has_update() {
                 let i = id.clone();
                 let label = if r.installed.is_some() { t("ext.update") } else { t("ext.download") };
-                actions = actions.child(ui::button(key("get"), label, 1).on_click(cx.listener(move |m, _, _w, cx| m.install(&i, cx))));
+                actions = actions.child(ui::button_sm(key("get"), label, 1).on_click(cx.listener(move |m, _, _w, cx| m.install(&i, cx))));
             }
             if r.installed.is_some() {
                 let i = id.clone();
-                actions = actions.child(ui::button(key("rm"), t("ext.uninstall"), 3).on_click(cx.listener(move |m, _, _w, cx| m.uninstall(&i, cx))));
+                actions = actions.child(ui::button_sm(key("rm"), t("ext.uninstall"), 3).on_click(cx.listener(move |m, _, _w, cx| m.uninstall(&i, cx))));
             }
         }
         let tools: Vec<String> = ext::KNOWN.iter().find(|k| k.0 == r.id).map(|k| k.2.iter().map(|x| t(&format!("tools.{x}")).to_string()).collect())
             .unwrap_or_else(|| ext::installed().into_iter().find(|i| i.manifest.id == r.id).map(|i| i.manifest.tools.into_iter().map(|t| t.name).collect()).unwrap_or_default());
-        div().id(key("row")).px_3().py_2().flex().flex_col().gap_1().border_b_1().border_color(c(th.surface0))
+        div().id(key("row")).px_3().py_2().flex().flex_col().gap_1().border_b_1().border_color(crate::theme::divider())
             .child(div().flex().items_center().gap_2()
-                .child(icon(if r.installed.is_some() { IconName::Package } else { IconName::CloudDownload }, 14., c(if r.installed.is_some() { th.accent } else { th.overlay1 })))
+                .child(icon(if r.installed.is_some() { IconName::Package } else { IconName::CloudDownload }, ui::IC_MD, c(if r.installed.is_some() { th.accent } else { th.overlay1 })))
                 .child(div().flex_1().min_w_0().flex().flex_col()
-                    .child(div().text_size(px(ui::fs_small())).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(r.name.clone()))
-                    .child(div().text_size(px(ui::fs_caption())).text_color(c(th.overlay1)).child(status)))
+                    .child(ui::row_title(r.name.clone()).font_weight(FontWeight::MEDIUM))
+                    .child(ui::row_meta(status)))
                 .child(actions))
-            .when(!tools.is_empty(), |d| d.child(div().text_size(px(ui::fs_caption())).text_color(c(th.subtext)).child(tools.join(" · "))))
-            .when_some(prog, |d, p| d.child(div().h(px(4.)).w_full().rounded(px(2.)).bg(c(th.surface0))
-                .child(div().h_full().rounded(px(2.)).bg(c(th.accent)).w(gpui::relative(p.max(0.02))))))
-            .when_some(job.and_then(|j| j.err.clone()), |d, e| d.child(div().text_size(px(ui::fs_caption())).text_color(c(th.error)).child(e)))
+            .when(!tools.is_empty(), |d| d.child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(tools.join(" · "))))
+            .when_some(prog, |d, p| d.child(div().h(px(4.)).w_full().rounded_full().bg(crate::theme::hover_bg())
+                .child(div().h_full().rounded_full().bg(c(th.accent)).w(gpui::relative(p.max(0.02))))))
+            .when_some(job.and_then(|j| j.err.clone()), |d, e| d.child(div().text_size(px(ui::fs_small())).text_color(c(th.error)).child(e)))
             .into_any_element()
     }
 }
@@ -177,14 +177,14 @@ impl Render for ExtManager {
         let rows = ext::rows(self.index.as_ref(), &inst);
         let mut list = crate::card_layout::sub_card().flex().flex_col();
         for r in &rows { list = list.child(self.row(r, cx)); }
-        let note = if self.loading { Some((t("ext.checking").to_string(), th.overlay1)) }
+        let note = if self.loading { Some((t("ext.checking").to_string(), th.subtext)) }
             else if let Some(e) = &self.index_err { Some((tf("ext.index_failed", &[("e", e)]), th.error)) }
-            else if self.index.is_none() { Some((t("ext.index_hint").to_string(), th.overlay1)) } else { None };
+            else if self.index.is_none() { Some((t("ext.index_hint").to_string(), th.subtext)) } else { None };
         div().flex().flex_col().gap_2()
             .child(div().flex().items_center().gap_2()
-                .child(div().flex_1().text_size(px(ui::fs_caption())).text_color(c(th.overlay1)).child(tf("ext.summary", &[("n", &inst.len()), ("dir", &ext::ext_dir().display())])))
+                .child(div().flex_1().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(tf("ext.summary", &[("n", &inst.len()), ("dir", &ext::ext_dir().display())])))
                 .child(ui::button("ext-refresh", t("ext.check"), 0).on_click(cx.listener(|m, _, _w, cx| m.refresh(cx)))))
-            .when_some(note, |d, (s, col)| d.child(div().text_size(px(ui::fs_caption())).text_color(c(col)).child(s)))
+            .when_some(note, |d, (s, col)| d.child(div().text_size(px(ui::fs_small())).text_color(c(col)).child(s)))
             .child(list)
     }
 }

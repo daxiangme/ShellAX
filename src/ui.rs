@@ -72,6 +72,8 @@ pub const IC_SM: f32 = 14.;
 pub const IC_MD: f32 = 16.;
 pub const IC_LG: f32 = 18.;
 pub const IC_XL: f32 = 28.;
+/// 实体图标角上的小徽标（生产环境盾牌）。
+pub const IC_BADGE: f32 = 9.;
 
 /// 统一的单行输入框：高 28（`large` 时 32）、圆角 6、左右内边距 8、正文字号。
 /// 聚焦时只把边框换成强调色（主题关闭了外扩的聚焦环），不会被父元素裁切。
@@ -125,7 +127,8 @@ pub fn icon_button_svg(id: impl Into<ElementId>, path: impl Into<SharedString>, 
     div().id(id).group(group.clone()).size(px(boxed)).flex_shrink_0().rounded(px(radius)).flex().items_center().justify_center().cursor_pointer()
         .when(active, |d| d.bg(selected_bg()))
         .when(!active, |d| d.hover(move |s| s.bg(if danger { crate::theme::danger_bg() } else { hover_bg() })).active(|s| s.bg(selected_bg())))
-        .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+        // 提示为空时不挂 tooltip（仅用于菜单展开期间避免遮住第一项）
+        .when(!tip.is_empty(), |d| d.tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx)))
         .child(svg().path(path).size(px(glyph)).flex_shrink_0().text_color(rest).group_hover(group, move |s| s.text_color(hot)))
 }
 
@@ -362,7 +365,7 @@ pub fn card(w: f32) -> Div {
 /// Finder tag dots (PRD 5.23), overlapping slightly like Finder's list view.
 /// Single Finder-style tag dot (the first tag of a host / group), or nothing.
 pub fn tag_dot(tag: Option<&String>) -> Option<AnyElement> {
-    tag.map(|t| div().size(px(7.)).flex_shrink_0().rounded_full().bg(c(crate::config::get().tags.rgb(t))).into_any_element())
+    tag.map(|t| div().size(px(8.)).flex_shrink_0().rounded_full().bg(c(crate::config::get().tags.rgb(t))).into_any_element())
 }
 
 /// Row of the seven color tags; selected ones get a check. `names`: (color, display name).
