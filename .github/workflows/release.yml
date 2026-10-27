@@ -57,11 +57,7 @@ jobs:
           APP=dist/ShellAX.app
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
           cp target/dist/shellax target/dist/shellax-cli "$APP/Contents/MacOS/"
-          if [ -f packaging/windows/agentshell-256.png ]; then
-            mkdir -p icon.iconset
-            for s in 16 32 128 256; do sips -z $s $s packaging/windows/agentshell-256.png --out icon.iconset/icon_${s}x${s}.png >/dev/null; done
-            iconutil -c icns icon.iconset -o "$APP/Contents/Resources/ShellAX.icns" || true
-          fi
+          cp packaging/macos/shellax.icns "$APP/Contents/Resources/ShellAX.icns"
           cat > "$APP/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
