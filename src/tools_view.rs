@@ -239,7 +239,7 @@ impl ToolView {
             .child(div().flex_1().child(ui::text_field(&w.msg, false)))
             .child(ui::button("ws-send", t("tools.ws_send"), 0).on_click(cx.listener(|this, _, w, cx| this.ws_send(w, cx))));
         let mut log = div().id("ws-log").flex_1().min_h_0().overflow_y_scroll().p_2().flex().flex_col().gap(px(2.))
-            .font_family(SharedString::from(crate::config::get().font.family.clone())).text_size(px(ui::FS_SECONDARY));
+            .font_family(SharedString::from(crate::config::get().font.family.clone())).text_size(px(ui::fs_small()));
         for (i, (mine, l)) in w.log.iter().enumerate() {
             log = log.child(div().id(("wsl", i)).whitespace_normal().text_color(if *mine { c(th.accent) } else { c(th.text) }).child(l.clone()));
         }
@@ -253,12 +253,12 @@ impl ToolView {
     fn out_head(&self, full: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
         let small = |id: &'static str, ic: IconName, tip: &'static str| div().id(id).h(px(ui::H_COMPACT)).px_2().rounded(px(ui::R_MD)).flex().items_center().gap_1().cursor_pointer()
-            .text_size(px(ui::FS_CAPTION)).text_color(c(cur().subtext)).hover(|s| s.bg(crate::theme::hover_bg()))
+            .text_size(px(ui::fs_caption())).text_color(c(cur().subtext)).hover(|s| s.bg(crate::theme::hover_bg()))
             .child(icon(ic, 12., c(cur().overlay1))).child(tip);
         div().h(px(30.)).px_2().flex().items_center().gap_1().flex_shrink_0().border_b_1().border_color(c(th.surface0))
-            .child(div().flex_1().text_size(px(ui::FS_CAPTION)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.overlay1)).child(t("tools.ui_output")))
-            .when_some(self.notice.clone(), |d, n| d.child(div().text_size(px(ui::FS_CAPTION)).text_color(c(th.success)).child(n)))
-            .when(self.busy, |d| d.child(div().text_size(px(ui::FS_CAPTION)).text_color(c(th.overlay1)).child(t("tools.ui_running"))))
+            .child(div().flex_1().text_size(px(ui::fs_caption())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.overlay1)).child(t("tools.ui_output")))
+            .when_some(self.notice.clone(), |d, n| d.child(div().text_size(px(ui::fs_caption())).text_color(c(th.success)).child(n)))
+            .when(self.busy, |d| d.child(div().text_size(px(ui::fs_caption())).text_color(c(th.overlay1)).child(t("tools.ui_running"))))
             .child(small("out-copy", IconName::Copy, t("tools.ui_copy")).on_click(cx.listener(|this, _, _w, cx| this.copy(cx))))
             .when(full, |d| d.child(small("out-save", IconName::Save, t("tools.ui_save")).on_click(cx.listener(|this, _, _w, cx| this.save(cx))))
                 .child(small("out-term", IconName::SquareTerminal, t("tools.ui_send_term")).on_click(cx.listener(|this, _, _w, cx| { let s = this.output.text.clone(); if !s.is_empty() { cx.emit(ToolEvent::SendToTerminal(s)); } }))))
@@ -266,7 +266,7 @@ impl ToolView {
     }
 
     fn field_label(s: &str) -> impl IntoElement {
-        div().text_size(px(ui::FS_CAPTION)).text_color(c(cur().overlay1)).child(s.to_string())
+        div().text_size(px(ui::fs_caption())).text_color(c(cur().overlay1)).child(s.to_string())
     }
 }
 
@@ -288,8 +288,8 @@ impl Render for ToolView {
         if let Some(s) = self.pending_out.take() { self.out_ed.update(cx, |e, cx| e.set_value(s, window, cx)); }
         let th = cur();
         let head = div().flex().items_center().gap_2().px_1().pb(px(CARD_PAD)).flex_shrink_0()
-            .child(div().text_size(px(ui::FS_TITLE)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(self.spec.name.clone()))
-            .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(ui::FS_SECONDARY)).text_color(c(th.overlay1)).child(self.spec.desc.clone()));
+            .child(div().text_size(px(ui::fs_title())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(self.spec.name.clone()))
+            .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(self.spec.desc.clone()));
         if self.spec.interactive {
             let body = self.render_ws(cx);
             return content_card("tool-card").child(head).child(body).into_any_element();
@@ -314,8 +314,8 @@ impl Render for ToolView {
                         .on_drop(cx.listener(move |v, ps: &ExternalPaths, _, cx| v.set_files(id2.clone(), ps.paths().to_vec(), cx)))
                         .on_click(cx.listener(move |v, _, _, cx| v.pick_files(id.clone(), multiple, cx)))
                         .child(icon(IconName::FileUp, 18., c(th.overlay1)))
-                        .child(div().text_size(px(ui::FS_SECONDARY)).text_color(c(th.subtext)).child(t("tools.ui_drop_hint")))
-                        .children(names.into_iter().map(|n| div().text_size(px(ui::FS_CAPTION)).text_color(c(th.text)).child(n))));
+                        .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(t("tools.ui_drop_hint")))
+                        .children(names.into_iter().map(|n| div().text_size(px(ui::fs_caption())).text_color(c(th.text)).child(n))));
                 }
                 _ => {}
             }
@@ -348,7 +348,7 @@ impl Render for ToolView {
             .child(div().flex_1().min_w_0().child(opts)).child(run_btn);
         // 输出卡片
         let mut out = sub_card().flex().flex_col().min_h(px(120.)).child(self.out_head(true, cx));
-        if let Some(e) = &self.error { out = out.child(div().px_3().py_2().text_size(px(ui::FS_SECONDARY)).text_color(c(th.error)).whitespace_normal().child(e.clone())); }
+        if let Some(e) = &self.error { out = out.child(div().px_3().py_2().text_size(px(ui::fs_small())).text_color(c(th.error)).whitespace_normal().child(e.clone())); }
         if let Some([r, g, b, a]) = self.output.color {
             out = out.child(div().px_3().pt_2().flex().items_center().gap_2()
                 .child(div().size(px(28.)).rounded(px(ui::R_MD)).border_1().border_color(c(th.surface1)).bg(gpui::Rgba { r: r as f32 / 255., g: g as f32 / 255., b: b as f32 / 255., a: a as f32 / 255. })));

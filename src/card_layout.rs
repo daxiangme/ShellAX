@@ -13,20 +13,23 @@ pub const CARD_GAP: f32 = 6.;
 /// Inner padding of the content card on all sides, and the gap between sub-cards inside it.
 pub const CARD_PAD: f32 = 6.;
 /// Corner radius of the content card and sub-cards.
-pub const CARD_RADIUS: f32 = 10.;
-pub const SUB_RADIUS: f32 = 8.;
+pub const CARD_RADIUS: f32 = crate::ui::R_LG;
+pub const SUB_RADIUS: f32 = crate::ui::R_SUB;
 
-/// The content card: rounded, card background, `CARD_PAD` on every side. The padding also keeps
-/// child backgrounds off the rounded corners (GPUI clips to the rectangle only).
-pub fn content_card(id: &'static str) -> gpui::Stateful<Div> {
-    div().id(id).flex_1().min_w_0().min_h_0().flex().flex_col().rounded(px(CARD_RADIUS)).overflow_hidden()
-        .bg(crate::theme::c(crate::theme::scheme().bg)).p(px(CARD_PAD))
+/// 岛：所有面板容器（左工具岛、内容岛、右侧卡片、底部面板）的唯一生成函数：圆角、卡片底色、无边框、纵向排列。
+pub fn island(id: impl Into<gpui::ElementId>) -> gpui::Stateful<Div> {
+    div().id(id).flex().flex_col().rounded(px(CARD_RADIUS)).overflow_hidden().bg(crate::theme::card_bg())
 }
 
-/// A sub-card inside the content card (SQL editor / results …).
+/// The content card: an island with `CARD_PAD` on every side. The padding also keeps
+/// child backgrounds off the rounded corners (GPUI clips to the rectangle only).
+pub fn content_card(id: &'static str) -> gpui::Stateful<Div> {
+    island(id).flex_1().min_w_0().min_h_0().p(px(CARD_PAD))
+}
+
+/// A sub-card inside the content card (SQL editor / results …): faint fill + hairline border.
 pub fn sub_card() -> Div {
-    let th = crate::theme::cur();
-    div().rounded(px(SUB_RADIUS)).border_1().border_color(crate::theme::c(th.surface0)).overflow_hidden().bg(crate::theme::c(th.base))
+    div().rounded(px(SUB_RADIUS)).border_1().border_color(crate::theme::divider()).overflow_hidden().bg(crate::theme::sub_bg())
 }
 
 #[cfg(test)]

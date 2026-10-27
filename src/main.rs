@@ -1333,7 +1333,7 @@ impl Root {
             _ => {}
         }
         let mut actions = div().flex().items_center().gap_2().justify_end()
-            .child(div().id("upd-notes").text_size(px(ui::FS_SECONDARY)).text_color(c(th.accent)).cursor_pointer().hover(|s| s.underline())
+            .child(div().id("upd-notes").text_size(px(ui::fs_small())).text_color(c(th.accent)).cursor_pointer().hover(|s| s.underline())
                 .child(t("update.view_notes")).on_click(move |_, _w, cx| cx.open_url(&notes_url)))
             .child(div().flex_1());
         if downloading {
@@ -1359,7 +1359,7 @@ impl Root {
                 .child(div().id("upd-offer-x").p_1().rounded(px(ui::R_MD)).cursor_pointer().hover(|s| s.bg(c(th.surface0)))
                     .child(icon(IconName::X, 14., c(th.overlay1)))
                     .on_click(cx.listener(|_, _, _w, cx| { update_ui::dismiss_offer(true); cx.notify(); }))))
-            .child(div().text_size(px(ui::FS_SECONDARY)).text_color(c(th.subtext)).child(tf("update.offer_body", &[("cur", &ssh_term_proto::update::CURRENT), ("v", &m.version)])))
+            .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(tf("update.offer_body", &[("cur", &ssh_term_proto::update::CURRENT), ("v", &m.version)])))
             .children(status.map(|(msg, err)| div().text_size(px(12.)).text_color(c(if err { th.error } else { th.overlay1 })).child(msg)))
             .child(actions)
     }
@@ -1683,6 +1683,7 @@ pub(crate) fn sync_component_theme(th: &Theme, cx: &mut App) {
         t.colors.switch_thumb = gpui::white();
         t.colors.popover = c(th.base);
         t.colors.popover_foreground = c(th.text);
+        theme::set_ui_size(config::get().appearance.ui_font_size);
         t.font_size = px(config::get().appearance.ui_font_size.clamp(10., 20.));
         t.font_family = theme::ui_font();
         t.radius = px(6.);
@@ -1811,7 +1812,7 @@ impl Render for Root {
         let want = if chrome::NATIVE_LIGHTS { gpui::WindowBackgroundAppearance::Blurred } else if op < 0.999 { gpui::WindowBackgroundAppearance::Transparent } else { gpui::WindowBackgroundAppearance::Opaque };
         if self.bg_seen != Some(want) { self.bg_seen = Some(want); window.set_background_appearance(want); }
         let ui = s.appearance.ui_font_size.clamp(10., 20.);
-        if self.ui_size_seen != ui { self.ui_size_seen = ui; gpui_component::Theme::global_mut(cx).font_size = px(ui); }
+        if self.ui_size_seen != ui { self.ui_size_seen = ui; theme::set_ui_size(ui); gpui_component::Theme::global_mut(cx).font_size = px(ui); cx.refresh_windows(); }
         // Settings is a tab of its own. It stays in the tab strip while other tabs are in front,
         // and only its close button (or Done) drops it.
         let settings_tab = self.settings.clone();
@@ -2266,7 +2267,7 @@ impl Render for Root {
         if let Some((msg, seq)) = &self.toast {
             // info toast: neutral text + info icon, 3px semantic bar on the left
             let el = div().absolute().bottom(px(40.)).right(px(16.)).min_w(px(320.)).max_w(px(400.)).pl(px(12.)).pr_4().py_2().rounded(px(ui::R_LG)).bg(c(th.base)).border_1().border_color(c(th.surface1)).shadow_lg()
-                .flex().items_center().gap_2().text_size(px(ui::FS_SECONDARY)).text_color(c(th.text))
+                .flex().items_center().gap_2().text_size(px(ui::fs_small())).text_color(c(th.text))
                 .child(div().w(px(3.)).h(px(18.)).rounded_full().bg(c(th.info)))
                 .child(icon(IconName::Info, 14., c(th.info))).child(msg.clone());
             let el = if motion::reduced() { el.into_any_element() }

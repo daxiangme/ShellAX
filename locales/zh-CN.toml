@@ -2076,3 +2076,4 @@
 "tools.pdf_clean_desc" = "移除作者、软件等文档信息"
 "tools.pdf_to_img" = "PDF 转图片"
 "tools.pdf_to_img_desc" = "把 PDF 页面渲染为 PNG 图片"
+"ui.close" = "关闭"

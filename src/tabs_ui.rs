@@ -158,7 +158,7 @@ impl Root {
         let items = self.new_menu_items(cx);
         let sel = self.new_menu_sel.min(items.len().saturating_sub(1));
         let searching = !self.new_menu_search.read(cx).value().trim().is_empty();
-        let row = |i: usize| div().id(("newm", i)).h(px(ui::H_DEFAULT)).px(px(10.)).rounded(px(ui::R_MD)).flex().items_center().gap_2().text_size(px(ui::FS_BODY)).text_color(c(th.text)).cursor_pointer()
+        let row = |i: usize| div().id(("newm", i)).h(px(ui::H_DEFAULT)).px(px(10.)).rounded(px(ui::R_MD)).flex().items_center().gap_2().text_size(px(ui::fs_body())).text_color(c(th.text)).cursor_pointer()
             .when(i == sel, |d| d.bg(c(th.surface0)))
             .hover(|d| d.bg(c(cur().accent)).text_color(gpui::white()));
         let mut list = div().id("newm-list").max_h(px(360.)).overflow_y_scroll().flex().flex_col();

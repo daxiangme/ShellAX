@@ -2076,3 +2076,4 @@
 "tools.pdf_clean_desc" = "Remove author, producer and other document info"
 "tools.pdf_to_img" = "PDF to Images"
 "tools.pdf_to_img_desc" = "Render PDF pages as PNG images"
+"ui.close" = "Close"

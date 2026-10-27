@@ -1,5 +1,6 @@
 //! Theme system: UI color tokens + terminal palette, loaded from TOML.
 //! Built-in themes are embedded from `themes/*.toml`; user themes from `~/.config/shellax/themes/*.toml`.
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
@@ -568,6 +569,23 @@ pub fn hover_bg() -> gpui::Hsla { c(cur().text).opacity(0.06) }
 pub fn selected_bg() -> gpui::Hsla { c(cur().accent).opacity(0.10) }
 /// 状态栏等弱化文字。
 pub fn muted_text() -> gpui::Hsla { c(cur().overlay1) }
+/// 弹出菜单 / 命令面板 / 下拉的键盘高亮行：强调色与卡片底色 30% 混合的不透明色，文字保持 text。
+pub fn menu_sel_bg() -> gpui::Hsla {
+    let (a, b) = (gpui::Rgba::from(c(cur().accent)), gpui::Rgba::from(card_bg()));
+    let mix = |x: f32, y: f32| x * 0.3 + y * 0.7;
+    gpui::Rgba { r: mix(a.r, b.r), g: mix(a.g, b.g), b: mix(a.b, b.b), a: 1. }.into()
+}
+/// 统一分隔线 / 发丝边框。
+pub fn divider() -> gpui::Hsla { c(cur().surface1).opacity(0.6) }
+/// 岛内子卡片底色：卡片底上叠一层很淡的前景色。
+pub fn sub_bg() -> gpui::Hsla { c(cur().text).opacity(0.035) }
+/// 危险操作悬停底色。
+pub fn danger_bg() -> gpui::Hsla { c(cur().error).opacity(0.12) }
+
+/// 界面字号基准 B（设置 › 外观 › 界面字号，已限制在 10–20），默认 13；`ui::fs_*` 由它推导。
+static UI_SIZE: AtomicU32 = AtomicU32::new(13f32.to_bits());
+pub fn set_ui_size(v: f32) { UI_SIZE.store(v.clamp(10., 20.).to_bits(), Ordering::Relaxed); }
+pub fn ui_size() -> f32 { f32::from_bits(UI_SIZE.load(Ordering::Relaxed)) }
 
 /// 窗口外层（侧栏、标签行、状态栏所在）背景：用 crust；与终端背景过近时由终端背景调暗或调亮推导，
 /// 保证终端卡片在亮色、暗色主题下都能与外层区分。

@@ -159,13 +159,13 @@ impl ExtManager {
             .child(div().flex().items_center().gap_2()
                 .child(icon(if r.installed.is_some() { IconName::Package } else { IconName::CloudDownload }, 14., c(if r.installed.is_some() { th.accent } else { th.overlay1 })))
                 .child(div().flex_1().min_w_0().flex().flex_col()
-                    .child(div().text_size(px(ui::FS_SECONDARY)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(r.name.clone()))
-                    .child(div().text_size(px(ui::FS_CAPTION)).text_color(c(th.overlay1)).child(status)))
+                    .child(div().text_size(px(ui::fs_small())).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(r.name.clone()))
+                    .child(div().text_size(px(ui::fs_caption())).text_color(c(th.overlay1)).child(status)))
                 .child(actions))
-            .when(!tools.is_empty(), |d| d.child(div().text_size(px(ui::FS_CAPTION)).text_color(c(th.subtext)).child(tools.join(" · "))))
+            .when(!tools.is_empty(), |d| d.child(div().text_size(px(ui::fs_caption())).text_color(c(th.subtext)).child(tools.join(" · "))))
             .when_some(prog, |d, p| d.child(div().h(px(4.)).w_full().rounded(px(2.)).bg(c(th.surface0))
                 .child(div().h_full().rounded(px(2.)).bg(c(th.accent)).w(gpui::relative(p.max(0.02))))))
-            .when_some(job.and_then(|j| j.err.clone()), |d, e| d.child(div().text_size(px(ui::FS_CAPTION)).text_color(c(th.error)).child(e)))
+            .when_some(job.and_then(|j| j.err.clone()), |d, e| d.child(div().text_size(px(ui::fs_caption())).text_color(c(th.error)).child(e)))
             .into_any_element()
     }
 }
@@ -182,9 +182,9 @@ impl Render for ExtManager {
             else if self.index.is_none() { Some((t("ext.index_hint").to_string(), th.overlay1)) } else { None };
         div().flex().flex_col().gap_2()
             .child(div().flex().items_center().gap_2()
-                .child(div().flex_1().text_size(px(ui::FS_CAPTION)).text_color(c(th.overlay1)).child(tf("ext.summary", &[("n", &inst.len()), ("dir", &ext::ext_dir().display())])))
+                .child(div().flex_1().text_size(px(ui::fs_caption())).text_color(c(th.overlay1)).child(tf("ext.summary", &[("n", &inst.len()), ("dir", &ext::ext_dir().display())])))
                 .child(ui::button("ext-refresh", t("ext.check"), 0).on_click(cx.listener(|m, _, _w, cx| m.refresh(cx)))))
-            .when_some(note, |d, (s, col)| d.child(div().text_size(px(ui::FS_CAPTION)).text_color(c(col)).child(s)))
+            .when_some(note, |d, (s, col)| d.child(div().text_size(px(ui::fs_caption())).text_color(c(col)).child(s)))
             .child(list)
     }
 }

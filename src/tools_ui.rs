@@ -64,7 +64,7 @@ impl Root {
                 .when(!open, |d| d.hover(|s| s.bg(crate::theme::hover_bg())))
                 .tooltip({ let d = sp.desc.clone(); move |w, cx| gpui_component::tooltip::Tooltip::new(d.clone()).build(w, cx) })
                 .on_click(cx.listener(move |this, _, w, cx| this.open_tool(&id, None, w, cx)))
-                .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(ui::FS_SECONDARY)).text_color(c(cur().text)).child(sp.name.clone()))
+                .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(ui::fs_small())).text_color(c(cur().text)).child(sp.name.clone()))
                 .child(div().id(SharedString::from(format!("fav-{}", sp.id))).size(px(18.)).flex().items_center().justify_center().rounded(px(4.))
                     .when(!fav, |d| d.invisible().group_hover("tool-row", |s| s.visible()))
                     .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(if fav { t("tools.ui_fav_remove") } else { t("tools.ui_fav_add") }).build(w, cx))
@@ -80,9 +80,9 @@ impl Root {
             let tip = tf("ext.needs_pack", &[("p", &ssh_term_proto::ext::pack_name(&pack))]);
             div().id(SharedString::from(key)).h(px(26.)).mx_2().px_2().rounded(px(6.)).flex().items_center().gap_2()
                 .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
-                .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(ui::FS_SECONDARY)).text_color(c(cur().overlay1)).opacity(0.6).child(sp.name.clone()))
+                .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(ui::fs_small())).text_color(c(cur().overlay1)).opacity(0.6).child(sp.name.clone()))
                 .child(div().id(SharedString::from(format!("dl-{}-{}", sp.pack, sp.id))).px_1p5().h(px(18.)).flex().items_center().rounded(px(4.)).cursor_pointer()
-                    .text_size(px(ui::FS_CAPTION)).text_color(c(cur().accent)).hover(|s| s.bg(crate::theme::hover_bg()))
+                    .text_size(px(ui::fs_caption())).text_color(c(cur().accent)).hover(|s| s.bg(crate::theme::hover_bg()))
                     .on_click(cx.listener(move |this, _, _w, cx| { cx.stop_propagation(); if let Some(e) = this.extm.clone() { e.update(cx, |m, cx| m.install(&pack, cx)); } }))
                     .child(match prog { Some(p) => format!("{:.0}%", p * 100.), None if busy => t("ext.preparing").to_string(), None => t("ext.download").to_string() }))
                 .into_any_element()
@@ -90,7 +90,7 @@ impl Root {
         let head = |label: String, key: Option<String>, collapsed: bool, cx: &mut Context<Self>| {
             let k = key.clone();
             div().id(SharedString::from(format!("th-{}", key.clone().unwrap_or(label.clone())))).h(px(24.)).mx_2().px_1().mt_1().flex().items_center().gap_1().cursor_pointer()
-                .text_size(px(ui::FS_CAPTION)).font_weight(FontWeight::SEMIBOLD).text_color(c(cur().overlay1))
+                .text_size(px(ui::fs_caption())).font_weight(FontWeight::SEMIBOLD).text_color(c(cur().overlay1))
                 .when_some(k, |d, k| d.on_click(cx.listener(move |this, _, _w, cx| { if !this.toolsp.collapsed.remove(&k) { this.toolsp.collapsed.insert(k.clone()); } cx.notify(); })))
                 .child(icon(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown }, 12., c(cur().overlay1)))
                 .child(label)
@@ -98,7 +98,7 @@ impl Root {
         let mut list = div().id("tools-list").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().pb_2();
         if !q.trim().is_empty() {
             let hits: Vec<&ToolSpec> = all.iter().filter(|s| tools::matches(s, &q)).collect();
-            if hits.is_empty() { list = list.child(div().p_3().text_size(px(ui::FS_SECONDARY)).text_color(c(th.overlay1)).child(t("tools.ui_no_match"))); }
+            if hits.is_empty() { list = list.child(div().p_3().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(t("tools.ui_no_match"))); }
             for sp in hits { let f = favs.contains(&sp.id); list = list.child(row(self, format!("q-{}", sp.id), sp, f, cx)); }
             for sp in placeholders.iter().filter(|s| tools::matches(s, &q)) { list = list.child(ghost(self, format!("qg-{}", sp.id), sp, cx)); }
         } else {
