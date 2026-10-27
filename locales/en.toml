@@ -945,6 +945,8 @@
 
 "hosttools.title" = "Host tools"
 "hosttools.local" = "Local machine"
+"hosttools.pick" = "Pick Services or Docker above to load the list."
+"hosttools.local_unsupported" = "This computer (Windows) supports the overview and process list only; use services and Docker on an SSH host."
 "hosttools.loading" = "Loading…"
 "hosttools.monitor" = "Monitor"
 "hosttools.processes" = "Processes"

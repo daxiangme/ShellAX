@@ -7,7 +7,7 @@ use ssh_term_proto::suggest::HistItem;
 
 use crate::theme::{c, cur};
 use crate::ui::{self, icon, IconName};
-use crate::{data_dir, Root, SideDock};
+use crate::{data_dir, Root};
 
 /// Filter value for snippets that have no group. Not a name a user can type.
 const UNGROUPED: &str = "\u{1}";
@@ -58,20 +58,23 @@ fn chip(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, on: bool
 }
 
 impl Root {
-    pub(crate) fn library_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let snippets_mode = self.dock == SideDock::Snippets;
-        let q = self.lib_search.read(cx).value().trim().to_lowercase();
+    /// One card per mode: saved commands (`snippets_mode`) or history. Both can be open; the shared
+    /// editor / variable / confirm forms show in the snippets card, or in history when that one is closed.
+    pub(crate) fn library_dock(&mut self, snippets_mode: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let search = if snippets_mode { self.lib_search.clone() } else { self.hist_search.clone() };
+        let owns_forms = snippets_mode || !self.dock_snip;
+        let q = search.read(cx).value().trim().to_lowercase();
         let group = self.lib_group.clone();
         let hist_all = self.lib_hist_all;
-        let editor = self.lib_editor.clone();
-        let vars = self.lib_vars.clone();
-        let confirm = self.lib_confirm.clone();
-        let notice = self.lib_notice.clone();
+        let editor = self.lib_editor.clone().filter(|_| owns_forms);
+        let vars = self.lib_vars.clone().filter(|_| owns_forms);
+        let confirm = self.lib_confirm.clone().filter(|_| owns_forms);
+        let notice = if owns_forms { self.lib_notice.clone() } else { String::new() };
         let module = self.snippet_module();
         let ready = module != "terminal" || self.focused_pane(window, cx).is_some_and(|p| p.read(cx).ready());
         let th = cur();
         let mut body = div().flex_1().min_h_0().flex().flex_col();
-        body = body.child(ui::field_row().pt_2().child(ui::search_field(&self.lib_search, false)));
+        body = body.child(ui::field_row().pt_2().child(ui::search_field(&search, false)));
         if !ready {
             body = body.child(div().px_3().pt_2().text_size(px(12.)).text_color(c(th.overlay1)).child(t("lib.need_terminal")));
         }
@@ -495,7 +498,8 @@ impl Root {
     }
 
     fn save_hist_as_snippet(&mut self, cmd: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.dock = SideDock::Snippets;
+        self.dock_snip = true;
+        self.dock_min.remove("snip-dock");
         let name: String = cmd.trim().chars().take(40).collect();
         self.open_lib_editor(None, name, String::new(), String::new(), cmd, window, cx);
     }

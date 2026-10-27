@@ -945,6 +945,8 @@
 
 "hosttools.title" = "主机工具"
 "hosttools.local" = "本机"
+"hosttools.pick" = "选择上面的“服务”或 Docker 来载入列表。"
+"hosttools.local_unsupported" = "本机（Windows）只支持系统概览和进程查看；服务和 Docker 请连接到 SSH 主机后使用。"
 "hosttools.loading" = "加载中…"
 "hosttools.monitor" = "监控"
 "hosttools.processes" = "进程"

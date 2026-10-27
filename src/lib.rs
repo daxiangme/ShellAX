@@ -41,6 +41,7 @@ pub mod tray;
 pub mod managed;
 pub mod link;
 pub mod hosttools;
+pub mod localstats;
 pub mod dirsync;
 pub mod asciicast;
 pub mod broadcast;

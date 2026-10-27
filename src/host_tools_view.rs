@@ -55,7 +55,11 @@ impl HostToolsView {
                 let r = async { let (c, _) = ssh::connect_shared(&tg, &p).await?; c.exec(&cmd, timeout).await }.await;
                 let _ = tx.send(r.map(|(code, o)| (code, String::from_utf8_lossy(&o).into_owned())).map_err(|e| format!("{e:#}")));
             }); }
-            None => { std::thread::spawn(move || {
+            None => { let unsupported = t("hosttools.local_unsupported").to_string(); std::thread::spawn(move || {
+                // 没有 /proc 的系统（Windows、Mac）：概览、进程、网络用原生采集；Windows 也没有 sh
+                #[cfg(not(target_os = "linux"))]
+                if let Some(out) = ssh_term_proto::localstats::native_output(&cmd) { let _ = tx.send(Ok((Some(0), out))); return; }
+                if cfg!(windows) { let _ = tx.send(Err(unsupported)); return; }
                 let r = std::process::Command::new("sh").arg("-c").arg(&cmd).output();
                 let _ = tx.send(r.map(|o| (o.status.code().map(|c| c as u32), format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)))).map_err(|e| e.to_string()));
             }); }
@@ -225,7 +229,7 @@ impl HostToolsView {
                     .child(div().w(px(52.)).text_color(c(th.subtext)).child(p.pid.to_string()))
                     .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(p.comm))
                     .child(div().w(px(40.)).child(format!("{:.1}", p.cpu))).child(div().w(px(40.)).child(format!("{:.1}", p.mem)))
-                    .child(div().w(px(36.)).child(ui::button(("ht-kill", i), t("hosttools.kill"), 2).h(px(18.)).px_1().text_size(px(10.)).on_click(cx.listener(move |v, _, _, cx| v.act(Action::Kill { pid, force: false }, cx))))));
+                    .child(div().w(px(36.)).when(!(cfg!(windows) && self.target.is_none()), |d| d.child(ui::button(("ht-kill", i), t("hosttools.kill"), 2).h(px(18.)).px_1().text_size(px(10.)).on_click(cx.listener(move |v, _, _, cx| v.act(Action::Kill { pid, force: false }, cx)))))));
             }
             v.push(d.into_any_element());
         }
@@ -245,7 +249,7 @@ impl HostToolsView {
         let row = || div().flex().items_center().gap_2().text_size(px(11.)).text_color(c(th.text));
         match &self.out {
             None if self.busy => d = d.child(Self::muted(t("hosttools.loading"))),
-            None => {}
+            None => d = d.child(Self::muted(t("hosttools.pick"))),
             Some(Err(e)) => d = d.child(div().text_size(px(11.)).text_color(c(th.error)).child(e.clone())),
             Some(Ok(out)) => match self.tab {
                 Tab::Docker => match hosttools::parse_docker(out) {
