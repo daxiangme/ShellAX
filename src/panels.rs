@@ -203,14 +203,15 @@ impl Root {
         if self.dock_snip { cards.push(("snip-dock", self.library_dock(true, window, cx))); }
         if self.dock_hist { cards.push(("hist-dock", self.library_dock(false, window, cx))); }
         if cards.is_empty() { self.dock_shown = false; return None; }
-        // first card in an empty column: slide the column in (terminal resizes once, at the end)
-        if !self.dock_shown && !crate::motion::reduced() {
-            let seq = self.dock_anim.map(|a| a.1 + 1).unwrap_or(1);
-            self.dock_anim = Some((true, seq));
-            crate::motion::hold(crate::motion::PANEL_OPEN_MS + 20);
+        // 空栏里出现第一张卡片：整栏从 0 宽展开（终端尺寸仍等到动画结束再改一次）
+        if !self.dock_shown && !crate::motion::reduced() && self.dock_reveal.is_none() {
+            let rev = crate::motion::Reveal::opening();
+            let (token, dur) = (rev.t0, rev.remaining_ms());
+            self.dock_reveal = Some(rev);
+            crate::motion::hold(dur + 20);
             cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(crate::motion::ms(crate::motion::PANEL_OPEN_MS)).await;
-                let _ = this.update(cx, |r, cx| if r.dock_anim.is_some_and(|a| a == (true, seq)) { r.dock_anim = None; cx.notify(); });
+                cx.background_executor().timer(crate::motion::ms(dur + 30)).await;
+                let _ = this.update(cx, |r, cx| if r.dock_reveal.as_ref().is_some_and(|a| a.t0 == token && a.expanding()) { r.dock_reveal = None; cx.notify(); });
             }).detach();
         }
         self.dock_shown = true;
@@ -255,15 +256,19 @@ impl Root {
             }
         }
         let col_h = self.dock_col_h.clone();
-        if !self.dock_tween.is_empty() { window.request_animation_frame(); }
+        if !self.dock_tween.is_empty() || self.dock_reveal.is_some() { window.request_animation_frame(); }
         col = col.child(inner).child(gpui::canvas(move |b, _, _| col_h.set(f32::from(b.size.height)), |_, _, _, _| {}).absolute().size_full()).child(div().id("dock-col-resize").absolute().top_0().left_0().w(px(6.)).h_full().cursor_col_resize()
             .hover(|d| d.bg(c(cur().accent).opacity(0.35)))
             .on_drag(crate::sidebar::AiResize, |d: &crate::sidebar::AiResize, _, _, cx| cx.new(|_| d.clone()))
             .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _w, cx| if ev.click_count() >= 2 { this.ai_width = config::AI_DOCK_W; this.save_ai_width(); cx.notify(); })));
-        Some(match self.dock_anim {
-            Some((show, seq)) => crate::motion::slide(div().h_full().flex_shrink_0().w(px(self.ai_width)), ("dock-anim", seq as usize), col.into_any_element(), self.ai_width + 8., crate::motion::Edge::Right, show),
-            None => col.into_any_element(),
-        })
+        // 贴右边缘裁切：宽度跟着进度变化，栏内内容保持全宽，左侧间隙一起收掉
+        let p = self.dock_reveal.as_ref().map(|r| r.progress()).unwrap_or(1.).clamp(0., 1.);
+        let gap = crate::card_layout::CARD_GAP;
+        let full = self.ai_width + gap;
+        let shown = div().h_full().w(px(full)).flex_shrink_0().flex().flex_row()
+            .child(div().w(px(gap)).h_full().flex_shrink_0())
+            .child(div().h_full().w(px(self.ai_width)).flex_shrink_0().opacity(p).child(col));
+        Some(div().h_full().w(px(full * p)).min_w(px(0.)).flex_shrink_0().overflow_hidden().flex().flex_row().justify_end().child(shown).into_any_element())
     }
 
     /// Right-hand AI tool window: conversation fills the column, terminal stays visible.

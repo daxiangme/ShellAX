@@ -87,15 +87,74 @@ mod tests {
         assert!(!g.waiting());
         assert_eq!(g.poll((90, 24), (90, 24), false, t0), None);
     }
+
+    #[test]
+    fn reveal_runs_between_its_endpoints() {
+        let open = Reveal { expanding: true, from: 0., t0: std::time::Instant::now() };
+        assert!((open.progress_after(0.) - 0.).abs() < 1e-4);
+        assert!((open.progress_after(PANEL_OPEN_MS as f32) - 1.).abs() < 1e-4);
+        assert_eq!(open.remaining_ms(), PANEL_OPEN_MS);
+        let close = Reveal { expanding: false, from: 1., t0: std::time::Instant::now() };
+        assert!((close.progress_after(0.) - 1.).abs() < 1e-4);
+        assert!((close.progress_after(PANEL_CLOSE_MS as f32) - 0.).abs() < 1e-4);
+        // a reversal halfway keeps the current progress and covers only the remaining distance
+        let back = Reveal { expanding: false, from: 0.4, t0: std::time::Instant::now() };
+        assert!((back.progress_after(0.) - 0.4).abs() < 1e-4);
+        assert!((back.progress_after(back.remaining_ms() as f32) - 0.).abs() < 1e-4);
+        assert_eq!(back.remaining_ms(), (PANEL_CLOSE_MS as f32 * 0.4).round() as u64);
+    }
 }
 
-/// Which edge a panel slides in from.
+/// Which edge a panel slides in from. Left / right remain for `slide`; columns no longer use them.
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 pub enum Edge { Left, Right, Bottom }
+
+/// Width / height reveal. Progress 0 is closed, 1 is open. `from` is the progress when this
+/// leg started, so a click in the middle reverses from the current size instead of restarting.
+#[derive(Clone, Copy)]
+pub struct Reveal {
+    expanding: bool,
+    from: f32,
+    pub t0: std::time::Instant,
+}
+
+impl Reveal {
+    pub fn opening() -> Self { Self { expanding: true, from: 0., t0: std::time::Instant::now() } }
+    pub fn closing() -> Self { Self { expanding: false, from: 1., t0: std::time::Instant::now() } }
+
+    pub fn expanding(&self) -> bool { self.expanding }
+
+    /// Distance still to cover, 0..1.
+    fn span(&self) -> f32 { if self.expanding { 1. - self.from } else { self.from } }
+    fn full_ms(&self) -> u64 { if self.expanding { PANEL_OPEN_MS } else { PANEL_CLOSE_MS } }
+
+    /// How long this leg should take so the speed matches a full open or close.
+    pub fn remaining_ms(&self) -> u64 { (self.full_ms() as f32 * self.span()).round() as u64 }
+
+    pub fn progress(&self) -> f32 { self.progress_after(self.t0.elapsed().as_secs_f32() * 1000.) }
+
+    fn progress_after(&self, elapsed_ms: f32) -> f32 {
+        let span = self.span();
+        if span <= f32::EPSILON { return if self.expanding { 1. } else { 0. }; }
+        let e = ease_out((elapsed_ms / (self.full_ms() as f32 * span)).clamp(0., 1.));
+        if self.expanding { self.from + span * e } else { self.from * (1. - e) }
+    }
+
+    /// Flip direction from the progress reached so far.
+    pub fn reverse(&mut self) {
+        let p = self.progress();
+        self.expanding = !self.expanding;
+        self.from = p;
+        self.t0 = std::time::Instant::now();
+    }
+}
 
 /// Slide a panel in/out inside a clipping box. The box keeps its full size for the whole
 /// animation, so nothing next to it is laid out again per frame; only the panel's paint offset
 /// moves. Callers add / remove the box (and resize terminals) once, at the start or end.
+/// Left and right columns no longer use this: they grow and shrink their real width (`Reveal`)
+/// so the neighboring content moves with them. The bottom panel still slides.
 pub fn slide(outer: gpui::Div, id: impl Into<gpui::ElementId>, el: gpui::AnyElement, dist: f32, edge: Edge, show: bool) -> gpui::AnyElement {
     use gpui::{div, prelude::*, px, AnimationExt};
     let dur = if show { PANEL_OPEN_MS } else { PANEL_CLOSE_MS };
