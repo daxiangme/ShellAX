@@ -89,6 +89,11 @@ pub fn file_icon(cls: Class, size: f32, dark: bool) -> AnyElement {
     d.into_any_element()
 }
 
+/// 文件列表里一行文件 / 文件夹的图标：本机与远程窗格、「..」行共用同一个入口，样式只在这里定义。
+pub fn entry_icon(name: &str, is_dir: bool, mode: u32, size: f32, dark: bool) -> AnyElement {
+    file_icon(class(name, is_dir, mode), size, dark)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

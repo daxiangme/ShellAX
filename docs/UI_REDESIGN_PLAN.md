@@ -207,7 +207,7 @@ pub fn danger_bg() -> Hsla       // c(cur().error).opacity(0.12)
 
 | 组件 | 规格 |
 |---|---|
-| `card_layout::island(id) -> Stateful<Div>` | `rounded(R_LG)`、`bg(card_bg())`、`overflow_hidden`、`flex_col`、无边框。左工具岛（`sb_frame`）、中间内容岛（`content_card`）、右侧每张卡片（`dock_frame`）、底部面板（`bottom_panel`）全部改用它。`content_card` 保留 `CARD_PAD` 内边距逻辑。 |
+| `card_layout::island(id) -> Stateful<Div>` | `rounded(R_LG)`、`bg(card_bg())`、`overflow_hidden`、`flex_col`、无边框。左工具岛（`sb_frame`）、中间内容岛（`content_card`）、右侧每张卡片（`dock_frame`）、底部面板（`bottom_panel`）全部改用它。`content_card` 本身不带内边距（通栏条如终端路径栏可贴满左右边缘）；模块内容区自带 `CARD_PAD` 间距（`main.rs` 的内容包裹层、`tools_view` 的工具卡片）。 |
 | `ui::panel_header(title, subtitle: Option, icon: Option, actions) -> Div` | 高 `PANEL_HEAD_H`，左右 `PANEL_PX`（右侧为 `PANEL_PX − 4` 以便图标按钮视觉对齐），标题 `fs_body` SEMIBOLD `text`，可选图标 `IC_SM` `overlay1`（非强调色），可选副标题 `fs_small` `subtext` 跟在标题后（`·` 分隔），右侧 actions 为 `IconBtn::Md`，间距 2。替代 `activity::panel_title`、`dock_frame` 头部、`bottom_panel` 头部。 |
 | `ui::section_header(id, label, count: Option<usize>, collapsed: Option<bool>) -> Stateful<Div>` | 高 `SECTION_H`，`mx(LIST_INSET)`、`px(ROW_PX)`，可选展开箭头 `IC_XS`，文字 `fs_small` SEMIBOLD `subtext`，右侧计数 `fs_caption` `overlay1`。返回 Stateful 以便调用方挂点击/拖放。替代 `sidebar::section_header`、`tools_ui` 的 `head`、`kv_tree.rs:175` 分组头。 |
 | `ui::list_row(id, depth, selected) -> Stateful<Div>` | `min_h(row_h())`、`mx(LIST_INSET)`、`pl(ROW_PX + INDENT*depth)`、`pr(4)`、`rounded(R_MD)`、`gap(6)`、`items_center`、`cursor_pointer`；`selected` → `selected_bg()`，否则悬停 `hover_bg()`。双行行用 `.min_h(row2_h())` 覆盖。 |
@@ -346,7 +346,7 @@ island
 ### 5.4 中间内容岛
 
 - **pane 悬浮头**（`tabs_ui.rs:257-280`）：按钮 → `IconBtn::Md`；容器底 `card_bg()`、边框 `divider()`、`R_SUB`。
-- **路径栏 cwd bar**（`main.rs:1705`）：高 28 保持；文字 `fs_small`；分隔线 `divider()`。
+- **路径栏 cwd bar**（`main.rs:1705`）：高 28 保持；文字 `fs_small`；分隔线 `divider()`。通栏贴满内容岛左右边缘，底部圆角 `CARD_RADIUS`。
 - **空工作区**（`ws_empty`）→ `empty_state`（横向按钮）。
 - **数据库视图**（`db_view.rs`）：工具栏 36/34 → `toolbar()`；结果表头 `table_header`；单元格 `mono_family` + `fs_mono`；SQL 编辑器/结果子卡片 `R_SUB`；错误条 `notice(error)`。
 - **Redis 视图**（`kv_view.rs:659`）、**Docker 视图**（`dock_view.rs:346,396,570,679`）、**文档视图**（`doc_view.rs:403`）、**工具页**（`tools_view.rs:258`）、**工作区头**（`workspace.rs:130`）：头部统一 `toolbar()`；分组头 `table_header`；`small()/mono()` 辅助函数改为调用 `ui` 组件；弹出表单 → `ui::card` + `dialog_header/footer`。

@@ -10,7 +10,8 @@ pub const TAB_PILL_H: f32 = 28.;
 pub const EDGE_GAP: f32 = (crate::chrome::TAB_H - TAB_PILL_H) / 2.;
 /// Horizontal gap between cards (sidebar card, content card, right dock, icon strip).
 pub const CARD_GAP: f32 = 6.;
-/// Inner padding of the content card on all sides, and the gap between sub-cards inside it.
+/// 模块内容区（终端、SFTP、数据库等）与内容卡片边缘的间距，也是卡片内子卡片之间的间隙。内容卡片本身不带内边距，
+/// 通栏条（如终端路径栏）可以贴满卡片左右边缘；需要留白的内容由模块自己加这个值。
 pub const CARD_PAD: f32 = 6.;
 /// Corner radius of the content card and sub-cards.
 pub const CARD_RADIUS: f32 = crate::ui::R_LG;
@@ -21,10 +22,11 @@ pub fn island(id: impl Into<gpui::ElementId>) -> gpui::Stateful<Div> {
     div().id(id).flex().flex_col().rounded(px(CARD_RADIUS)).overflow_hidden().bg(crate::theme::card_bg())
 }
 
-/// The content card: an island with `CARD_PAD` on every side. The padding also keeps
-/// child backgrounds off the rounded corners (GPUI clips to the rectangle only).
+/// The content card: a plain island without inner padding, so full-width strips (the terminal
+/// path bar) reach its left / right edges. Module content adds `CARD_PAD` itself. GPUI clips to
+/// the rectangle only, so a full-bleed child with its own background must round its own corners.
 pub fn content_card(id: &'static str) -> gpui::Stateful<Div> {
-    island(id).flex_1().min_w_0().min_h_0().p(px(CARD_PAD))
+    island(id).flex_1().min_w_0().min_h_0()
 }
 
 /// 子卡片内容区的内边距（输入、选项、输出卡片共用）；标题工具栏不加，保证分隔线通栏。
@@ -48,7 +50,7 @@ mod tests {
         // gap above the card equals the gap above the tab pills, and the status-bar gap matches it
         assert_eq!(EDGE_GAP, 4.);
         assert!(EDGE_GAP + TAB_PILL_H * 1. + EDGE_GAP == crate::chrome::TAB_H);
-        // inner padding equals the gap between sub-cards, and fits inside the corner radius
+        // module padding equals the gap between sub-cards, and fits inside the corner radius
         assert_eq!(CARD_PAD, CARD_GAP);
         assert!(CARD_PAD * 2. >= CARD_RADIUS && SUB_RADIUS <= CARD_RADIUS);
         // 子卡片内容区边距与工具栏水平边距（SP_2）一致，标题与内容左边缘对齐

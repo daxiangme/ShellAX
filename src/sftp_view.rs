@@ -19,6 +19,9 @@ use ssh_term_proto::ssh::{self, SshTarget};
 use crate::theme::{c, cur, Appearance};
 use crate::ui::{self, fs_body, fs_small, icon, IconName, H_COMPACT, H_DEFAULT, R_MD, R_SM};
 
+/// 页面左右留白：与弹窗/页面标题行（`dialog_header`）的左右内边距一致，面板、传输队列、状态行与标题对齐。
+const SFTP_PX: f32 = ui::SP_5;
+
 #[derive(Clone)]
 pub struct DragFile { pub pane: usize, pub path: String, pub name: String }
 pub struct DragPreview(String);
@@ -188,7 +191,9 @@ impl SftpView {
     pub fn new_deferred(target: Option<SshTarget>, rt: tokio::runtime::Handle, prompts: ssh::Prompts, _w: &mut Window, _cx: &mut Context<Self>) -> Self {
         let mut me = Self { rt, prompts, panes: [Pane::new(Src::Empty), Pane::new(Src::Empty)], active: 1, status: String::new(), error: false, edit: None, confirm_delete: None, editor: None, ticking: false, _subs: vec![], sync: None, ctx_menu: None, ops_menu: None, pending_edit: None, mode: Mode::Popup, follow_src: None, follow: Follow::new(false), follow_task: false, next_token: 0 };
         if let Some(t) = target { me.panes[1].src = Src::Remote(Box::new(me.new_remote(host_name(&t), t))); }
-        // both panes start on the remote host list; 本地 in the picker switches a pane to local
+        // 左栏默认是本机文件；主机选择器只在栏头下拉菜单里打开。右栏没有目标主机时仍显示主机列表
+        me.panes[0].src = Src::Local;
+        me.refresh_local(0);
         me
     }
     pub fn new(target: Option<SshTarget>, rt: tokio::runtime::Handle, prompts: ssh::Prompts, w: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -968,7 +973,7 @@ impl SftpView {
             bar = bar.child(ui::button("sync-run", if su.confirm_delete { tf("sync.confirm_delete", &[("n", &dels)]) } else { t("sync.run").to_string() }, if su.confirm_delete || dels > 0 { 2 } else { 1 }).on_click(cx.listener(|v, _, _, cx| v.sync_run(cx))));
         }
         bar = bar.child(ui::button("sync-close", t("ui.cancel"), 3).on_click(cx.listener(|v, _, _, cx| { v.sync = None; cx.notify() })));
-        Some(div().mx_4().mt_2().p_3().rounded(px(R_MD)).border_1().border_color(c(th.accent).opacity(0.5)).flex().flex_col().gap_2().text_size(px(fs_small())).text_color(c(th.text))
+        Some(div().mx(px(SFTP_PX)).mt_2().p_3().rounded(px(R_MD)).border_1().border_color(c(th.accent).opacity(0.5)).flex().flex_col().gap_2().text_size(px(fs_small())).text_color(c(th.text))
             .child(div().font_weight(FontWeight::SEMIBOLD).child(tf("sync.title", &[("l", &self.panes[l].ldir.display()), ("r", &self.panes[r].rdir)])))
             .child(bar)
             .children(su.confirm_delete.then(|| div().flex().items_center().gap_2().text_color(c(th.error)).child(icon(IconName::TriangleAlert, ui::IC_SM, c(th.error))).child(tf("sync.delete_warn", &[("n", &dels)]))))
@@ -1080,15 +1085,15 @@ impl SftpView {
             }
         }
         let at_drives = p.is_local() && p.ldir.as_os_str().is_empty();
+        let dark = th.appearance == Appearance::Dark;
         if !at_drives {
-            list = list.child(div().id(("sftp-up", pi)).h(px(32.)).flex_shrink_0().px_3().flex().items_center().gap_2().text_size(px(fs_body())).text_color(c(th.subtext)).cursor_pointer()
+            list = list.child(div().id(("sftp-up", pi)).h(px(26.)).flex_shrink_0().px_3().flex().items_center().gap_2().text_size(px(fs_body())).text_color(c(th.subtext)).cursor_pointer()
                 .hover(|d| d.bg(crate::theme::hover_bg()))
                 .on_click(cx.listener(move |v, ev: &gpui::ClickEvent, _, cx| if ev.click_count() >= 2 { v.up(pi, cx) }))
-                .child(icon(IconName::FolderUp, ui::IC_MD, c(th.overlay1))).child(".."));
+                .child(crate::file_icon::entry_icon("..", true, 0, ui::IC_LG, dark)).child(".."));
         }
         if p.loading { return list.child(remote_skeleton()).into_any_element(); }
         let q = p.filter.as_ref().map(|f| f.read(cx).value().trim().to_lowercase()).unwrap_or_default();
-        let dark = th.appearance == Appearance::Dark;
         let (wt, ws, wk) = col_widths(compact);
         let selected_on = self.active == pi;
         let mut shown = 0;
@@ -1099,7 +1104,6 @@ impl SftpView {
             if shown > 2000 { break; }
             let selected = selected_on && (p.multi.contains(&i) || p.sel == Some(i));
             let drag = DragFile { pane: pi, path: p.path_of(&e.name), name: e.name.clone() };
-            let cls = crate::file_icon::class(&e.name, e.is_dir, e.mode);
             let hidden = e.name.starts_with('.');
             list = list.child(div().id(("sftp-row", pid(pi, i))).h(px(26.)).flex_shrink_0().px_3().flex().items_center().gap_2().text_size(px(fs_body())).text_color(c(th.text)).cursor_pointer()
                 .when(hidden, |d| d.opacity(0.72))
@@ -1107,7 +1111,7 @@ impl SftpView {
                 .on_click(cx.listener(move |v, ev: &gpui::ClickEvent, _, cx| { if ev.click_count() >= 2 { v.open(pi, i, cx) } else { v.select(pi, i, ev.modifiers()); cx.notify() } }))
                 .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |v, ev: &gpui::MouseDownEvent, _, cx| { v.open_ctx_menu(pi, i, ev.position, cx); cx.stop_propagation(); }))
                 .on_drag(drag, |d: &DragFile, _, _, cx| cx.new(|_| DragPreview(d.name.clone())))
-                .child(crate::file_icon::file_icon(cls, ui::IC_LG, dark))
+                .child(crate::file_icon::entry_icon(&e.name, e.is_dir, e.mode, ui::IC_LG, dark))
                 .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(e.name.clone()))
                 .child(div().w(px(wt)).flex_shrink_0().px_1().overflow_hidden().whitespace_nowrap().text_size(px(fs_small())).text_color(c(th.overlay0)).child(fmt_mtime(e.mtime)))
                 .child(div().w(px(ws)).flex_shrink_0().px_1().overflow_hidden().whitespace_nowrap().text_size(px(fs_small())).text_color(c(th.overlay0)).child(if e.is_dir { "—".to_string() } else { human(e.size) }))
@@ -1326,27 +1330,27 @@ impl Render for SftpView {
         let edit_bar = self.edit.as_ref().map(|(k, pi, name, st)| {
             let what = match k { Edit::Mkdir => t("sftp.mkdir").to_string(), Edit::Rename => tf("sftp.rename_x", &[("x", name)]), Edit::Chmod => tf("sftp.chmod_x", &[("x", name)]) };
             let where_ = self.panes[*pi].label();
-            div().mx_4().mt_2().p_2().rounded(px(R_MD)).border_1().border_color(c(th.accent).opacity(0.5)).flex().items_center().gap_2().text_size(px(fs_small())).text_color(c(th.text))
+            div().mx(px(SFTP_PX)).mt_2().p_2().rounded(px(R_MD)).border_1().border_color(c(th.accent).opacity(0.5)).flex().items_center().gap_2().text_size(px(fs_small())).text_color(c(th.text))
                 .child(format!("{what} ({where_})")).child(div().w(px(260.)).child(ui::text_field(st, false)))
                 .child(ui::button("edit-ok", t("ui.save"), 1).on_click(cx.listener(|v, _, _, cx| v.commit_edit(cx))))
                 .child(ui::button("edit-cancel", t("ui.cancel"), 3).on_click(cx.listener(|v, _, _, cx| { v.edit = None; cx.notify() })))
         });
         let confirm = self.confirm_delete.as_ref().map(|(pi, p)| {
-            div().mx_4().mt_2().p_2().rounded(px(R_MD)).bg(c(th.error).opacity(0.1)).border_1().border_color(c(th.error).opacity(0.5)).flex().items_center().gap_2().text_size(px(fs_small())).text_color(c(th.text))
+            div().mx(px(SFTP_PX)).mt_2().p_2().rounded(px(R_MD)).bg(c(th.error).opacity(0.1)).border_1().border_color(c(th.error).opacity(0.5)).flex().items_center().gap_2().text_size(px(fs_small())).text_color(c(th.text))
                 .child(icon(IconName::TriangleAlert, ui::IC_SM, c(th.error)))
                 .child(div().flex_1().child(tf("sftp.confirm_delete", &[("p", p), ("side", &self.panes[*pi].label())])))
                 .child(ui::button("del-ok", t("sftp.delete"), 2).on_click(cx.listener(|v, _, _, cx| v.delete_confirmed(cx))))
                 .child(ui::button("del-cancel", t("ui.cancel"), 3).on_click(cx.listener(|v, _, _, cx| { v.confirm_delete = None; cx.notify() })))
         });
         if let Some((pi, path, _, st, force)) = self.editor.clone() {
-            let ed = div().flex_1().min_h_0().px_4().pt_3().flex().flex_col().gap_2()
+            let ed = div().flex_1().min_h_0().px(px(SFTP_PX)).pt_3().flex().flex_col().gap_2()
                 .child(div().flex().items_center().gap_2().text_size(px(fs_small())).text_color(c(th.text))
                     .child(icon(IconName::FileText, ui::IC_SM, c(th.accent)))
                     .child(div().flex_1().min_w_0().overflow_hidden().child(format!("{}:{path}", self.panes[pi].label())))
                     .child(ui::button("ed-save", if force { t("sftp.edit_overwrite") } else { t("ui.save") }, if force { 2 } else { 1 }).on_click(cx.listener(|v, _, _, cx| v.save_editor(cx))))
                     .child(ui::button("ed-close", t("sftp.edit_close"), 3).on_click(cx.listener(|v, _, _, cx| { v.editor = None; cx.notify() }))))
                 .child(div().flex_1().min_h_0().border_1().border_color(crate::theme::divider()).rounded(px(ui::R_LG)).overflow_hidden().child(Editor::new(&st).h_full()));
-            let status = div().px_4().py_2().text_size(px(fs_small())).text_color(if self.error { c(th.error) } else { c(th.overlay1) }).child(self.status.clone());
+            let status = div().px(px(SFTP_PX)).py_2().text_size(px(fs_small())).text_color(if self.error { c(th.error) } else { c(th.overlay1) }).child(self.status.clone());
             return self.frame()
                 .child(ui::dialog_header(Some(IconName::FolderSync), c(cur().accent), t("sftp.editor_title"), None, None).child(self.mode_bar(cx)))
                 .child(ed).child(status);
@@ -1357,12 +1361,12 @@ impl Render for SftpView {
             .when(both, |d| d.cursor_pointer().hover(|d| d.bg(crate::theme::hover_bg())))
             .child(icon(ic, ui::IC_MD, if both { c(th.accent) } else { c(th.overlay0).opacity(0.5) }))
             .on_click(cx.listener(move |v, _, _, cx| v.transfer_from(from, cx)));
-        let mid = div().w(px(28.)).flex().flex_col().items_center().justify_center().gap_3()
+        let mid = div().w(px(H_COMPACT)).flex().flex_col().items_center().justify_center().gap_3()
             .child(arrow("sftp-to-right", IconName::ArrowRight, 0))
             .child(arrow("sftp-to-left", IconName::ArrowLeft, 1));
         let (left, right) = (self.pane(0, cx), self.pane(1, cx));
-        let body = div().flex_1().min_h_0().px_4().pt_3().flex().gap_2().child(left).child(mid).child(right);
-        let status = div().px_4().py_2().text_size(px(fs_small())).text_color(if self.error { c(th.error) } else { c(th.overlay1) }).child(if self.status.is_empty() { t("sftp.dnd_hint").to_string() } else { format!("{} · {}", self.status, t("sftp.dnd_hint")) });
+        let body = div().flex_1().min_h_0().px(px(SFTP_PX)).pt_3().flex().gap(px(ui::SP_1)).child(left).child(mid).child(right);
+        let status = div().px(px(SFTP_PX)).py_2().text_size(px(fs_small())).text_color(if self.error { c(th.error) } else { c(th.overlay1) }).child(if self.status.is_empty() { t("sftp.dnd_hint").to_string() } else { format!("{} · {}", self.status, t("sftp.dnd_hint")) });
         let popup = !self.mode.embedded();
         let ctx = self.ctx_menu.as_ref().map(|(_, m)| crate::ctxmenu_view::render(m, cx, Self::ctx_pick, Self::ctx_close));
         let ops = self.ops_menu_el(cx);
@@ -1373,7 +1377,7 @@ impl Render for SftpView {
             .children(ctx).children(ops)
             .children(edit_bar).children(confirm).children(sync)
             .child(body)
-            .child(div().px_4().pt_3().flex_shrink_0().child(self.queue_view(cx)))
+            .child(div().px(px(SFTP_PX)).pt_3().flex_shrink_0().child(self.queue_view(cx)))
             .child(status.flex_shrink_0())
     }
 }

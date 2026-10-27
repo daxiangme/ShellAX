@@ -292,7 +292,7 @@ impl Render for ToolView {
             .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(self.spec.desc.clone()));
         if self.spec.interactive {
             let body = self.render_ws(cx);
-            return content_card("tool-card").child(head).child(body).into_any_element();
+            return content_card("tool-card").p(px(CARD_PAD)).child(head).child(body).into_any_element();
         }
         let me = cx.entity().downgrade();
         // 输入卡片
@@ -355,7 +355,7 @@ impl Render for ToolView {
         }
         out = out.child(sub_card_body().min_h(px(80.)).child(Editor::new(&self.out_ed).h_full()));
         out = out.flex_1().min_h_0();
-        content_card("tool-card").child(head)
+        content_card("tool-card").p(px(CARD_PAD)).child(head)
             .child(div().id("tool-body").flex_1().min_h_0().flex().flex_col().gap(px(CARD_PAD))
                 .when(!self.spec.inputs.is_empty(), |d| d.child(input))
                 .when(!self.spec.options.is_empty() || !self.spec.live, |d| d.child(opts_card))

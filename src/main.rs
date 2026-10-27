@@ -1799,7 +1799,7 @@ impl Root {
         if crumbs.is_empty() { return None; }
         let mut row = div().id("cwd-bar").h(px(28.)).flex_shrink_0().px_2().flex().items_center().gap(px(2.)).overflow_x_scroll()
             // 与终端内容之间一条细分隔线，底色略深一层
-            .bg(c(th.mantle)).border_t_1().border_color(crate::theme::divider()).rounded_bl(px(ui::R_XL)).rounded_br(px(ui::R_XL));
+            .bg(c(th.mantle)).border_t_1().border_color(crate::theme::divider()).rounded_bl(px(card_layout::CARD_RADIUS)).rounded_br(px(card_layout::CARD_RADIUS));
         let last = crumbs.len().saturating_sub(1);
         for (i, (label, path)) in crumbs.into_iter().enumerate() {
             if i > 0 { row = row.child(icon(IconName::ChevronRight, ui::IC_XS, c(th.overlay0))); }
@@ -2059,10 +2059,10 @@ impl Render for Root {
             }
         };
         let cwd_bar = if settings_on { None } else { self.cwd_bar(window, cx) };
-        // 所有模块共用同一张内容卡片：四边内边距统一为 card_layout::CARD_PAD（也让圆角露出卡片背景）
+        // 所有模块共用同一张内容卡片（本身无内边距）：模块内容区自带 card_layout::CARD_PAD 间距（也让圆角露出卡片背景），
+        // 路径栏在内容区之外，左右贴满卡片边缘
         let center = card_layout::content_card("center")
-            .when(cwd_bar.is_some(), |d| d.pb_0())
-            .child(div().flex_1().min_h_0().overflow_hidden().flex().flex_col().child(workspace))
+            .child(div().flex_1().min_h_0().overflow_hidden().flex().flex_col().p(px(card_layout::CARD_PAD)).when(cwd_bar.is_some(), |d| d.pb_0()).child(workspace))
             .children(cwd_bar);
 
         let (status, scolor, dims, title, hist) = match self.focused_pane(window, cx) {
