@@ -155,6 +155,8 @@ pub enum RowFmt {
     Colon,
     /// 标签左对齐补到 n 个字符宽，再空一格接内容。
     Pad(usize),
+    /// `内容 标签`（单位换算：`1000 m`）。
+    Suffix,
 }
 
 /// 把行拼成多行文本（复制全部、保存、发送到终端用）。分组标题只产生一个空行分隔。
@@ -162,7 +164,7 @@ pub fn rows_text(rows: &[Row], fmt: RowFmt) -> String {
     let mut out: Vec<String> = vec![];
     for r in rows {
         if r.head { if !out.is_empty() { out.push(String::new()); } continue; }
-        out.push(if r.label.is_empty() { r.value.clone() } else { match fmt { RowFmt::Colon => format!("{}: {}", r.label, r.value), RowFmt::Pad(n) => format!("{:<n$} {}", r.label, r.value) } });
+        out.push(if r.label.is_empty() { r.value.clone() } else { match fmt { RowFmt::Colon => format!("{}: {}", r.label, r.value), RowFmt::Pad(n) => format!("{:<n$} {}", r.label, r.value), RowFmt::Suffix => format!("{} {}", r.value, r.label) } });
     }
     out.join("\n")
 }
@@ -183,6 +185,13 @@ impl Output {
     pub fn text(s: impl Into<String>) -> Output { Output { text: s.into(), ..Default::default() } }
     /// 生成类结果：一批，每条一行。
     pub fn rows(rows: Vec<Row>, meta: impl Into<String>) -> Output { Output { text: rows_text(&rows, RowFmt::Colon), kind: OutKind::Rows, rows, meta: meta.into(), ..Default::default() } }
+}
+impl Output {
+    /// 多格式结果：键值行（可有一个主结果）。没有行时退回空文本。
+    pub fn kv(rows: Vec<Row>, fmt: RowFmt) -> Output {
+        if rows.is_empty() { return Output::default(); }
+        Output { text: rows_text(&rows, fmt), kind: OutKind::Kv, rows, ..Default::default() }
+    }
 }
 impl From<String> for Output { fn from(s: String) -> Output { Output::text(s) } }
 
@@ -278,18 +287,18 @@ pub fn builtin() -> Vec<ToolSpec> {
 /// 运行内置工具。
 pub fn run(id: &str, a: &Args) -> Result<Output> {
     Ok(match id {
-        "units" => num::units(a)?.into(),
-        "en_amount" => num::en_amount(a.get("input"), a.get("currency"))?.into(),
+        "units" => Output::kv(num::units_rows(a)?, RowFmt::Suffix),
+        "en_amount" => Output::kv(num::en_amount_rows(a.get("input"), a.get("currency"))?, RowFmt::Colon),
         "rmb" => num::rmb(a.get("input"))?.into(),
-        "sum_list" => num::sum_list(a.get("input")).into(),
-        "loan" => num::loan(a)?.into(),
+        "sum_list" => { let r = num::sum_rows(a.get("input")); if r.is_empty() { num::sum_list(a.get("input")).into() } else { Output::kv(r, RowFmt::Colon) } }
+        "loan" => Output::kv(num::loan_rows(a)?, RowFmt::Colon),
         "dedupe" => text::dedupe(a.get("input"), a.on("ignore_case"), a.on("trim"), a.on("drop_empty"), a.on("sort")).into(),
         "trim" => text::trim(a.get("input"), a.get("mode"), a.on("drop_empty")).into(),
         "case" => text::case(a.get("input"), a.get("mode")).into(),
         "plural" => text::plural_lines(a.get("input"), a.get("mode") != "singular").into(),
         "cjk_space" => text::cjk_space(a.get("input")).into(),
         "regex" => text::regex_test(a.get("pattern"), a.get("input"), a.get("replace"), a.on("i"), a.on("m"), a.on("s"))?.into(),
-        "id_card" => text::id_card(a.get("input"), chrono::Local::now().date_naive())?.into(),
+        "id_card" => Output::kv(text::id_card_rows(a.get("input"), chrono::Local::now().date_naive())?, RowFmt::Colon),
         "emoji" => text::strip_emoji(a.get("input")).into(),
         "md_html" => text::md_html(a.get("input")).into(),
         "json" => dev::json(a.get("input"), a.get("mode") == "minify", a.get("indent"), a.on("sort"))?.into(),
@@ -298,21 +307,21 @@ pub fn run(id: &str, a: &Args) -> Result<Output> {
         "sql" => dev::sql(a.get("input"), a.get("mode") == "minify", a.on("upper")).into(),
         "css" => dev::css(a.get("input"), a.get("mode") == "minify").into(),
         "html" => dev::html(a.get("input"), a.get("mode") == "minify").into(),
-        "cron" => dev::cron_next(a.get("input"), a.int("count", 1, 100).unwrap_or(10) as usize, chrono::Local::now())?.into(),
-        "naming" => dev::naming(a.get("input")).into(),
-        "color" => { let (s, rgba) = dev::color(a.get("input"))?; Output { text: s, color: Some(rgba), ..Default::default() } }
-        "radix" => dev::radix(a.get("input"), a.get("from"))?.into(),
-        "md5" => crypto::md5_text(a.get("input")).into(),
-        "file_md5" => { let p = a.file("file").ok_or_else(|| anyhow::anyhow!(t("tools.err_need_file")))?; crypto::file_hash(p, a.get("algo"))?.into() }
-        "sha" => crypto::sha_all(a.get("input"), a.on("upper")).into(),
+        "cron" => Output::kv(dev::cron_rows(a.get("input"), a.int("count", 1, 100).unwrap_or(10) as usize, chrono::Local::now())?, RowFmt::Pad(4)),
+        "naming" => Output::kv(dev::naming_rows(a.get("input")), RowFmt::Pad(16)),
+        "color" => { let (rows, rgba) = dev::color_rows(a.get("input"))?; Output { color: Some(rgba), ..Output::kv(rows, RowFmt::Pad(5)) } }
+        "radix" => Output::kv(dev::radix_rows(a.get("input"), a.get("from"))?, RowFmt::Pad(4)),
+        "md5" => Output::kv(crypto::md5_rows(a.get("input")), RowFmt::Colon),
+        "file_md5" => { let p = a.file("file").ok_or_else(|| anyhow::anyhow!(t("tools.err_need_file")))?; Output::kv(crypto::file_hash_rows(p, a.get("algo"))?, RowFmt::Colon) }
+        "sha" => Output::kv(crypto::sha_rows(a.get("input"), a.on("upper")), RowFmt::Pad(8)),
         "hmac" => crypto::hmac(a.get("input"), a.get("key"), a.get("algo"))?.into(),
         "aes" | "des" | "rc4" | "rabbit" => crypto::cipher(id, a)?.into(),
         "base64" => crypto::base64(a.get("input"), a.get("dir") == "dec", a.on("url"))?.into(),
         "url" => crypto::url(a.get("input"), a.get("dir"))?.into(),
         "unicode" => crypto::unicode(a.get("input"), a.get("dir") == "dec", a.on("ascii")).into(),
-        "timestamp" => time::timestamp(a.get("input"), chrono::Local::now())?.into(),
-        "date_calc" => time::date_calc(a)?.into(),
-        "workday" => time::workday(a)?.into(),
+        "timestamp" => Output::kv(time::timestamp_rows(a.get("input"), chrono::Local::now())?, RowFmt::Colon),
+        "date_calc" => Output::kv(time::date_calc_rows(a)?, RowFmt::Colon),
+        "workday" => Output::kv(time::workday_rows(a)?, RowFmt::Colon),
         "batch_time" => time::batch(a.get("input"), a.get("mode"), a.get("unit") == "ms").into(),
         "password" => gen::password_output(a)?,
         "uuid" => gen::uuid_output(a)?,
@@ -356,6 +365,46 @@ pub fn terminal_targets(sel: &str) -> Vec<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn kv_outputs() {
+        let mut a = Args::default();
+        // 颜色：主结果是小写 HEX，色块与全文都在
+        a.set("input", "#3b82f6");
+        let o = run("color", &a).unwrap();
+        assert_eq!(o.kind, OutKind::Kv);
+        assert_eq!(o.color, Some([0x3b, 0x82, 0xf6, 255]));
+        assert!(o.rows[0].primary && o.rows[0].value == "#3b82f6" && o.text.starts_with("HEX   #3b82f6"), "{}", o.text);
+        // 哈希：每行一个算法，复制的是纯哈希
+        a.set("input", "abc");
+        let o = run("sha", &a).unwrap();
+        assert_eq!(o.rows.len(), 5);
+        assert_eq!(o.rows[2].label, "SHA-256");
+        assert_eq!(o.rows[2].value, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        // 单位：全文保持“数值 单位”
+        let mut u = Args::default();
+        u.set("input", "1").set("kind", "length").set("from", "km");
+        let o = run("units", &u).unwrap();
+        assert!(o.text.contains("1000 m") && o.rows.iter().any(|r| r.label == "m" && r.value == "1000"), "{}", o.text);
+        // 求和：合计为主结果；没有数字时退回文本提示
+        a.set("input", "1 2 3");
+        let o = run("sum_list", &a).unwrap();
+        assert!(o.rows[0].primary && o.rows[0].value == "6");
+        a.set("input", "abc");
+        assert_eq!(run("sum_list", &a).unwrap().kind, OutKind::Text);
+        // 命名：多行输入每组前有分组标题，单行没有
+        a.set("input", "user name");
+        assert!(!run("naming", &a).unwrap().rows.iter().any(|r| r.head));
+        a.set("input", "user name\nfoo bar");
+        let o = run("naming", &a).unwrap();
+        assert_eq!(o.rows.iter().filter(|r| r.head).count(), 2);
+        // 空进制输入没有行
+        a.set("input", "").set("from", "auto");
+        assert!(run("radix", &a).unwrap().rows.is_empty());
+        // 身份证：无效时主结果为危险色
+        a.set("input", "110101199003070000");
+        let o = run("id_card", &a).unwrap();
+        assert!(o.rows[0].primary && o.rows[0].tone.is_some());
+    }
     use super::*;
     #[test]
     fn registry_complete() {

@@ -2,7 +2,7 @@
 use anyhow::{anyhow, bail, Result};
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
 
-use super::Args;
+use super::{rows_text, Args, Row, RowFmt};
 use crate::i18n::{t, tf};
 
 /// 解析常见日期时间写法（本地时区）。
@@ -32,23 +32,26 @@ pub fn from_ts(n: i64) -> Option<DateTime<Utc>> {
     else { Some(Utc.timestamp_nanos(n)) }
 }
 
-fn describe(d: DateTime<Local>) -> String {
+/// 一个时间点的各种写法；本地时间为主结果。
+fn describe_rows(d: DateTime<Local>) -> Vec<Row> {
     let wd = ["tools.wd_mon", "tools.wd_tue", "tools.wd_wed", "tools.wd_thu", "tools.wd_fri", "tools.wd_sat", "tools.wd_sun"][d.weekday().num_days_from_monday() as usize];
-    [format!("{}: {}", t("tools.ts_s"), d.timestamp()), format!("{}: {}", t("tools.ts_ms"), d.timestamp_millis()),
-     format!("{}: {} {}", t("tools.ts_local"), d.format("%Y-%m-%d %H:%M:%S"), t(wd)), format!("UTC: {}", d.with_timezone(&Utc).format("%Y-%m-%d %H:%M:%S")),
-     format!("ISO 8601: {}", d.to_rfc3339()), format!("RFC 2822: {}", d.to_rfc2822()),
-     format!("{}: {}", t("tools.ts_week"), tf("tools.ts_week_v", &[("y", &d.iso_week().year()), ("w", &d.iso_week().week()), ("d", &d.ordinal())]))].join("\n")
+    vec![Row::kv(t("tools.ts_s"), d.timestamp().to_string()), Row::kv(t("tools.ts_ms"), d.timestamp_millis().to_string()),
+        Row::kv(t("tools.ts_local"), format!("{} {}", d.format("%Y-%m-%d %H:%M:%S"), t(wd))).primary(), Row::kv("UTC", d.with_timezone(&Utc).format("%Y-%m-%d %H:%M:%S").to_string()),
+        Row::kv("ISO 8601", d.to_rfc3339()), Row::kv("RFC 2822", d.to_rfc2822()),
+        Row::kv(t("tools.ts_week"), tf("tools.ts_week_v", &[("y", &d.iso_week().year()), ("w", &d.iso_week().week()), ("d", &d.ordinal())]))]
 }
 
-pub fn timestamp(s: &str, now: DateTime<Local>) -> Result<String> {
+pub fn timestamp(s: &str, now: DateTime<Local>) -> Result<String> { Ok(rows_text(&timestamp_rows(s, now)?, RowFmt::Colon)) }
+
+pub fn timestamp_rows(s: &str, now: DateTime<Local>) -> Result<Vec<Row>> {
     let s = s.trim();
-    if s.is_empty() { return Ok(describe(now)); }
+    if s.is_empty() { return Ok(describe_rows(now)); }
     if let Ok(n) = s.parse::<i64>() {
         let d = from_ts(n).ok_or_else(|| anyhow!(t("tools.err_ts")))?;
-        return Ok(describe(d.with_timezone(&Local)));
+        return Ok(describe_rows(d.with_timezone(&Local)));
     }
-    if let Ok(f) = s.parse::<f64>() { if let Some(d) = Utc.timestamp_millis_opt((f * 1000.).round() as i64).single() { return Ok(describe(d.with_timezone(&Local))); } }
-    parse_dt(s).map(describe).ok_or_else(|| anyhow!(tf("tools.err_date", &[("v", &s)])))
+    if let Ok(f) = s.parse::<f64>() { if let Some(d) = Utc.timestamp_millis_opt((f * 1000.).round() as i64).single() { return Ok(describe_rows(d.with_timezone(&Local))); } }
+    parse_dt(s).map(describe_rows).ok_or_else(|| anyhow!(tf("tools.err_date", &[("v", &s)])))
 }
 
 fn add_months(d: NaiveDateTime, m: i64) -> Option<NaiveDateTime> {
@@ -58,7 +61,9 @@ fn add_months(d: NaiveDateTime, m: i64) -> Option<NaiveDateTime> {
     NaiveDate::from_ymd_opt(y, mo, d.day().min(last)).map(|x| x.and_time(d.time()))
 }
 
-pub fn date_calc(a: &Args) -> Result<String> {
+pub fn date_calc(a: &Args) -> Result<String> { Ok(rows_text(&date_calc_rows(a)?, RowFmt::Colon)) }
+
+pub fn date_calc_rows(a: &Args) -> Result<Vec<Row>> {
     let now = Local::now();
     let da = if a.get("a").trim().is_empty() { now } else { parse_dt(a.get("a")).ok_or_else(|| anyhow!(tf("tools.err_date", &[("v", &a.get("a"))])))? };
     if a.get("mode") == "add" {
@@ -69,7 +74,7 @@ pub fn date_calc(a: &Args) -> Result<String> {
             _ => Some(base + Duration::days(n)),
         }.ok_or_else(|| anyhow!(t("tools.err_range")))?;
         let r = Local.from_local_datetime(&r).earliest().ok_or_else(|| anyhow!(t("tools.err_range")))?;
-        return Ok(describe(r));
+        return Ok(describe_rows(r));
     }
     let db = if a.get("b").trim().is_empty() { now } else { parse_dt(a.get("b")).ok_or_else(|| anyhow!(tf("tools.err_date", &[("v", &a.get("b"))])))? };
     let (x, y) = if da <= db { (da, db) } else { (db, da) };
@@ -78,9 +83,9 @@ pub fn date_calc(a: &Args) -> Result<String> {
     let mut months = (y.year() - x.year()) as i64 * 12 + y.month() as i64 - x.month() as i64;
     if add_months(x.naive_local(), months).is_some_and(|m| m > y.naive_local()) { months -= 1; }
     let workdays = (0..dur.num_days()).filter(|i| (x.date_naive() + Duration::days(*i)).weekday().num_days_from_monday() < 5).count();
-    Ok([tf("tools.diff_days", &[("n", &dur.num_days())]), tf("tools.diff_weeks", &[("w", &(dur.num_days() / 7)), ("d", &(dur.num_days() % 7))]),
-        tf("tools.diff_months", &[("n", &months)]), tf("tools.diff_hours", &[("n", &dur.num_hours())]), tf("tools.diff_minutes", &[("n", &dur.num_minutes())]),
-        tf("tools.diff_seconds", &[("n", &dur.num_seconds())]), tf("tools.diff_workdays", &[("n", &workdays)])].join("\n"))
+    Ok(vec![Row::item(tf("tools.diff_days", &[("n", &dur.num_days())])).primary(), Row::item(tf("tools.diff_weeks", &[("w", &(dur.num_days() / 7)), ("d", &(dur.num_days() % 7))])),
+        Row::item(tf("tools.diff_months", &[("n", &months)])), Row::item(tf("tools.diff_hours", &[("n", &dur.num_hours())])), Row::item(tf("tools.diff_minutes", &[("n", &dur.num_minutes())])),
+        Row::item(tf("tools.diff_seconds", &[("n", &dur.num_seconds())])), Row::item(tf("tools.diff_workdays", &[("n", &workdays)]))])
 }
 
 fn date_list(s: &str) -> Result<Vec<NaiveDate>> {
@@ -102,7 +107,9 @@ pub fn is_workday(d: NaiveDate, holidays: &[NaiveDate], extra: &[NaiveDate]) -> 
     d.weekday().num_days_from_monday() < 5
 }
 
-pub fn workday(a: &Args) -> Result<String> {
+pub fn workday(a: &Args) -> Result<String> { Ok(rows_text(&workday_rows(a)?, RowFmt::Colon)) }
+
+pub fn workday_rows(a: &Args) -> Result<Vec<Row>> {
     let start = if a.get("start").trim().is_empty() { Local::now().date_naive() } else { parse_date(a.get("start")).ok_or_else(|| anyhow!(tf("tools.err_date", &[("v", &a.get("start"))])))? };
     let n = a.num("n")?.round() as i64;
     if n.abs() > 100_000 { bail!(t("tools.err_range")); }
@@ -111,8 +118,8 @@ pub fn workday(a: &Args) -> Result<String> {
     let mut d = start; let mut left = n.abs(); let mut skipped = 0;
     while left > 0 { d += Duration::days(step); if is_workday(d, &hol, &extra) { left -= 1; } else { skipped += 1; } }
     let wd = ["tools.wd_mon", "tools.wd_tue", "tools.wd_wed", "tools.wd_thu", "tools.wd_fri", "tools.wd_sat", "tools.wd_sun"][d.weekday().num_days_from_monday() as usize];
-    Ok([format!("{}: {} {}", t("tools.wk_result"), d.format("%Y-%m-%d"), t(wd)), tf("tools.wk_calendar", &[("n", &(d - start).num_days().abs())]), tf("tools.wk_skipped", &[("n", &skipped)]),
-        format!("{}: {}", t("tools.wk_start_is"), if is_workday(start, &hol, &extra) { t("tools.wk_workday") } else { t("tools.wk_restday") })].join("\n"))
+    Ok(vec![Row::kv(t("tools.wk_result"), format!("{} {}", d.format("%Y-%m-%d"), t(wd))).primary(), Row::item(tf("tools.wk_calendar", &[("n", &(d - start).num_days().abs())])), Row::item(tf("tools.wk_skipped", &[("n", &skipped)])),
+        Row::kv(t("tools.wk_start_is"), if is_workday(start, &hol, &extra) { t("tools.wk_workday") } else { t("tools.wk_restday") })])
 }
 
 pub fn batch(s: &str, mode: &str, ms: bool) -> String {

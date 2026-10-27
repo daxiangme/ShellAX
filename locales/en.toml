@@ -1730,6 +1730,8 @@
 "tools.cron" = "Cron schedule"
 "tools.cron_desc" = "Preview the next run times of a cron expression"
 "tools.cron_meaning" = "Meaning"
+"tools.cron_next_runs" = "Next runs"
+"tools.k_upper" = "Uppercase"
 "tools.naming" = "Naming styles"
 "tools.naming_desc" = "Convert between camelCase, snake_case, kebab-case and more"
 "tools.color" = "Color converter"

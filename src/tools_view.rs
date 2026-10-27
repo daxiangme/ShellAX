@@ -357,6 +357,23 @@ impl ToolView {
         list.into_any_element()
     }
 
+    /// 多格式结果：每种写法一行（主结果加大加粗），可逐条复制；颜色工具在最上面带色块。
+    fn render_kv(&self, cx: &mut Context<Self>) -> AnyElement {
+        let mut list = div().id("kv-scroll").flex_1().min_h_0().overflow_y_scroll().py(px(ui::LIST_INSET)).flex().flex_col().gap(px(ui::SP_1));
+        if let Some([r, g, b, a]) = self.output.color {
+            list = list.child(div().px(px(ui::LIST_INSET + ui::ROW_PX)).pb(px(ui::SP_2)).flex().items_center()
+                .child(div().h(px(ui::SP_6 * 1.5)).w_full().rounded(px(ui::R_MD)).border_1().border_color(crate::theme::divider())
+                    .bg(gpui::Rgba { r: r as f32 / 255., g: g as f32 / 255., b: b as f32 / 255., a: a as f32 / 255. })));
+        }
+        for (i, r) in self.output.rows.iter().enumerate() {
+            let key = format!("kv{i}");
+            let (val, k2) = (r.value.clone(), key.clone());
+            let on_copy: ClickFn = Box::new(cx.listener(move |this, _: &ClickEvent, _w, cx| this.copy_text(k2.clone(), val.clone(), cx)));
+            list = list.child(result_list::result_row(SharedString::from(format!("kvr-{i}")), r, RowMode::Kv, false, self.copied.as_deref() == Some(key.as_str()), on_copy, None));
+        }
+        list.into_any_element()
+    }
+
     fn field_label(s: &str) -> impl IntoElement {
         div().text_size(px(ui::fs_small())).text_color(c(cur().overlay1)).child(s.to_string())
     }
@@ -443,6 +460,8 @@ impl Render for ToolView {
         if let Some(e) = &self.error { out = out.child(ui::notice(ui::Notice::Error, e.clone()).mx(px(SUB_PAD)).my(px(ui::SP_2))); }
         if tools::has_history(&self.spec.id) {
             out = out.child(self.render_history(cx));
+        } else if self.output.kind == OutKind::Kv {
+            out = out.child(self.render_kv(cx));
         } else {
         if let Some([r, g, b, a]) = self.output.color {
             out = out.child(div().px(px(SUB_PAD)).pt(px(SUB_PAD)).flex().items_center().gap_2()

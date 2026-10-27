@@ -2,6 +2,7 @@
 use anyhow::{anyhow, bail, Result};
 use serde_json::Value;
 
+use super::{rows_text, Row, RowFmt, Tone};
 use crate::i18n::{t, tf};
 
 fn json_err(e: serde_json::Error) -> anyhow::Error { anyhow!(tf("tools.err_json", &[("line", &e.line()), ("col", &e.column()), ("msg", &e)])) }
@@ -302,13 +303,18 @@ pub fn html(s: &str, minify: bool) -> String {
 }
 
 pub fn cron_next(expr: &str, count: usize, now: chrono::DateTime<chrono::Local>) -> Result<String> {
+    Ok(rows_text(&cron_rows(expr, count, now)?, RowFmt::Pad(4)))
+}
+
+/// 含义（主结果）+ 之后若干次触发时间。
+pub fn cron_rows(expr: &str, count: usize, now: chrono::DateTime<chrono::Local>) -> Result<Vec<Row>> {
     use croner::parser::{CronParser, Seconds};
     let e = expr.trim();
     if e.is_empty() { bail!(t("tools.err_empty")); }
     let cron = CronParser::builder().seconds(Seconds::Optional).build().parse(e).map_err(|x| anyhow!(tf("tools.err_cron", &[("msg", &x)])))?;
-    let mut lines = vec![format!("{}: {}", t("tools.cron_meaning"), cron.describe())];
-    for (i, dt) in cron.iter_after(now).take(count).enumerate() { lines.push(format!("{:>3}. {}", i + 1, dt.format("%Y-%m-%d %H:%M:%S %a"))); }
-    Ok(lines.join("\n"))
+    let mut rows = vec![Row::kv(t("tools.cron_meaning"), cron.describe().to_string()).primary(), Row::head(t("tools.cron_next_runs"))];
+    for (i, dt) in cron.iter_after(now).take(count).enumerate() { rows.push(Row::kv(format!("{}.", i + 1), dt.format("%Y-%m-%d %H:%M:%S %a").to_string())); }
+    Ok(rows)
 }
 
 /// 拆词：驼峰、下划线、连字符、空格、点。
@@ -329,16 +335,25 @@ pub fn split_words(s: &str) -> Vec<String> {
     words
 }
 
-pub fn naming(s: &str) -> String {
-    s.lines().filter(|l| !l.trim().is_empty()).map(|l| {
+pub fn naming(s: &str) -> String { rows_text(&naming_rows(s), RowFmt::Pad(16)) }
+
+/// 每个输入行一组 8 种写法；多行输入时每组前加分组标题（原输入）。
+pub fn naming_rows(s: &str) -> Vec<Row> {
+    let lines: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
+    let multi = lines.len() > 1;
+    let mut rows = vec![];
+    for l in lines {
         let w: Vec<String> = split_words(l).iter().map(|x| x.to_lowercase()).collect();
-        if w.is_empty() { return String::new(); }
+        if w.is_empty() { continue; }
+        if multi { rows.push(Row::head(l.trim())); }
         let camel = w[0].clone() + &w[1..].iter().map(|x| cap(x)).collect::<String>();
         let pas: String = w.iter().map(|x| cap(x)).collect();
-        [("camelCase", camel), ("PascalCase", pas), ("snake_case", w.join("_")), ("SCREAMING_SNAKE", w.join("_").to_uppercase()), ("kebab-case", w.join("-")),
-         ("dot.case", w.join(".")), ("Title Case", w.iter().map(|x| cap(x)).collect::<Vec<_>>().join(" ")), ("path/case", w.join("/"))]
-            .iter().map(|(k, v)| format!("{k:16} {v}")).collect::<Vec<_>>().join("\n")
-    }).collect::<Vec<_>>().join("\n\n")
+        for (k, v) in [("camelCase", camel), ("PascalCase", pas), ("snake_case", w.join("_")), ("SCREAMING_SNAKE", w.join("_").to_uppercase()), ("kebab-case", w.join("-")),
+            ("dot.case", w.join(".")), ("Title Case", w.iter().map(|x| cap(x)).collect::<Vec<_>>().join(" ")), ("path/case", w.join("/"))] {
+            rows.push(Row::kv(k, v));
+        }
+    }
+    rows
 }
 
 fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (f64, f64, f64) {
@@ -361,6 +376,12 @@ fn rgb_to_hsl(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
 
 /// 解析 HEX / rgb() / rgba() / hsl() / hsla()，输出各种格式与 RGBA 值。
 pub fn color(s: &str) -> Result<(String, [u8; 4])> {
+    let (rows, rgba) = color_rows(s)?;
+    Ok((rows_text(&rows, RowFmt::Pad(5)), rgba))
+}
+
+/// 各种写法（第一行小写 HEX 为主结果）与 RGBA 值（给色块用）。
+pub fn color_rows(s: &str) -> Result<(Vec<Row>, [u8; 4])> {
     let s = s.trim().to_lowercase();
     let bad = || anyhow!(tf("tools.err_color", &[("v", &s)]));
     let nums = |inner: &str| -> Vec<f64> { inner.split([',', ' ', '/']).filter(|x| !x.is_empty()).map(|x| { let p = x.ends_with('%'); let v: f64 = x.trim_end_matches(['%', 'g', 'e', 'd']).parse().unwrap_or(f64::NAN); if p { v / 100. } else { v } }).collect() };
@@ -387,14 +408,14 @@ pub fn color(s: &str) -> Result<(String, [u8; 4])> {
     let (h, sl, l) = rgb_to_hsl(r8 as f64 / 255., g8 as f64 / 255., b8 as f64 / 255.);
     let mx = (r8.max(g8).max(b8)) as f64 / 255.;
     let sv = if mx == 0. { 0. } else { (mx - (r8.min(g8).min(b8)) as f64 / 255.) / mx };
-    let mut lines = vec![format!("HEX   #{r8:02x}{g8:02x}{b8:02x}"), format!("HEX   #{r8:02X}{g8:02X}{b8:02X}")];
-    if a8 < 255 { lines.push(format!("HEXA  #{r8:02x}{g8:02x}{b8:02x}{a8:02x}")); }
-    lines.push(format!("RGB   rgb({r8}, {g8}, {b8})"));
-    if a8 < 255 { lines.push(format!("RGBA  rgba({r8}, {g8}, {b8}, {:.2})", a)); }
-    lines.push(format!("HSL   hsl({}, {}%, {}%)", h.round(), (sl * 100.).round(), (l * 100.).round()));
-    lines.push(format!("HSV   hsv({}, {}%, {}%)", h.round(), (sv * 100.).round(), (mx * 100.).round()));
-    lines.push(format!("ARGB  0x{a8:02X}{r8:02X}{g8:02X}{b8:02X}"));
-    Ok((lines.join("\n"), [r8, g8, b8, a8]))
+    let mut rows = vec![Row::kv("HEX", format!("#{r8:02x}{g8:02x}{b8:02x}")).primary(), Row::kv("HEX", format!("#{r8:02X}{g8:02X}{b8:02X}")).tag(t("tools.k_upper"), Tone::Muted)];
+    if a8 < 255 { rows.push(Row::kv("HEXA", format!("#{r8:02x}{g8:02x}{b8:02x}{a8:02x}"))); }
+    rows.push(Row::kv("RGB", format!("rgb({r8}, {g8}, {b8})")));
+    if a8 < 255 { rows.push(Row::kv("RGBA", format!("rgba({r8}, {g8}, {b8}, {:.2})", a))); }
+    rows.push(Row::kv("HSL", format!("hsl({}, {}%, {}%)", h.round(), (sl * 100.).round(), (l * 100.).round())));
+    rows.push(Row::kv("HSV", format!("hsv({}, {}%, {}%)", h.round(), (sv * 100.).round(), (mx * 100.).round())));
+    rows.push(Row::kv("ARGB", format!("0x{a8:02X}{r8:02X}{g8:02X}{b8:02X}")));
+    Ok((rows, [r8, g8, b8, a8]))
 }
 
 fn to_base(mut n: u128, b: u32) -> String {
@@ -406,9 +427,12 @@ fn to_base(mut n: u128, b: u32) -> String {
     String::from_utf8(v).unwrap()
 }
 
-pub fn radix(s: &str, from: &str) -> Result<String> {
+pub fn radix(s: &str, from: &str) -> Result<String> { Ok(rows_text(&radix_rows(s, from)?, RowFmt::Pad(4))) }
+
+/// 各进制写法；输入为空时没有行。
+pub fn radix_rows(s: &str, from: &str) -> Result<Vec<Row>> {
     let raw: String = s.trim().chars().filter(|c| !matches!(c, '_' | ' ' | ',')).collect();
-    if raw.is_empty() { return Ok(String::new()); }
+    if raw.is_empty() { return Ok(vec![]); }
     let (neg, body) = match raw.strip_prefix('-') { Some(r) => (true, r.to_string()), None => (false, raw.clone()) };
     let lower = body.to_lowercase();
     let (base, digits) = match from {
@@ -417,11 +441,11 @@ pub fn radix(s: &str, from: &str) -> Result<String> {
     };
     let n = u128::from_str_radix(&digits, base).map_err(|_| anyhow!(tf("tools.err_radix", &[("v", &body), ("b", &base)])))?;
     let sg = if neg { "-" } else { "" };
-    let mut lines = vec![];
-    for (b, name) in [(2, "BIN"), (8, "OCT"), (10, "DEC"), (16, "HEX"), (32, "B32"), (36, "B36")] { lines.push(format!("{name:4} {sg}{}", to_base(n, b))); }
-    lines.push(format!("HEX  {sg}0x{}", to_base(n, 16).to_uppercase()));
-    if !neg && n <= u32::MAX as u128 { lines.push(format!("{} {}", t("tools.radix_bits"), format!("{:032b}", n as u32).as_bytes().chunks(8).map(|c| std::str::from_utf8(c).unwrap()).collect::<Vec<_>>().join(" "))); }
-    Ok(lines.join("\n"))
+    let mut rows = vec![];
+    for (b, name) in [(2, "BIN"), (8, "OCT"), (10, "DEC"), (16, "HEX"), (32, "B32"), (36, "B36")] { rows.push(Row::kv(name, format!("{sg}{}", to_base(n, b)))); }
+    rows.push(Row::kv("HEX", format!("{sg}0x{}", to_base(n, 16).to_uppercase())));
+    if !neg && n <= u32::MAX as u128 { rows.push(Row::kv(t("tools.radix_bits"), format!("{:032b}", n as u32).as_bytes().chunks(8).map(|c| std::str::from_utf8(c).unwrap()).collect::<Vec<_>>().join(" "))); }
+    Ok(rows)
 }
 
 #[cfg(test)]

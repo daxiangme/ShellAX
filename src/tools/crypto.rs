@@ -9,16 +9,20 @@ use cipher::{BlockDecryptMut, BlockEncryptMut, KeyInit, KeyIvInit, StreamCipher}
 use cipher::block_padding::NoPadding;
 use digest::Digest;
 
-use super::Args;
+use super::{rows_text, Args, Row, RowFmt, Tone};
 use crate::i18n::{t, tf};
 
-pub fn md5_text(s: &str) -> String {
+pub fn md5_text(s: &str) -> String { rows_text(&md5_rows(s), RowFmt::Colon) }
+
+/// 32 位小写（主结果）、32 位大写、16 位小写、16 位大写。
+pub fn md5_rows(s: &str) -> Vec<Row> {
     let h = hex::encode(md5::Md5::digest(s.as_bytes()));
-    format!("{}: {h}\n{}: {}\n16 {}: {}\n16 {}: {}", t("tools.lower32"), t("tools.upper32"), h.to_uppercase(), t("tools.lower"), &h[8..24], t("tools.upper"), h[8..24].to_uppercase())
+    vec![Row::kv(t("tools.lower32"), h.clone()).primary(), Row::kv(t("tools.upper32"), h.to_uppercase()),
+        Row::kv(format!("16 {}", t("tools.lower")), h[8..24].to_string()), Row::kv(format!("16 {}", t("tools.upper")), h[8..24].to_uppercase())]
 }
 
-/// 分块读取文件计算哈希，内存占用固定（1 MiB 缓冲）。
-pub fn file_hash(p: &Path, algo: &str) -> Result<String> {
+/// 分块读取文件计算哈希，内存占用固定（1 MiB 缓冲）。返回（小写十六进制，字节数）。
+fn file_digest(p: &Path, algo: &str) -> Result<(String, u64)> {
     fn run<D: Digest>(p: &Path) -> Result<(String, u64)> {
         let mut f = std::fs::File::open(p)?;
         let mut h = D::new();
@@ -27,16 +31,31 @@ pub fn file_hash(p: &Path, algo: &str) -> Result<String> {
         loop { let k = f.read(&mut buf)?; if k == 0 { break; } n += k as u64; h.update(&buf[..k]); }
         Ok((hex::encode(h.finalize()), n))
     }
-    let (h, n) = match algo { "sha1" => run::<sha1::Sha1>(p)?, "sha256" => run::<sha2::Sha256>(p)?, "sha512" => run::<sha2::Sha512>(p)?, _ => run::<md5::Md5>(p)? };
+    match algo { "sha1" => run::<sha1::Sha1>(p), "sha256" => run::<sha2::Sha256>(p), "sha512" => run::<sha2::Sha512>(p), _ => run::<md5::Md5>(p) }
+}
+
+pub fn file_hash(p: &Path, algo: &str) -> Result<String> {
+    let (h, n) = file_digest(p, algo)?;
     let name = p.file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_default();
     Ok(format!("{h}\n{}\n\n{}: {name}\n{}: {n}", h.to_uppercase(), t("tools.file_name"), t("tools.file_size")))
 }
 
-pub fn sha_all(s: &str, upper: bool) -> String {
+/// 文件哈希：小写（主结果）、大写，之后是文件名与大小。
+pub fn file_hash_rows(p: &Path, algo: &str) -> Result<Vec<Row>> {
+    let (h, n) = file_digest(p, algo)?;
+    let name = p.file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_default();
+    let label = match algo { "sha1" => "SHA-1", "sha256" => "SHA-256", "sha512" => "SHA-512", _ => "MD5" };
+    Ok(vec![Row::kv(label, h.clone()).primary(), Row::kv(label, h.to_uppercase()).tag(t("tools.k_upper"), Tone::Muted),
+        Row::kv(t("tools.file_name"), name), Row::kv(t("tools.file_size"), n.to_string())])
+}
+
+pub fn sha_all(s: &str, upper: bool) -> String { rows_text(&sha_rows(s, upper), RowFmt::Pad(8)) }
+
+pub fn sha_rows(s: &str, upper: bool) -> Vec<Row> {
     let b = s.as_bytes();
-    let rows = [("SHA-1", hex::encode(sha1::Sha1::digest(b))), ("SHA-224", hex::encode(sha2::Sha224::digest(b))), ("SHA-256", hex::encode(sha2::Sha256::digest(b))),
-        ("SHA-384", hex::encode(sha2::Sha384::digest(b))), ("SHA-512", hex::encode(sha2::Sha512::digest(b)))];
-    rows.iter().map(|(k, v)| format!("{k:8} {}", if upper { v.to_uppercase() } else { v.clone() })).collect::<Vec<_>>().join("\n")
+    [("SHA-1", hex::encode(sha1::Sha1::digest(b))), ("SHA-224", hex::encode(sha2::Sha224::digest(b))), ("SHA-256", hex::encode(sha2::Sha256::digest(b))),
+        ("SHA-384", hex::encode(sha2::Sha384::digest(b))), ("SHA-512", hex::encode(sha2::Sha512::digest(b)))]
+        .into_iter().map(|(k, v)| Row::kv(k, if upper { v.to_uppercase() } else { v })).collect()
 }
 
 pub fn hmac(s: &str, key: &str, algo: &str) -> Result<String> {

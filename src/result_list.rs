@@ -24,8 +24,11 @@ pub fn tone_color(tone: Tone) -> Hsla {
     c(match tone { Tone::Muted => th.overlay1, Tone::Danger => th.error, Tone::Warn => th.warning, Tone::Good => th.success, Tone::Accent => th.accent })
 }
 
+/// 超过这个长度的整段内容（哈希等）也允许折行。
+const WRAP_LEN: usize = 32;
+
 /// 内容里有空白（句子、名单）时允许换行，否则单行省略并在悬停时显示全文。
-fn wraps(v: &str) -> bool { v.contains(char::is_whitespace) || v.contains('、') }
+fn wraps(v: &str) -> bool { v.contains(char::is_whitespace) || v.contains('、') || v.chars().count() > WRAP_LEN }
 
 /// 一行结果：[标签] 内容 [标签徽标] [复制] [删除（悬停显示）]。
 /// `masked` 时内容画成圆点（复制仍复制原文）；`copied` 时复制图标短暂变成对勾。
@@ -36,7 +39,7 @@ pub fn result_row(id: impl Into<SharedString>, r: &Row, mode: RowMode, masked: b
     let gid = SharedString::from(format!("rr-{id}"));
     let shown = if masked { "•".repeat(r.value.chars().count().min(MASK_MAX)) } else { r.value.clone() };
     let wrap = wraps(&r.value);
-    let vsize = if r.primary { ui::fs_title() } else { ui::fs_mono() };
+    let vsize = if r.primary && r.value.chars().count() <= WRAP_LEN { ui::fs_title() } else { ui::fs_mono() };
     let vcol = r.tone.map(tone_color).unwrap_or_else(|| c(th.text));
     let value = div().id(SharedString::from(format!("{id}-v"))).flex_1().min_w_0().font_family(ui::mono_family()).text_size(px(vsize)).line_height(px(ui::lh(vsize)))
         .text_color(vcol).when(r.primary, |d| d.font_weight(FontWeight::SEMIBOLD))

@@ -1730,6 +1730,8 @@
 "tools.cron" = "Crontab 执行时间"
 "tools.cron_desc" = "预览 Cron 表达式接下来的执行时间"
 "tools.cron_meaning" = "说明"
+"tools.cron_next_runs" = "接下来的触发时间"
+"tools.k_upper" = "大写"
 "tools.naming" = "命名风格转换"
 "tools.naming_desc" = "在 camelCase、snake_case、kebab-case 等命名风格间转换"
 "tools.color" = "颜色转换"

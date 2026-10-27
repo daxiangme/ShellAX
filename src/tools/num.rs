@@ -1,7 +1,7 @@
 //! 单位换算与财务计算。
 use anyhow::{anyhow, bail, Result};
 
-use super::Args;
+use super::{rows_text, Args, Row, RowFmt};
 use crate::i18n::{t, tf};
 
 /// (种类 id, 文案键)
@@ -49,7 +49,10 @@ pub fn convert(kind: &str, v: f64, from: &str) -> Result<Vec<(String, f64)>> {
     Ok(tb.iter().map(|(u, k)| (u.to_string(), base / k)).collect())
 }
 
-pub fn units(a: &Args) -> Result<String> {
+pub fn units(a: &Args) -> Result<String> { Ok(rows_text(&units_rows(a)?, RowFmt::Suffix)) }
+
+/// 每个单位一行：标签是单位，内容是数值。
+pub fn units_rows(a: &Args) -> Result<Vec<Row>> {
     let v = a.num("input")?;
     let kind = a.get("kind");
     let from = if a.get("from").trim().is_empty() { if kind == "temp" { "°C" } else { table(kind).first().map(|x| x.0).unwrap_or("") } } else { a.get("from") };
@@ -57,7 +60,7 @@ pub fn units(a: &Args) -> Result<String> {
         // 单位不属于当前种类时，自动找一个包含它的种类
         UNIT_KINDS.iter().find_map(|k| convert(k.0, v, from).ok()).ok_or(e)
     })?;
-    Ok(rows.into_iter().map(|(u, x)| format!("{} {u}", fmt_num(x))).collect::<Vec<_>>().join("\n"))
+    Ok(rows.into_iter().map(|(u, x)| Row::kv(u, fmt_num(x))).collect())
 }
 
 const ONES: [&str; 20] = ["Zero", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten", "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen", "Seventeen", "Eighteen", "Nineteen"];
@@ -102,7 +105,10 @@ fn parse_money(s: &str) -> Result<(bool, u64, u64)> {
     Ok((neg, int, cents))
 }
 
-pub fn en_amount(s: &str, currency: &str) -> Result<String> {
+pub fn en_amount(s: &str, currency: &str) -> Result<String> { Ok(rows_text(&en_amount_rows(s, currency)?, RowFmt::Colon)) }
+
+/// 英文金额：首字母大写（主结果）、全大写、支票写法（SAY … ONLY、金额）。
+pub fn en_amount_rows(s: &str, currency: &str) -> Result<Vec<Row>> {
     let (neg, int, cents) = parse_money(s)?;
     let (major, minor) = match currency { "USD" => ("Dollars", "Cents"), "EUR" => ("Euros", "Cents"), "HKD" => ("Hong Kong Dollars", "Cents"), "RMB" => ("Yuan", "Fen"), _ => ("", "") };
     let mut w = en_words(int);
@@ -110,7 +116,7 @@ pub fn en_amount(s: &str, currency: &str) -> Result<String> {
     let words = if cents > 0 { if major.is_empty() { format!("{w} and {cents:02}/100") } else { format!("{w} and {} {minor}", en_words(cents)) } } else { w };
     let words = if neg { format!("Minus {words}") } else { words };
     let check = format!("{} {} AND {:02}/100", if currency.is_empty() { "" } else { currency }, en_words(int).to_uppercase(), cents).trim().to_string();
-    Ok(format!("{words}\n{}\nSAY {} ONLY\n{}", words.to_uppercase(), words.to_uppercase(), check))
+    Ok(vec![Row::item(words.clone()).primary(), Row::item(words.to_uppercase()), Row::item(format!("SAY {} ONLY", words.to_uppercase())), Row::item(check)])
 }
 
 pub fn rmb(s: &str) -> Result<String> {
@@ -153,18 +159,29 @@ pub fn parse_numbers(s: &str) -> Vec<f64> {
 }
 
 pub fn sum_list(s: &str) -> String {
+    let rows = sum_rows(s);
+    if rows.is_empty() { return t("tools.no_numbers").to_string(); }
+    rows_text(&rows, RowFmt::Colon)
+}
+
+/// 合计（主结果）、个数、平均、最小、最大、中位数；没有数字时为空。
+pub fn sum_rows(s: &str) -> Vec<Row> {
     let v = parse_numbers(s);
-    if v.is_empty() { return t("tools.no_numbers").to_string(); }
+    if v.is_empty() { return vec![]; }
     let sum: f64 = v.iter().sum();
     let mut sorted = v.clone();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let n = v.len();
     let median = if n % 2 == 1 { sorted[n / 2] } else { (sorted[n / 2 - 1] + sorted[n / 2]) / 2. };
     let r = |x: f64| fmt_num((x * 1e8).round() / 1e8);
-    format!("{}: {n}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}", t("tools.s_count"), t("tools.s_sum"), r(sum), t("tools.s_avg"), r(sum / n as f64), t("tools.s_min"), r(sorted[0]), t("tools.s_max"), r(sorted[n - 1]), t("tools.s_median"), r(median))
+    vec![Row::kv(t("tools.s_sum"), r(sum)).primary(), Row::kv(t("tools.s_count"), n.to_string()), Row::kv(t("tools.s_avg"), r(sum / n as f64)),
+        Row::kv(t("tools.s_min"), r(sorted[0])), Row::kv(t("tools.s_max"), r(sorted[n - 1])), Row::kv(t("tools.s_median"), r(median))]
 }
 
-pub fn loan(a: &Args) -> Result<String> {
+pub fn loan(a: &Args) -> Result<String> { Ok(rows_text(&loan_rows(a)?, RowFmt::Colon)) }
+
+/// 等额本息：月供为主结果；等额本金：首月还款为主结果。
+pub fn loan_rows(a: &Args) -> Result<Vec<Row>> {
     let p = a.num("principal")?;
     let rate = a.num("rate")? / 100. / 12.;
     let n = (a.num("years")? * 12.).round();
@@ -175,11 +192,12 @@ pub fn loan(a: &Args) -> Result<String> {
         let first = base + p * rate;
         let last = base + base * rate;
         let interest = p * rate * (n + 1.) / 2.;
-        return Ok(format!("{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}", t("tools.l_first"), money(first), t("tools.l_last"), money(last), t("tools.l_decrease"), money(base * rate), t("tools.l_interest"), money(interest), t("tools.l_total"), money(p + interest)));
+        return Ok(vec![Row::kv(t("tools.l_first"), money(first)).primary(), Row::kv(t("tools.l_last"), money(last)), Row::kv(t("tools.l_decrease"), money(base * rate)),
+            Row::kv(t("tools.l_interest"), money(interest)), Row::kv(t("tools.l_total"), money(p + interest))]);
     }
     let m = if rate == 0. { p / n } else { p * rate * (1. + rate).powf(n) / ((1. + rate).powf(n) - 1.) };
     let total = m * n;
-    Ok(format!("{}: {}\n{}: {}\n{}: {}\n{}: {n}", t("tools.l_monthly"), money(m), t("tools.l_interest"), money(total - p), t("tools.l_total"), money(total), t("tools.l_months")))
+    Ok(vec![Row::kv(t("tools.l_monthly"), money(m)).primary(), Row::kv(t("tools.l_interest"), money(total - p)), Row::kv(t("tools.l_total"), money(total)), Row::kv(t("tools.l_months"), n.to_string())])
 }
 
 #[cfg(test)]

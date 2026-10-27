@@ -1,6 +1,7 @@
 //! 文本类工具。
 use anyhow::{bail, Result};
 
+use super::{rows_text, Row, RowFmt, Tone};
 use crate::i18n::{t, tf};
 
 pub fn dedupe(s: &str, ignore_case: bool, trim: bool, drop_empty: bool, sort: bool) -> String {
@@ -138,7 +139,10 @@ pub fn regex_test(pat: &str, text: &str, replace: &str, i: bool, m: bool, s: boo
 }
 
 /// 大陆 18 位身份证号校验。
-pub fn id_card(s: &str, today: chrono::NaiveDate) -> Result<String> {
+pub fn id_card(s: &str, today: chrono::NaiveDate) -> Result<String> { Ok(rows_text(&id_card_rows(s, today)?, RowFmt::Colon)) }
+
+/// 校验结果（主结果，有效绿色/无效红色）+ 校验位、地区、生日、年龄、性别。
+pub fn id_card_rows(s: &str, today: chrono::NaiveDate) -> Result<Vec<Row>> {
     use chrono::Datelike;
     let id: String = s.trim().to_uppercase().chars().filter(|c| !c.is_whitespace()).collect();
     if id.len() != 18 || !id[..17].chars().all(|c| c.is_ascii_digit()) || !id[17..].chars().all(|c| c.is_ascii_digit() || c == 'X') { bail!(t("tools.id_bad_format")); }
@@ -149,22 +153,23 @@ pub fn id_card(s: &str, today: chrono::NaiveDate) -> Result<String> {
     let ok = id.ends_with(expect);
     let birth = chrono::NaiveDate::parse_from_str(&id[6..14], "%Y%m%d").ok().filter(|d| *d <= today && d.year() >= 1900);
     let male = (id.as_bytes()[16] - b'0') % 2 == 1;
+    let valid = ok && birth.is_some();
     let mut lines = vec![
-        format!("{}: {}", t("tools.id_result"), if ok && birth.is_some() { t("tools.id_valid") } else { t("tools.id_invalid") }),
-        format!("{}: {} ({})", t("tools.id_check"), if ok { "✓" } else { "✗" }, tf("tools.id_expect", &[("c", &expect)])),
-        format!("{}: {}", t("tools.id_region"), &id[..6]),
+        Row::kv(t("tools.id_result"), if valid { t("tools.id_valid") } else { t("tools.id_invalid") }).primary().tone(if valid { Tone::Good } else { Tone::Danger }),
+        Row::kv(t("tools.id_check"), format!("{} ({})", if ok { "✓" } else { "✗" }, tf("tools.id_expect", &[("c", &expect)]))),
+        Row::kv(t("tools.id_region"), &id[..6]),
     ];
     match birth {
         Some(b) => {
             let mut age = today.year() - b.year();
             if (today.month(), today.day()) < (b.month(), b.day()) { age -= 1; }
-            lines.push(format!("{}: {}", t("tools.id_birth"), b.format("%Y-%m-%d")));
-            lines.push(format!("{}: {age}", t("tools.id_age")));
+            lines.push(Row::kv(t("tools.id_birth"), b.format("%Y-%m-%d").to_string()));
+            lines.push(Row::kv(t("tools.id_age"), age.to_string()));
         }
-        None => lines.push(format!("{}: ✗", t("tools.id_birth"))),
+        None => lines.push(Row::kv(t("tools.id_birth"), "✗")),
     }
-    lines.push(format!("{}: {}", t("tools.id_gender"), if male { t("tools.id_male") } else { t("tools.id_female") }));
-    Ok(lines.join("\n"))
+    lines.push(Row::kv(t("tools.id_gender"), if male { t("tools.id_male") } else { t("tools.id_female") }));
+    Ok(lines)
 }
 
 fn is_emoji(c: char) -> bool {
