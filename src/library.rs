@@ -73,17 +73,16 @@ impl Root {
         let vars = self.lib_vars.clone().filter(|_| owns_forms);
         let confirm = self.lib_confirm.clone().filter(|_| owns_forms);
         let notice = if owns_forms { self.lib_notice.clone() } else { String::new() };
-        let module = self.snippet_module();
-        let ready = module != "terminal" || self.focused_pane(window, cx).is_some_and(|p| p.read(cx).ready());
+        // a command can be inserted into the focused SQL editor, Redis console or ready terminal
+        let target = self.active_in_ws(cx) && self.focused_pane(window, cx).is_some_and(|p| { let p = p.read(cx); p.db.is_some() || matches!(p.embed, Some(crate::termview::Embed::Kv(_))) || p.ready() });
         let mut actions: Vec<AnyElement> = vec![];
         let mut body = div().flex_1().min_h_0().flex().flex_col();
         body = body.child(ui::field_row().pb(px(ui::SP_2)).child(ui::search_field(&search, false)));
-        if !ready {
-            body = body.child(ui::notice(ui::Notice::Info, t("lib.need_terminal")).mb(px(ui::SP_2)));
+        if !target {
+            body = body.child(ui::notice(ui::Notice::Info, t(if snippets_mode { "lib.no_target_hint" } else { "lib.need_terminal" })).mb(px(ui::SP_2)));
         }
         if snippets_mode {
-            let mut all = ssh_term_proto::snippets::load();
-            all.retain(|s| s.module == module);
+            let all = ssh_term_proto::snippets::load();
             body = body.child(self.snippet_groups(&all, &group, cx));
             if let Some(ed) = editor {
                 body = body.child(self.snippet_editor(&ed, cx));
@@ -95,7 +94,7 @@ impl Root {
                 actions.push(ui::icon_button("lib-new", IconName::Plus, ui::IconBtn::Md, t("lib.new")).on_click(cx.listener(|this, _, w, cx| {
                     this.open_lib_editor(None, String::new(), String::new(), String::new(), String::new(), w, cx);
                 })).into_any_element());
-                body = body.child(self.snippet_list(&all, &q, &group, module, cx));
+                body = body.child(self.snippet_list(&all, &q, &group, cx));
             }
         } else {
             let opts = [("this".to_string(), t("lib.this_host").to_string()), ("all".to_string(), t("lib.all_hosts").to_string())];
@@ -120,7 +119,7 @@ impl Root {
         if let Some((target, pos)) = self.lib_menu.clone().filter(|(t, _)| t.owner_is_snippets() == snippets_mode) {
             body = body.child(self.lib_menu_el(target, pos, cx));
         }
-        let (id, title, sub, ic) = if snippets_mode { ("snip-dock", t("lib.snippets"), Some(SharedString::from(module_label(module))), IconName::Code) } else { ("hist-dock", t("lib.history"), None, IconName::Clock) };
+        let (id, title, sub, ic) = if snippets_mode { ("snip-dock", t("lib.snippets"), None, IconName::Code) } else { ("hist-dock", t("lib.history"), None, IconName::Clock) };
         self.dock_frame(id, title.into(), sub, ic, actions, body, cx)
     }
 
@@ -143,7 +142,7 @@ impl Root {
         row
     }
 
-    fn snippet_list(&mut self, all: &[Snippet], q: &str, group: &str, module: &'static str, cx: &mut Context<Self>) -> AnyElement {
+    fn snippet_list(&mut self, all: &[Snippet], q: &str, group: &str, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
         let shown: Vec<Snippet> = all.iter().filter(|s| snip_visible(s, q, group)).cloned().collect();
         if all.is_empty() {
@@ -151,7 +150,7 @@ impl Root {
                 ui::button("lib-new-empty", t("lib.new"), 1).on_click(cx.listener(|this, _, w, cx| {
                     this.open_lib_editor(None, String::new(), String::new(), String::new(), String::new(), w, cx);
                 })).into_any_element(),
-                ui::button("lib-starters", t("lib.add_examples"), 0).on_click(cx.listener(move |this, _, _w, cx| this.add_starters(module, cx))).into_any_element(),
+                ui::button("lib-starters", t("lib.add_examples"), 0).on_click(cx.listener(move |this, _, _w, cx| this.add_starters(cx))).into_any_element(),
             ], false).into_any_element();
         }
         if shown.is_empty() {
@@ -387,10 +386,8 @@ impl Root {
             cx.notify();
             return;
         }
-        // an edited snippet keeps its module; a new one joins the current module
-        let module = ed.id.as_ref().and_then(|id| ssh_term_proto::snippets::load().into_iter().find(|s| &s.id == id)).map(|s| s.module).unwrap_or_else(|| self.snippet_module().to_string());
         let item = Snippet {
-            module,
+            module: String::new(),
             id: ed.id.clone().unwrap_or_else(ssh_term_proto::snippets::new_id),
             name,
             group: ed.group.read(cx).value().trim().to_string(),
@@ -444,26 +441,24 @@ impl Root {
         }
     }
 
-    /// Example snippets for a module that has none yet.
-    fn add_starters(&mut self, module: &'static str, cx: &mut Context<Self>) {
-        for (name, group, body) in ssh_term_proto::snippets::starters(module) {
-            let item = Snippet { id: ssh_term_proto::snippets::new_id(), name: name.to_string(), group: group.to_string(), note: String::new(), body: body.to_string(), module: module.into() };
+    /// Example snippets (terminal, SQL, Redis, Docker) for an empty list.
+    fn add_starters(&mut self, cx: &mut Context<Self>) {
+        for (name, group, body) in ssh_term_proto::snippets::starters() {
+            let item = Snippet { id: ssh_term_proto::snippets::new_id(), name: name.to_string(), group: group.to_string(), note: String::new(), body: body.to_string(), module: String::new() };
             if let Err(e) = ssh_term_proto::snippets::upsert(item) { self.lib_notice = e; break; }
         }
         cx.notify();
     }
 
-    /// Insert / run into the current module's own target: SQL editor, Redis console, or (for
-    /// terminal, Docker container shells) the terminal. With no target the text is copied.
+    /// Insert / run into whatever the focused pane is: SQL editor, Redis console or terminal
+    /// (the list is shared by every module). With no target the text is copied.
     fn apply_module(&mut self, body: &str, exec: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let module = self.snippet_module();
         let pane = if self.active_in_ws(cx) { self.focused_pane(window, cx) } else { None };
         if let Some(p) = &pane {
             if let Some(dv) = p.read(cx).db.clone() { dv.update(cx, |v, cx| v.insert_text(body, window, cx)); self.lib_notice.clear(); cx.notify(); return true; }
             if let Some(crate::termview::Embed::Kv(kv)) = p.read(cx).embed.clone() { kv.update(cx, |v, cx| v.insert_console(body, exec, window, cx)); self.lib_notice.clear(); cx.notify(); return true; }
             if p.read(cx).ready() { return false; }
         }
-        if module == "terminal" { return false; }
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(body.to_string()));
         self.lib_notice = t("lib.copied_no_target").into();
         cx.notify();
@@ -571,9 +566,4 @@ fn snip_visible(s: &Snippet, q: &str, group: &str) -> bool {
     if !group.is_empty() && group != UNGROUPED && s.group != group { return false; }
     if q.is_empty() { return true; }
     format!("{} {} {} {}", s.name, s.group, s.note, s.body).to_lowercase().contains(q)
-}
-
-/// Label of a snippet module for the tool window header.
-pub(crate) fn module_label(m: &str) -> String {
-    match m { "sftp" => t("tool.sftp"), "database" => t("tool.database"), "redis" => t("tool.redis"), "docker" => t("tool.docker"), _ => t("lib.module_terminal") }.to_string()
 }

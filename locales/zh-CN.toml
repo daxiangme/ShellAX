@@ -1574,7 +1574,7 @@
 "ws.sftp_title" = "没有打开的文件浏览器"
 "lib.add_examples" = "添加示例"
 "lib.copied_no_target" = "当前没有可插入的位置，已复制到剪贴板"
-"lib.module_terminal" = "终端"
+"lib.no_target_hint" = "当前没有可插入的位置：点击命令会复制到剪贴板"
 "db.clear_results" = "清空"
 "docker.kill" = "强制停止"
 "docker.compose_up" = "启动项目"

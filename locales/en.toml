@@ -1574,7 +1574,7 @@
 "ws.sftp_title" = "No file browser open"
 "lib.add_examples" = "Add examples"
 "lib.copied_no_target" = "Nothing to insert into here, so it was copied to the clipboard"
-"lib.module_terminal" = "Terminal"
+"lib.no_target_hint" = "Nothing to insert into right now: clicking a command copies it to the clipboard"
 "db.clear_results" = "Clear"
 "docker.kill" = "Kill"
 "docker.compose_up" = "Up"

@@ -95,9 +95,6 @@ impl Root {
         self.ws_seen = self.tabs.get(self.active).map(Self::tab_key);
     }
 
-    /// Snippet module of the current workspace.
-    pub(crate) fn snippet_module(&self) -> &'static str { match self.tool.workspace() { Tool::Hosts => "terminal", t => t.id() } }
-
     /// "+" in the tab row outside the terminal module; false = terminal (use the new-tab menu).
     pub(crate) fn new_module_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         match self.tool.workspace() {
