@@ -108,6 +108,9 @@ pub struct ToolSpec {
     /// 所属扩展包 id；内置工具为空。
     #[serde(default)]
     pub pack: String,
+    /// 列表与页面标题用的图标名（Lucide 文件名，如 `qr-code`）；扩展包可选声明，留空则按工具 id 查 `icon_of`，仍没有就用通用图标。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub icon: String,
 }
 
 /// 运行参数：字段 id → 文本值；文件字段为路径列表。
@@ -300,8 +303,49 @@ pub fn cat_label(id: &str) -> String {
     CATEGORIES.iter().find(|c| c.0 == id).map(|c| t(c.1).to_string()).unwrap_or_else(|| id.to_string())
 }
 
+/// 通用图标：没有声明也查不到映射时使用。
+pub const ICON_FALLBACK: &str = "wrench";
+
+/// 内置工具与已知扩展工具的图标（Lucide 文件名）；未知 id 返回空串。
+pub fn icon_of(id: &str) -> &'static str {
+    match id {
+        // 单位与财务
+        "units" => "ruler", "en_amount" => "badge-dollar-sign", "rmb" => "banknote", "sum_list" => "sigma", "loan" => "landmark",
+        // 文本
+        "dedupe" => "list-minus", "trim" => "scissors", "case" => "a-large-small", "plural" => "copy-plus", "cjk_space" => "space",
+        "regex" => "regex", "id_card" => "id-card", "emoji" => "sticker", "md_html" => "file-type",
+        // 开发
+        "json" => "braces", "json_ts" => "file-braces", "go_json" => "file-code", "color" => "palette", "cron" => "calendar-clock",
+        "css" => "paintbrush", "html" => "code-xml", "naming" => "case-sensitive", "radix" => "binary", "sql" => "database", "websocket" => "radio-tower",
+        // 加解密与编码
+        "aes" => "lock-keyhole", "base64" => "arrow-left-right", "des" => "lock", "file_md5" => "file-check", "hmac" => "key-round",
+        "md5" => "hash", "rabbit" => "rabbit", "rc4" => "shield", "sha" => "shield-check", "unicode" => "type", "url" => "link",
+        // 生成
+        "password" => "rectangle-ellipsis", "random_group" => "shuffle", "random_num" => "dices", "uuid" => "fingerprint-pattern",
+        // 时间
+        "batch_time" => "timer-reset", "date_calc" => "calendar-days", "timestamp" => "clock", "workday" => "briefcase",
+        "world_clock" => "globe", "tz_convert" => "clock-arrow-right",
+        // 语言
+        "pinyin" => "languages", "zh_convert" => "repeat-2",
+        // 图片
+        "qr_gen" => "qr-code", "qr_decode" => "scan-qr-code", "barcode" => "barcode", "img_compress" => "image-down", "img_watermark" => "stamp",
+        // PDF
+        "pdf_merge" => "merge", "pdf_split" => "split", "pdf_rotate" => "rotate-cw", "pdf_delete" => "file-x", "pdf_reorder" => "arrow-up-down",
+        "pdf_watermark" => "stamp", "pdf_pagenum" => "list-ordered", "img_to_pdf" => "file-image", "pdf_text" => "file-text",
+        "pdf_clean" => "brush-cleaning", "pdf_to_img" => "images",
+        _ => "",
+    }
+}
+
+impl ToolSpec {
+    /// 实际使用的图标名：包里声明的优先，其次按 id 查表，最后通用图标。
+    pub fn icon_name(&self) -> &str {
+        if !self.icon.is_empty() { &self.icon } else { match icon_of(&self.id) { "" => ICON_FALLBACK, n => n } }
+    }
+}
+
 fn spec(id: &str, cat: &str, kw: &str, inputs: Vec<Field>, options: Vec<Field>) -> ToolSpec {
-    ToolSpec { id: id.into(), cat: cat.into(), name: t(&format!("tools.{id}")).to_string(), desc: t(&format!("tools.{id}_desc")).to_string(), keywords: kw.into(), inputs, options, interactive: false, heavy: false, live: true, pack: String::new() }
+    ToolSpec { id: id.into(), cat: cat.into(), name: t(&format!("tools.{id}")).to_string(), desc: t(&format!("tools.{id}_desc")).to_string(), keywords: kw.into(), inputs, options, interactive: false, heavy: false, live: true, pack: String::new(), icon: String::new() }
 }
 
 /// 全部内置工具，按分类顺序。每次调用按当前语言生成文案（只在打开工具面板时调用）。
@@ -495,7 +539,7 @@ mod tests {
     #[test]
     fn pack_hints() {
         // 清单里没有 rows 的旧扩展包：宿主按 (工具, 字段) 补；大文本工具保持占满
-        let mk = |id: &str, f: &str| ToolSpec { id: id.into(), cat: "x".into(), name: String::new(), desc: String::new(), keywords: String::new(), inputs: vec![Field::multiline(f, "")], options: vec![], interactive: false, heavy: true, live: false, pack: "p".into() };
+        let mk = |id: &str, f: &str| ToolSpec { id: id.into(), cat: "x".into(), name: String::new(), desc: String::new(), keywords: String::new(), inputs: vec![Field::multiline(f, "")], options: vec![], interactive: false, heavy: true, live: false, pack: "p".into(), icon: String::new() };
         let mut q = mk("qr_gen", "input");
         apply_hints(&mut q);
         assert_eq!(q.inputs[0].size(), InSize::Auto(2, 8));

@@ -567,6 +567,7 @@ impl Render for ToolView {
         if let Some(s) = self.pending_out.take() { self.out_ed.update(cx, |e, cx| e.set_value(s, window, cx)); }
         let th = cur();
         let head = div().flex().items_center().gap_2().px_1().pb(px(CARD_PAD)).flex_shrink_0()
+            .child(ui::icon(ui::tool_icon(&self.spec), ui::IC_MD, c(th.overlay1)))
             .child(div().text_size(px(ui::fs_title())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(self.spec.name.clone()))
             .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(self.spec.desc.clone()));
         if self.spec.interactive {

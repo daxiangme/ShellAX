@@ -124,6 +124,17 @@ fn arc(window: &mut gpui::Window, (cx, cy): (f32, f32), r: f32, frac: f32, color
     if let Ok(path) = pb.build() { window.paint_path(path, color); }
 }
 
+/// 按 Lucide 文件名（如 `qr-code`）找内置图标；找不到返回 `None`。
+pub fn icon_by_name(name: &str) -> Option<IconName> {
+    let path = format!("icons/{name}.svg");
+    IconName::ALL.iter().copied().find(|i| i.path().as_ref() == path)
+}
+
+/// 工具图标：声明的名字找不到时退回通用图标。
+pub fn tool_icon(sp: &ssh_term_proto::tools::ToolSpec) -> IconName {
+    icon_by_name(sp.icon_name()).or_else(|| icon_by_name(ssh_term_proto::tools::ICON_FALLBACK)).unwrap_or(IconName::PencilRuler)
+}
+
 pub fn icon(name: IconName, size: f32, color: Hsla) -> impl IntoElement {
     svg().path(name.path()).size(px(size)).flex_shrink_0().text_color(color)
 }

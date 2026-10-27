@@ -60,6 +60,7 @@ impl Root {
             ui::list_row(SharedString::from(key), 0, open).group(gid.clone())
                 .tooltip({ let d = sp.desc.clone(); move |w, cx| gpui_component::tooltip::Tooltip::new(d.clone()).build(w, cx) })
                 .on_click(cx.listener(move |this, _, w, cx| this.open_tool(&id, None, w, cx)))
+                .child(ui::icon(ui::tool_icon(sp), ui::IC_MD, c(if open { cur().text } else { cur().overlay1 })))
                 .child(ui::row_title(sp.name.clone()))
                 .child(div().flex_1())
                 .child(ui::row_actions(gid).when(fav || open, |d| d.visible())
@@ -77,6 +78,7 @@ impl Root {
             // 未安装的扩展工具：只读行，文字用提示色，右侧是下载按钮
             div().id(SharedString::from(key)).min_h(px(ui::row_h())).mx(px(ui::LIST_INSET)).pl(px(ui::ROW_PX)).pr(px(4.)).rounded(px(ui::R_MD)).flex().items_center().gap(px(6.))
                 .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+                .child(ui::icon(ui::tool_icon(sp), ui::IC_MD, c(cur().overlay1)))
                 .child(ui::row_title(sp.name.clone()).text_color(c(cur().overlay1)))
                 .child(div().flex_1())
                 .child(ui::button_sm(SharedString::from(format!("dl-{}-{}", sp.pack, sp.id)), label, 3)
@@ -181,5 +183,22 @@ impl Root {
         self.leave_settings();
         self.focus_active(window, cx);
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_tool_has_a_bundled_icon() {
+        let mut ids: Vec<String> = tools::builtin().into_iter().map(|s| s.id).collect();
+        for (_, _, ts) in ssh_term_proto::ext::KNOWN { ids.extend(ts.iter().map(|t| t.to_string())); }
+        for id in ids {
+            let n = tools::icon_of(&id);
+            assert!(!n.is_empty(), "工具 {id} 没有图标");
+            assert!(ui::icon_by_name(n).is_some(), "工具 {id} 的图标 {n} 不在内置图标里");
+        }
+        assert!(ui::icon_by_name(tools::ICON_FALLBACK).is_some());
     }
 }

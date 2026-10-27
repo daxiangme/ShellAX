@@ -377,7 +377,7 @@ pub fn placeholders(inst: &[Installed]) -> Vec<ToolSpec> {
             v.push(ToolSpec {
                 id: t.to_string(), cat: cat.to_string(), name: crate::i18n::t(&format!("tools.{t}")).to_string(),
                 desc: crate::i18n::t(&format!("tools.{t}_desc")).to_string(), keywords: String::new(), inputs: vec![], options: vec![],
-                interactive: false, heavy: true, live: false, pack: pack.to_string(),
+                interactive: false, heavy: true, live: false, pack: pack.to_string(), icon: String::new(),
             });
         }
     }
