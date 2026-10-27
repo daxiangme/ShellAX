@@ -16,6 +16,8 @@ const FILES: &[(&str, &[u8])] = &[
     ("shellax/files/folder_open_front.svg", include_bytes!("../assets/icons/files/folder_open_front.svg")),
     ("shellax/files/monitor_body.svg", include_bytes!("../assets/icons/files/monitor_body.svg")),
     ("shellax/files/monitor_screen.svg", include_bytes!("../assets/icons/files/monitor_screen.svg")),
+    ("shellax/files/laptop_body.svg", include_bytes!("../assets/icons/files/laptop_body.svg")),
+    ("shellax/files/laptop_screen.svg", include_bytes!("../assets/icons/files/laptop_screen.svg")),
     ("shellax/files/server_body.svg", include_bytes!("../assets/icons/files/server_body.svg")),
     ("shellax/files/server_leds.svg", include_bytes!("../assets/icons/files/server_leds.svg")),
     ("shellax/files/doc_page.svg", include_bytes!("../assets/icons/files/doc_page.svg")),
@@ -113,6 +115,18 @@ pub fn monitor_icon(size: f32) -> AnyElement {
     div().relative().size(px(size)).flex_shrink_0()
         .child(layer("shellax/files/monitor_body.svg", size, crate::theme::entity_body()))
         .child(layer("shellax/files/monitor_screen.svg", size, crate::theme::entity_accent())).into_any_element()
+}
+
+/// 填充笔记本（Mac 本机用）：屏幕盖板 + 更宽的底座为机身色，屏幕为强调色；不含任何品牌标志。
+pub fn laptop_icon(size: f32) -> AnyElement {
+    div().relative().size(px(size)).flex_shrink_0()
+        .child(layer("shellax/files/laptop_body.svg", size, crate::theme::entity_body()))
+        .child(layer("shellax/files/laptop_screen.svg", size, crate::theme::entity_accent())).into_any_element()
+}
+
+/// 「本机」图标：macOS 用笔记本，Windows / Linux 用显示器。主机列表本地终端行与 SFTP 本地来源共用此入口。
+pub fn local_icon(size: f32) -> AnyElement {
+    if cfg!(target_os = "macos") { laptop_icon(size) } else { monitor_icon(size) }
 }
 
 /// 文件列表里一行文件 / 文件夹的图标：本机与远程窗格、「..」行共用同一个入口，样式只在这里定义。

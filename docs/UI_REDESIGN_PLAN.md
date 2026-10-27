@@ -266,7 +266,7 @@ island
 - 新增 `panel_header("主机"/"SFTP")`，原搜索框右侧的「+」移到标题行 actions（`IconBtn::Md`，`Plus`，点击仍弹出原菜单）。搜索框独占一行。
 - 分区：`本地`、`连接`、`标签` 用 `ui::section_header`；`连接`/`标签` 可折叠（折叠状态可只存内存，不改配置格式）；`连接` 右侧显示主机总数。拖放到「连接」标题移到顶层的逻辑保留。
 - **主机行**：`list_row` + `min_h(row2_h())`；图标 `file_icon::server_icon(IC_MD)`（填充服务器：浅中性机身 + 强调色指示灯）；状态点 7px 位于图标右上角、带 `card_bg()` 描边（不是 `crust`；指示灯在机身左侧，不被状态点遮住）；生产环境盾牌保留在图标右下；第一行 `row_title(name)` + 最多 3 个标签点（6px）+ `+N`（`fs_caption`）；第二行 `row_meta("user@host:port · OS")`；编辑按钮放入 `row_actions`（`IconBtn::Sm`）。缩进 `INDENT` 16/级，展开箭头占 16px 宽槽位以对齐。
-- **本地终端行 / 环境变量主机行**：与主机行完全同构（图标 `file_icon::monitor_icon` / `server_icon` 填充图标 + 右上角状态点），去掉独立圆点与 `info`/`accent` 图标色。
+- **本地终端行 / 环境变量主机行**：与主机行完全同构（图标 `file_icon::local_icon`（macOS 笔记本 / 其他平台显示器）/ `server_icon` 填充图标 + 右上角状态点），去掉独立圆点与 `info`/`accent` 图标色。
 - **分组行**：`list_row` 单行；箭头 `IC_XS`；文件夹图标 `file_icon::folder_icon(IC_MD, open)`（蓝色填充，折叠闭合、展开用打开态；不再按标签着色）；名称 `fs_body` MEDIUM；有标签时名称后跟 8px 标签点；右侧计数 `fs_caption` `overlay1`。
 - **位置行（places）**：双行同主机行；图标用同一个蓝色填充文件夹（闭合态，无徽标），靠第二行路径与分组行区分。
 - **标签行**：`list_row` 单行；8px 色点 + 名称 + 生产盾牌 + 计数。

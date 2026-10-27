@@ -999,7 +999,7 @@ impl SftpView {
     fn pane_header(&self, pi: usize, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
         let p = &self.panes[pi];
-        let (ic, name) = match &p.src { Src::Remote(_) => (crate::file_icon::server_icon(ui::IC_MD), p.label()), _ => (crate::file_icon::monitor_icon(ui::IC_MD), p.label()) };
+        let (ic, name) = match &p.src { Src::Remote(_) => (crate::file_icon::server_icon(ui::IC_MD), p.label()), _ => (crate::file_icon::local_icon(ui::IC_MD), p.label()) };
         let tags = p.target().and_then(|t| config_hosts().iter().find(|(_, x)| x.pool_key() == t.pool_key()).cloned()).map(|(h, _)| h.tags).unwrap_or_default();
         let s = crate::config::get();
         let filter_on = p.filter.is_some();
@@ -1133,7 +1133,7 @@ impl SftpView {
             .when(!can_back, |d| d.pl_1())
             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(fs_body())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(title))
             .child(ui::button(("sftp-pk-local", pi), t("sftp.local_btn"), 0).h(px(H_COMPACT)).px_2()
-                .child(icon(IconName::Monitor, ui::IC_SM, c(th.subtext)))
+                .child(crate::file_icon::local_icon(ui::IC_SM))
                 .on_click(cx.listener(move |v, _, _, cx| v.choose_local(pi, cx))));
         let search = ui::field_row().py_2().child(ui::search_field(&pk.search, false));
         let section = |label: String| div().px_3().pt_2().pb_1().text_size(px(fs_small())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.overlay1)).child(label);

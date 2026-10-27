@@ -382,7 +382,7 @@ impl Root {
             list = list.child(ui::list_row("host-local", 0, local_sel).min_h(px(ui::row2_h()))
                 .on_click(cx.listener(|this, ev: &gpui::ClickEvent, w, cx| this.sb_activate(Spec::Local, t("ui.local_terminal").to_string(), ev.click_count() >= 2, w, cx)))
                 .on_mouse_down(gpui::MouseButton::Right, cx.listener(|this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.show_sb_menu(SbMenu { target: SbTarget::Local, pos: ev.position, sub: SbSub::Main }); cx.notify(); }))
-                .child(Self::entity_icon(crate::file_icon::monitor_icon(ui::IC_MD), if local_on { 2 } else { 0 }, usize::MAX, None))
+                .child(Self::entity_icon(crate::file_icon::local_icon(ui::IC_MD), if local_on { 2 } else { 0 }, usize::MAX, None))
                 .child(div().flex_1().min_w_0().flex().flex_col().overflow_hidden()
                     .child(ui::row_title(t("ui.local_terminal")))
                     .child(ui::row_meta(sh))));
