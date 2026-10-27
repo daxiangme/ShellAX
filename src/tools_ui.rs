@@ -154,7 +154,8 @@ impl Root {
         }
         let Some(spec) = spec_of(id) else { return };
         let rt = self.rt.handle().clone();
-        let v = cx.new(|cx| ToolView::new(spec, rt, window, cx));
+        let hist = self.tool_hist.entry(id.to_string()).or_default().clone();
+        let v = cx.new(|cx| ToolView::new(spec, rt, hist, window, cx));
         self._subs.push(cx.subscribe_in(&v, window, |this: &mut Self, _, ev: &ToolEvent, w, cx| match ev { ToolEvent::SendToTerminal(s) => this.send_to_terminal(s.clone(), w, cx) }));
         if let Some(p) = preset { v.update(cx, |v, cx| v.preset(p, window, cx)); }
         let pane = self.embed_pane(Embed::Tool(v), window, cx);

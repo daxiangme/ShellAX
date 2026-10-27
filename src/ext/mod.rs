@@ -136,7 +136,7 @@ pub fn run_tool(wasm: &[u8], tool: &str, a: &Args) -> Result<Output> {
     let (j, rest) = unframe(&out)?;
     let r: RunReply = serde_json::from_slice(j).context("bad reply")?;
     if let Some(e) = r.error { bail!(e); }
-    Ok(Output { text: r.text, color: r.color, file: r.file_name.map(|n| (n, rest.to_vec())) })
+    Ok(Output { text: r.text, color: r.color, file: r.file_name.map(|n| (n, rest.to_vec())), ..Default::default() })
 }
 
 // ---------- 本地安装 ----------

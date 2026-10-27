@@ -1,13 +1,19 @@
 //! 工具模块界面：一个通用视图按 `ToolSpec` 渲染输入卡片、选项与输出卡片；WebSocket 为交互式视图。
 //! 视图在打开标签时创建、关闭时释放；没有后台轮询，耗时工具在后台执行器上运行。
+//! 生成类工具的历史由 Root 按工具 id 持有（会话级、只在内存），所以关闭标签后再打开仍在。
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::rc::Rc;
+use std::time::Duration;
 
-use gpui::{div, prelude::*, px, AnyElement, ClipboardItem, Context, Entity, EventEmitter, ExternalPaths, FontWeight, SharedString, Window};
+use gpui::{div, prelude::*, px, AnyElement, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, ExternalPaths, FontWeight, SharedString, Window};
 use gpui_component::input::{Editor, EditorState, InputEvent, InputState};
 use ssh_term_proto::i18n::{t, tf};
-use ssh_term_proto::tools::{self, Args, FieldKind, Output, ToolSpec};
+use ssh_term_proto::tools::history::History;
+use ssh_term_proto::tools::{self, Args, FieldKind, OutKind, Output, ToolSpec};
 
+use crate::result_list::{self, ClickFn, RowMode};
 use crate::card_layout::{content_card, sub_card, sub_card_body, CARD_PAD, SUB_PAD};
 use crate::theme::{c, cur};
 use crate::ui::{self, icon, IconName};
@@ -29,6 +35,11 @@ pub struct ToolView {
     busy: bool,
     seq: u64,
     pending_out: Option<String>,
+    /// 生成类工具的历史（与 Root 共享）。
+    hist: Rc<RefCell<History>>,
+    /// 刚复制过的行（用于短暂显示对勾）与其计时序号。
+    copied: Option<String>,
+    copy_seq: u64,
     ws: Option<WsState>,
     rt: tokio::runtime::Handle,
     _subs: Vec<gpui::Subscription>,
@@ -39,7 +50,7 @@ struct WsState { url: Entity<InputState>, msg: Entity<InputState>, tx: Option<to
 impl EventEmitter<ToolEvent> for ToolView {}
 
 impl ToolView {
-    pub fn new(spec: ToolSpec, rt: tokio::runtime::Handle, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(spec: ToolSpec, rt: tokio::runtime::Handle, hist: Rc<RefCell<History>>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut subs = vec![];
         let (mut texts, mut areas, mut picks) = (HashMap::new(), HashMap::new(), HashMap::new());
         for f in spec.inputs.iter().chain(&spec.options) {
@@ -74,7 +85,7 @@ impl ToolView {
             subs.push(cx.subscribe_in(&w.msg, window, |this: &mut Self, _, ev: &InputEvent, w, cx| if let InputEvent::PressEnter { .. } = ev { this.ws_send(w, cx) }));
         }
         let title = spec.name.clone();
-        let mut me = Self { spec, title, texts, areas, picks, files: HashMap::new(), out_ed, output: Output::default(), error: None, notice: None, busy: false, seq: 0, pending_out: None, ws, rt, _subs: subs };
+        let mut me = Self { spec, title, texts, areas, picks, files: HashMap::new(), out_ed, output: Output::default(), error: None, notice: None, busy: false, seq: 0, pending_out: None, hist, copied: None, copy_seq: 0, ws, rt, _subs: subs };
         if me.spec.live && !me.spec.interactive && !me.spec.heavy { me.run(cx); }
         me
     }
@@ -122,34 +133,79 @@ impl ToolView {
 
     fn apply(&mut self, r: anyhow::Result<Output>) {
         match r {
-            Ok(o) => { self.error = None; self.pending_out = Some(o.text.clone()); self.output = o; }
+            Ok(o) => {
+                self.error = None;
+                match o.kind {
+                    // 生成类：追加一批到历史，旧结果保留
+                    OutKind::Rows => { self.hist.borrow_mut().push(chrono::Local::now().format("%H:%M:%S").to_string(), o.meta.clone(), o.rows.clone()); }
+                    OutKind::Text => self.pending_out = Some(o.text.clone()),
+                    OutKind::Kv => {}
+                }
+                self.output = o;
+            }
             Err(e) => { self.error = Some(e.to_string()); }
         }
     }
 
-    fn clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        for s in self.texts.values() { s.update(cx, |e, cx| e.set_value("", window, cx)); }
-        for s in self.areas.values() { s.update(cx, |e, cx| e.set_value("", window, cx)); }
-        self.files.clear();
+    /// 清空输入框与文件（选项保持不变）；生成类的历史不动。
+    fn clear_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ids: Vec<String> = self.spec.inputs.iter().map(|f| f.id.clone()).collect();
+        for id in &ids {
+            if let Some(s) = self.texts.get(id) { s.update(cx, |e, cx| e.set_value("", window, cx)); }
+            if let Some(s) = self.areas.get(id) { s.update(cx, |e, cx| e.set_value("", window, cx)); }
+            self.files.remove(id);
+        }
+        if !tools::has_history(&self.spec.id) {
+            self.output = Output::default();
+            self.out_ed.update(cx, |e, cx| e.set_value("", window, cx));
+        }
+        self.error = None;
+        self.notice = None;
+        cx.notify();
+    }
+
+    /// 清空历史（只清结果，输入与选项都保留）。
+    fn clear_history(&mut self, cx: &mut Context<Self>) {
+        self.hist.borrow_mut().clear();
         self.output = Output::default();
         self.error = None;
         self.notice = None;
-        self.out_ed.update(cx, |e, cx| e.set_value("", window, cx));
+        cx.notify();
+    }
+
+    fn clear_log(&mut self, cx: &mut Context<Self>) {
         if let Some(w) = &mut self.ws { w.log.clear(); }
         cx.notify();
     }
 
-    fn copy(&mut self, cx: &mut Context<Self>) {
-        let text = if let Some(w) = &self.ws { w.log.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>().join("\n") } else { self.output.text.clone() };
+    /// 复制/保存/发送到终端用的文本：生成类取最新一批，其余取输出全文。
+    fn output_text(&self) -> String {
+        if tools::has_history(&self.spec.id) { return self.hist.borrow().latest().map(|b| b.text()).unwrap_or_default(); }
+        self.output.text.clone()
+    }
+
+    fn copy_text(&mut self, key: String, text: String, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(text));
         self.notice = Some(t("tools.ui_copied").into());
+        self.copied = Some(key);
+        self.copy_seq += 1;
+        let seq = self.copy_seq;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(1200)).await;
+            let _ = this.update(cx, |v, cx| if v.copy_seq == seq { v.copied = None; v.notice = None; cx.notify(); });
+        }).detach();
         cx.notify();
+    }
+
+    fn copy(&mut self, cx: &mut Context<Self>) {
+        let text = if let Some(w) = &self.ws { w.log.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>().join("\n") } else { self.output_text() };
+        self.copy_text("all".into(), text, cx);
     }
 
     fn save(&mut self, cx: &mut Context<Self>) {
         let (name, bytes) = match &self.output.file {
             Some((n, b)) => (n.clone(), b.clone()),
-            None => (format!("{}.txt", self.spec.id), self.output.text.clone().into_bytes()),
+            None => (format!("{}.txt", self.spec.id), self.output_text().into_bytes()),
         };
         let dir = dirs_home();
         let rx = cx.prompt_for_new_path(&dir, Some(&name));
@@ -180,7 +236,8 @@ impl ToolView {
 
     fn set_pick(&mut self, id: String, v: String, cx: &mut Context<Self>) {
         self.picks.insert(id, v);
-        if self.spec.live || !self.output.text.is_empty() { self.run(cx); } else { cx.notify(); }
+        // 生成类改选项不自动再生成（否则每次改选项都会追加一批）
+        if self.spec.live || (!self.output.text.is_empty() && !tools::has_history(&self.spec.id)) { self.run(cx); } else { cx.notify(); }
     }
 
     // ---------------- WebSocket
@@ -261,8 +318,43 @@ impl ToolView {
             .when(self.busy, |d| d.child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(t("tools.ui_running"))))
             .child(small("out-copy", IconName::Copy, t("tools.ui_copy")).on_click(cx.listener(|this, _, _w, cx| this.copy(cx))))
             .when(full, |d| d.child(small("out-save", IconName::Save, t("tools.ui_save")).on_click(cx.listener(|this, _, _w, cx| this.save(cx))))
-                .child(small("out-term", IconName::SquareTerminal, t("tools.ui_send_term")).on_click(cx.listener(|this, _, _w, cx| { let s = this.output.text.clone(); if !s.is_empty() { cx.emit(ToolEvent::SendToTerminal(s)); } }))))
-            .child(small("out-clear", IconName::Eraser, t("tools.ui_clear")).on_click(cx.listener(|this, _, w, cx| this.clear(w, cx))))
+                .child(small("out-term", IconName::SquareTerminal, t("tools.ui_send_term")).on_click(cx.listener(|this, _, _w, cx| { let s = this.output_text(); if !s.is_empty() { cx.emit(ToolEvent::SendToTerminal(s)); } }))))
+            .when(self.ws.is_some(), |d| d.child(small("out-clear", IconName::Eraser, t("tools.ui_clear")).on_click(cx.listener(|this, _, _w, cx| this.clear_log(cx)))))
+            .when(self.ws.is_none() && !self.spec.inputs.is_empty(), |d| d.child(small("out-clear-in", IconName::Eraser, t("tools.ui_clear_input")).on_click(cx.listener(|this, _, w, cx| this.clear_input(w, cx)))))
+            .when(tools::has_history(&self.spec.id) && !self.hist.borrow().is_empty(), |d| d.child(small("out-clear-hist", IconName::Trash, t("tools.ui_clear_history")).on_click(cx.listener(|this, _, _w, cx| this.clear_history(cx)))))
+    }
+
+    /// 生成类历史：按批次分组，新批次在最上；每条一行，可逐条复制 / 删除。
+    fn render_history(&self, cx: &mut Context<Self>) -> AnyElement {
+        let hist = self.hist.clone();
+        let h = hist.borrow();
+        if h.is_empty() {
+            return ui::empty_state(IconName::Clock, t("tools.hist_empty"), Some(t("tools.hist_empty_desc").into()), vec![], true).into_any_element();
+        }
+        let mut list = div().id("hist-scroll").flex_1().min_h_0().overflow_y_scroll().py(px(ui::LIST_INSET)).flex().flex_col().gap(px(ui::SP_1));
+        for (bi, b) in h.batches.iter().enumerate() {
+            let bid = b.id;
+            let listener = |f: fn(&mut Self, u64, &mut Context<Self>)| -> ClickFn { Box::new(cx.listener(move |this, _: &ClickEvent, _w, cx| f(this, bid, cx))) };
+            let text = b.text();
+            list = list.child(result_list::batch_head(result_list::BatchHead {
+                id: bid, time: b.time.clone(), meta: b.meta.clone(), count: b.rows.len(), folded: b.folded,
+                masked: b.has_secret().then_some(b.masked),
+                on_fold: listener(|v, id, cx| { v.hist.borrow_mut().toggle_fold(id); cx.notify(); }),
+                on_mask: listener(|v, id, cx| { v.hist.borrow_mut().toggle_mask(id); cx.notify(); }),
+                on_copy: Box::new(cx.listener(move |this, _: &ClickEvent, _w, cx| this.copy_text(format!("b{bid}"), text.clone(), cx))),
+                on_delete: listener(|v, id, cx| { v.hist.borrow_mut().remove_batch(id); cx.notify(); }),
+            }));
+            if b.folded { continue; }
+            for (ri, r) in b.rows.iter().enumerate() {
+                let key = format!("r{bid}-{ri}");
+                let (val, k2) = (r.value.clone(), key.clone());
+                let on_copy: ClickFn = Box::new(cx.listener(move |this, _: &ClickEvent, _w, cx| this.copy_text(k2.clone(), val.clone(), cx)));
+                let on_del: ClickFn = Box::new(cx.listener(move |this, _: &ClickEvent, _w, cx| { this.hist.borrow_mut().remove_row(bid, ri); cx.notify(); }));
+                list = list.child(result_list::result_row(SharedString::from(format!("hr-{bid}-{ri}-{bi}")), r, RowMode::List, b.masked && r.secret,
+                    self.copied.as_deref() == Some(key.as_str()), on_copy, Some(on_del)));
+            }
+        }
+        list.into_any_element()
     }
 
     fn field_label(s: &str) -> impl IntoElement {
@@ -349,11 +441,15 @@ impl Render for ToolView {
         // 输出卡片
         let mut out = sub_card().flex().flex_col().min_h(px(120.)).child(self.out_head(true, cx));
         if let Some(e) = &self.error { out = out.child(ui::notice(ui::Notice::Error, e.clone()).mx(px(SUB_PAD)).my(px(ui::SP_2))); }
+        if tools::has_history(&self.spec.id) {
+            out = out.child(self.render_history(cx));
+        } else {
         if let Some([r, g, b, a]) = self.output.color {
             out = out.child(div().px(px(SUB_PAD)).pt(px(SUB_PAD)).flex().items_center().gap_2()
                 .child(div().size(px(28.)).rounded(px(ui::R_MD)).border_1().border_color(crate::theme::divider()).bg(gpui::Rgba { r: r as f32 / 255., g: g as f32 / 255., b: b as f32 / 255., a: a as f32 / 255. })));
         }
         out = out.child(sub_card_body().min_h(px(80.)).child(Editor::new(&self.out_ed).h_full()));
+        }
         out = out.flex_1().min_h_0();
         content_card("tool-card").p(px(CARD_PAD)).child(head)
             .child(div().id("tool-body").flex_1().min_h_0().flex().flex_col().gap(px(CARD_PAD))

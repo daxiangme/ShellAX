@@ -286,6 +286,12 @@ island
 - `panel_title` → `panel_header`（扩展入口、返回按钮用 `IconBtn::Md`）。
 - 行高 26 → `row_h()`；文字 `FS_SECONDARY` → `fs_body`；收藏星标按钮 → `row_actions` 内 `IconBtn::Sm`（已收藏时常显）；分组头 `head` → `section_header`；未安装扩展的 ghost 行文字用 `overlay1`，不再叠加 `opacity(0.6)`，下载按钮用 `button_sm` kind=3。
 
+#### 工具结果列表（`result_list.rs`、`tools/history.rs`）
+- 结果以“行”为单位，不再整块塞进一个编辑器：`result_list::result_row`（标签 / 内容 / 徽标 / 逐条复制 / 悬停删除，高度 `row_h()`，间距走 `LIST_INSET`、`ROW_PX`）、`result_list::batch_head`（`SECTION_H` 高，含折叠、遮住、复制本批、删除本批）。
+- 生成类工具（密码、UUID、随机数、随机分组）的结果按批次保存在 `Root.tool_hist`（`HashMap<工具 id, History>`），会话级、不写盘，关闭标签后仍在；每个工具最多 20 批 / 500 行，超出丢最旧的。
+- 多格式结果（单位换算、哈希、进制、颜色等）使用键值行（`RowMode::Kv`），主结果行用 `fs_title` 加粗，分组标题行用 `section_header`。
+- “清空输入”与“清空历史”是两个按钮，都不重置选项；生成类改选项不会自动重新生成。
+
 ### 5.3 右侧卡片岛
 
 #### 卡片框架（`panels.rs::dock_frame`）

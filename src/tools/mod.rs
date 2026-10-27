@@ -11,6 +11,7 @@ use crate::i18n::t;
 pub mod crypto;
 pub mod dev;
 pub mod gen;
+pub mod history;
 pub mod num;
 pub mod text;
 pub mod time;
@@ -99,11 +100,94 @@ impl Args {
     pub fn set(&mut self, id: &str, v: impl Into<String>) -> &mut Self { self.values.insert(id.into(), v.into()); self }
 }
 
-/// 运行结果：文本，及可选的颜色色块、二进制文件。
+/// 结果的呈现形态。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OutKind {
+    /// 一段文本，用只读编辑器显示（文本进文本出的工具）。
+    #[default]
+    Text,
+    /// 生成类：每次运行是一批“每条一行”的结果，旧批次保留为历史。
+    Rows,
+    /// 多格式键值：一个输入对应多行“标签 值”，每次运行替换上一次。
+    Kv,
+}
+
+/// 标签 / 数值的语气，界面映射到主题色。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone { Muted, Danger, Warn, Good, Accent }
+
+/// 结果里的一行。
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct Output { pub text: String, pub color: Option<[u8; 4]>, pub file: Option<(String, Vec<u8>)> }
-impl Output { pub fn text(s: impl Into<String>) -> Output { Output { text: s.into(), ..Default::default() } } }
+pub struct Row {
+    /// 左侧标签（可空）。
+    pub label: String,
+    /// 内容；复制按钮复制的就是它。
+    pub value: String,
+    /// 行尾小标签（如强度、人数）。
+    pub tag: Option<(String, Tone)>,
+    /// 悬停提示（如熵值说明）。
+    pub hint: String,
+    /// 主结果：加大加粗显示。
+    pub primary: bool,
+    /// 敏感内容（密码）：可被“隐藏”遮住。
+    pub secret: bool,
+    /// 分组标题行：不可复制。
+    pub head: bool,
+    /// 内容文字的语气颜色。
+    pub tone: Option<Tone>,
+}
+
+impl Row {
+    pub fn item(value: impl Into<String>) -> Row { Row { value: value.into(), ..Default::default() } }
+    pub fn kv(label: impl Into<String>, value: impl Into<String>) -> Row { Row { label: label.into(), value: value.into(), ..Default::default() } }
+    pub fn head(title: impl Into<String>) -> Row { Row { value: title.into(), head: true, ..Default::default() } }
+    pub fn primary(mut self) -> Row { self.primary = true; self }
+    pub fn secret(mut self) -> Row { self.secret = true; self }
+    pub fn tag(mut self, text: impl Into<String>, tone: Tone) -> Row { self.tag = Some((text.into(), tone)); self }
+    pub fn hint(mut self, h: impl Into<String>) -> Row { self.hint = h.into(); self }
+    pub fn tone(mut self, tone: Tone) -> Row { self.tone = Some(tone); self }
+}
+
+/// 行转文本的排版。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowFmt {
+    /// `标签: 内容`；没有标签时只有内容。
+    Colon,
+    /// 标签左对齐补到 n 个字符宽，再空一格接内容。
+    Pad(usize),
+}
+
+/// 把行拼成多行文本（复制全部、保存、发送到终端用）。分组标题只产生一个空行分隔。
+pub fn rows_text(rows: &[Row], fmt: RowFmt) -> String {
+    let mut out: Vec<String> = vec![];
+    for r in rows {
+        if r.head { if !out.is_empty() { out.push(String::new()); } continue; }
+        out.push(if r.label.is_empty() { r.value.clone() } else { match fmt { RowFmt::Colon => format!("{}: {}", r.label, r.value), RowFmt::Pad(n) => format!("{:<n$} {}", r.label, r.value) } });
+    }
+    out.join("\n")
+}
+
+/// 运行结果：文本，及可选的颜色色块、二进制文件、按行结果。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Output {
+    /// 全文（复制全部、保存、发送到终端用）；按行结果时由行拼出。
+    pub text: String,
+    pub color: Option<[u8; 4]>,
+    pub file: Option<(String, Vec<u8>)>,
+    pub kind: OutKind,
+    pub rows: Vec<Row>,
+    /// 批次的参数摘要（`Rows` 形态用）。
+    pub meta: String,
+}
+impl Output {
+    pub fn text(s: impl Into<String>) -> Output { Output { text: s.into(), ..Default::default() } }
+    /// 生成类结果：一批，每条一行。
+    pub fn rows(rows: Vec<Row>, meta: impl Into<String>) -> Output { Output { text: rows_text(&rows, RowFmt::Colon), kind: OutKind::Rows, rows, meta: meta.into(), ..Default::default() } }
+}
 impl From<String> for Output { fn from(s: String) -> Output { Output::text(s) } }
+
+/// 带会话历史的工具（生成类）：每次运行追加一批，不覆盖旧结果。
+pub fn has_history(id: &str) -> bool { matches!(id, "password" | "uuid" | "random_num" | "random_group") }
 
 /// 分类：(id, 文案键, 图标名)。扩展包分类也在这里，以便未安装时也能显示占位。
 pub const CATEGORIES: &[(&str, &str)] = &[
@@ -216,7 +300,7 @@ pub fn run(id: &str, a: &Args) -> Result<Output> {
         "html" => dev::html(a.get("input"), a.get("mode") == "minify").into(),
         "cron" => dev::cron_next(a.get("input"), a.int("count", 1, 100).unwrap_or(10) as usize, chrono::Local::now())?.into(),
         "naming" => dev::naming(a.get("input")).into(),
-        "color" => { let (s, rgba) = dev::color(a.get("input"))?; Output { text: s, color: Some(rgba), file: None } }
+        "color" => { let (s, rgba) = dev::color(a.get("input"))?; Output { text: s, color: Some(rgba), ..Default::default() } }
         "radix" => dev::radix(a.get("input"), a.get("from"))?.into(),
         "md5" => crypto::md5_text(a.get("input")).into(),
         "file_md5" => { let p = a.file("file").ok_or_else(|| anyhow::anyhow!(t("tools.err_need_file")))?; crypto::file_hash(p, a.get("algo"))?.into() }
@@ -230,10 +314,10 @@ pub fn run(id: &str, a: &Args) -> Result<Output> {
         "date_calc" => time::date_calc(a)?.into(),
         "workday" => time::workday(a)?.into(),
         "batch_time" => time::batch(a.get("input"), a.get("mode"), a.get("unit") == "ms").into(),
-        "password" => gen::passwords(a)?.into(),
-        "uuid" => gen::uuids(a.int("count", 1, 1000)? as usize, a.on("upper"), a.on("hyphen")).into(),
-        "random_num" => gen::random_numbers(a)?.into(),
-        "random_group" => gen::random_group(a.get("input"), a.get("mode"), a.int("n", 1, 10000)? as usize)?.into(),
+        "password" => gen::password_output(a)?,
+        "uuid" => gen::uuid_output(a)?,
+        "random_num" => gen::number_output(a)?,
+        "random_group" => gen::group_output(a)?,
         _ => bail!(crate::i18n::tf("tools.err_unknown", &[("id", &id)])),
     })
 }
