@@ -77,7 +77,7 @@ pub fn badge(os: &str) -> (&'static str, &'static str) {
         "ubuntu" => ("Ub", "Ubuntu"), "debian" => ("Db", "Debian"), "fedora" => ("Fd", "Fedora"),
         "centos" => ("Ce", "CentOS"), "rhel" => ("RH", "RHEL"), "rocky" => ("Ro", "Rocky"), "almalinux" => ("Al", "AlmaLinux"),
         "alpine" => ("Ap", "Alpine"), "arch" => ("Ar", "Arch"), "opensuse-leap" | "opensuse-tumbleweed" | "sles" => ("Su", "SUSE"),
-        "amzn" => ("Am", "Amazon Linux"), "macos" => ("Ma", "macOS"), "windows" => ("Wi", "Windows"),
+        "amzn" => ("Am", "Amazon Linux"), "macos" => ("Ma", "Mac"), "windows" => ("Wi", "Windows"),
         "freebsd" => ("Fb", "FreeBSD"), "openbsd" => ("Ob", "OpenBSD"), "netbsd" => ("Nb", "NetBSD"),
         _ => ("Lx", "Linux"),
     }
