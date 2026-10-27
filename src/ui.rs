@@ -1,6 +1,4 @@
 //! Small shared widgets drawn with plain GPUI divs + Lucide icons (gpui-kit-assets, ISC).
-// 公共组件按规格一次性建好，业务视图随后分阶段接入；全部接入后（收尾阶段）移除此处的允许标注。
-#![allow(dead_code)]
 use gpui::{div, prelude::*, px, svg, AnyElement, Div, ElementId, FontWeight, Hsla, SharedString, Stateful};
 pub use gpui_kit_assets::IconName;
 
