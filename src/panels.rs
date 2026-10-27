@@ -108,9 +108,10 @@ impl Root {
         let min_id = SharedString::from(format!("{dock_id}-min"));
         let collapsed = self.dock_min.contains(dock_id);
         let btn = |id: SharedString| div().id(id).size(px(26.)).rounded_md().flex().items_center().justify_center().cursor_pointer().hover(|d| d.bg(c(cur().surface0)));
+        // one uniform rounded border around the whole card; no separator line under the title row
         let mut dock = div().id(dock_id).w_full().flex().flex_col().min_h_0().overflow_hidden()
-            .rounded(px(crate::card_layout::CARD_RADIUS)).bg(crate::theme::card_bg());
-        dock = dock.child(div().h(px(40.)).px_3().flex_shrink_0().flex().items_center().gap_2().when(!collapsed, |d| d.border_b_1()).border_color(c(th.surface0))
+            .rounded(px(crate::card_layout::CARD_RADIUS)).bg(crate::theme::card_bg()).border_1().border_color(c(th.surface0));
+        dock = dock.child(div().h(px(40.)).px_3().flex_shrink_0().flex().items_center().gap_2()
             .child(icon(ic, 15., c(th.accent)))
             .child(div().flex_1().min_w_0().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(title))
             .child(btn(min_id).on_click(cx.listener(move |this, _, _w, cx| { if this.dock_min.remove(dock_id) { *this.dock_flip.entry(dock_id).or_default() += 1; } else { this.dock_min.insert(dock_id); } cx.notify(); }))
@@ -118,6 +119,8 @@ impl Root {
             .child(btn(close_id).on_click(cx.listener(move |this, _, w, cx| this.close_dock(dock_id, w, cx)))
                 .child(icon(IconName::X, 16., c(th.overlay1)))));
         if collapsed { return dock.flex_shrink_0().into_any_element(); }
+        // the expanded card takes the whole slot; its body scrolls inside
+        let dock = dock.flex_1();
         let body = div().flex_1().min_h_0().flex().flex_col().child(body);
         match self.dock_flip.get(dock_id).copied() {
             // re-expanded: short ease-out reveal (offset only; the column size does not change)
@@ -140,10 +143,8 @@ impl Root {
             cards.push(("host-dock", self.dock_frame("host-dock", title, IconName::Monitor, el, cx)));
         }
         if self.dock_ai { cards.push(("ai-dock", self.ai_dock(cx))); }
-        if matches!(self.dock, crate::SideDock::Snippets | crate::SideDock::History) {
-            let id = if self.dock == crate::SideDock::Snippets { "snip-dock" } else { "hist-dock" };
-            cards.push((id, self.library_dock(window, cx)));
-        }
+        if self.dock_snip { cards.push(("snip-dock", self.library_dock(true, window, cx))); }
+        if self.dock_hist { cards.push(("hist-dock", self.library_dock(false, window, cx))); }
         if cards.is_empty() { self.dock_shown = false; return None; }
         // first card in an empty column: slide the column in (terminal resizes once, at the end)
         if !self.dock_shown && !crate::motion::reduced() {
@@ -175,13 +176,14 @@ impl Root {
             let collapsed = self.dock_min.contains(id);
             let mut slot = div().w_full().min_h_0().flex().flex_col();
             slot = if collapsed { slot.flex_shrink_0() } else if open.len() >= 2 {
-                let share = if Some(i) == first_open { split } else { (1.0 - split) / (n_open - 1.0) };
+                // two open cards follow the draggable split; three or more share the height equally
+                let share = if open.len() > 2 { 1.0 / n_open } else if Some(i) == first_open { split } else { 1.0 - split };
                 slot.flex_basis(gpui::relative(share)).flex_grow(1.).flex_shrink(1.)
             } else { slot.flex_1() };
             col = col.child(slot.child(el));
             if i + 1 < total {
                 // gap between cards; below the first expanded card it doubles as the split handle
-                let handle = Some(i) == first_open && open.len() >= 2;
+                let handle = Some(i) == first_open && open.len() == 2;
                 col = col.child(div().id(("dock-gap", i)).h(px(crate::card_layout::CARD_GAP)).flex_shrink_0().w_full()
                     .when(handle, |d| d.cursor_row_resize().hover(|d| d.bg(c(cur().accent).opacity(0.35)))
                         .on_drag(DockSplit, |d: &DockSplit, _, _, cx| cx.new(|_| d.clone()))
@@ -219,7 +221,9 @@ impl Root {
         let target = self.ai_target(cx);
         let term = self.tool.workspace() == crate::activity::Tool::Hosts && target.is_terminal();
         if let Some(v) = self.chat_view.clone() { v.update(cx, |c, cx| c.set_target(target, cx)); }
-        let mut strip = div().px_3().py(px(6.)).flex().flex_wrap().items_center().gap_1().border_b_1().border_color(c(th.surface0));
+        // one compact row: running agents / hint on the left, quick-launch buttons on the right
+        let mut strip = div().px_3().py(px(6.)).flex_shrink_0().flex().items_center().gap_1().overflow_hidden();
+        let mut launch = div().flex().flex_shrink_0().items_center().gap_1();
         let mut n = 0usize;
         for (ti, tab) in self.tabs.iter().enumerate() {
             for p in tab.layout.leaves() {
@@ -231,12 +235,13 @@ impl Root {
                 }
             }
         }
-        if n == 0 { strip = strip.child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(t("ui.no_running_claude_code_codex"))); }
+        if n == 0 { strip = strip.child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_size(px(11.)).text_color(c(th.overlay1)).child(t("ui.no_running_claude_code_codex"))); } else { strip = strip.child(div().flex_1()); }
         for (k, q) in s.agents.quick_launch.iter().enumerate().take(6) {
             if q.command.trim().is_empty() { continue; }
-            strip = strip.child(ui::button(("aidock-ql", k), q.name.clone(), 0).h(px(24.)).px_2().text_size(px(11.))
+            launch = launch.child(ui::button(("aidock-ql", k), q.name.clone(), 0).h(px(24.)).px_2().text_size(px(11.))
                 .on_click(cx.listener(move |this, _, w, cx| this.launch_agent(k, w, cx))));
         }
+        strip = strip.child(launch).when(n > 0, |d| d.flex_wrap());
         let mut body = div().flex_1().min_h_0().flex().flex_col().when(term, |d| d.child(strip));
         if let Some(v) = self.chat_view.clone() { body = body.child(div().flex_1().min_h_0().child(v)); }
         self.dock_frame("ai-dock", t("ui.built_in_ai_assistant").into(), IconName::Sparkles, body, cx)

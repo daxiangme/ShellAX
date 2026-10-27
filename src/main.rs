@@ -192,9 +192,9 @@ pub(crate) struct Tab { layout: Node<Entity<TermView>>, focused: Entity<TermView
 
 pub(crate) enum Overlay { None, Palette(Entity<Palette>), Host(Entity<HostDialog>), Audit, Sftp, Port, Db(Entity<db_dialog::DbDialog>), Asset(Entity<kv_ui::AssetDialog>) }
 
-/// Which right-hand card is open. AI, saved commands and history share one slot.
+/// Right-hand cards that toggle from the menu / shortcuts; each opens independently.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SideDock { None, Ai, Snippets, History }
+pub(crate) enum SideDock { Ai, Snippets, History }
 
 pub(crate) struct Root {
     rt: Arc<tokio::runtime::Runtime>,
@@ -237,7 +237,8 @@ pub(crate) struct Root {
     /// live sidebar width (px); saved to sidebar.width when a resize drag ends
     sb_width: f32,
     /// Right-hand card: AI, saved commands, or history. Only one is open.
-    dock: SideDock,
+    dock_snip: bool,
+    dock_hist: bool,
     /// AI assistant card open in the right column (independent of the library card).
     dock_ai: bool,
     /// Host status card open in the right column.
@@ -255,6 +256,7 @@ pub(crate) struct Root {
     /// Bottom panel slide: (showing, seq).
     bottom_anim: Option<(bool, u64)>,
     lib_search: Entity<InputState>,
+    hist_search: Entity<InputState>,
     lib_group: String,
     lib_hist_all: bool,
     lib_editor: Option<library::LibEditor>,
@@ -394,25 +396,27 @@ impl Root {
         match a {
             actions::Action::OpenAi => self.dock_ai,
             actions::Action::OpenHostTools => self.dock_host.is_some(),
-            actions::Action::OpenSnippets => self.dock == SideDock::Snippets,
-            actions::Action::OpenHistory => self.dock == SideDock::History,
+            actions::Action::OpenSnippets => self.dock_snip,
+            actions::Action::OpenHistory => self.dock_hist,
             _ => false,
         }
     }
 
-    /// Right-column cards open independently; snippets and history share one slot.
+    /// Right-column cards open and close independently.
     fn toggle_dock(&mut self, which: SideDock, window: &mut Window, cx: &mut Context<Self>) {
         if which == SideDock::Ai {
             if self.dock_ai { self.close_dock("ai-dock", window, cx); } else { self.dock_min.remove("ai-dock"); self.open_chat(window, cx); }
             return;
         }
-        if self.dock == which { self.close_dock("lib-dock", window, cx); return; }
-        self.dock = which;
+        let (flag, id) = if which == SideDock::Snippets { (self.dock_snip, "snip-dock") } else { (self.dock_hist, "hist-dock") };
+        if flag { self.close_dock(id, window, cx); return; }
+        self.dock_min.remove(id);
+        if which == SideDock::Snippets { self.dock_snip = true } else { self.dock_hist = true }
         cx.notify();
     }
     pub(crate) fn close_dock(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         // closing the last card slides the whole column out first, then removes it
-        let left = [self.dock_ai && id != "ai-dock", self.dock_host.is_some() && id != "host-dock", self.dock != SideDock::None && !matches!(id, "snip-dock" | "hist-dock" | "lib-dock")];
+        let left = [self.dock_ai && id != "ai-dock", self.dock_host.is_some() && id != "host-dock", self.dock_snip && id != "snip-dock", self.dock_hist && id != "hist-dock"];
         if !left.iter().any(|x| *x) && !motion::reduced() {
             if self.dock_anim.is_some_and(|a| !a.0) { return; }
             let seq = self.dock_anim.map(|a| a.1 + 1).unwrap_or(1);
@@ -423,7 +427,7 @@ impl Root {
                 cx.background_executor().timer(motion::ms(motion::PANEL_CLOSE_MS)).await;
                 let _ = this.update_in(cx, |r, w, cx| if r.dock_anim.is_some_and(|a| a.1 == seq) {
                     r.dock_anim = None;
-                    r.dock_ai = false; chat_view::set_dock_open(false); r.dock_host = None; r.dock = SideDock::None;
+                    r.dock_ai = false; chat_view::set_dock_open(false); r.dock_host = None; r.dock_snip = false; r.dock_hist = false;
                     r.focus_active(w, cx); cx.notify();
                 });
             }).detach();
@@ -432,7 +436,8 @@ impl Root {
         match id {
             "ai-dock" => { self.dock_ai = false; chat_view::set_dock_open(false); }
             "host-dock" => self.dock_host = None,
-            _ => self.dock = SideDock::None,
+            "snip-dock" => self.dock_snip = false,
+            _ => self.dock_hist = false,
         }
         self.focus_active(window, cx);
         cx.notify();
@@ -1360,14 +1365,14 @@ impl Root {
     }
 
     pub(crate) fn apply_update(&mut self, rec: &ssh_term_proto::updater::Record, w: &mut Window, cx: &mut Context<Self>) {
-        match ssh_term_proto::updater::apply(rec) {
+        match ssh_term_proto::updater::apply(rec, &data_dir()) {
             Ok(ssh_term_proto::updater::Apply::QuitNow) => {
                 self.log("update.apply", &rec.version);
                 self.quit_ok = true; self.save_layout(cx);
                 for v in self.tabs.iter().flat_map(|t| t.layout.leaves()) { if let Some(s) = &v.read(cx).session { if v.read(cx).daemon_id.is_none() { s.close(); } } }
                 w.remove_window(); cx.quit();
             }
-            Ok(ssh_term_proto::updater::Apply::Revealed) => self.toast_after(t("update.revealed").into(), std::time::Duration::from_secs(8), cx),
+            Ok(ssh_term_proto::updater::Apply::Revealed(why)) => self.toast_after(tf("update.revealed", &[("why", &t(why))]), std::time::Duration::from_secs(8), cx),
             Err(e) => self.toast_after(tf("update.apply_failed", &[("e", &format!("{e:#}"))]), std::time::Duration::from_secs(8), cx),
         }
     }
@@ -2387,11 +2392,12 @@ fn open_main(cx: &mut App, rt: Arc<tokio::runtime::Runtime>, themes: Vec<Arc<The
                     let host_search = cx.new(|cx| InputState::new(window, cx).placeholder(t("ui.search_hosts")));
                     let new_menu_search = cx.new(|cx| InputState::new(window, cx).placeholder(t("newmenu.search")));
                     let lib_search = cx.new(|cx| InputState::new(window, cx).placeholder(t("lib.search")));
+                    let hist_search = cx.new(|cx| InputState::new(window, cx).placeholder(t("lib.search")));
                     let audit = audit_log();
                     let mut root = Root {
                         rt, default_target, tabs: vec![], active: 0, themes, schemes, histories: HashMap::new(),
                         manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], deny_reason: None, policy_port: None, overlay: Overlay::None, settings: None, sftp_views: HashMap::new(), sftp_current: None, sftp_windows: vec![], drag_div: None, port_view: None, quit_confirm: false, modal: None, quit_ok: false, chat_view: None,
-                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, menu_last: (None, None), menu_ghost: None, menu_ghost_seq: 0, sb_menu_at: std::time::Instant::now(), sb_modal: None, tag_filter: vec![], tab_menu: None, tab_menu_at: std::time::Instant::now(), new_menu: None, new_menu_at: std::time::Instant::now(), new_menu_closed: std::time::Instant::now(), new_menu_collapsed: config::get().sidebar.collapsed.clone(), new_menu_sel: 0, new_menu_search: new_menu_search.clone(), tab_scroll: gpui::ScrollHandle::new(), tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), dock: SideDock::None, dock_ai: false, dock_host: None, dock_min: HashSet::new(), dock_split: 0.5, dock_anim: None, dock_shown: false, dock_flip: HashMap::new(), bottom_anim: None, lib_search: lib_search.clone(), lib_group: String::new(), lib_hist_all: false, lib_editor: None, lib_vars: None, lib_confirm: None, lib_notice: String::new(), ai_width: { let w = config::get().sidebar.ai_width; if (280.0..=560.0).contains(&w) { w } else { config::AI_DOCK_W } }, host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: !config::get().sidebar.collapsed_panel(), sb_anim: None, ws_seen: None, ws_last: HashMap::new(), tool: activity::Tool::from_id(&config::get().sidebar.tool), bottom_open: config::get().sidebar.bottom_open, bottom_tab: activity::Bottom::from_id(&config::get().sidebar.bottom_tab), bottom_h: config::get().sidebar.bottom_height.clamp(120., 600.), exec_log: Default::default(), dbp: Default::default(), kvp: Default::default(), toolsp: Default::default(), extm: None, audit, audit_verify: None, audit_filter: Default::default(),
+                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, menu_last: (None, None), menu_ghost: None, menu_ghost_seq: 0, sb_menu_at: std::time::Instant::now(), sb_modal: None, tag_filter: vec![], tab_menu: None, tab_menu_at: std::time::Instant::now(), new_menu: None, new_menu_at: std::time::Instant::now(), new_menu_closed: std::time::Instant::now(), new_menu_collapsed: config::get().sidebar.collapsed.clone(), new_menu_sel: 0, new_menu_search: new_menu_search.clone(), tab_scroll: gpui::ScrollHandle::new(), tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), dock_snip: false, dock_hist: false, dock_ai: false, dock_host: None, dock_min: HashSet::new(), dock_split: 0.5, dock_anim: None, dock_shown: false, dock_flip: HashMap::new(), bottom_anim: None, lib_search: lib_search.clone(), hist_search: hist_search.clone(), lib_group: String::new(), lib_hist_all: false, lib_editor: None, lib_vars: None, lib_confirm: None, lib_notice: String::new(), ai_width: { let w = config::get().sidebar.ai_width; if (280.0..=560.0).contains(&w) { w } else { config::AI_DOCK_W } }, host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: !config::get().sidebar.collapsed_panel(), sb_anim: None, ws_seen: None, ws_last: HashMap::new(), tool: activity::Tool::from_id(&config::get().sidebar.tool), bottom_open: config::get().sidebar.bottom_open, bottom_tab: activity::Bottom::from_id(&config::get().sidebar.bottom_tab), bottom_h: config::get().sidebar.bottom_height.clamp(120., 600.), exec_log: Default::default(), dbp: Default::default(), kvp: Default::default(), toolsp: Default::default(), extm: None, audit, audit_verify: None, audit_filter: Default::default(),
                         settings_dirty: vec![], toast: None, toast_out: false, toast_seq: 0, _subs: vec![],
                     };
                     crate::ctxmenu_view::init(root.rt.handle().clone(), root.prompts.clone());
@@ -2399,6 +2405,7 @@ fn open_main(cx: &mut App, rt: Arc<tokio::runtime::Runtime>, themes: Vec<Arc<The
                     root._subs.push(cx.observe_window_appearance(window, |this: &mut Root, w, cx| { this.apply_theme(w, cx); this.refresh_all(cx); }));
                     root._subs.push(cx.subscribe_in(&new_menu_search, window, |this: &mut Root, _, ev: &InputEvent, _, cx| if matches!(ev, InputEvent::Change) { this.new_menu_sel = 0; cx.notify() }));
                     root._subs.push(cx.subscribe_in(&host_search, window, |_, _, ev: &InputEvent, _, cx| if matches!(ev, InputEvent::Change) { cx.notify() }));
+                    root._subs.push(cx.subscribe_in(&hist_search, window, |_, _, ev: &InputEvent, _, cx| if matches!(ev, InputEvent::Change) { cx.notify() }));
                     root._subs.push(cx.subscribe_in(&lib_search, window, |_, _, ev: &InputEvent, _, cx| if matches!(ev, InputEvent::Change) { cx.notify() }));
                     cx.spawn(async move |this, cx| {
                         while let Ok(p) = au_rx.recv_async().await {
@@ -2415,6 +2422,13 @@ fn open_main(cx: &mut App, rt: Arc<tokio::runtime::Runtime>, themes: Vec<Arc<The
                     // 应用内更新：读下载记录并清理旧安装包；下载进度变化时刷新主窗口和设置页
                     if !secondary() {
                         update_ui::init();
+                        // 上次更新没成功（助手脚本记在 update.log 里）：启动后说明原因
+                        if let Some(why) = ssh_term_proto::updater::take_failure(&data_dir()) {
+                            cx.spawn(async move |this, cx| {
+                                cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
+                                let _ = this.update(cx, |r, cx| r.toast_after(tf("update.last_failed", &[("why", &why)]), std::time::Duration::from_secs(12), cx));
+                            }).detach();
+                        }
                         cx.spawn(async move |this, cx| {
                             let mut seen = u64::MAX;
                             loop {

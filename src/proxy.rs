@@ -191,7 +191,7 @@ pub fn ureq_builder_sys(url: &str, b: ureq::AgentBuilder) -> Result<ureq::AgentB
 }
 
 #[cfg(windows)]
-fn read_reg_sz(sub: &str, name: &str) -> Option<String> {
+pub(crate) fn read_reg_sz(sub: &str, name: &str) -> Option<String> {
     use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_SZ};
     let sub: Vec<u16> = sub.encode_utf16().chain(std::iter::once(0)).collect();
     let name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();

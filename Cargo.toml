@@ -27,6 +27,8 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 windows-link = "0.2"
 
 [dependencies]
+# Local host overview / processes on Windows and macOS (MIT; already a transitive dependency)
+sysinfo = { version = "0.31", default-features = false, features = ["system", "disk", "network"] }
 # GPUI: gpui-pre (Apache-2.0), same pin as gpui-component 0.7.3
 gpui = { package = "gpui-pre", version = "=0.3.9" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
