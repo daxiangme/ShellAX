@@ -40,6 +40,12 @@ pub struct HostEntry {
     /// OpenSSH certificate file for the "cert" auth method (PRD 5.24).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cert: Option<String>,
+    /// 自定义图标 id（`iconset::HOST_ICONS`），缺省为服务器。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// 自定义图标强调色 id（`iconset::COLORS`），缺省跟随主题强调色。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_color: Option<String>,
     /// "config" or "ssh_config"
     #[serde(skip)]
     pub source: &'static str,

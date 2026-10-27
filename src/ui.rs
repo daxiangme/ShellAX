@@ -446,6 +446,51 @@ pub fn tag_picker(base: &'static str, selected: &[String], names: &[(String, Str
     row.into_any_element()
 }
 
+/// 单选色板（更换图标等共用）：`colors` 为 (id, 颜色, 提示)，选中项描边加对勾；`selected` 为 `None` 时都不选中（默认态）。
+pub fn swatch_row(base: &'static str, colors: &[(String, Hsla, String)], selected: Option<&str>, on: impl Fn(String, &mut gpui::Window, &mut gpui::App) + 'static + Clone) -> AnyElement {
+    let mut row = div().flex().flex_wrap().items_center().gap(px(SP_2));
+    for (i, (id, col, tip)) in colors.iter().enumerate() {
+        let (on, idc, tip) = (on.clone(), id.clone(), tip.clone());
+        let sel = selected == Some(id.as_str());
+        row = row.child(div().id((base, i)).size(px(SWATCH)).rounded_full().cursor_pointer().flex().items_center().justify_center()
+            .bg(*col).border_2().border_color(if sel { c(cur().text).opacity(0.55) } else { gpui::transparent_black() })
+            .hover(|d| d.opacity(0.85))
+            .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(move |_, w, cx| on(idc.clone(), w, cx))
+            .when(sel, |d| d.child(icon(IconName::Check, IC_XS, gpui::white()))));
+    }
+    row.into_any_element()
+}
+
+/// 色板圆点直径。
+pub const SWATCH: f32 = 22.;
+/// 图标网格单元边长。
+pub const ICON_CELL: f32 = 40.;
+
+/// 单选图标网格（更换图标等共用）：`cells` 为 (id, 图标元素, 提示)，每行 `cols` 个；选中项用 `selected_bg()` 加强调色描边。
+pub fn icon_grid(base: &'static str, cells: Vec<(String, AnyElement, String)>, selected: Option<&str>, cols: usize, on: impl Fn(String, &mut gpui::Window, &mut gpui::App) + 'static + Clone) -> AnyElement {
+    let mut grid = div().flex().flex_col().gap(px(SP_1));
+    let mut it = cells.into_iter().enumerate().peekable();
+    while it.peek().is_some() {
+        let mut row = div().flex().gap(px(SP_1));
+        for (i, (id, el, tip)) in it.by_ref().take(cols.max(1)) {
+            let (on, idc) = (on.clone(), id.clone());
+            let sel = selected == Some(id.as_str());
+            row = row.child(div().id((base, i)).size(px(ICON_CELL)).flex_shrink_0().rounded(px(R_MD)).cursor_pointer().flex().items_center().justify_center()
+                .border_1().border_color(if sel { c(cur().accent) } else { gpui::transparent_black() })
+                .when(sel, |d| d.bg(selected_bg()))
+                .when(!sel, |d| d.hover(|d| d.bg(hover_bg())))
+                .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(move |_, w, cx| on(idc.clone(), w, cx))
+                .child(el));
+        }
+        grid = grid.child(row);
+    }
+    grid.into_any_element()
+}
+
 /// Multi-select tag chips (dot + name), wrapping onto more lines; selected chips are highlighted.
 pub fn tag_chips(base: &'static str, selected: &[String], names: &[(String, String)], on: impl Fn(String, &mut gpui::Window, &mut gpui::App) + 'static + Clone) -> AnyElement {
     let th = cur();

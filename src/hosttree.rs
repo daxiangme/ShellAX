@@ -25,6 +25,12 @@ pub struct GroupEntry {
     pub path: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// 自定义图标：文件夹字形 id（`iconset::FOLDER_GLYPHS`），缺省为纯文件夹。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// 自定义图标颜色 id（`iconset::COLORS`），缺省为蓝色。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_color: Option<String>,
 }
 
 pub fn parent_of(path: &str) -> &str { path.rsplit_once('/').map(|(p, _)| p).unwrap_or("") }
@@ -44,7 +50,7 @@ pub fn ensure_groups(hosts: &[HostEntry], groups: &mut Vec<GroupEntry>) {
         let mut acc = String::new();
         for part in p.split('/') {
             acc = if acc.is_empty() { part.to_string() } else { format!("{acc}/{part}") };
-            if !groups.iter().any(|g| g.path == acc) { groups.push(GroupEntry { path: acc.clone(), tags: vec![] }); }
+            if !groups.iter().any(|g| g.path == acc) { groups.push(GroupEntry { path: acc.clone(), ..Default::default() }); }
         }
     };
     for p in want { add(p, groups); }
@@ -60,7 +66,7 @@ fn unique(base: &str, taken: &dyn Fn(&str) -> bool) -> String {
 pub fn add_group(groups: &mut Vec<GroupEntry>, parent: &str, name: &str) -> String {
     let base = join(parent, if name.trim().is_empty() { "New group" } else { name });
     let path = unique(&base, &|p| groups.iter().any(|g| g.path == p));
-    groups.push(GroupEntry { path: path.clone(), tags: vec![] });
+    groups.push(GroupEntry { path: path.clone(), ..Default::default() });
     path
 }
 
@@ -257,7 +263,7 @@ mod tests {
     #[test]
     fn tree_rows_order_collapse_and_search() {
         let hosts = vec![h("web1", "prod"), h("db1", "prod/db"), h("dev", ""), h("web2", "prod")];
-        let mut groups = vec![GroupEntry { path: "lab".into(), tags: vec![] }];
+        let mut groups = vec![GroupEntry { path: "lab".into(), ..Default::default() }];
         ensure_groups(&hosts, &mut groups);
         assert_eq!(groups.iter().map(|g| g.path.as_str()).collect::<Vec<_>>(), ["lab", "prod", "prod/db"]);
         let r = rows(&hosts, &groups, &[], &Query::default());
@@ -312,7 +318,7 @@ mod tests {
     #[test]
     fn tags_production_and_filter() {
         let mut hosts = vec![h("a", "g"), h("b", ""), HostEntry { production: true, ..h("legacy", "") }];
-        let mut groups = vec![GroupEntry { path: "g".into(), tags: vec!["red".into()] }];
+        let mut groups = vec![GroupEntry { path: "g".into(), tags: vec!["red".into()], ..Default::default() }];
         assert_eq!(migrate_production(&mut hosts, "red"), 1);
         assert_eq!((hosts[2].production, hosts[2].tags.as_slice()), (false, &["red".to_string()][..]));
         assert!(is_production(&hosts[0], &groups, "red"));

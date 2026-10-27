@@ -362,6 +362,12 @@ pub struct Place {
     pub host: String,
     /// Sidebar group path. Empty means the top level of Connections.
     pub group: String,
+    /// 自定义图标：文件夹字形 id（`iconset::FOLDER_GLYPHS`），缺省为纯文件夹。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// 自定义图标颜色 id（`iconset::COLORS`），缺省为蓝色。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon_color: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -820,6 +826,40 @@ mod tests {
         r2.tags.production = "orange".into();
         r2.hosts[0].tags.clear();
         assert!(r2.host_is_production(&r2.hosts[0]), "inherits orange from group prod");
+    }
+    #[test]
+    fn custom_icons_round_trip_and_old_configs_load() {
+        use ssh_term_proto::iconset;
+        // 没有图标字段的旧配置：照常加载，字段为空，写回时不产生 icon 噪音
+        let old = "# mine\n[[hosts]]\nname = \"web\"\nhost = \"10.0.0.1\"\ngroup = \"prod\"\n\n[[groups]]\npath = \"prod\"\ntags = [\"red\"]\n\n[[places]]\nname = \"logs\"\npath = \"/var/log\"\n";
+        let mut s = Settings::parse(old).unwrap();
+        assert_eq!((s.hosts[0].icon.clone(), s.hosts[0].icon_color.clone()), (None, None));
+        assert_eq!((s.groups[0].icon.clone(), s.groups[0].icon_color.clone()), (None, None));
+        assert_eq!((s.places[0].icon.clone(), s.places[0].icon_color.clone()), (None, None));
+        let plain = toml::to_string_pretty(&s).unwrap();
+        assert!(!plain.contains("icon"), "{plain}");
+        assert_eq!(Settings::parse(&plain).unwrap(), s);
+        // 带图标字段：往返无损，经 merge_preserving 写回既有文本后仍在
+        s.hosts[0].icon = Some("router".into());
+        s.hosts[0].icon_color = Some("green".into());
+        s.groups[0].icon = Some("database".into());
+        s.groups[0].icon_color = Some("purple".into());
+        s.places[0].icon = Some("terminal".into());
+        s.places[0].icon_color = Some("yellow".into());
+        let text = toml::to_string_pretty(&s).unwrap();
+        assert_eq!(Settings::parse(&text).unwrap(), s);
+        let merged = merge_preserving(old, &text).unwrap();
+        assert!(!plain.contains("icon = ") && !plain.contains("icon_color"), "{plain}");
+        assert_eq!(Settings::parse(&merged).unwrap(), s);
+        // 恢复默认后字段从文件里消失
+        s.hosts[0].icon = None;
+        s.hosts[0].icon_color = None;
+        let back = merge_preserving(&merged, &toml::to_string_pretty(&s).unwrap()).unwrap();
+        assert!(!back.contains("router") && !back.contains("green") && back.contains("database"), "{back}");
+        // 手改成未知 id 时照常加载并保留，但渲染回到默认
+        let odd = Settings::parse("[[hosts]]\nname = \"h\"\nhost = \"h\"\nicon = \"apple\"\nicon_color = \"pink\"\n").unwrap();
+        assert_eq!(iconset::pick(&odd.hosts[0].icon, iconset::is_host_icon), None);
+        assert_eq!(iconset::pick(&odd.hosts[0].icon_color, iconset::is_color), None);
     }
     #[test]
     fn save_preserves_comments() {

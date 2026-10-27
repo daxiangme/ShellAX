@@ -579,9 +579,27 @@ pub fn menu_sel_bg() -> gpui::Hsla {
 pub fn divider() -> gpui::Hsla { c(cur().surface1).opacity(0.6) }
 /// 岛内子卡片底色：卡片底上叠一层很淡的前景色。
 pub fn sub_bg() -> gpui::Hsla { c(cur().text).opacity(0.035) }
-/// 文件夹图标的两层填充色（后层、前层），深浅色各一档；SFTP 文件列表与主机列表共用。
-pub fn folder_colors() -> (gpui::Hsla, gpui::Hsla) {
-    if cur().appearance == Appearance::Dark { (c(0x3d8fd6), c(0x62aef0)) } else { (c(0x5aa9ec), c(0x8cc8f8)) }
+/// 自定义图标色板（8 色，id 与 `ssh_term_proto::iconset::COLORS` 一一对应）：每色给出浅色、深色主题各一组
+/// `[后层, 前层, 字形]`；字形是叠在文件夹前层上的小图案，取与前层反差足够的颜色。蓝色即默认的 SFTP 文件夹蓝。
+pub const ICON_TONES: [(&str, [u32; 3], [u32; 3]); 8] = [
+    ("blue",   [0x5aa9ec, 0x8cc8f8, 0x1f5f9f], [0x3d8fd6, 0x62aef0, 0xffffff]),
+    ("green",  [0x4fb872, 0x86d6a2, 0x1f7a42], [0x3a9e5c, 0x5fc07f, 0xffffff]),
+    ("orange", [0xf09a3a, 0xf8bf70, 0x9a560a], [0xd97f22, 0xf2a24a, 0xffffff]),
+    ("red",    [0xe8625a, 0xf59a93, 0x9c2a24], [0xcf4a43, 0xec746d, 0xffffff]),
+    ("purple", [0xa279e0, 0xc5a8f2, 0x5d3a9b], [0x8a5ec8, 0xae86e6, 0xffffff]),
+    ("cyan",   [0x38bcd0, 0x76dae8, 0x0f6f80], [0x25a2b8, 0x4cc2d6, 0xffffff]),
+    ("gray",   [0x8f98a5, 0xbcc3cc, 0x4b5563], [0x6f7885, 0x959eab, 0xffffff]),
+    ("yellow", [0xe8b923, 0xf7d760, 0x6b4f00], [0xcc9d10, 0xecc13c, 0x4a3600]),
+];
+/// 色板里某个 id 的 `(后层, 前层)` 与字形色；未设置或 id 未知时取蓝色（默认）。
+pub fn folder_tone(id: Option<&str>) -> ((gpui::Hsla, gpui::Hsla), gpui::Hsla) {
+    let row = id.and_then(|i| ICON_TONES.iter().find(|r| r.0 == i)).unwrap_or(&ICON_TONES[0]);
+    let t = if cur().appearance == Appearance::Dark { row.2 } else { row.1 };
+    ((c(t[0]), c(t[1])), c(t[2]))
+}
+/// 主机图标的强调部分：设置了色板颜色时取其后层色，否则跟随主题强调色。
+pub fn host_accent(id: Option<&str>) -> gpui::Hsla {
+    match id.filter(|i| ICON_TONES.iter().any(|r| r.0 == *i)) { Some(i) => folder_tone(Some(i)).0 .0, None => entity_accent() }
 }
 /// 主机 / 终端填充图标的机身：次要图标色与卡片底色各一半，浅色主题里是浅灰，深色主题里是深灰。
 pub fn entity_body() -> gpui::Hsla {

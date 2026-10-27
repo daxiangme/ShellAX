@@ -62,7 +62,7 @@
 1. **岛（Island）是唯一容器**：左工具岛、中间内容岛、每张右侧卡片、底部面板，用同一个函数生成：同圆角、同底色、无边框。岛之间只靠外框底色与 6px 间距区分。
 2. **一套字号，跟随设置**：所有字号都由 `appearance.ui_font_size`（默认 13）推导，改设置即全局生效。
 3. **一种悬停、一种选中**：悬停 = `hover_bg()`，持久选中 = `selected_bg()`，键盘高亮（菜单/面板）= `menu_sel_bg()`。不再使用实心强调色 + 白字（主按钮除外）。
-4. **图标分两类**：通用功能图标（按钮、菜单、工具栏、数据库 / Redis 树的实体图标）保持单色 `overlay1`，颜色只用于传达状态（连接点、标签点、危险/警告）。**主机列表与 SFTP 里的“实体”用填充图标**（`file_icon.rs`，多层 SVG）：文件夹 / 位置 = 蓝色两层填充（`theme::folder_colors`，深浅色各一档，分组展开用 `folder_open_*`）；SSH 主机 / 本地终端 = 浅中性机身（`theme::entity_body`）加强调色指示灯 / 屏幕（`theme::entity_accent`）。品牌图标（数据库引擎 SVG、文件类型 SVG）同样除外。
+4. **图标分两类**：通用功能图标（按钮、菜单、工具栏、数据库 / Redis 树的实体图标）保持单色 `overlay1`，颜色只用于传达状态（连接点、标签点、危险/警告）。**主机列表与 SFTP 里的“实体”用填充图标**（`file_icon.rs`，多层 SVG）：文件夹 / 位置 = 默认蓝色两层填充（`theme::folder_tone(None)`，深浅色各一档，分组展开用 `folder_open_*`）；SSH 主机 / 本地终端 = 浅中性机身（`theme::entity_body`）加强调色指示灯 / 屏幕（`theme::entity_accent`）。分组、位置、SSH 主机可经右键「更换图标」自定义，见 §5.2「自定义图标」。品牌图标（数据库引擎 SVG、文件类型 SVG）同样除外。
    - 工具列表行与工具页标题左侧各有一枚工具图标：单色描边（Lucide）、`IC_MD`、颜色 `overlay1`，选中行跟随选中文字色 `text`；图标在 `ToolSpec.icon` / `tools::icon_of(id)` 里按工具定义，扩展包可选声明，缺省用通用图标。分类标题不带图标。
 5. **安静的默认态**：行内操作按钮默认隐藏，悬停/选中时出现；标题不大写；次要信息用颜色而不是更小的字号区分。
 6. **4px 网格**：间距只用 2/4/6/8/12/16/20/24/32。
@@ -225,6 +225,7 @@ pub fn danger_bg() -> Hsla       // c(cur().error).opacity(0.12)
 | `ui::empty_state(icon, title, desc: Option, actions: Vec<AnyElement>) -> Div` | 垂直居中列：图标 `IC_XL` `overlay0`，标题 `fs_body` MEDIUM `subtext`，说明 `fs_small` `overlay1` `max_w(260)` 自动换行，按钮纵向全宽排列（窄面板）或横向（宽区域，参数控制）。替代侧栏空状态卡片（`sidebar.rs:430`）、`activity::empty_tool`、各列表 "empty" 文本、底部面板空态、`ws_empty`、`panels::sftp_panel` 空态。 |
 | `ui::notice(kind, text) -> Div` | 行内提示条：`mx(LIST_INSET)`、`px(ROW_PX)`、`py(6)`、`R_MD`、`fs_small`；kind=info/warn/error → 底色 `info/warning/error.opacity(0.10)`、文字对应色。替代 `lib_notice`、"需要终端" 提示、Docker/DB 的错误条。 |
 | `ui::dialog_header(icon, icon_color, title, subtitle, on_close)` / `ui::dialog_footer(children)` | 头部高 `DIALOG_HEAD_H`、`px(SP_5)`、图标 `IC_MD`（颜色由 `icon_color` 传入：默认 `accent`，确认类 `warning`，删除类 `error`）、标题 `fs_title` SEMIBOLD、副标题 `fs_small` `subtext`、右侧关闭 `IconBtn::Lg`、底部 `divider()`；底栏 `px(SP_5) py(SP_3)`、顶部 `divider()`、**无底色**、按钮右对齐 gap 8、危险按钮靠左。替代 `panels::panel_shell`、`host_dialog.rs:319`、`kv_ui.rs:155`、`db_dialog.rs:253`、`port_view.rs:133`、`sftp_view.rs:1359`、`chat_view.rs:614`、`dock_view` 的创建/exec/确认卡片、`main.rs` 的 hostkey/auth/approval/quit/update 卡片、`sidebar::sb_modal_el`。 |
+| `ui::swatch_row(base, colors, selected, on)` / `ui::icon_grid(base, cells, selected, cols, on)` | 更换图标对话框的共用件：一排圆形色板（选中描边）、等宽图标网格（选中底色）；不含业务逻辑，选中值由调用方传入。 |
 | `ui::menu_item` / `ui::menu_sep` / `ui::menu_label(text)` | 菜单项悬停改 `menu_sel_bg()`（见 3.7），文字 `fs_body`，图标 `IC_MD`；新增 `menu_label` 作为菜单内分组小标题（`fs_small` SEMIBOLD `subtext`，不大写），替代 `sidebar.rs:546,609` 的大写标签。 |
 
 ---
@@ -265,10 +266,15 @@ island
 #### 主机 / SFTP（`sidebar.rs`）
 - 新增 `panel_header("主机"/"SFTP")`，原搜索框右侧的「+」移到标题行 actions（`IconBtn::Md`，`Plus`，点击仍弹出原菜单）。搜索框独占一行。
 - 分区：`本地`、`连接`、`标签` 用 `ui::section_header`；`连接`/`标签` 可折叠（折叠状态可只存内存，不改配置格式）；`连接` 右侧显示主机总数。拖放到「连接」标题移到顶层的逻辑保留。
-- **主机行**：`list_row` + `min_h(row2_h())`；图标 `file_icon::server_icon(IC_MD)`（填充服务器：浅中性机身 + 强调色指示灯）；状态点 7px 位于图标右上角、带 `card_bg()` 描边（不是 `crust`；指示灯在机身左侧，不被状态点遮住）；生产环境盾牌保留在图标右下；第一行 `row_title(name)` + 最多 3 个标签点（6px）+ `+N`（`fs_caption`）；第二行 `row_meta("user@host:port · OS")`；编辑按钮放入 `row_actions`（`IconBtn::Sm`）。缩进 `INDENT` 16/级，展开箭头占 16px 宽槽位以对齐。
+- **主机行**：`list_row` + `min_h(row2_h())`；图标 `file_icon::host_icon(IC_MD, icon, color)`（默认填充服务器：浅中性机身 + 强调色指示灯；可自定义）；状态点 7px 位于图标右上角、带 `card_bg()` 描边（不是 `crust`；指示灯在机身左侧，不被状态点遮住）；生产环境盾牌保留在图标右下；第一行 `row_title(name)` + 最多 3 个标签点（6px）+ `+N`（`fs_caption`）；第二行 `row_meta("user@host:port · OS")`；编辑按钮放入 `row_actions`（`IconBtn::Sm`）。缩进 `INDENT` 16/级，展开箭头占 16px 宽槽位以对齐。
 - **本地终端行 / 环境变量主机行**：与主机行完全同构（图标 `file_icon::local_icon`（macOS 笔记本 / 其他平台显示器）/ `server_icon` 填充图标 + 右上角状态点），去掉独立圆点与 `info`/`accent` 图标色。
-- **分组行**：`list_row` 单行；箭头 `IC_XS`；文件夹图标 `file_icon::folder_icon(IC_MD, open)`（蓝色填充，折叠闭合、展开用打开态；不再按标签着色）；名称 `fs_body` MEDIUM；有标签时名称后跟 8px 标签点；右侧计数 `fs_caption` `overlay1`。
-- **位置行（places）**：双行同主机行；图标用同一个蓝色填充文件夹（闭合态，无徽标），靠第二行路径与分组行区分。
+- **分组行**：`list_row` 单行；箭头 `IC_XS`；文件夹图标 `file_icon::folder_icon_styled(IC_MD, open, color, glyph)`（默认蓝色填充，折叠闭合、展开用打开态；不再按标签着色；可自定义颜色与字形）；名称 `fs_body` MEDIUM；有标签时名称后跟 8px 标签点；右侧计数 `fs_caption` `overlay1`。
+- **位置行（places）**：双行同主机行；图标用同一个填充文件夹（闭合态，无徽标，默认蓝色，可自定义颜色与字形），靠第二行路径与分组行区分。
+- **自定义图标（更换图标）**：分组行、位置行、SSH 主机行的右键菜单各有「更换图标…」（`IconName::Palette`），打开小对话框 `SbModal::ChangeIcon`：顶部实时预览（`IC_XL` 图标 + 名称）、一排色板 `ui::swatch_row`（`SWATCH` 22px）、图标网格 `ui::icon_grid`（6 列，`ICON_CELL` 40px）、左下「恢复默认」、右下「完成」。每次点选立即写入配置并刷新侧栏。
+  - 文件夹（分组 / 位置）：8 色（蓝默认、绿、橙、红、紫、青、灰、黄），色值在 `theme::ICON_TONES`（每色浅 / 深主题各一对 back / front + 字形色），经 `theme::folder_tone` 取用；12 个字形（默认纯文件夹、代码、分支、文档、数据库、云、星标、锁、主页、下载、图片、终端），作为第三层 SVG（`assets/icons/files/glyph_*.svg`）叠在文件夹前片中央；分组仍保留展开 / 折叠两态。
+  - SSH 主机：11 个图标（服务器默认、云主机、笔记本、台式机、路由 / 网关、数据库服务器、容器、单板机，以及 Linux、Windows、Mac 三个自绘几何标记，非官方标志）；同为两层填充（机身 `entity_body` + 强调部分 `entity_accent`）；色板只改强调部分（`theme::host_accent`），不选即用主题强调色。
+  - 存储：`GroupEntry`、`Place`、`HostEntry` 各新增可选字段 `icon`、`icon_color`（serde 默认 + 为空不写出），旧配置无需迁移；未知 id 渲染回默认。id 与标签表在 `iconset.rs`，中英文名称键为 `icon.color.*`、`icon.glyph.*`、`icon.host.*`。
+  - 不变：状态点、生产盾牌、标签色点；不支持导入自定义图标。仅左侧栏行套用，SFTP 主机选择器与标签页图标仍用默认图标。
 - **标签行**：`list_row` 单行；8px 色点 + 名称 + 生产盾牌 + 计数。
 - 空状态改 `ui::empty_state(Server, "还没有连接", 说明, [新建连接(主), 导入 ~/.ssh/config])`。无匹配时 `empty_state(Search, "没有匹配的主机", None, [])`。
 - 右键菜单内「移动到」小标题改 `ui::menu_label`，不大写。

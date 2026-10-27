@@ -6,6 +6,7 @@ use gpui::{div, prelude::*, px, AnyElement, Context, Entity, FontWeight, SharedS
 use gpui_component::input::{InputState};
 use ssh_term_proto::hosts::HostEntry;
 use ssh_term_proto::hosttree::{self, Row};
+use ssh_term_proto::iconset;
 use ssh_term_proto::i18n::{t, tf};
 use std::sync::atomic::Ordering;
 
@@ -45,8 +46,17 @@ pub(crate) struct SbMenu { pub target: SbTarget, pub pos: gpui::Point<gpui::Pixe
 
 #[derive(Clone)]
 pub(crate) enum PromptKind { NewGroup(String), RenameHost(String), RenameGroup(String), SavePlace { path: String, host: String, group: String }, PlacePath { host: String, group: String }, RenamePlace(usize) }
+/// 「更换图标」作用的实体：主机名 / 分组路径 / 位置序号。
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum IconTarget { Host(String), Group(String), Place(usize) }
+/// 图标选择器里被点的那一栏。
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum IconField { Color, Glyph }
+
 #[derive(Clone)]
 pub(crate) enum SbModal {
+    /// 右键「更换图标」：色板 + 图标网格 + 恢复默认；每次点选立即写入配置，预览与侧栏同步更新。
+    ChangeIcon(IconTarget),
     Prompt { kind: PromptKind, input: Entity<InputState> },
     DeleteHost(String),
     DeleteGroup(String),
@@ -91,6 +101,38 @@ impl Root {
     /// Resolved SSH target of a config host.
     pub(crate) fn target_for(&self, name: &str) -> Option<ssh_term_proto::ssh::SshTarget> {
         self.host_targets().into_iter().find(|(h, _)| h.name == name).map(|(_, t)| t)
+    }
+    /// 目标当前保存的 (字形 / 图标 id, 颜色 id)。
+    fn icon_of(target: &IconTarget) -> (Option<String>, Option<String>) {
+        let s = config::get();
+        match target {
+            IconTarget::Host(n) => s.hosts.iter().find(|h| &h.name == n).map(|h| (h.icon.clone(), h.icon_color.clone())),
+            IconTarget::Group(p) => s.groups.iter().find(|g| &g.path == p).map(|g| (g.icon.clone(), g.icon_color.clone())),
+            IconTarget::Place(i) => s.places.get(*i).map(|p| (p.icon.clone(), p.icon_color.clone())),
+        }.unwrap_or_default()
+    }
+    /// 改写目标的图标字段：`field` 为 `None` 表示两项一起恢复默认；默认值与未知 id 存成 `None`。
+    fn set_icon(&mut self, target: &IconTarget, field: Option<(IconField, String)>, cx: &mut Context<Self>) {
+        let t = target.clone();
+        let detail = format!("target={target:?} field={field:?}");
+        self.sb_save("sidebar.icon", detail, move |s| {
+            let (mut icon, mut color) = (None, None);
+            let slot: Option<(&mut Option<String>, &mut Option<String>)> = match &t {
+                IconTarget::Host(n) => s.hosts.iter_mut().find(|h| &h.name == n).map(|h| (&mut h.icon, &mut h.icon_color)),
+                IconTarget::Group(p) => {
+                    if !s.groups.iter().any(|g| &g.path == p) { s.groups.push(hosttree::GroupEntry { path: p.clone(), ..Default::default() }); }
+                    s.groups.iter_mut().find(|g| &g.path == p).map(|g| (&mut g.icon, &mut g.icon_color))
+                }
+                IconTarget::Place(i) => s.places.get_mut(*i).map(|p| (&mut p.icon, &mut p.icon_color)),
+            };
+            let (i, c) = slot.unwrap_or((&mut icon, &mut color));
+            let host = matches!(t, IconTarget::Host(_));
+            match field {
+                None => { *i = None; *c = None; }
+                Some((IconField::Color, id)) => *c = iconset::store(&id, if host { "" } else { iconset::COLORS[0] }, iconset::is_color),
+                Some((IconField::Glyph, id)) => *i = if host { iconset::store(&id, iconset::HOST_ICONS[0], iconset::is_host_icon) } else { iconset::store(&id, iconset::FOLDER_GLYPHS[0], iconset::is_folder_glyph) },
+            }
+        }, cx);
     }
     fn toggle_collapsed(&mut self, path: &str, cx: &mut Context<Self>) {
         let p = path.to_string();
@@ -203,7 +245,7 @@ impl Root {
                 return;
             }
             PromptKind::SavePlace { path, host, group } => {
-                self.sb_save("places.save", format!("name={val:?} path={path:?} host={host:?} group={group:?}"), |s| s.places.push(config::Place { name: val.clone(), path, host, group }), cx);
+                self.sb_save("places.save", format!("name={val:?} path={path:?} host={host:?} group={group:?}"), |s| s.places.push(config::Place { name: val.clone(), path, host, group, ..Default::default() }), cx);
             }
             PromptKind::RenamePlace(i) => {
                 self.sb_save("places.rename", format!("i={i} name={val:?}"), |s| { if let Some(p) = s.places.get_mut(i) { p.name = val.clone(); } }, cx);
@@ -256,7 +298,7 @@ impl Root {
         // 比同级分组多一级缩进（对齐分组的展开箭头槽位）
         let mut row = ui::list_row(("host", idx), depth + 1, sel).min_h(px(ui::row2_h())).group(gid.clone())
             // 一个信号一件事：单色服务器图标，右上角连接状态点，生产环境右下盾牌；标签最多 3 个色点（+N）
-            .child(Self::entity_icon(crate::file_icon::server_icon(ui::IC_MD), st, idx, prod.then(|| c(s.tags.rgb(&s.tags.production)))))
+            .child(Self::entity_icon(crate::file_icon::host_icon(ui::IC_MD, h.icon.as_deref(), h.icon_color.as_deref()), st, idx, prod.then(|| c(s.tags.rgb(&s.tags.production)))))
             .child(div().flex_1().min_w_0().flex().flex_col().overflow_hidden()
                 .child(div().flex().items_center().gap(px(4.))
                     .child(ui::row_title(h.name.clone()))
@@ -298,7 +340,7 @@ impl Root {
         ui::list_row(("place", idx), depth + 1, false).min_h(px(ui::row2_h()))
             .on_click(cx.listener(move |this, _, w, cx| this.open_place(idx, w, cx)))
             .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.show_sb_menu(SbMenu { target: SbTarget::Place(idx), pos: ev.position, sub: SbSub::Main }); cx.notify(); }))
-            .child(crate::file_icon::folder_icon(ui::IC_MD, false))
+            .child(crate::file_icon::folder_icon_styled(ui::IC_MD, false, p.icon_color.as_deref(), p.icon.as_deref()))
             .child(div().flex_1().min_w_0().flex().flex_col().overflow_hidden()
                 .child(ui::row_title(p.name.clone()))
                 .child(ui::row_meta(sub)))
@@ -308,7 +350,9 @@ impl Root {
     fn sb_group_row(&self, path: &str, name: &str, depth: usize, count: usize, collapsed: bool, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
         let s = config::get();
-        let tags = s.groups.iter().find(|g| g.path == path).map(|g| g.tags.clone()).unwrap_or_default();
+        let entry = s.groups.iter().find(|g| g.path == path);
+        let tags = entry.map(|g| g.tags.clone()).unwrap_or_default();
+        let (g_icon, g_color) = entry.map(|g| (g.icon.clone(), g.icon_color.clone())).unwrap_or_default();
         let (p1, p2, p3, p4) = (path.to_string(), path.to_string(), path.to_string(), path.to_string());
         ui::list_row(SharedString::from(format!("grp-{path}")), depth, false)
             .on_click(cx.listener(move |this, _, _w, cx| this.toggle_collapsed(&p1, cx)))
@@ -323,7 +367,7 @@ impl Root {
                 this.sb_save("hosts.group_move", format!("group={from:?} into={to:?}"), |s| { hosttree::move_group(&mut s.hosts, &mut s.groups, &from, &to, None); }, cx);
             }))
             .child(div().w(px(ui::INDENT)).flex_shrink_0().flex().items_center().child(icon(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown }, ui::IC_XS, c(th.overlay1))))
-            .child(crate::file_icon::folder_icon(ui::IC_MD, !collapsed))
+            .child(crate::file_icon::folder_icon_styled(ui::IC_MD, !collapsed, g_color.as_deref(), g_icon.as_deref()))
             .child(ui::row_title(name.to_string()).font_weight(FontWeight::MEDIUM))
             .children(ui::tag_dot(tags.first()))
             .child(div().flex_1())
@@ -561,6 +605,7 @@ impl Root {
                 list = list
                     .child(item!(Some(IconName::Pencil), t("sb.edit"), move |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.open_host_dialog(e.clone(), None, w, cx)))
                     .child(item!(Some(IconName::TextCursorInput), t("sb.rename"), move |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.prompt(PromptKind::RenameHost(r.clone()), r.clone(), w, cx)))
+                    .child(item!(Some(IconName::Palette), t("sb.change_icon"), { let n = name.clone(); move |this: &mut Root, _w: &mut Window, _cx: &mut Context<Root>| this.sb_modal = Some(SbModal::ChangeIcon(IconTarget::Host(n.clone()))) }))
                     .child(item!(Some(IconName::CopyPlus), t("sb.duplicate"), move |this: &mut Root, _w: &mut Window, cx: &mut Context<Root>| { let n = du.clone(); this.sb_save("hosts.duplicate", format!("host={n}"), |s| { hosttree::duplicate_host(&mut s.hosts, &n); }, cx); }))
                     .child(ui::menu_item(id(), Some(IconName::FolderInput), t("sb.move_to"), true, false).child(div().flex_1()).child(icon(IconName::ChevronRight, ui::IC_XS, c(th.overlay1)))
                         .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _w, cx| { this.show_sb_menu(SbMenu { target: SbTarget::Host(mv.clone()), pos: ev.position(), sub: SbSub::Move }); cx.notify(); })));
@@ -582,7 +627,8 @@ impl Root {
                     .child(ui::menu_sep())
                     .child(item!(Some(IconName::SquarePlus), t("sb.new_connection_here"), move |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.open_host_dialog(None, Some(p2.clone()), w, cx)))
                     .child(item!(Some(IconName::FolderPlus), t("sb.new_subgroup"), move |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.prompt(PromptKind::NewGroup(p3.clone()), String::new(), w, cx)))
-                    .child(item!(Some(IconName::TextCursorInput), t("sb.rename"), move |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.prompt(PromptKind::RenameGroup(p4.clone()), hosttree::leaf_of(&p4).to_string(), w, cx)));
+                    .child(item!(Some(IconName::TextCursorInput), t("sb.rename"), move |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.prompt(PromptKind::RenameGroup(p4.clone()), hosttree::leaf_of(&p4).to_string(), w, cx)))
+                    .child(item!(Some(IconName::Palette), t("sb.change_icon"), { let p = path.clone(); move |this: &mut Root, _w: &mut Window, _cx: &mut Context<Root>| this.sb_modal = Some(SbModal::ChangeIcon(IconTarget::Group(p.clone()))) }));
                 let tags = s.groups.iter().find(|g| g.path == *path).map(|g| g.tags.clone()).unwrap_or_default();
                 list = list.child(div().px(px(10.)).py(px(6.)).flex().items_center().gap_2().child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(t("tag.tags")))
                     .child(ui::tag_picker("sbm-gtags", &tags, &s.tags.all(), {
@@ -615,6 +661,7 @@ impl Root {
                 let name = s.places.get(*i).map(|p| p.name.clone()).unwrap_or_default();
                 list = list
                     .child(item!(Some(IconName::TextCursorInput), t("sb.rename"), move |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.prompt(PromptKind::RenamePlace(i1), name.clone(), w, cx)))
+                    .child(item!(Some(IconName::Palette), t("sb.change_icon"), move |this: &mut Root, _w: &mut Window, _cx: &mut Context<Root>| this.sb_modal = Some(SbModal::ChangeIcon(IconTarget::Place(i1)))))
                     .child(danger!(Some(IconName::Trash), t("place.delete"), move |this: &mut Root, _w: &mut Window, cx: &mut Context<Root>| { this.sb_save("places.delete", format!("i={i2}"), |s| { if i2 < s.places.len() { s.places.remove(i2); } }, cx); }))
                     .child(ui::menu_item(id(), Some(IconName::FolderInput), t("sb.move_to"), true, false).child(div().flex_1()).child(icon(IconName::ChevronRight, ui::IC_XS, c(th.overlay1)))
                         .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _w, cx| { this.show_sb_menu(SbMenu { target: SbTarget::Place(mv), pos: ev.position(), sub: SbSub::Move }); cx.notify(); })));
@@ -644,6 +691,39 @@ impl Root {
         let hdr: (IconName, gpui::Hsla, String);
         let mut foot = ui::dialog_footer(None, vec![]);
         match m {
+            SbModal::ChangeIcon(target) => {
+                let (icon_id, color_id) = Self::icon_of(&target);
+                let is_host = matches!(target, IconTarget::Host(_));
+                let entity_name = match &target {
+                    IconTarget::Host(n) => n.clone(),
+                    IconTarget::Group(p) => hosttree::leaf_of(p).to_string(),
+                    IconTarget::Place(i) => config::get().places.get(*i).map(|p| p.name.clone()).unwrap_or_default(),
+                };
+                let (cur_icon, cur_color) = (iconset::pick(&icon_id, if is_host { iconset::is_host_icon } else { iconset::is_folder_glyph }), iconset::pick(&color_id, iconset::is_color));
+                // 预览：与侧栏行同款图标，放大一档
+                let preview = if is_host { crate::file_icon::host_icon(ui::IC_XL, cur_icon, cur_color) } else { crate::file_icon::folder_icon_styled(ui::IC_XL, false, cur_color, cur_icon) };
+                let swatches: Vec<(String, gpui::Hsla, String)> = iconset::COLORS.iter().map(|id| (id.to_string(), crate::theme::folder_tone(Some(id)).0 .0, t(&format!("icon.color.{id}")).to_string())).collect();
+                let me = cx.entity().downgrade();
+                let on_color = { let (me, tg) = (me.clone(), target.clone()); move |id: String, _w: &mut Window, cx: &mut gpui::App| { let _ = me.update(cx, |this, cx| this.set_icon(&tg, Some((IconField::Color, id)), cx)); } };
+                let on_glyph = { let (me, tg) = (me.clone(), target.clone()); move |id: String, _w: &mut Window, cx: &mut gpui::App| { let _ = me.update(cx, |this, cx| this.set_icon(&tg, Some((IconField::Glyph, id)), cx)); } };
+                let cells: Vec<(String, AnyElement, String)> = if is_host {
+                    iconset::HOST_ICONS.iter().map(|id| (id.to_string(), crate::file_icon::host_icon(ui::IC_XL, Some(id), cur_color), t(&format!("icon.host.{id}")).to_string())).collect()
+                } else {
+                    iconset::FOLDER_GLYPHS.iter().map(|id| (id.to_string(), crate::file_icon::folder_icon_styled(ui::IC_XL, false, cur_color, Some(id)), t(&format!("icon.glyph.{id}")).to_string())).collect()
+                };
+                let label = |k: &'static str| div().text_size(px(ui::fs_small())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.subtext)).child(t(k));
+                hdr = (IconName::Palette, c(cur().accent), t("icon.title").to_string());
+                body = body
+                    .child(div().flex().items_center().gap(px(ui::SP_3))
+                        .child(div().size(px(ui::ICON_CELL + 8.)).flex_shrink_0().rounded(px(ui::R_MD)).bg(crate::theme::sub_bg()).flex().items_center().justify_center().child(preview))
+                        .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(entity_name)))
+                    .child(label(if is_host { "icon.accent" } else { "icon.color" }))
+                    .child(ui::swatch_row("icon-color", &swatches, if is_host { cur_color } else { Some(cur_color.unwrap_or(iconset::COLORS[0])) }, on_color))
+                    .child(label("icon.icon"))
+                    .child(ui::icon_grid("icon-glyph", cells, Some(cur_icon.unwrap_or(if is_host { iconset::HOST_ICONS[0] } else { iconset::FOLDER_GLYPHS[0] })), 6, on_glyph));
+                let reset = ui::button("sbm-icon-reset", t("icon.reset"), 0).on_click({ let tg = target.clone(); cx.listener(move |this, _, _w, cx| this.set_icon(&tg, None, cx)) });
+                foot = ui::dialog_footer(Some(reset.into_any_element()), vec![ui::button("sbm-icon-done", t("ui.done"), 1).on_click(cx.listener(|this, _, w, cx| { this.sb_modal = None; this.focus_active(w, cx); cx.notify(); })).into_any_element()]);
+            }
             SbModal::Prompt { kind, input } => {
                 let head = match &kind {
                     PromptKind::NewGroup(p) if p.is_empty() => t("sb.new_group").to_string(),

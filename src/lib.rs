@@ -48,6 +48,7 @@ pub mod asciicast;
 pub mod broadcast;
 pub mod snapshot;
 pub mod notify_rules;
+pub mod iconset;
 pub mod graphics;
 pub mod ctxmenu;
 pub mod sftp_follow;

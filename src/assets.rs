@@ -344,7 +344,7 @@ pub fn ensure_asset_groups(dbs: &[DbConn], groups: &mut Vec<GroupEntry>) {
         let mut acc = String::new();
         for part in g.split('/') {
             acc = if acc.is_empty() { part.to_string() } else { format!("{acc}/{part}") };
-            if !groups.iter().any(|x| x.path == acc) { groups.push(GroupEntry { path: acc.clone(), tags: vec![] }); }
+            if !groups.iter().any(|x| x.path == acc) { groups.push(GroupEntry { path: acc.clone(), ..Default::default() }); }
         }
     }
 }
@@ -439,7 +439,7 @@ mod tests {
 
     #[test]
     fn groups_shared_and_tags_inherited() {
-        let mut groups = vec![GroupEntry { path: "生产".into(), tags: vec!["red".into()] }];
+        let mut groups = vec![GroupEntry { path: "生产".into(), tags: vec!["red".into()], ..Default::default() }];
         let dbs = vec![DbConn { id: "1".into(), name: "a".into(), group: Some("生产/华东".into()), ..Default::default() }, DbConn { id: "2".into(), name: "b".into(), ..Default::default() }];
         ensure_asset_groups(&dbs, &mut groups);
         assert_eq!(groups.iter().map(|g| g.path.as_str()).collect::<Vec<_>>(), vec!["生产", "生产/华东"]);

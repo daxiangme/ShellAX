@@ -4,6 +4,7 @@
 use std::borrow::Cow;
 
 use gpui::{div, prelude::*, px, rgb, svg, AnyElement, SharedString};
+use ssh_term_proto::iconset;
 
 
 /// Embedded icon layers, served under `shellax/files/…`; everything else falls through to the
@@ -30,6 +31,33 @@ const FILES: &[(&str, &[u8])] = &[
     ("shellax/files/mark_archive.svg", include_bytes!("../assets/icons/files/mark_archive.svg")),
     ("shellax/files/mark_image.svg", include_bytes!("../assets/icons/files/mark_image.svg")),
     ("shellax/files/mark_exec.svg", include_bytes!("../assets/icons/files/mark_exec.svg")),
+    ("shellax/files/glyph_code.svg", include_bytes!("../assets/icons/files/glyph_code.svg")),
+    ("shellax/files/glyph_branch.svg", include_bytes!("../assets/icons/files/glyph_branch.svg")),
+    ("shellax/files/glyph_doc.svg", include_bytes!("../assets/icons/files/glyph_doc.svg")),
+    ("shellax/files/glyph_database.svg", include_bytes!("../assets/icons/files/glyph_database.svg")),
+    ("shellax/files/glyph_cloud.svg", include_bytes!("../assets/icons/files/glyph_cloud.svg")),
+    ("shellax/files/glyph_star.svg", include_bytes!("../assets/icons/files/glyph_star.svg")),
+    ("shellax/files/glyph_lock.svg", include_bytes!("../assets/icons/files/glyph_lock.svg")),
+    ("shellax/files/glyph_home.svg", include_bytes!("../assets/icons/files/glyph_home.svg")),
+    ("shellax/files/glyph_download.svg", include_bytes!("../assets/icons/files/glyph_download.svg")),
+    ("shellax/files/glyph_image.svg", include_bytes!("../assets/icons/files/glyph_image.svg")),
+    ("shellax/files/glyph_terminal.svg", include_bytes!("../assets/icons/files/glyph_terminal.svg")),
+    ("shellax/files/host_cloud_body.svg", include_bytes!("../assets/icons/files/host_cloud_body.svg")),
+    ("shellax/files/host_cloud_accent.svg", include_bytes!("../assets/icons/files/host_cloud_accent.svg")),
+    ("shellax/files/host_router_body.svg", include_bytes!("../assets/icons/files/host_router_body.svg")),
+    ("shellax/files/host_router_accent.svg", include_bytes!("../assets/icons/files/host_router_accent.svg")),
+    ("shellax/files/host_dbserver_body.svg", include_bytes!("../assets/icons/files/host_dbserver_body.svg")),
+    ("shellax/files/host_dbserver_accent.svg", include_bytes!("../assets/icons/files/host_dbserver_accent.svg")),
+    ("shellax/files/host_container_body.svg", include_bytes!("../assets/icons/files/host_container_body.svg")),
+    ("shellax/files/host_container_accent.svg", include_bytes!("../assets/icons/files/host_container_accent.svg")),
+    ("shellax/files/host_board_body.svg", include_bytes!("../assets/icons/files/host_board_body.svg")),
+    ("shellax/files/host_board_accent.svg", include_bytes!("../assets/icons/files/host_board_accent.svg")),
+    ("shellax/files/os_linux_body.svg", include_bytes!("../assets/icons/files/os_linux_body.svg")),
+    ("shellax/files/os_linux_accent.svg", include_bytes!("../assets/icons/files/os_linux_accent.svg")),
+    ("shellax/files/os_windows_body.svg", include_bytes!("../assets/icons/files/os_windows_body.svg")),
+    ("shellax/files/os_windows_accent.svg", include_bytes!("../assets/icons/files/os_windows_accent.svg")),
+    ("shellax/files/os_mac_body.svg", include_bytes!("../assets/icons/files/os_mac_body.svg")),
+    ("shellax/files/os_mac_accent.svg", include_bytes!("../assets/icons/files/os_mac_accent.svg")),
     ("shellax/db/docker.svg", include_bytes!("../assets/icons/db/docker.svg")),
     ("shellax/db/redis.svg", include_bytes!("../assets/icons/db/redis.svg")),
     ("shellax/db/toolbox.svg", include_bytes!("../assets/icons/db/toolbox.svg")),
@@ -98,19 +126,30 @@ pub fn file_icon(cls: Class, size: f32, dark: bool) -> AnyElement {
     d.into_any_element()
 }
 
-/// 填充文件夹（SFTP 文件列表与主机列表共用）：`open` 为展开态。颜色来自 `theme::folder_colors`。
-pub fn folder_icon(size: f32, open: bool) -> AnyElement {
-    let (back, front) = crate::theme::folder_colors();
+/// 填充文件夹（SFTP 文件列表与主机列表共用）：`open` 为展开态。颜色来自 `theme::folder_colors`（蓝色默认）。
+pub fn folder_icon(size: f32, open: bool) -> AnyElement { folder_icon_styled(size, open, None, None) }
+
+/// 自定义外观的文件夹：`color` 取自 `iconset::COLORS`，`glyph` 取自 `iconset::FOLDER_GLYPHS`；
+/// 空值或未知 id 都回到默认（蓝色、无字形）。字形是叠在前层上的第三层。
+pub fn folder_icon_styled(size: f32, open: bool, color: Option<&str>, glyph: Option<&str>) -> AnyElement {
+    let color = color.filter(|c| iconset::is_color(c));
+    let ((back, front), mark) = crate::theme::folder_tone(color);
     let (b, f) = if open { ("shellax/files/folder_open_back.svg", "shellax/files/folder_open_front.svg") } else { ("shellax/files/folder_back.svg", "shellax/files/folder_front.svg") };
-    div().relative().size(px(size)).flex_shrink_0().child(layer(b, size, back)).child(layer(f, size, front)).into_any_element()
+    let mut d = div().relative().size(px(size)).flex_shrink_0().child(layer(b, size, back)).child(layer(f, size, front));
+    if let Some(g) = glyph.and_then(iconset::folder_glyph_path) { d = d.child(layer(g, size, mark)); }
+    d.into_any_element()
+}
+
+/// 填充主机图标：`id` 取自 `iconset::HOST_ICONS`（未知回到服务器），机身浅中性，强调部分取 `color` 色板色或主题强调色。
+pub fn host_icon(size: f32, id: Option<&str>, color: Option<&str>) -> AnyElement {
+    let (body, accent) = id.and_then(iconset::host_layers).unwrap_or_else(|| iconset::host_layers("server").unwrap());
+    div().relative().size(px(size)).flex_shrink_0()
+        .child(layer(body, size, crate::theme::entity_body()))
+        .child(layer(accent, size, crate::theme::host_accent(color))).into_any_element()
 }
 
 /// 填充服务器：浅中性机身加强调色指示灯。
-pub fn server_icon(size: f32) -> AnyElement {
-    div().relative().size(px(size)).flex_shrink_0()
-        .child(layer("shellax/files/server_body.svg", size, crate::theme::entity_body()))
-        .child(layer("shellax/files/server_leds.svg", size, crate::theme::entity_accent())).into_any_element()
-}
+pub fn server_icon(size: f32) -> AnyElement { host_icon(size, None, None) }
 
 /// 填充显示器：浅中性机身加强调色屏幕。
 pub fn monitor_icon(size: f32) -> AnyElement {
@@ -156,6 +195,21 @@ mod tests {
         assert_eq!(class("p.png", false, 0), Class::Image);
         assert_eq!(class("tool", false, 0o755), Class::Exec);
         assert_eq!(class("weird.xyz", false, 0), Class::Generic);
+    }
+    #[test]
+    fn every_icon_id_maps_to_bundled_svgs() {
+        use gpui::AssetSource;
+        let paths = iconset::all_layer_paths();
+        assert_eq!(paths.len(), 11 + 2 * 11);
+        for p in paths {
+            assert!(FILES.iter().any(|(f, _)| *f == p), "not bundled: {p}");
+            let b = Assets.load(p).unwrap().unwrap_or_else(|| panic!("{p}"));
+            assert!(std::str::from_utf8(&b).unwrap().starts_with("<svg"), "{p}");
+        }
+        // 每个色板 id 都有主题色 token，且第一项就是默认的 SFTP 文件夹蓝
+        for id in iconset::COLORS { assert!(crate::theme::ICON_TONES.iter().any(|r| r.0 == id), "{id}"); }
+        assert_eq!(crate::theme::ICON_TONES.len(), iconset::COLORS.len());
+        assert_eq!(crate::theme::ICON_TONES[0].0, iconset::COLORS[0]);
     }
     #[test]
     fn layers_are_embedded() {

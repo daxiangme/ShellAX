@@ -106,7 +106,9 @@ impl HostDialog {
         let key = if uses(Method::Key) || uses(Method::Cert) { opt(Self::v(&self.key_path, cx)) } else { None };
         let cert = if uses(Method::Cert) { opt(Self::v(&self.cert_path, cx)) } else { None };
         let auth = self.methods.iter().map(|m| m.id()).collect::<Vec<_>>().join(",");
-        Some(HostEntry { name, host, port, user: opt(self.val("user", cx)), identity_file: key, cert,
+        // 图标由侧栏「更换图标」维护，编辑连接时原样保留
+        let (icon, icon_color) = self.editing.as_ref().and_then(|n| config::get().hosts.iter().find(|h| &h.name == n).map(|h| (h.icon.clone(), h.icon_color.clone()))).unwrap_or_default();
+        Some(HostEntry { icon, icon_color, name, host, port, user: opt(self.val("user", cx)), identity_file: key, cert,
             group: opt(self.val("group", cx)).map(|g| ssh_term_proto::outline::normalize(&g)).filter(|g| !g.is_empty()), auth: Some(auth), production: false, tags: self.tags.clone(), jump: opt(self.val("jump", cx)), use_proxy: self.use_proxy, source: "config" })
     }
 
