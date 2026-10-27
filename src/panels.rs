@@ -96,32 +96,108 @@ impl Root {
         let close_id = SharedString::from(format!("{dock_id}-close"));
         let min_id = SharedString::from(format!("{dock_id}-min"));
         let head_id = SharedString::from(format!("{dock_id}-head"));
-        let collapsed = self.dock_min.contains(dock_id);
-        let toggle = move |this: &mut Root| { if this.dock_min.remove(dock_id) { *this.dock_flip.entry(dock_id).or_default() += 1; } else { this.dock_min.insert(dock_id); } this.save_docks(); };
-        actions.push(ui::icon_button(min_id, if collapsed { IconName::ChevronDown } else { IconName::ChevronUp }, ui::IconBtn::Md, if collapsed { t("ai.expand") } else { t("ai.collapse") })
-            .on_click(cx.listener(move |this, _, _w, cx| { cx.stop_propagation(); toggle(this); cx.notify(); })).into_any_element());
+        // 折叠补间期间卡片仍按「展开」渲染（内容保持挂载），补间结束后才真正收起
+        let collapsed = !self.dock_open_eff(dock_id);
+        let real_min = self.dock_min.contains(dock_id);
+        let toggle = move |this: &mut Root, cx: &mut Context<Root>| {
+            if this.dock_tween.contains_key(dock_id) { return; }
+            let expanding = this.dock_min.remove(dock_id);
+            if !expanding { this.dock_min.insert(dock_id); }
+            this.dock_start_tween(dock_id, expanding, cx);
+            this.save_docks();
+        };
+        actions.push(ui::icon_button(min_id, if real_min { IconName::ChevronDown } else { IconName::ChevronUp }, ui::IconBtn::Md, if real_min { t("ai.expand") } else { t("ai.collapse") })
+            .on_click(cx.listener(move |this, _, _w, cx| { cx.stop_propagation(); toggle(this, cx); cx.notify(); })).into_any_element());
         actions.push(ui::icon_button(close_id, IconName::X, ui::IconBtn::Md, t("ui.close")).on_click(cx.listener(move |this, _, w, cx| this.close_dock(dock_id, w, cx))).into_any_element());
         // 折叠态整行可点击展开
         let head = div().id(head_id).w_full().flex_shrink_0().child(ui::panel_header(title, subtitle, Some(ic), actions))
-            .when(collapsed, |d| d.cursor_pointer().on_click(cx.listener(move |this, _, _w, cx| { toggle(this); cx.notify(); })));
+            .when(collapsed, |d| d.cursor_pointer().on_click(cx.listener(move |this, _, _w, cx| { toggle(this, cx); cx.notify(); })));
         let dock = crate::card_layout::island(dock_id).w_full().min_h_0().child(head);
         if collapsed { return dock.flex_shrink_0().into_any_element(); }
         // the expanded card takes the whole slot; its body scrolls inside
         let dock = dock.flex_1();
-        let body = div().flex_1().min_h_0().flex().flex_col().child(body);
-        match self.dock_flip.get(dock_id).copied() {
-            // re-expanded: short ease-out reveal (offset only; the column size does not change)
-            Some(n) if !crate::motion::reduced() => {
-                use gpui::AnimationExt;
-                dock.child(body.with_animation((dock_id, n as usize), gpui::Animation::new(crate::motion::ms(crate::motion::PANEL_CLOSE_MS)).with_easing(crate::motion::ease_out), |d, t| d.relative().top(px((1. - t) * -12.)))).into_any_element()
-            }
-            _ => dock.child(body).into_any_element(),
+        // 补间中：内容按终态高度固定（顶部对齐，被裁剪而不是被挤压），只淡入 / 淡出；否则随卡片填满
+        let vis = self.dock_vis(dock_id);
+        let pin = vis.and_then(|_| self.dock_body_h(dock_id));
+        let inner = div().w_full().flex().flex_col()
+            .when_some(pin, |d, h| d.flex_shrink_0().h(px(h)))
+            .when(pin.is_none(), |d| d.flex_1().min_h_0())
+            .child(body);
+        let wrap = div().flex_1().min_h_0().overflow_hidden().flex().flex_col()
+            .when_some(vis, |d, f| d.opacity(f))
+            .child(inner);
+        dock.child(wrap).into_any_element()
+    }
+
+    /// 当前已打开的卡片（按显示顺序）及其中按「展开」计的卡片（折叠补间中的卡片仍算展开）。
+    fn dock_sets(&self) -> (Vec<&'static str>, Vec<&'static str>) {
+        let present: Vec<&'static str> = DOCK_IDS.into_iter().filter(|i| self.dock_open_flag(i)).collect();
+        let open = present.iter().copied().filter(|i| self.dock_open_eff(i)).collect();
+        (present, open)
+    }
+
+    /// 卡片是否按展开态布局：未折叠，或正在播放折叠补间。
+    fn dock_open_eff(&self, id: &str) -> bool {
+        !self.dock_min.contains(id) || self.dock_tween.get(id).is_some_and(|a| !a.0)
+    }
+
+    /// 卡片在右侧栏中占的比例（一张 = 1；两张按分割线；三张及以上均分）。
+    fn dock_share(&self, id: &str, open: &[&'static str]) -> f32 {
+        let split = self.dock_split.clamp(0.15, 0.85);
+        match open.len() {
+            0 | 1 => 1.0,
+            2 => if open[0] == id { split } else { 1.0 - split },
+            n => 1.0 / n as f32,
         }
+    }
+
+    /// 补间进度：展开方向 0→1，折叠方向 1→0（缓出）；无补间返回 None。
+    fn dock_vis(&self, id: &str) -> Option<f32> {
+        let (expanding, t0) = self.dock_tween.get(id)?;
+        let dur = crate::motion::ms(if *expanding { crate::motion::PANEL_OPEN_MS } else { crate::motion::PANEL_CLOSE_MS });
+        let e = crate::motion::ease_out((t0.elapsed().as_secs_f32() / dur.as_secs_f32()).clamp(0., 1.));
+        Some(if *expanding { e } else { 1. - e })
+    }
+
+    /// 补间期间卡片内容的终态高度（卡片终态高度减去标题行）；右侧栏高度还没量到时返回 None。
+    fn dock_body_h(&self, id: &str) -> Option<f32> {
+        let col_h = self.dock_col_h.get();
+        if col_h <= 1. { return None; }
+        let (present, open) = self.dock_sets();
+        let gaps = present.len().saturating_sub(1) as f32 * crate::card_layout::CARD_GAP;
+        let heads = (present.len() - open.len()) as f32 * ui::PANEL_HEAD_H;
+        let mut slot = self.dock_share(id, &open) * (col_h - gaps - heads);
+        if open.len() > 2 { slot = slot.max(DOCK_MIN_H); }
+        Some((slot - ui::PANEL_HEAD_H).max(0.))
+    }
+
+    /// 开始一张卡片的高度补间（展开 / 新打开为 true，折叠为 false）；减少动效时直接生效。
+    pub(crate) fn dock_start_tween(&mut self, id: &'static str, expanding: bool, cx: &mut Context<Root>) {
+        if crate::motion::reduced() { self.dock_tween.remove(id); return; }
+        let t0 = std::time::Instant::now();
+        self.dock_tween.insert(id, (expanding, t0));
+        let dur = if expanding { crate::motion::PANEL_OPEN_MS } else { crate::motion::PANEL_CLOSE_MS };
+        crate::motion::hold(dur + 20);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(crate::motion::ms(dur + 30)).await;
+            let _ = this.update(cx, |r, cx| if r.dock_tween.get(id).is_some_and(|a| a.1 == t0) { r.dock_tween.remove(id); cx.notify(); });
+        }).detach();
     }
 
     /// Right column: host status, AI, snippets and history cards stacked top to bottom (several may be open; `sidebar.dock_multi` limits it to one).
     /// Shared width (drag the left edge); two expanded cards split by `dock_split`, three or more share equally with a minimum height.
     pub(crate) fn dock_column(&mut self, window: &mut gpui::Window, cx: &mut Context<Root>) -> Option<AnyElement> {
+        // 新打开的卡片（栏里已有别的卡片时）播放展开补间；第一张卡片由整栏滑入负责
+        let (present, _) = self.dock_sets();
+        if !self.dock_shown { self.dock_seen = present.iter().copied().collect(); }
+        else {
+            if !self.dock_seen.is_empty() {
+                let fresh: Vec<&'static str> = present.iter().copied().filter(|i| !self.dock_seen.contains(i) && !self.dock_min.contains(i)).collect();
+                for id in fresh { self.dock_start_tween(id, true, cx); }
+            }
+            self.dock_seen = present.iter().copied().collect();
+        }
+        self.dock_tween.retain(|id, _| present.contains(id));
         let mut cards: Vec<(&'static str, AnyElement)> = vec![];
         if let Some(v) = self.dock_host.clone() {
             let title = SharedString::from(format!("{} · {}", t("hosttools.title"), v.read(cx).label()));
@@ -144,7 +220,7 @@ impl Root {
             }).detach();
         }
         self.dock_shown = true;
-        let open: Vec<usize> = cards.iter().enumerate().filter(|(_, (id, _))| !self.dock_min.contains(id)).map(|(i, _)| i).collect();
+        let open: Vec<usize> = cards.iter().enumerate().filter(|(_, (id, _))| self.dock_open_eff(id)).map(|(i, _)| i).collect();
         let split = self.dock_split.clamp(0.15, 0.85);
         let first_open = open.first().copied();
         let n_open = open.len().max(1) as f32;
@@ -159,12 +235,17 @@ impl Root {
                 if (r - this.dock_split).abs() > 0.002 { this.dock_split = r; cx.notify(); }
             }));
         let total = cards.len();
+        let card_ids: Vec<&'static str> = cards.iter().map(|c| c.0).collect();
         // 卡片放进可纵向滚动的内层容器：三张及以上展开时每张有最小高度，放不下就滚动而不是被压扁
         let mut inner = div().id("dock-scroll").w_full().flex_1().min_h_0().overflow_y_scroll().flex().flex_col();
         for (i, (id, el)) in cards.into_iter().enumerate() {
-            let collapsed = self.dock_min.contains(id);
+            let collapsed = !self.dock_open_eff(id);
             let mut slot = div().w_full().min_h_0().flex().flex_col();
-            slot = if collapsed { slot.flex_shrink_0() } else if open.len() >= 2 {
+            slot = if collapsed { slot.flex_shrink_0() } else if let Some(f) = self.dock_vis(id) {
+                // 补间中的卡片按进度占高（不增长、可被挤压），其余展开卡片自动补满剩余高度；终态与普通布局一致，不会跳变
+                let open_ids: Vec<&'static str> = open.iter().map(|&k| card_ids[k]).collect();
+                slot.flex_basis(gpui::relative(self.dock_share(id, &open_ids) * f)).flex_grow(0.).flex_shrink(1.).min_h(px(ui::PANEL_HEAD_H))
+            } else if open.len() >= 2 {
                 // two open cards follow the draggable split; three or more share the height equally
                 let share = if open.len() > 2 { 1.0 / n_open } else if Some(i) == first_open { split } else { 1.0 - split };
                 slot.flex_basis(gpui::relative(share)).flex_grow(1.).flex_shrink(1.).when(open.len() > 2, |d| d.min_h(px(DOCK_MIN_H)))
@@ -179,7 +260,9 @@ impl Root {
                         .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _w, cx| if ev.click_count() >= 2 { this.dock_split = 0.5; cx.notify(); }))));
             }
         }
-        col = col.child(inner).child(div().id("dock-col-resize").absolute().top_0().left_0().w(px(6.)).h_full().cursor_col_resize()
+        let col_h = self.dock_col_h.clone();
+        if !self.dock_tween.is_empty() { window.request_animation_frame(); }
+        col = col.child(inner).child(gpui::canvas(move |b, _, _| col_h.set(f32::from(b.size.height)), |_, _, _, _| {}).absolute().size_full()).child(div().id("dock-col-resize").absolute().top_0().left_0().w(px(6.)).h_full().cursor_col_resize()
             .hover(|d| d.bg(c(cur().accent).opacity(0.35)))
             .on_drag(crate::sidebar::AiResize, |d: &crate::sidebar::AiResize, _, _, cx| cx.new(|_| d.clone()))
             .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _w, cx| if ev.click_count() >= 2 { this.ai_width = config::AI_DOCK_W; this.save_ai_width(); cx.notify(); })));
@@ -243,6 +326,8 @@ fn _unused(_: Overlay) {}
 
 /// 三张及以上卡片同时展开时，每张展开卡片的最小高度（px），放不下时右侧栏内部滚动。
 const DOCK_MIN_H: f32 = 160.;
+/// 右侧栏卡片的显示顺序。
+const DOCK_IDS: [&str; 4] = ["host-dock", "ai-dock", "snip-dock", "hist-dock"];
 
 /// Drag payload for the split between stacked right-column cards.
 #[derive(Clone)]
