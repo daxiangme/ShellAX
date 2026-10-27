@@ -123,12 +123,28 @@ impl Root {
         dock.child(wrap).into_any_element()
     }
 
+    /// 右侧栏宽度动画开始或反向后：冻结终端尺寸，并在动画结束时清掉补间状态。
+    /// `opening` 为 true 时展开方向的补间结束后清除；收起方向由 `close_dock` 的收尾回调处理。
+    fn dock_reveal_settle(&mut self, opening: bool, cx: &mut Context<Self>) {
+        let Some(rev) = self.dock_reveal.as_ref() else { return };
+        let (token, dur) = (rev.t0, rev.remaining_ms());
+        crate::motion::hold(dur + 20);
+        if !opening { return; }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(crate::motion::ms(dur + 30)).await;
+            let _ = this.update(cx, |r, cx| if r.dock_reveal.as_ref().is_some_and(|a| a.t0 == token && a.expanding()) { r.dock_reveal = None; cx.notify(); });
+        }).detach();
+    }
+
     /// 当前已打开的卡片（按显示顺序）及其中按「展开」计的卡片（折叠补间中的卡片仍算展开）。
     fn dock_sets(&self) -> (Vec<&'static str>, Vec<&'static str>) {
         let present: Vec<&'static str> = DOCK_IDS.into_iter().filter(|i| self.dock_open_flag(i)).collect();
         let open = present.iter().copied().filter(|i| self.dock_open_eff(i)).collect();
         (present, open)
     }
+
+    /// 当前已打开的卡片 id（含正在收起的）。
+    pub(crate) fn dock_sets_present(&self) -> Vec<&'static str> { self.dock_sets().0 }
 
     /// 卡片是否按展开态布局：未折叠，或正在播放折叠补间。
     fn dock_open_eff(&self, id: &str) -> bool {
@@ -203,16 +219,18 @@ impl Root {
         if self.dock_snip { cards.push(("snip-dock", self.library_dock(true, window, cx))); }
         if self.dock_hist { cards.push(("hist-dock", self.library_dock(false, window, cx))); }
         if cards.is_empty() { self.dock_shown = false; return None; }
+        // 收起动画进行中又打开了新卡片：取消收起，反向展开回来（正在收起的旧卡片直接去掉）
+        if self.dock_reveal.as_ref().is_some_and(|r| !r.expanding()) && present.iter().any(|i| !self.dock_close_ids.contains(i)) {
+            for id in std::mem::take(&mut self.dock_close_ids) { if present.contains(&id) { self.close_dock_now(id); } }
+            self.save_docks();
+            if let Some(r) = self.dock_reveal.as_mut() { r.reverse(); }
+            self.dock_reveal_settle(true, cx);
+            return self.dock_column(window, cx);
+        }
         // 空栏里出现第一张卡片：整栏从 0 宽展开（终端尺寸仍等到动画结束再改一次）
         if !self.dock_shown && !crate::motion::reduced() && self.dock_reveal.is_none() {
-            let rev = crate::motion::Reveal::opening();
-            let (token, dur) = (rev.t0, rev.remaining_ms());
-            self.dock_reveal = Some(rev);
-            crate::motion::hold(dur + 20);
-            cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(crate::motion::ms(dur + 30)).await;
-                let _ = this.update(cx, |r, cx| if r.dock_reveal.as_ref().is_some_and(|a| a.t0 == token && a.expanding()) { r.dock_reveal = None; cx.notify(); });
-            }).detach();
+            self.dock_reveal = Some(crate::motion::Reveal::opening());
+            self.dock_reveal_settle(true, cx);
         }
         self.dock_shown = true;
         let open: Vec<usize> = cards.iter().enumerate().filter(|(_, (id, _))| self.dock_open_eff(id)).map(|(i, _)| i).collect();
@@ -261,13 +279,13 @@ impl Root {
             .hover(|d| d.bg(c(cur().accent).opacity(0.35)))
             .on_drag(crate::sidebar::AiResize, |d: &crate::sidebar::AiResize, _, _, cx| cx.new(|_| d.clone()))
             .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _w, cx| if ev.click_count() >= 2 { this.ai_width = config::AI_DOCK_W; this.save_ai_width(); cx.notify(); })));
-        // 贴右边缘裁切：宽度跟着进度变化，栏内内容保持全宽，左侧间隙一起收掉
+        // 贴右边缘裁切：宽度跟着进度变化，栏内内容保持全宽（不淡入淡出），左侧间隙一起收掉
         let p = self.dock_reveal.as_ref().map(|r| r.progress()).unwrap_or(1.).clamp(0., 1.);
         let gap = crate::card_layout::CARD_GAP;
         let full = self.ai_width + gap;
         let shown = div().h_full().w(px(full)).flex_shrink_0().flex().flex_row()
             .child(div().w(px(gap)).h_full().flex_shrink_0())
-            .child(div().h_full().w(px(self.ai_width)).flex_shrink_0().opacity(p).child(col));
+            .child(div().h_full().w(px(self.ai_width)).flex_shrink_0().child(col));
         Some(div().h_full().w(px(full * p)).min_w(px(0.)).flex_shrink_0().overflow_hidden().flex().flex_row().justify_end().child(shown).into_any_element())
     }
 

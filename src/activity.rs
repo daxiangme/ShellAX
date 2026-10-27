@@ -12,7 +12,7 @@ use crate::actions::Action;
 use crate::card_layout;
 use crate::theme::{c, cur};
 use crate::ui::{self, icon, IconName};
-use crate::{chrome, config, Root};
+use crate::{config, Root};
 
 pub const STRIP_W: f32 = 40.;
 
@@ -118,11 +118,9 @@ impl Root {
 
     /// The left activity strip: modules only (session tools live in the right strip, settings in the title bar).
     pub(crate) fn activity_strip(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        // layout follows `sidebar_visible` (stays true until a collapse animation ends) so icons never jump
-        let open = self.sidebar_visible;
-        let mut col = div().id("activity").w(px(STRIP_W)).flex_shrink_0().h_full().flex().flex_col().items_center().gap(px(4.)).pb(px(8.));
-        // no window head while the panel is collapsed: keep the top row draggable
-        if !open { col = col.child(chrome::drag_region(div().id("act-drag")).h(px(chrome::TAB_H)).w_full().flex_shrink_0().window_control_area(gpui::WindowControlArea::Drag)); } else { col = col.pt(px(4.)); }
+        // 展开 / 收起 / 动画中结构一致（顶部标题行由主布局提供），图标位置不变；高亮在收起动画开始时就撤掉
+        let open = self.sidebar_visible && self.sb_reveal.as_ref().is_none_or(|r| r.expanding());
+        let mut col = div().id("activity").w(px(STRIP_W)).flex_shrink_0().h_full().flex().flex_col().items_center().gap(px(4.)).pb(px(8.)).pt(px(4.));
         for (i, tool) in Tool::TOP.into_iter().enumerate() {
             let tip = crate::sidebar::action_tip(tool.label(), &tool.action().binding());
             col = col.child(self.strip_btn_with(("act", i), match tool { Tool::Redis => Some("shellax/db/redis.svg"), Tool::Docker => Some("shellax/db/docker.svg"), Tool::Tools => Some("shellax/db/toolbox.svg"), _ => None }, tool.icon(), tip, open && self.tool == tool, false)

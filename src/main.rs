@@ -254,6 +254,11 @@ pub(crate) struct Root {
     dock_split: f32,
     /// Right-column width reveal. While closing, the cards stay mounted until it ends.
     dock_reveal: Option<motion::Reveal>,
+    /// Cards that were open when the column started closing (a card opened meanwhile cancels the close).
+    dock_close_ids: Vec<&'static str>,
+    /// Width of the content area measured while no panel animates, and the width it is frozen at while one does.
+    center_w: std::rc::Rc<std::cell::Cell<f32>>,
+    freeze_w: Option<f32>,
     /// Column had cards on the previous render (to start the slide-in once).
     dock_shown: bool,
     /// 右侧卡片展开 / 折叠 / 新开的高度补间：卡片 → (是否展开方向, 起始时刻)。补间期间卡片按进度占高，内容保持满高不重排。
@@ -495,6 +500,7 @@ impl Root {
                 if !r.expanding() { return; }
                 r.reverse();
             } else { self.dock_reveal = Some(motion::Reveal::closing()); }
+            self.dock_close_ids = self.dock_sets_present();
             let (token, dur) = { let r = self.dock_reveal.as_ref().unwrap(); (r.t0, r.remaining_ms()) };
             motion::hold(dur + 20);
             cx.notify();
@@ -503,6 +509,7 @@ impl Root {
                 let _ = this.update_in(cx, |r, w, cx| if r.dock_reveal.as_ref().is_some_and(|a| a.t0 == token && !a.expanding()) {
                     r.dock_reveal = None;
                     r.dock_shown = false;
+                    r.dock_close_ids.clear();
                     r.dock_ai = false; chat_view::set_dock_open(false); r.dock_host = None; r.dock_snip = false; r.dock_hist = false;
                     r.focus_active(w, cx); cx.notify();
                 });
@@ -1808,7 +1815,10 @@ impl Render for Root {
         // 标签行没有自己的底色，直接落在窗口外层背景上
         let mut row = chrome::drag_region(div().id("tabbar")).h(px(chrome::TAB_H)).flex_shrink_0().flex().items_center().overflow_hidden();
         // 侧栏折叠时标签栏到达窗口左缘：为红黄绿按钮留位
-        row = if mac && !self.sidebar_visible { row.child(self.lights(window, cx)) } else { row.pl(px(6.)) };
+        // 侧栏收起后标签栏到达窗口左缘，为红黄绿按钮留位；原生按钮的留白随动画进度渐变，收起结束时标签不会突然右移
+        row = if mac && !self.sidebar_visible { row.child(self.lights(window, cx)) }
+            else if mac && chrome::NATIVE_LIGHTS { row.pl(px(6. + (chrome::LIGHTS_W - 6.) * (1. - self.sb_reveal.as_ref().map_or(1., |r| r.progress()).clamp(0., 1.)))) }
+            else { row.pl(px(6.)) };
         let mut tabbar = div().id("tab-scroll").h_full().min_w_0().flex_shrink(1.).flex().items_center().overflow_x_scroll().track_scroll(&self.tab_scroll);
         row = row.child(ui::icon_button("sb-collapse", IconName::PanelLeft, ui::IconBtn::Lg, t("ui.show_hide_sidebar"))
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1939,8 +1949,15 @@ impl Render for Root {
         let cwd_bar = if settings_on { None } else { self.cwd_bar(window, cx) };
         // 所有模块共用同一张内容卡片（本身无内边距）：模块内容区自带 card_layout::CARD_PAD 间距（也让圆角露出卡片背景），
         // 路径栏在内容区之外，左右贴满卡片边缘
+        // 面板动画期间内容区按动画开始时的宽度冻结，只裁切不重排；动画结束再一次性按新宽度布局（终端同步改一次尺寸）
+        let animating = self.sb_reveal.is_some() || self.dock_reveal.is_some();
+        if !animating { self.freeze_w = None; }
+        else if self.freeze_w.is_none() && self.center_w.get() > 1. { self.freeze_w = Some(self.center_w.get()); }
+        let measure = { let w = self.center_w.clone(); gpui::canvas(move |b, _, _| w.set(f32::from(b.size.width)), |_, _, _, _| {}).absolute().size_full() };
+        let frozen = div().flex_1().min_h_0().flex().flex_col().when_some(self.freeze_w, |d, w| d.w(px(w)).flex_shrink_0()).child(workspace);
         let center = card_layout::content_card("center")
-            .child(div().flex_1().min_h_0().overflow_hidden().flex().flex_col().p(px(card_layout::CARD_PAD)).when(cwd_bar.is_some(), |d| d.pb_0()).child(workspace))
+            .child(div().flex_1().min_h_0().overflow_hidden().flex().flex_col().p(px(card_layout::CARD_PAD)).when(cwd_bar.is_some(), |d| d.pb_0())
+                .child(div().relative().flex_1().min_h_0().overflow_hidden().flex().flex_col().child(measure).child(frozen)))
             .children(cwd_bar);
 
         let (status, scolor, dims, title, hist) = match self.focused_pane(window, cx) {
@@ -1990,32 +2007,37 @@ impl Render for Root {
         let mut content = div().flex_1().min_h_0().w_full().flex().flex_row().items_stretch().gap(px(CARD_GAP));
         let strip = self.activity_strip(cx).into_any_element();
         if self.sb_reveal.is_some() { window.request_animation_frame(); }
-        if self.sidebar_visible {
-            let sb = self.tool_panel(window, cx);
-            // 宽度跟着进度从 0 收到面板全宽，内容保持全宽被裁切，旁边的内容区一起让位。
-            // 图标栏始终全高；「ShellAX」只放在面板上方，随面板一起被裁掉。收到 0 时剩下的就是收起后的图标栏。
-            let p = self.sb_reveal.as_ref().map(|r| r.progress()).unwrap_or(1.).clamp(0., 1.);
+        {
+            // 宽度跟着进度从 0 收到面板全宽，内容保持全宽被裁切（不淡入淡出），旁边的内容区一起让位。
+            // 图标栏与顶部标题行的结构在展开 / 收起 / 动画中完全一致（收起时只是面板宽度为 0），图标不会换父级或位移。
+            // 「ShellAX」只放在面板上方，随面板一起被裁掉。
+            let open = self.sidebar_visible;
+            let p = if open { self.sb_reveal.as_ref().map(|r| r.progress()).unwrap_or(1.).clamp(0., 1.) } else { 0. };
             let w = self.sb_width;
             let name = div().text_size(px(ui::fs_body())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).whitespace_nowrap().child("ShellAX");
             let title = if mac {
-                div().flex().items_center().opacity(p).child(name)
+                div().flex().items_center().child(name)
             } else {
-                div().flex().items_center().gap(px(6.)).pl(px(12.)).opacity(p).child(icon(IconName::SquareTerminal, ui::IC_SM, c(th.accent))).child(name)
+                div().flex().items_center().gap(px(6.)).pl(px(12.)).child(icon(IconName::SquareTerminal, ui::IC_SM, c(th.accent))).child(name)
             };
             let head_inner = if mac {
-                div().h_full().w(px(activity::STRIP_W + w)).flex_shrink_0().flex().items_center().child(self.lights(window, cx)).child(title)
+                // 收起后红黄绿按钮的位置由标签栏留出，这里只占位
+                let lights = if open { self.lights(window, cx) } else { div().w(px(chrome::LIGHTS_W)).flex_shrink_0().into_any_element() };
+                div().h_full().w(px(activity::STRIP_W + w)).flex_shrink_0().flex().items_center().child(lights).child(title)
             } else {
                 div().h_full().w(px(activity::STRIP_W + w)).flex_shrink_0().flex().items_center()
                     .child(div().w(px(activity::STRIP_W)).h_full().flex_shrink_0()).child(title)
             }.child(chrome::drag_spacer("sb-drag"));
             let head = chrome::drag_region(div().id("sb-chrome")).h(px(chrome::TAB_H)).w_full().flex_shrink_0().overflow_hidden()
                 .window_control_area(gpui::WindowControlArea::Drag).child(head_inner);
-            let panel = div().h_full().w(px(w)).flex_shrink_0().flex().flex_col().pb(px(card_layout::EDGE_GAP)).opacity(p).child(sb);
+            let mut body_row = div().flex_1().min_h_0().w_full().overflow_hidden().flex().flex_row().child(strip);
+            if open {
+                let sb = self.tool_panel(window, cx);
+                body_row = body_row.child(div().h_full().w(px(w)).flex_shrink_0().flex().flex_col().pb(px(card_layout::EDGE_GAP)).child(sb));
+            }
             content = content.child(div().h_full().w(px(activity::STRIP_W + w * p)).min_w(px(0.)).flex_shrink_0().overflow_hidden().flex().flex_col()
                 .child(head)
-                .child(div().flex_1().min_h_0().w_full().overflow_hidden().flex().flex_row().child(strip).child(panel)));
-        } else {
-            content = content.child(strip);
+                .child(body_row));
         }
         // 右侧栏自己带左侧间隙，并让间隙跟着栏宽一起收掉，避免收起结束时缝突然消失
         let mut work = div().flex_1().min_w_0().min_h_0().flex().flex_row().child(center);
@@ -2370,7 +2392,7 @@ fn open_main(cx: &mut App, rt: Arc<tokio::runtime::Runtime>, themes: Vec<Arc<The
                     let mut root = Root {
                         rt, default_target, tabs: vec![], active: 0, themes, schemes, histories: HashMap::new(),
                         manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], deny_reason: None, policy_port: None, overlay: Overlay::None, settings: None, drag_div: None, port_view: None, quit_confirm: false, modal: None, quit_ok: false, chat_view: None,
-                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, menu_last: (None, None), menu_ghost: None, menu_ghost_seq: 0, sb_menu_at: std::time::Instant::now(), sb_modal: None, tag_filter: vec![], tab_menu: None, tab_menu_at: std::time::Instant::now(), new_menu: None, new_menu_at: std::time::Instant::now(), new_menu_closed: std::time::Instant::now(), new_menu_collapsed: config::get().sidebar.collapsed.clone(), new_menu_sel: 0, new_menu_search: new_menu_search.clone(), tab_scroll: gpui::ScrollHandle::new(), tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), dock_snip: false, dock_hist: false, dock_ai: false, dock_host: None, dock_min: HashSet::new(), dock_order: vec![], sb_fold: HashSet::new(), dock_split: config::get().sidebar.dock_split.clamp(0.15, 0.85), dock_reveal: None, dock_shown: false, dock_tween: HashMap::new(), dock_seen: HashSet::new(), dock_col_h: Default::default(), bottom_anim: None, lib_search: lib_search.clone(), hist_search: hist_search.clone(), lib_group: String::new(), lib_hist_all: false, lib_editor: None, lib_vars: None, lib_confirm: None, lib_notice: String::new(), lib_menu: None, ai_width: { let w = config::get().sidebar.ai_width; if (280.0..=560.0).contains(&w) { w } else { config::AI_DOCK_W } }, host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: !config::get().sidebar.collapsed_panel(), sb_reveal: None, ws_seen: None, ws_last: HashMap::new(), tool: activity::Tool::from_id(&config::get().sidebar.tool), bottom_open: config::get().sidebar.bottom_open, bottom_tab: activity::Bottom::from_id(&config::get().sidebar.bottom_tab), bottom_h: config::get().sidebar.bottom_height.clamp(120., 600.), exec_log: Default::default(), dbp: Default::default(), kvp: Default::default(), toolsp: Default::default(), tool_hist: HashMap::new(), extm: None, audit, audit_verify: None, audit_filter: Default::default(),
+                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, menu_last: (None, None), menu_ghost: None, menu_ghost_seq: 0, sb_menu_at: std::time::Instant::now(), sb_modal: None, tag_filter: vec![], tab_menu: None, tab_menu_at: std::time::Instant::now(), new_menu: None, new_menu_at: std::time::Instant::now(), new_menu_closed: std::time::Instant::now(), new_menu_collapsed: config::get().sidebar.collapsed.clone(), new_menu_sel: 0, new_menu_search: new_menu_search.clone(), tab_scroll: gpui::ScrollHandle::new(), tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), dock_snip: false, dock_hist: false, dock_ai: false, dock_host: None, dock_min: HashSet::new(), dock_order: vec![], sb_fold: HashSet::new(), dock_split: config::get().sidebar.dock_split.clamp(0.15, 0.85), dock_reveal: None, dock_close_ids: vec![], center_w: Default::default(), freeze_w: None, dock_shown: false, dock_tween: HashMap::new(), dock_seen: HashSet::new(), dock_col_h: Default::default(), bottom_anim: None, lib_search: lib_search.clone(), hist_search: hist_search.clone(), lib_group: String::new(), lib_hist_all: false, lib_editor: None, lib_vars: None, lib_confirm: None, lib_notice: String::new(), lib_menu: None, ai_width: { let w = config::get().sidebar.ai_width; if (280.0..=560.0).contains(&w) { w } else { config::AI_DOCK_W } }, host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: !config::get().sidebar.collapsed_panel(), sb_reveal: None, ws_seen: None, ws_last: HashMap::new(), tool: activity::Tool::from_id(&config::get().sidebar.tool), bottom_open: config::get().sidebar.bottom_open, bottom_tab: activity::Bottom::from_id(&config::get().sidebar.bottom_tab), bottom_h: config::get().sidebar.bottom_height.clamp(120., 600.), exec_log: Default::default(), dbp: Default::default(), kvp: Default::default(), toolsp: Default::default(), tool_hist: HashMap::new(), extm: None, audit, audit_verify: None, audit_filter: Default::default(),
                         settings_dirty: vec![], toast: None, toast_out: false, toast_seq: 0, _subs: vec![],
                     };
                     crate::ctxmenu_view::init(root.rt.handle().clone(), root.prompts.clone());

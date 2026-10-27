@@ -28,10 +28,14 @@ pub fn reduced() -> bool {
 
 pub fn ms(v: u64) -> Duration { Duration::from_millis(v) }
 
-/// Panel slide-in (left panel, right column, bottom panel).
+/// Panel slide-in (bottom panel, dock card height tweens).
 pub const PANEL_OPEN_MS: u64 = 170;
 /// Panel slide-out.
 pub const PANEL_CLOSE_MS: u64 = 140;
+/// Left panel / right column width reveal (ease-in-out, so the first and last frames move little).
+pub const REVEAL_OPEN_MS: u64 = 240;
+/// Left panel / right column width collapse.
+pub const REVEAL_CLOSE_MS: u64 = 200;
 /// Trailing quiet time before a terminal applies a new size (window / drag resizes).
 pub const RESIZE_DEBOUNCE_MS: u64 = 60;
 
@@ -50,18 +54,32 @@ pub fn layout_busy() -> bool { HOLD_UNTIL.lock().unwrap().is_some_and(|u| std::t
 /// Ease-out cubic.
 pub fn ease_out(t: f32) -> f32 { 1. - (1. - t).powi(3) }
 
+/// Ease-in-out cubic.
+pub fn ease_in_out(t: f32) -> f32 { if t < 0.5 { 4. * t * t * t } else { 1. - (-2. * t + 2.).powi(3) / 2. } }
+
 /// Trailing debounce for a terminal size: returns the size to apply now, if any.
 #[derive(Default)]
-pub struct SizeGate { pending: Option<((usize, usize), std::time::Instant)>, applied: bool }
+pub struct SizeGate { pending: Option<((usize, usize), std::time::Instant)>, applied: bool, last_busy: Option<std::time::Instant> }
 impl SizeGate {
     /// `want` = size the current bounds give, `cur` = size the terminal has. The first size is
-    /// applied immediately; later changes wait for `RESIZE_DEBOUNCE_MS` of quiet and no hold.
+    /// applied immediately; later changes wait for `RESIZE_DEBOUNCE_MS` of quiet and no hold,
+    /// except right after a hold (panel animation) ends: then the final size applies at once.
     pub fn poll(&mut self, want: (usize, usize), cur: (usize, usize), busy: bool, now: std::time::Instant) -> Option<(usize, usize)> {
         if !self.applied { self.applied = true; self.pending = None; return Some(want); }
+        if busy {
+            self.last_busy = Some(now);
+            self.pending = (want != cur).then_some((want, now));
+            return None;
+        }
         if want == cur { self.pending = None; return None; }
+        if self.last_busy.is_some_and(|t| now.saturating_duration_since(t) < Duration::from_millis(AFTER_HOLD_MS)) {
+            self.last_busy = None;
+            self.pending = None;
+            return Some(want);
+        }
         match self.pending {
             Some((p, t)) if p == want => {
-                if !busy && now.duration_since(t) >= Duration::from_millis(RESIZE_DEBOUNCE_MS) { self.pending = None; Some(want) } else { None }
+                if now.duration_since(t) >= Duration::from_millis(RESIZE_DEBOUNCE_MS) { self.pending = None; Some(want) } else { None }
             }
             _ => { self.pending = Some((want, now)); None }
         }
@@ -69,6 +87,9 @@ impl SizeGate {
     /// A size is still waiting to be applied (keep drawing frames until it is).
     pub fn waiting(&self) -> bool { self.pending.is_some() }
 }
+
+/// A hold that ended this recently counts as "the animation just finished".
+const AFTER_HOLD_MS: u64 = 150;
 
 #[cfg(test)]
 mod tests {
@@ -86,22 +107,44 @@ mod tests {
         assert_eq!(g.poll((90, 24), (80, 24), false, t0 + Duration::from_millis(100)), Some((90, 24)));
         assert!(!g.waiting());
         assert_eq!(g.poll((90, 24), (90, 24), false, t0), None);
+        // window drag long after a hold: debounced again
+        let late = t0 + Duration::from_millis(1000);
+        assert_eq!(g.poll((100, 24), (90, 24), false, late), None);
+        assert_eq!(g.poll((100, 24), (90, 24), false, late + Duration::from_millis(70)), Some((100, 24)));
+    }
+
+    #[test]
+    fn size_gate_applies_at_once_when_a_hold_ends() {
+        let t0 = std::time::Instant::now();
+        let mut g = SizeGate::default();
+        assert_eq!(g.poll((80, 24), (0, 0), false, t0), Some((80, 24)));
+        // frames during the animation, then the hold ends and the final size is applied on the first frame
+        assert_eq!(g.poll((80, 24), (80, 24), true, t0 + Duration::from_millis(230)), None);
+        assert_eq!(g.poll((80, 24), (80, 24), false, t0 + Duration::from_millis(250)), None);
+        assert_eq!(g.poll((60, 24), (80, 24), false, t0 + Duration::from_millis(260)), Some((60, 24)));
+    }
+
+    #[test]
+    fn easing_in_out_is_symmetric() {
+        assert!(ease_in_out(0.).abs() < 1e-6 && (ease_in_out(1.) - 1.).abs() < 1e-6);
+        assert!((ease_in_out(0.5) - 0.5).abs() < 1e-6);
+        assert!(ease_in_out(0.1) < 0.01 + 1e-3 && ease_in_out(0.9) > 0.99 - 1e-3);
     }
 
     #[test]
     fn reveal_runs_between_its_endpoints() {
         let open = Reveal { expanding: true, from: 0., t0: std::time::Instant::now() };
         assert!((open.progress_after(0.) - 0.).abs() < 1e-4);
-        assert!((open.progress_after(PANEL_OPEN_MS as f32) - 1.).abs() < 1e-4);
-        assert_eq!(open.remaining_ms(), PANEL_OPEN_MS);
+        assert!((open.progress_after(REVEAL_OPEN_MS as f32) - 1.).abs() < 1e-4);
+        assert_eq!(open.remaining_ms(), REVEAL_OPEN_MS);
         let close = Reveal { expanding: false, from: 1., t0: std::time::Instant::now() };
         assert!((close.progress_after(0.) - 1.).abs() < 1e-4);
-        assert!((close.progress_after(PANEL_CLOSE_MS as f32) - 0.).abs() < 1e-4);
+        assert!((close.progress_after(REVEAL_CLOSE_MS as f32) - 0.).abs() < 1e-4);
         // a reversal halfway keeps the current progress and covers only the remaining distance
         let back = Reveal { expanding: false, from: 0.4, t0: std::time::Instant::now() };
         assert!((back.progress_after(0.) - 0.4).abs() < 1e-4);
         assert!((back.progress_after(back.remaining_ms() as f32) - 0.).abs() < 1e-4);
-        assert_eq!(back.remaining_ms(), (PANEL_CLOSE_MS as f32 * 0.4).round() as u64);
+        assert_eq!(back.remaining_ms(), (REVEAL_CLOSE_MS as f32 * 0.4).round() as u64);
     }
 }
 
@@ -127,7 +170,7 @@ impl Reveal {
 
     /// Distance still to cover, 0..1.
     fn span(&self) -> f32 { if self.expanding { 1. - self.from } else { self.from } }
-    fn full_ms(&self) -> u64 { if self.expanding { PANEL_OPEN_MS } else { PANEL_CLOSE_MS } }
+    fn full_ms(&self) -> u64 { if self.expanding { REVEAL_OPEN_MS } else { REVEAL_CLOSE_MS } }
 
     /// How long this leg should take so the speed matches a full open or close.
     pub fn remaining_ms(&self) -> u64 { (self.full_ms() as f32 * self.span()).round() as u64 }
@@ -137,7 +180,7 @@ impl Reveal {
     fn progress_after(&self, elapsed_ms: f32) -> f32 {
         let span = self.span();
         if span <= f32::EPSILON { return if self.expanding { 1. } else { 0. }; }
-        let e = ease_out((elapsed_ms / (self.full_ms() as f32 * span)).clamp(0., 1.));
+        let e = ease_in_out((elapsed_ms / (self.full_ms() as f32 * span)).clamp(0., 1.));
         if self.expanding { self.from + span * e } else { self.from * (1. - e) }
     }
 
