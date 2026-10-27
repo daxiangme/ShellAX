@@ -28,6 +28,7 @@ pub(crate) fn pane_module(v: &TermView, cx: &App) -> Tool {
         Some(Embed::Dock(_) | Embed::Log(_)) => Tool::Docker,
         Some(Embed::Mongo(_)) => Tool::Database,
         Some(Embed::Gone(g)) => g.read(cx).module,
+        Some(Embed::Tool(_)) => Tool::Tools,
         None => Tool::Hosts,
     }
 }
@@ -105,6 +106,7 @@ impl Root {
             Tool::Database => self.db_new_query(None, window, cx),
             Tool::Redis => self.open_asset_dialog(crate::kv_ui::AssetKind::Redis, None, window, cx),
             Tool::Docker => self.open_asset_dialog(crate::kv_ui::AssetKind::Docker, None, window, cx),
+            Tool::Tools => { if !self.sidebar_visible { self.toggle_sidebar(cx); } }
             _ => return false,
         }
         true
@@ -135,6 +137,7 @@ impl Root {
             Tool::Database => (t("ws.db_title"), t("ws.db_hint")),
             Tool::Redis => (t("ws.redis_title"), t("ws.redis_hint")),
             Tool::Docker => (t("ws.docker_title"), t("ws.docker_hint")),
+            Tool::Tools => (t("ws.tools_title"), t("ws.tools_hint")),
             _ => (t("ui.no_open_terminals"), ""),
         };
         let mut list = div().flex().flex_col().gap_1().max_h(px(320.)).id("ws-list").overflow_y_scroll();
@@ -171,6 +174,18 @@ impl Root {
                         .on_click(cx.listener(move |this, _, w, cx| this.open_docker_tab(&id, w, cx))));
                 }
                 buttons = buttons.child(ui::button("ws-docker-new", t("ws.docker_new"), 1).on_click(cx.listener(|this, _, w, cx| this.open_asset_dialog(crate::kv_ui::AssetKind::Docker, None, w, cx))));
+            }
+            Tool::Tools => {
+                let all = crate::tools_ui::all_tools();
+                let mut ids: Vec<String> = s.sidebar.tools_fav.iter().chain(&s.sidebar.tools_recent).cloned().collect();
+                ids.dedup();
+                if ids.is_empty() { ids = ["json", "timestamp", "base64", "url", "uuid", "password"].iter().map(|x| x.to_string()).collect(); }
+                let mut seen = std::collections::HashSet::new();
+                for (i, sp) in ids.iter().filter(|x| seen.insert((*x).clone())).filter_map(|x| all.iter().find(|s| &s.id == x)).take(10).enumerate() {
+                    let id = sp.id.clone();
+                    list = list.child(row(format!("ws-t-{i}").into(), IconName::PencilRuler, sp.name.clone(), ssh_term_proto::tools::cat_label(&sp.cat))
+                        .on_click(cx.listener(move |this, _, w, cx| this.open_tool(&id, None, w, cx))));
+                }
             }
             _ => {
                 buttons = buttons.child(ui::button("empty-local", t("ui.open_local_terminal"), 1).on_click(cx.listener(|this, _, w, cx| this.new_tab(crate::termview::Spec::Local, w, cx))))

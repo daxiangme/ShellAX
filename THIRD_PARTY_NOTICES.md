@@ -101,3 +101,23 @@ On Windows the default fallback chain also lists the system fonts "Segoe UI Symb
 ## rustls 0.23 — Apache-2.0 OR ISC OR MIT (dependency, unmodified; TLS crypto provider selection)
 ## duckdb 1.x / libduckdb-sys (bundled DuckDB, optional `duckdb` build feature) — MIT; DuckDB itself MIT, Copyright (c) DuckDB Foundation (dependency, unmodified)
 ## lsp-types 0.97 — MIT (dependency, unmodified; completion item types for the SQL editor)
+## 内置工具模块（`src/tools/`）依赖 — dependencies, unmodified
+- md-5 0.10, sha1 0.10, hmac 0.12, digest 0.10, aes 0.8, des 0.8, rabbit 0.4, cipher 0.4, cbc 0.1, ecb 0.1, ctr 0.9, cfb-mode 0.8, ofb 0.6 (RustCrypto) — MIT OR Apache-2.0
+- base64 0.22, percent-encoding 2, hex 0.4, uuid 1 — MIT OR Apache-2.0
+- sqlformat 0.5 — MIT OR Apache-2.0; croner 4 — MIT; pulldown-cmark 0.13 — MIT
+- `src/tools/pinyin.rs` 首字母表依据 GB2312 一级汉字的拼音排序（标准字符集顺序）生成，未复制第三方代码或数据库。
+## tokio-tungstenite 0.28 / tungstenite 0.28 — MIT OR Apache-2.0 (dependency, unmodified; WebSocket 测试工具)
+- 工具箱图标 assets/icons/db/toolbox.svg — 本项目原创图形
+## wasmi 1.x / wasmi_core / wasmi_ir / wasmi_collections — MIT OR Apache-2.0；wasmparser — Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT；string-interner — MIT OR Apache-2.0 (dependencies, unmodified; 扩展包 WebAssembly 解释器)
+## wat / wast / wasm-encoder / leb128fmt — Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT (仅开发依赖，用于单元测试，不随程序分发)
+## 扩展包（`extensions/`，独立 WebAssembly 包，仅在用户安装对应扩展时下载，不随主程序分发） — dependencies, unmodified
+- 公共：serde_json — MIT OR Apache-2.0；crc32fast 1 — MIT OR Apache-2.0；getrandom 0.3/0.4 — MIT OR Apache-2.0
+- 中文语言包（lang-zh）：pinyin 0.11 — MIT；hanconv 0.5 — MIT（内含简繁转换词典数据，Apache-2.0）
+- 世界时间（worldtime）：chrono 0.4、chrono-tz 0.10 — MIT OR Apache-2.0（时区数据来自 IANA tz database，公有领域）
+- 图片与条码（image）：image 0.24/0.25 及其编解码器（png、gif、jpeg-decoder、zune-jpeg、image-webp、tiff、exr 等）— MIT OR Apache-2.0 / BSD-3-Clause；qrcode 0.14 — MIT OR Apache-2.0；barcoders 2 — MIT OR Apache-2.0；bardecoder 0.5 — MIT；ab_glyph 0.2 / owned_ttf_parser — Apache-2.0；font8x8 0.3 — MIT
+- PDF 工具（pdf）：lopdf 0.46 — MIT；encoding_rs — (Apache-2.0 OR MIT) AND BSD-3-Clause；stringprep / unicode-normalization — MIT OR Apache-2.0（含 Unicode-3.0 数据）
+- PDF 渲染（pdf-render）：hayro 0.8 / hayro-interpret / hayro-syntax / hayro-jpeg2000 / hayro-jbig2 / hayro-ccitt / hayro-cmap / hayro-postscript、vello_cpu、vello_common、kurbo、peniko、skrifa、read-fonts、fearless_simd — Apache-2.0 OR MIT；pic-scale、moxcms、pxfm — BSD-3-Clause OR Apache-2.0；yoke / zerofrom — Unicode-3.0
+  - 内嵌标准字体（.pfb）：Copyright 2014 PDFium Authors，原始代码 Copyright 2014 Foxit Software Inc.，BSD-3-Clause；内嵌 CMYK 配置文件 — CC0-1.0
+- 中文字体（image、pdf 扩展包内置）：`extensions/assets/NotoSansSC-common.ttf`，由 Noto Sans SC（Copyright 2014-2021 Adobe，Reserved Font Name 'Source'）裁剪为常用字子集（ASCII、常用中文标点与 GB2312 一级汉字 3755 字，常规字重），SIL Open Font License 1.1，许可全文见 `extensions/assets/NotoSansSC-OFL.txt`；PDF 中按文档再次子集化嵌入
+- PDF 中文字体嵌入（pdf）：subsetter 0.2 — MIT OR Apache-2.0；ttf-parser 0.25 — MIT OR Apache-2.0
+- 完整传递依赖清单可在 `extensions/` 下运行 `cargo tree --target wasm32-unknown-unknown -e normal` 查看；均为 MIT / Apache-2.0 / BSD / Zlib / Unicode-3.0 / CC0 等宽松许可。

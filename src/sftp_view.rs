@@ -526,7 +526,7 @@ impl SftpView {
             Act::OpenEditor(p) => self.edit_in(pi, p, cx),
             Act::Download(paths) | Act::Upload(paths) => { let names = paths.into_iter().map(|p| { let n = p.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or("file").to_string(); (p, n) }).collect(); self.send(pi, 1 - pi, names, cx) }
             Act::OpenUrl(u) => cx.open_url(&u),
-            Act::Search(_) | Act::AiExplain(_) | Act::PasteInput(_) | Act::UseAiContext => {}
+            Act::Search(_) | Act::AiExplain(_) | Act::PasteInput(_) | Act::UseAiContext | Act::OpenTool(..) => {}
         }
         cx.notify();
     }

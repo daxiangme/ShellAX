@@ -439,6 +439,8 @@ pub enum Act {
     PasteInput(String),
     /// Point the open AI assistant at the terminal that opened this menu.
     UseAiContext,
+    /// Open a built-in tool (id) with the selection as its input.
+    OpenTool(String, String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -628,6 +630,12 @@ pub fn build(target: &Target, ctx: &Ctx) -> Menu {
             b.push("search", t("cm.search").into(), Act::Search(s.clone()), &[]);
             b.push("ai_explain", t("cm.ai_explain").into(), Act::AiExplain(s.clone()), &[]);
             b.push("paste_input", t("cm.paste_input").into(), Act::PasteInput(s.clone()), &[]);
+            b.sep();
+            let specs = crate::tools::builtin();
+            for id in crate::tools::terminal_targets(s) {
+                let Some(sp) = specs.iter().find(|x| x.id == id) else { continue };
+                b.push(&format!("tool_{id}"), crate::i18n::tf("cm.open_with_tool", &[("tool", &sp.name)]), Act::OpenTool(id.to_string(), s.clone()), &[]);
+            }
         }
         Target::Blank { paste } => {
             header = t("cm.blank").to_string();

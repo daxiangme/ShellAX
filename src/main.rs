@@ -41,6 +41,9 @@ mod theme;
 mod ui;
 mod update_ui;
 mod ctxmenu_view;
+mod tools_view;
+mod tools_ui;
+mod ext_ui;
 
 use ssh_term_proto::i18n::{t, tf};
 use std::collections::{HashMap, HashSet};
@@ -290,6 +293,8 @@ pub(crate) struct Root {
     exec_log: activity::ExecLog,
     dbp: db_ui::DbPanel,
     kvp: kv_tree::KvPanel,
+    toolsp: tools_ui::ToolsPanel,
+    extm: Option<Entity<ext_ui::ExtManager>>,
     /// Sidebar collapse/expand animation in flight: (expanding, seq).
     sb_anim: Option<(bool, u64)>,
     /// Active tab last seen by `sync_workspace`, and the last active tab of each module.
@@ -496,6 +501,12 @@ impl Root {
                     let spec = pane.read(cx).spec.clone();
                     this.new_tab(spec, w, cx);
                     if let Some(p) = this.tabs.get(this.active).map(|t| t.focused.clone()) { Self::insert_when_ready(p, format!("cd -- {}", ssh_term_proto::ctxmenu::quote_path(dir)), cx); }
+                    return;
+                }
+                termview::TermEvent::CtxOpenTool(id, text) => {
+                    let (id, text) = (id.clone(), text.clone());
+                    this.tool = activity::Tool::Tools;
+                    this.open_tool(&id, Some(text), w, cx);
                     return;
                 }
                 termview::TermEvent::CtxAiExplain(text) => {
@@ -1367,7 +1378,7 @@ impl Root {
     }
     fn running_agents(&self, cx: &App) -> usize { self.tabs.iter().flat_map(|t| t.layout.leaves()).filter(|v| v.read(cx).agent_label().is_some()).count() }
 
-    fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.get(self.active) { let fh = tab.focused.read(cx).focus.clone(); window.focus(&fh, cx); }
     }
 
@@ -1482,7 +1493,7 @@ impl Root {
         self.settings.as_ref().is_some_and(|(_, on)| *on) && matches!(self.overlay, Overlay::None)
     }
     /// Another tab comes to the front. The settings tab stays open, it just stops being the one shown.
-    fn leave_settings(&mut self) {
+    pub(crate) fn leave_settings(&mut self) {
         if let Some((_, on)) = &mut self.settings { *on = false; }
     }
     /// Close the settings tab itself (its close button or Done), and log the changes made while it lived.
@@ -1514,7 +1525,8 @@ impl Root {
         }
         let names = self.themes.iter().map(|t| (t.name.clone(), t.appearance == Appearance::Dark)).collect();
         let schemes = self.schemes.iter().map(|s| (s.name.clone(), s.appearance == Appearance::Dark)).collect();
-        let v = cx.new(|cx| SettingsView::new(cat, names, schemes, window, cx));
+        let extm = self.ext_manager(cx);
+        let v = cx.new(|cx| { let mut v = SettingsView::new(cat, names, schemes, window, cx); v.ext = Some(extm); v });
         self._subs.push(cx.subscribe_in(&v, window, |this, _, ev: &SettingsEvent, window, cx| match ev {
             SettingsEvent::Close => this.close_settings(window, cx),
             SettingsEvent::ApplyUpdate(rec) => this.apply_update(rec, window, cx),
@@ -1616,7 +1628,7 @@ impl Root {
                 self.focus_active(window, cx);
             }
             Action::OpenAudit => { self.audit_verify = None; self.overlay = Overlay::Audit; }
-            Action::ToolHosts | Action::ToolSftp | Action::ToolDatabase | Action::ToolRedis | Action::ToolDocker | Action::ToolPorts => {
+            Action::ToolHosts | Action::ToolSftp | Action::ToolDatabase | Action::ToolRedis | Action::ToolDocker | Action::ToolPorts | Action::ToolTools => {
                 if let Some(t) = activity::Tool::from_action(a) { self.select_tool(t, window, cx); }
             }
             Action::ToggleBottomPanel => self.toggle_bottom(None, cx),
@@ -1784,6 +1796,7 @@ impl Render for Root {
         let lang = ssh_term_proto::i18n::current() as u8;
         if self.lang_seen != lang {
             self.lang_seen = lang;
+            ssh_term_proto::ext::reload();
             self.host_search.update(cx, |s, cx| s.set_placeholder(t("ui.search_hosts"), window, cx));
             // the native menu is built from these strings; rebuild it in the new language.
             // Deferred: set_menus talks to AppKit, so keep it out of the paint pass.
@@ -1874,7 +1887,7 @@ impl Render for Root {
                 .child({
                     // small monochrome kind icon: terminal / ssh / sftp
                     let v = panes[0].read(cx);
-                    let ic = if matches!(v.embed, Some(termview::Embed::Kv(_))) { IconName::Database } else if v.embed.is_some() { IconName::Container } else if v.db.is_some() { IconName::Database } else if v.sftp.is_some() { IconName::FolderSync } else if matches!(v.spec, Spec::Ssh(_)) { IconName::Server } else { IconName::SquareTerminal };
+                    let ic = if matches!(v.embed, Some(termview::Embed::Kv(_))) { IconName::Database } else if matches!(v.embed, Some(termview::Embed::Tool(_))) { IconName::PencilRuler } else if v.embed.is_some() { IconName::Container } else if v.db.is_some() { IconName::Database } else if v.sftp.is_some() { IconName::FolderSync } else if matches!(v.spec, Spec::Ssh(_)) { IconName::Server } else { IconName::SquareTerminal };
                     icon(ic, 13., if active { c(th.subtext) } else { c(th.overlay1) })
                 })
                 .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.)).text_color(if active { c(th.text) } else { c(th.overlay1) }).when(active, |d| d.font_weight(FontWeight::MEDIUM))
@@ -2384,7 +2397,7 @@ fn open_main(cx: &mut App, rt: Arc<tokio::runtime::Runtime>, themes: Vec<Arc<The
                     let mut root = Root {
                         rt, default_target, tabs: vec![], active: 0, themes, schemes, histories: HashMap::new(),
                         manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], deny_reason: None, policy_port: None, overlay: Overlay::None, settings: None, sftp_views: HashMap::new(), sftp_current: None, sftp_windows: vec![], drag_div: None, port_view: None, quit_confirm: false, modal: None, quit_ok: false, chat_view: None,
-                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, menu_last: (None, None), menu_ghost: None, menu_ghost_seq: 0, sb_menu_at: std::time::Instant::now(), sb_modal: None, tag_filter: vec![], tab_menu: None, tab_menu_at: std::time::Instant::now(), new_menu: None, new_menu_at: std::time::Instant::now(), new_menu_closed: std::time::Instant::now(), new_menu_collapsed: config::get().sidebar.collapsed.clone(), new_menu_sel: 0, new_menu_search: new_menu_search.clone(), tab_scroll: gpui::ScrollHandle::new(), tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), dock_snip: false, dock_hist: false, dock_ai: false, dock_host: None, dock_min: HashSet::new(), dock_split: 0.5, dock_anim: None, dock_shown: false, dock_flip: HashMap::new(), bottom_anim: None, lib_search: lib_search.clone(), hist_search: hist_search.clone(), lib_group: String::new(), lib_hist_all: false, lib_editor: None, lib_vars: None, lib_confirm: None, lib_notice: String::new(), ai_width: { let w = config::get().sidebar.ai_width; if (280.0..=560.0).contains(&w) { w } else { config::AI_DOCK_W } }, host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: !config::get().sidebar.collapsed_panel(), sb_anim: None, ws_seen: None, ws_last: HashMap::new(), tool: activity::Tool::from_id(&config::get().sidebar.tool), bottom_open: config::get().sidebar.bottom_open, bottom_tab: activity::Bottom::from_id(&config::get().sidebar.bottom_tab), bottom_h: config::get().sidebar.bottom_height.clamp(120., 600.), exec_log: Default::default(), dbp: Default::default(), kvp: Default::default(), audit, audit_verify: None, audit_filter: Default::default(),
+                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, menu_last: (None, None), menu_ghost: None, menu_ghost_seq: 0, sb_menu_at: std::time::Instant::now(), sb_modal: None, tag_filter: vec![], tab_menu: None, tab_menu_at: std::time::Instant::now(), new_menu: None, new_menu_at: std::time::Instant::now(), new_menu_closed: std::time::Instant::now(), new_menu_collapsed: config::get().sidebar.collapsed.clone(), new_menu_sel: 0, new_menu_search: new_menu_search.clone(), tab_scroll: gpui::ScrollHandle::new(), tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), dock_snip: false, dock_hist: false, dock_ai: false, dock_host: None, dock_min: HashSet::new(), dock_split: 0.5, dock_anim: None, dock_shown: false, dock_flip: HashMap::new(), bottom_anim: None, lib_search: lib_search.clone(), hist_search: hist_search.clone(), lib_group: String::new(), lib_hist_all: false, lib_editor: None, lib_vars: None, lib_confirm: None, lib_notice: String::new(), ai_width: { let w = config::get().sidebar.ai_width; if (280.0..=560.0).contains(&w) { w } else { config::AI_DOCK_W } }, host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: !config::get().sidebar.collapsed_panel(), sb_anim: None, ws_seen: None, ws_last: HashMap::new(), tool: activity::Tool::from_id(&config::get().sidebar.tool), bottom_open: config::get().sidebar.bottom_open, bottom_tab: activity::Bottom::from_id(&config::get().sidebar.bottom_tab), bottom_h: config::get().sidebar.bottom_height.clamp(120., 600.), exec_log: Default::default(), dbp: Default::default(), kvp: Default::default(), toolsp: Default::default(), extm: None, audit, audit_verify: None, audit_filter: Default::default(),
                         settings_dirty: vec![], toast: None, toast_out: false, toast_seq: 0, _subs: vec![],
                     };
                     crate::ctxmenu_view::init(root.rt.handle().clone(), root.prompts.clone());

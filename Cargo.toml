@@ -1,6 +1,6 @@
 [package]
 name = "ssh-term-proto"
-version = "0.2.2"
+version = "0.3.0-beta.1"
 edition = "2021"
 publish = false
 license = "AGPL-3.0-only"
@@ -79,6 +79,28 @@ tokio-util = { version = "0.7", features = ["compat"] }
 mongodb = { version = "3", default-features = false, features = ["compat-3-0-0", "rustls-tls", "dns-resolver"] }
 # DuckDB (MIT), optional: the bundled engine is a large C++ build
 duckdb = { version = "1", optional = true, features = ["bundled"] }
+md-5 = "0.10"
+sha1 = "0.10"
+hmac = "0.12"
+aes = "0.8"
+des = "0.8"
+rabbit = "0.4"
+cbc = "0.1"
+ecb = "0.1"
+ctr = "0.9"
+cfb-mode = "0.8"
+ofb = "0.6"
+cipher = "0.4"
+base64 = "0.22"
+percent-encoding = "2"
+hex = "0.4"
+croner = "4.0.2"
+sqlformat = "0.5.0"
+uuid = { version = "1", features = ["v4"] }
+pulldown-cmark = { version = "0.13.5", default-features = false, features = ["html"] }
+digest = "0.10"
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
+wasmi = { version = "1", default-features = false, features = ["std"] }
 
 # Distribution build (installer payload): `cargo build --profile dist`.
 # Kept separate from `release` so day-to-day release builds/tests stay fast.
@@ -95,6 +117,7 @@ debug = false
 duckdb = ["dep:duckdb"]
 
 [dev-dependencies]
+wat = "1"
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 # Windows cross-build: GPUI's DirectX backend precompiles HLSL only on a Windows host.

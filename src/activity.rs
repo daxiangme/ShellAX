@@ -16,30 +16,30 @@ use crate::{chrome, config, Root};
 pub const STRIP_W: f32 = 40.;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Tool { Hosts, Sftp, Database, Redis, Docker, Ports }
+pub enum Tool { Hosts, Sftp, Database, Redis, Docker, Ports, Tools }
 
 impl Tool {
-    pub const TOP: [Tool; 6] = [Tool::Hosts, Tool::Sftp, Tool::Database, Tool::Redis, Tool::Docker, Tool::Ports];
+    pub const TOP: [Tool; 7] = [Tool::Hosts, Tool::Sftp, Tool::Database, Tool::Redis, Tool::Docker, Tool::Ports, Tool::Tools];
     pub fn id(self) -> &'static str {
-        match self { Tool::Hosts => "hosts", Tool::Sftp => "sftp", Tool::Database => "database", Tool::Redis => "redis", Tool::Docker => "docker", Tool::Ports => "ports" }
+        match self { Tool::Hosts => "hosts", Tool::Sftp => "sftp", Tool::Database => "database", Tool::Redis => "redis", Tool::Docker => "docker", Tool::Ports => "ports", Tool::Tools => "tools" }
     }
     pub fn from_id(s: &str) -> Tool { Tool::TOP.into_iter().find(|t| t.id() == s).unwrap_or(Tool::Hosts) }
     pub fn label(self) -> &'static str {
         match self {
             Tool::Hosts => t("tool.hosts"), Tool::Sftp => t("tool.sftp"), Tool::Database => t("tool.database"), Tool::Redis => t("tool.redis"),
-            Tool::Docker => t("tool.docker"), Tool::Ports => t("tool.ports"),
+            Tool::Docker => t("tool.docker"), Tool::Ports => t("tool.ports"), Tool::Tools => t("tool.tools"),
         }
     }
     pub fn icon(self) -> IconName {
         match self {
             Tool::Hosts => IconName::Server, Tool::Sftp => IconName::FolderSync, Tool::Database => IconName::Database, Tool::Redis => IconName::Layers,
-            Tool::Docker => IconName::Container, Tool::Ports => IconName::ArrowLeftRight,
+            Tool::Docker => IconName::Container, Tool::Ports => IconName::ArrowLeftRight, Tool::Tools => IconName::PencilRuler,
         }
     }
     pub fn action(self) -> Action {
         match self {
             Tool::Hosts => Action::ToolHosts, Tool::Sftp => Action::ToolSftp, Tool::Database => Action::ToolDatabase, Tool::Redis => Action::ToolRedis,
-            Tool::Docker => Action::ToolDocker, Tool::Ports => Action::ToolPorts,
+            Tool::Docker => Action::ToolDocker, Tool::Ports => Action::ToolPorts, Tool::Tools => Action::ToolTools,
         }
     }
     pub fn from_action(a: Action) -> Option<Tool> { Tool::TOP.into_iter().find(|t| t.action() == a) }
@@ -130,7 +130,7 @@ impl Root {
         if !open { col = col.child(chrome::drag_region(div().id("act-drag")).h(px(chrome::TAB_H)).w_full().flex_shrink_0().window_control_area(gpui::WindowControlArea::Drag)); } else { col = col.pt(px(4.)); }
         for (i, tool) in Tool::TOP.into_iter().enumerate() {
             let tip = crate::sidebar::action_tip(tool.label(), &tool.action().binding());
-            col = col.child(self.strip_btn_with(("act", i), match tool { Tool::Redis => Some("shellax/db/redis.svg"), Tool::Docker => Some("shellax/db/docker.svg"), _ => None }, tool.icon(), tip, open && self.tool == tool, false)
+            col = col.child(self.strip_btn_with(("act", i), match tool { Tool::Redis => Some("shellax/db/redis.svg"), Tool::Docker => Some("shellax/db/docker.svg"), Tool::Tools => Some("shellax/db/toolbox.svg"), _ => None }, tool.icon(), tip, open && self.tool == tool, false)
                 .on_click(cx.listener(move |this, _, _w, cx| this.select_tool(tool, _w, cx))));
         }
         // 外层框架色由根节点统一提供
@@ -148,6 +148,10 @@ impl Root {
             Tool::Redis | Tool::Docker => {
                 let k = if self.tool == Tool::Redis { crate::kv_ui::AssetKind::Redis } else { crate::kv_ui::AssetKind::Docker };
                 let p = self.asset_panel(k, cx);
+                self.sb_frame(cx).bg(crate::theme::card_bg()).child(p).into_any_element()
+            }
+            Tool::Tools => {
+                let p = self.tools_panel(window, cx);
                 self.sb_frame(cx).bg(crate::theme::card_bg()).child(p).into_any_element()
             }
             other => {

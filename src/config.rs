@@ -324,8 +324,13 @@ pub struct Sidebar {
     pub bottom_tab: String,
     /// Left tool window collapsed (activity strip only).
     pub panel_hidden: bool,
+    /// 工具模块：收藏与最近使用的工具 id。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tools_fav: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tools_recent: Vec<String>,
 }
-impl Default for Sidebar { fn default() -> Self { Self { collapsed: vec![], width: SIDEBAR_W, ai_width: AI_DOCK_W, tool: "hosts".into(), bottom_open: false, bottom_height: BOTTOM_H, bottom_tab: "transfers".into(), panel_hidden: false } } }
+impl Default for Sidebar { fn default() -> Self { Self { collapsed: vec![], width: SIDEBAR_W, ai_width: AI_DOCK_W, tool: "hosts".into(), bottom_open: false, bottom_height: BOTTOM_H, bottom_tab: "transfers".into(), panel_hidden: false, tools_fav: vec![], tools_recent: vec![] } } }
 impl Sidebar { /** left tool window starts collapsed */ pub fn collapsed_panel(&self) -> bool { self.panel_hidden } }
 /// Default bottom tool window height.
 pub const BOTTOM_H: f32 = 220.0;
