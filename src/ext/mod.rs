@@ -8,7 +8,8 @@
 //!
 //! 请求与响应缓冲区格式相同：`[u32 LE json_len][json][附加字节]`。
 //! 请求 JSON：`{"op":"manifest"|"run","lang":"zh-CN"|"en","tool":..,"args":{..},"files":[{"field","name","len"}]}`，
-//! 文件内容按 `files` 顺序依次拼在 JSON 之后。
+//! 文件内容按 `files` 顺序依次拼在 JSON 之后。`op=run` 时还带 `now_ms`（Unix 毫秒）与 `utc_offset`（秒），
+//! 因为扩展包里没有时钟。
 //! 响应 JSON：`op=manifest` 时为 [`PackManifest`]；`op=run` 时为 [`RunReply`]，附加字节是输出文件内容。
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -127,7 +128,10 @@ pub fn run_tool(wasm: &[u8], tool: &str, a: &Args) -> Result<Output> {
         }
     }
     let args: BTreeMap<_, _> = a.values.iter().collect();
-    let req = serde_json::json!({ "op": "run", "lang": lang(), "tool": tool, "args": args, "files": files }).to_string();
+    // 扩展包里没有时钟，当前时间与本地时区偏移由宿主传入。
+    let now = chrono::Local::now();
+    let req = serde_json::json!({ "op": "run", "lang": lang(), "tool": tool, "args": args, "files": files,
+        "now_ms": now.timestamp_millis(), "utc_offset": now.offset().local_minus_utc() }).to_string();
     let out = call(wasm, &frame(req.as_bytes(), &bytes))?;
     let (j, rest) = unframe(&out)?;
     let r: RunReply = serde_json::from_slice(j).context("bad reply")?;

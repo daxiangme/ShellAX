@@ -14,3 +14,4 @@ SHA256SUMS
 SHA256SUMS.txt
 testenv/*_ed25519
 testenv/*_ed25519.pub
+extensions/target/

@@ -108,3 +108,29 @@ fn locale_keys() {
     let missing: Vec<_> = keys.iter().filter(|k| !en.contains(&format!("\"{k}\" =")) || !zh.contains(&format!("\"{k}\" ="))).collect();
     assert!(missing.is_empty(), "missing: {missing:?}");
 }
+
+/// 若 extensions/ 已构建出 wasm，则在宿主运行时里实际加载并跑一遍（未构建时跳过）。
+#[test]
+fn built_packs_run_in_host() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("extensions/target/wasm32-unknown-unknown/release");
+    let load = |n: &str| std::fs::read(dir.join(format!("ext_{n}.wasm"))).ok();
+    let run = |w: &[u8], tool: &str, kv: &[(&str, &str)]| {
+        let mut a = Args::default();
+        for (k, v) in kv { a.values.insert(k.to_string(), v.to_string()); }
+        run_tool(w, tool, &a)
+    };
+    for (n, id) in [("lang_zh", "lang-zh"), ("worldtime", "worldtime"), ("image", "image"), ("pdf", "pdf"), ("pdf_render", "pdf-render")] {
+        let Some(w) = load(n) else { continue };
+        let m = manifest_of(&w).unwrap();
+        assert_eq!(m.id, id);
+        let known: Vec<&str> = KNOWN.iter().find(|k| k.0 == id).map(|k| k.2.to_vec()).unwrap_or_default();
+        for t in &m.tools { assert!(known.contains(&t.id.as_str()), "{id}: {} not in KNOWN", t.id); }
+    }
+    if let Some(w) = load("lang_zh") {
+        assert!(!run(&w, "pinyin", &[("input", "中文")]).unwrap().text.is_empty());
+    }
+    if let Some(w) = load("image") {
+        let o = run(&w, "qr_gen", &[("input", "hello")]).unwrap();
+        assert!(o.file.is_some());
+    }
+}
