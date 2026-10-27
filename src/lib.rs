@@ -49,6 +49,6 @@ pub mod snapshot;
 pub mod notify_rules;
 pub mod graphics;
 pub mod ctxmenu;
-pub mod sftp_mode;
+pub mod sftp_follow;
 pub mod tools;
 pub mod ext;

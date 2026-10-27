@@ -80,12 +80,6 @@ impl Root {
         ui::modal(panel_shell(t("ui.audit_log"), IconName::ScrollText, t("ui.append_only_sha_256_hash"), cx).child(toolbar).child(frow).child(list)).into_any_element()
     }
 
-    pub(crate) fn sftp_panel(&mut self, cx: &mut Context<Root>) -> AnyElement {
-        if let Some(v) = self.sftp_current.clone() { return ui::modal(v).into_any_element(); }
-        let body = ui::empty_state(IconName::FolderSync, t("sftp.need_ssh"), None, vec![], false);
-        ui::modal(panel_shell(t("ui.sftp_files"), IconName::FolderSync, t("ui.remote_browsing_reuses_the_sftp"), cx).child(body)).into_any_element()
-    }
-
     pub(crate) fn port_panel(&mut self, _cx: &mut Context<Root>) -> AnyElement {
         match self.port_view.clone() { Some(v) => ui::modal(v).into_any_element(), None => div().into_any_element() }
     }

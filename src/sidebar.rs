@@ -7,7 +7,6 @@ use gpui_component::input::{InputState};
 use ssh_term_proto::hosts::HostEntry;
 use ssh_term_proto::hosttree::{self, Row};
 use ssh_term_proto::i18n::{t, tf};
-use ssh_term_proto::sftp_mode::Mode as SftpMode;
 use std::sync::atomic::Ordering;
 
 use crate::actions::Action;
@@ -535,7 +534,6 @@ impl Root {
         let mut id = || { n += 1; ("sbm", n) };
         macro_rules! item { ($ic:expr, $label:expr, $f:expr) => {{ let f = $f; ui::menu_item(id(), $ic, $label, true, false).on_click(cx.listener(move |this, _, w, cx| { close(this); f(this, w, cx); cx.notify(); })) }} }
         macro_rules! danger { ($ic:expr, $label:expr, $f:expr) => {{ let f = $f; ui::menu_item(id(), $ic, $label, true, true).on_click(cx.listener(move |this, _, w, cx| { close(this); f(this, w, cx); cx.notify(); })) }} }
-        let sftp_mode = SftpMode::parse(&s.session.sftp_mode);
         match (&m.target, m.sub) {
             (SbTarget::Host(name), SbSub::Move) => {
                 list = list.child(ui::menu_label(t("sb.move_to")));
@@ -556,7 +554,7 @@ impl Root {
                     .child(item!(Some(IconName::Plug), t("sb.connect"), move |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| if let Some(t) = a.clone() { this.new_tab(Spec::Ssh(t), w, cx) }))
                     .child(item!(Some(IconName::Columns2), t("sb.open_split_right"), move |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| if let Some(t) = b.clone() { this.split_with(Spec::Ssh(t), Dir::Vertical, w, cx) }))
                     .child(item!(Some(IconName::Rows2), t("sb.open_split_down"), move |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| if let Some(t) = c2.clone() { this.split_with(Spec::Ssh(t), Dir::Horizontal, w, cx) }))
-                    .child(item!(Some(IconName::FolderSync), t("sb.open_sftp"), move |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| if let Some(t) = d.clone() { this.open_sftp_mode(Some(t), sftp_mode, w, cx) }))
+                    .child(item!(Some(IconName::FolderSync), t("sb.open_sftp"), move |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| if let Some(t) = d.clone() { this.open_sftp_tab(Some(t), None, None, w, cx) }))
                     .child(ui::menu_sep());
                 let h = s.hosts.iter().find(|h| h.name == *name).cloned();
                 let (e, r, du, mv, del) = (h.clone(), name.clone(), name.clone(), name.clone(), name.clone());
@@ -747,14 +745,13 @@ impl Root {
         if double { let _ = label; return; }
         // SFTP tool window: the same host tree, but a click opens the file browser
         if self.tool == crate::activity::Tool::Sftp {
-            let mode = SftpMode::parse(&config::get().session.sftp_mode);
             let target = match spec { Spec::Ssh(t) => Some(t), Spec::Local => None };
             // the focused SFTP tab still choosing a host takes it right away; otherwise a new tab
             if let Some(t) = target.clone() {
                 let sv = self.tabs.get(self.active).and_then(|tb| tb.focused.read(cx).sftp.clone());
                 if let Some(sv) = sv { if sv.update(cx, |v, cx| v.connect_free_pane(t, cx)) { return; } }
             }
-            return self.open_sftp_mode(target, mode, window, cx);
+            return self.open_sftp_tab(target, None, None, window, cx);
         }
         let same = |p: &Entity<crate::termview::TermView>, cx: &Context<Self>| {
             let v = p.read(cx);

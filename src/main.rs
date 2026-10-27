@@ -62,7 +62,6 @@ use ssh_term_proto::audit::AuditLog;
 use ssh_term_proto::hosts::{self, HostEntry};
 use ssh_term_proto::layout::{auto_direction, Dir, Node};
 use ssh_term_proto::policy::Mode;
-use ssh_term_proto::sftp_mode::Mode as SftpMode;
 use ssh_term_proto::ssh::{self, HostKeyDecision, HostKeyPrompt, SshTarget};
 use ssh_term_proto::suggest::History;
 use ssh_term_proto::{local, term::Size};
@@ -192,7 +191,7 @@ enum Modal { Broadcast(Vec<String>), Snapshots, Recordings, QuickStart { dir: St
 
 pub(crate) struct Tab { layout: Node<Entity<TermView>>, focused: Entity<TermView>, /** custom name (PRD 5.23) */ name: Option<String> }
 
-pub(crate) enum Overlay { None, Palette(Entity<Palette>), Host(Entity<HostDialog>), Audit, Sftp, Port, Db(Entity<db_dialog::DbDialog>), Asset(Entity<kv_ui::AssetDialog>) }
+pub(crate) enum Overlay { None, Palette(Entity<Palette>), Host(Entity<HostDialog>), Audit, Port, Db(Entity<db_dialog::DbDialog>), Asset(Entity<kv_ui::AssetDialog>) }
 
 /// Right-hand cards that toggle from the menu / shortcuts; each opens independently.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -322,16 +321,13 @@ pub(crate) struct Root {
     /// Toast is playing its exit fade.
     toast_out: bool,
     toast_seq: u64,
-    pub(crate) sftp_views: HashMap<String, Entity<sftp_view::SftpView>>,
     pub(crate) port_view: Option<Entity<port_view::PortView>>,
     pub(crate) chat_view: Option<Entity<chat_view::ChatView>>,
     quit_confirm: bool,
     /// Generic confirmation / picker modal (broadcast prod warning, snapshots, recordings, quick start).
     modal: Option<Modal>,
     quit_ok: bool,
-    pub(crate) sftp_current: Option<Entity<sftp_view::SftpView>>,
     /// Detached SFTP windows (PRD 5.21).
-    sftp_windows: Vec<(Entity<sftp_view::SftpView>, gpui::AnyWindowHandle)>,
     /// Split divider being dragged (drawn thicker).
     drag_div: Option<(usize, Vec<bool>)>,
     _subs: Vec<gpui::Subscription>,
@@ -581,11 +577,7 @@ impl Root {
                 }
                 termview::TermEvent::CtxEditor(path) => {
                     let target = match &pane.read(cx).spec { Spec::Ssh(t) => t.clone(), Spec::Local => return };
-                    let v = this.sftp_for(target, w, cx);
-                    v.update(cx, |v, cx| v.edit_path(path.clone(), cx));
-                    this.sftp_current = Some(v);
-                    this.overlay = Overlay::Sftp;
-                    cx.notify();
+                    this.open_sftp_tab(Some(target), None, Some(path.clone()), w, cx);
                     return;
                 }
                 termview::TermEvent::CtxCdTab(dir) => {
@@ -773,53 +765,27 @@ impl Root {
         match l.kind {
             ssh_term_proto::link::Kind::Ssh => self.new_tab(Spec::Ssh(target), window, cx),
             ssh_term_proto::link::Kind::Sftp => {
-                let key = target.pool_key();
-                let (rt, pr) = (self.rt.handle().clone(), self.prompts.clone());
-                let dir = l.path.clone();
-                let v = match self.sftp_views.get(&key).filter(|v| v.read(cx).mode == SftpMode::Popup) { Some(v) => v.clone(), None => {
-                    let v = cx.new(|cx| { let mut v = sftp_view::SftpView::new_deferred(Some(target), rt, pr, window, cx); v.set_initial_dir(dir); v.start(cx); v });
-                    self._subs.push(cx.subscribe_in(&v, window, Self::on_sftp_event));
-                    self.sftp_views.insert(key, v.clone()); v
-                } };
-                self.sftp_current = Some(v);
-                self.overlay = Overlay::Sftp;
+                self.open_sftp_tab(Some(target), l.path.clone(), None, window, cx);
             }
         }
         cx.notify();
     }
-    /// SFTP view for a host (cached per pool key), subscribed to its events.
-    fn sftp_for(&mut self, t: SshTarget, window: &mut Window, cx: &mut Context<Self>) -> Entity<sftp_view::SftpView> {
-        let key = t.pool_key();
-        // the cached popup view may have been moved to a tab/split/window: then make a fresh popup one
-        if let Some(v) = self.sftp_views.get(&key).filter(|v| v.read(cx).mode == SftpMode::Popup) { return v.clone(); }
-        let (rt, pr) = (self.rt.handle().clone(), self.prompts.clone());
-        let v = cx.new(|cx| sftp_view::SftpView::new(Some(t), rt, pr, window, cx));
-        self._subs.push(cx.subscribe_in(&v, window, Self::on_sftp_event));
-        self.sftp_views.insert(key, v.clone());
-        v
-    }
     fn on_sftp_event(&mut self, v: &Entity<sftp_view::SftpView>, ev: &sftp_view::SftpEvent, w: &mut Window, cx: &mut Context<Self>) {
         match ev {
-            sftp_view::SftpEvent::Close => self.close_overlay(w, cx),
-            sftp_view::SftpEvent::Move(m) => self.move_sftp(v.clone(), *m, w, cx),
             sftp_view::SftpEvent::Pane(act) => self.sftp_pane_act(v, *act, w, cx),
             sftp_view::SftpEvent::Retitle => {
                 let title: SharedString = v.read(cx).title().into();
                 for tab in &self.tabs { for p in tab.layout.leaves() { if p.read(cx).sftp.as_ref() == Some(v) { p.update(cx, |p, cx| { p.title = title.clone(); cx.notify() }); } } }
-                if let Some((_, h)) = self.sftp_windows.iter().find(|(w, _)| w == v) { let tt = title.clone(); let _ = h.update(cx, |_, w, _| w.set_window_title(&tt)); }
                 self.save_layout(cx);
                 cx.notify();
             }
             sftp_view::SftpEvent::Insert { target, command } => {
                 let target = target.clone();
-                if v.read(cx).mode == SftpMode::Popup { self.close_overlay(w, cx); }
-                if v.read(cx).mode == SftpMode::Window { w.activate_window(); }
                 let pane = self.pane_for(target, w, cx);
                 Self::insert_when_ready(pane, command.clone(), cx);
             }
             sftp_view::SftpEvent::CdTab { target, dir } => {
                 let spec = match target { Some(t) => Spec::Ssh(t.clone()), None => Spec::Local };
-                if v.read(cx).mode == SftpMode::Popup { self.close_overlay(w, cx); }
                 self.new_tab(spec, w, cx);
                 if let Some(p) = self.tabs.get(self.active).map(|t| t.focused.clone()) { Self::insert_when_ready(p, format!("cd -- {}", ssh_term_proto::ctxmenu::quote_path(dir)), cx); }
             }
@@ -877,7 +843,7 @@ impl Root {
         let me = cx.entity().downgrade();
         chrome::traffic_lights("lights", window, move |w, cx| { let _ = me.update(cx, |r, cx| if r.should_close(w, cx) { w.remove_window(); cx.quit(); }); })
     }
-    // ---- SFTP display modes (PRD 5.21)
+    // ---- SFTP tabs
     fn new_sftp_view(&mut self, t: Option<SshTarget>, remote: Option<String>, local: Option<String>, panes: Vec<ssh_term_proto::session_store::SftpSide>, window: &mut Window, cx: &mut Context<Self>) -> Entity<sftp_view::SftpView> {
         let (rt, pr) = (self.rt.handle().clone(), self.prompts.clone());
         let v = cx.new(|cx| {
@@ -905,129 +871,29 @@ impl Root {
         for p in &leaves {
             if let Some(sv) = p.read(cx).sftp.clone() {
                 let on = sv.read(cx).follow.on;
-                sv.update(cx, |v, cx| { v.mode = SftpMode::Tab; v.set_follow_source(Some((term.downgrade(), local)), on, cx) });
+                sv.update(cx, |v, cx| { v.set_follow_source(Some((term.downgrade(), local)), on, cx) });
             }
         }
     }
-    /// Open SFTP for `target` (default: focused/any SSH host) in `mode`. Popup reuses the per-host
-    /// view; tab/split/window create a new view (several per host are allowed).
-    fn open_sftp_mode(&mut self, target: Option<SshTarget>, mode: SftpMode, window: &mut Window, cx: &mut Context<Self>) {
-        // SFTP now opens only as a tab of the SFTP module; older modes in saved settings map here
-        let _ = mode;
-        let mode = SftpMode::Tab;
+    /// Open SFTP as its own tab for `target` (default: focused / any SSH host). `dir` is the
+    /// remote directory to open first, `edit` a remote file to open in the built-in editor.
+    fn open_sftp_tab(&mut self, target: Option<SshTarget>, dir: Option<String>, edit: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         // no host: both panes show the remote host list
-        let Some(t) = target.or_else(|| self.ssh_target_for_tools(cx)) else {
-            self.log("sftp.open", format!("host=- mode={}", mode.as_str()));
-            let v = self.new_sftp_view(None, None, None, vec![], window, cx);
-            return self.place_sftp(v, mode, window, cx);
-        };
-        if self.block_proxy(&Spec::Ssh(t.clone()), true, window, cx) { return; }
-        self.log("sftp.open", format!("host={} mode={}", t.label(), mode.as_str()));
-        if mode == SftpMode::Popup {
-            let v = self.sftp_for(t, window, cx);
-            self.detach_sftp(&v, window, cx);
-            return self.place_sftp(v, SftpMode::Popup, window, cx);
+        let t = target.or_else(|| self.ssh_target_for_tools(cx));
+        if let Some(t) = &t {
+            if self.block_proxy(&Spec::Ssh(t.clone()), true, window, cx) { return; }
         }
-        let v = self.new_sftp_view(Some(t), None, None, vec![], window, cx);
-        self.place_sftp(v, mode, window, cx);
-    }
-    /// Move an existing view (state, selection, transfer queue kept: same entity) to `mode`.
-    fn move_sftp(&mut self, v: Entity<sftp_view::SftpView>, mode: SftpMode, window: &mut Window, cx: &mut Context<Self>) {
-        let _ = mode;
-        let mode = SftpMode::Tab;
-        if v.read(cx).mode == mode { return; }
-        let from = v.read(cx).mode;
-        self.log("sftp.mode", format!("host={} from={} to={}", v.read(cx).target().map(|t| t.label()).unwrap_or_else(|| "-".into()), from.as_str(), mode.as_str()));
-        self.detach_sftp(&v, window, cx);
-        self.place_sftp(v, mode, window, cx);
-    }
-    /// Remove a view from wherever it is shown (popup, layout leaf, detached window).
-    fn detach_sftp(&mut self, v: &Entity<sftp_view::SftpView>, window: &mut Window, cx: &mut Context<Self>) {
-        if self.sftp_current.as_ref() == Some(v) { self.sftp_current = None; if matches!(self.overlay, Overlay::Sftp) { self.overlay = Overlay::None; } }
-        let mut ti = 0;
-        while ti < self.tabs.len() {
-            let leaf = self.tabs[ti].layout.leaves().into_iter().find(|p| p.read(cx).sftp.as_ref() == Some(v));
-            if let Some(leaf) = leaf {
-                if !self.tabs[ti].layout.remove(&leaf) {
-                    self.tabs.remove(ti);
-                    if self.active >= ti && self.active > 0 { self.active -= 1; }
-                    self.active = self.active.min(self.tabs.len().saturating_sub(1));
-                    continue;
-                }
-                self.tabs[ti].focused = self.tabs[ti].layout.leaves()[0].clone();
-            }
-            ti += 1;
-        }
-        if let Some(i) = self.sftp_windows.iter().position(|(w, _)| w == v) {
-            let (_, h) = self.sftp_windows.remove(i);
-            let _ = h.update(cx, |_, w, _| w.remove_window());
-        }
-        v.update(cx, |v, cx| v.set_follow_source(None, false, cx));
-        self.focus_active(window, cx);
-    }
-    fn place_sftp(&mut self, v: Entity<sftp_view::SftpView>, mode: SftpMode, window: &mut Window, cx: &mut Context<Self>) {
-        v.update(cx, |v, cx| { v.mode = mode; cx.notify() });
-        match mode {
-            SftpMode::Popup => { self.sftp_current = Some(v); self.overlay = Overlay::Sftp; }
-            SftpMode::Tab => {
-                let pane = self.sftp_pane(v, window, cx);
-                let fh = pane.read(cx).focus.clone();
-                self.tabs.push(Tab { layout: Node::Leaf(pane.clone()), focused: pane, name: None });
-                self.active = self.tabs.len() - 1;
-                self.leave_settings();
-                self.overlay = Overlay::None;
-                window.focus(&fh, cx);
-            }
-            SftpMode::Split => {
-                // anchor: focused terminal (not an SFTP leaf); else a terminal on that host; else a new one
-                let t = v.read(cx).target();
-                let anchor = self.pane_for(t, window, cx);
-                let local = matches!(anchor.read(cx).spec, Spec::Local);
-                let pane = self.sftp_pane(v.clone(), window, cx);
-                if let Some(ti) = self.tabs.iter().position(|t| t.layout.leaves().contains(&anchor)) {
-                    self.active = ti;
-                    // side by side unless the terminal is already too narrow for two columns
-                    let dir = match anchor.read(cx).session.as_ref().map(|s| s.size()) { Some(s) if s.cols < 90 && s.rows > 30 => Dir::Horizontal, _ => Dir::Vertical };
-                    self.tabs[ti].layout.split(&anchor, pane.clone(), dir);
-                    self.tabs[ti].focused = anchor.clone();
-                }
-                let on = config::get().session.sftp_follow_cwd;
-                v.update(cx, |v, cx| v.set_follow_source(Some((anchor.downgrade(), local)), on, cx));
-                self.overlay = Overlay::None;
-                let fh = anchor.read(cx).focus.clone();
-                window.focus(&fh, cx);
-            }
-            SftpMode::Window => {
-                let title = v.read(cx).title();
-                let bounds = Bounds::centered(None, size(px(1180.), px(760.)), cx);
-                let vv = v.clone();
-                let opts = chrome::window_options(bounds, Some(title));
-                match cx.open_window(opts, move |w, cx| {
-                    let inner = vv.clone();
-                    w.on_window_should_close(cx, move |_, cx| { inner.update(cx, |_, cx| cx.emit(sftp_view::SftpEvent::Move(SftpMode::Tab))); false });
-                    if !chrome::NATIVE_LIGHTS { w.set_client_inset(px(0.)); }
-                    let d = cx.new(|_| SftpWindow { view: vv });
-                    cx.new(|cx| gpui_component::Root::new(d, w, cx))
-                }) {
-                    Ok(h) => { self.sftp_windows.push((v, h.into())); self.overlay = Overlay::None; }
-                    Err(e) => { self.toast(format!("{e:#}"), cx); self.place_sftp(v, SftpMode::Tab, window, cx); return; }
-                }
-            }
-        }
+        self.log("sftp.open", format!("host={}", t.as_ref().map(|t| t.label()).unwrap_or_else(|| "-".into())));
+        let v = self.new_sftp_view(t, dir, None, vec![], window, cx);
+        if let Some(p) = edit { v.update(cx, |v, cx| v.edit_path(p, cx)); }
+        let pane = self.sftp_pane(v, window, cx);
+        let fh = pane.read(cx).focus.clone();
+        self.tabs.push(Tab { layout: Node::Leaf(pane.clone()), focused: pane, name: None });
+        self.active = self.tabs.len() - 1;
+        self.leave_settings();
+        self.overlay = Overlay::None;
+        window.focus(&fh, cx);
         cx.notify();
-    }
-    #[allow(dead_code)]
-    fn open_sftp(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.sftp_current = self.ssh_target_for_tools(cx).map(|t| {
-            let key = t.pool_key();
-            if let Some(v) = self.sftp_views.get(&key) { return v.clone(); }
-            let (rt, pr) = (self.rt.handle().clone(), self.prompts.clone());
-            let v = cx.new(|cx| sftp_view::SftpView::new(Some(t), rt, pr, window, cx));
-            self._subs.push(cx.subscribe_in(&v, window, Self::on_sftp_event));
-            self.sftp_views.insert(key, v.clone());
-            v
-        });
-        self.overlay = Overlay::Sftp;
     }
     fn split(&mut self, dir: Option<Dir>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(target) = self.focused_pane(window, cx) else { return self.new_tab(Spec::Local, window, cx) };
@@ -1368,7 +1234,7 @@ impl Root {
                 PaneSave::Sftp { target, local_dir, remote_dir, follow, panes } => {
                     let target = (!target.host.is_empty()).then_some(target);
                     let v = r.new_sftp_view(target, (!remote_dir.is_empty()).then_some(remote_dir), (!local_dir.is_empty()).then_some(local_dir), panes, window, cx);
-                    v.update(cx, |v, _| { v.mode = SftpMode::Tab; v.follow.set(follow); });
+                    v.update(cx, |v, _| { v.follow.set(follow); });
                     r.sftp_pane(v, window, cx)
                 }
                 PaneSave::Db { conn, database, schema, table, sql, editor_h } => {
@@ -1703,7 +1569,7 @@ impl Root {
             Action::ModeAsk => self.set_mode(Mode::Ask, cx),
             Action::ModePlan => self.set_mode(Mode::Plan, cx),
             Action::ModeAuto => self.set_mode(Mode::Auto, cx),
-            Action::OpenSftp => { let m = SftpMode::parse(&config::get().session.sftp_mode); self.open_sftp_mode(None, m, window, cx) }
+            Action::OpenSftp => self.open_sftp_tab(None, None, None, window, cx),
             Action::OpenHostTools => self.toggle_host_dock(window, cx),
             Action::OpenPortForward => { let tg = self.ssh_target_for_tools(cx); let pv = self.port_view(window, cx); pv.update(cx, |v, _| if v.target.is_none() || tg.is_some() { v.target = tg }); self.overlay = Overlay::Port; }
             Action::OpenAi => self.toggle_dock(SideDock::Ai, window, cx),
@@ -2234,7 +2100,6 @@ impl Render for Root {
             Overlay::Db(d) => Some(div().absolute().top_0().left_0().size_full().child(d.clone()).into_any_element()),
             Overlay::Asset(d) => Some(div().absolute().top_0().left_0().size_full().child(d.clone()).into_any_element()),
             Overlay::Audit => Some(self.audit_panel(cx)),
-            Overlay::Sftp => Some(self.sftp_panel(cx)),
             Overlay::Port => Some(self.port_panel(cx)),
         };
         if let Some(o) = overlay { root = root.child(o); }
@@ -2489,7 +2354,7 @@ fn open_main(cx: &mut App, rt: Arc<tokio::runtime::Runtime>, themes: Vec<Arc<The
                     let audit = audit_log();
                     let mut root = Root {
                         rt, default_target, tabs: vec![], active: 0, themes, schemes, histories: HashMap::new(),
-                        manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], deny_reason: None, policy_port: None, overlay: Overlay::None, settings: None, sftp_views: HashMap::new(), sftp_current: None, sftp_windows: vec![], drag_div: None, port_view: None, quit_confirm: false, modal: None, quit_ok: false, chat_view: None,
+                        manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], deny_reason: None, policy_port: None, overlay: Overlay::None, settings: None, drag_div: None, port_view: None, quit_confirm: false, modal: None, quit_ok: false, chat_view: None,
                         host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, menu_last: (None, None), menu_ghost: None, menu_ghost_seq: 0, sb_menu_at: std::time::Instant::now(), sb_modal: None, tag_filter: vec![], tab_menu: None, tab_menu_at: std::time::Instant::now(), new_menu: None, new_menu_at: std::time::Instant::now(), new_menu_closed: std::time::Instant::now(), new_menu_collapsed: config::get().sidebar.collapsed.clone(), new_menu_sel: 0, new_menu_search: new_menu_search.clone(), tab_scroll: gpui::ScrollHandle::new(), tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), dock_snip: false, dock_hist: false, dock_ai: false, dock_host: None, dock_min: HashSet::new(), dock_order: vec![], sb_fold: HashSet::new(), dock_split: config::get().sidebar.dock_split.clamp(0.15, 0.85), dock_anim: None, dock_shown: false, dock_tween: HashMap::new(), dock_seen: HashSet::new(), dock_col_h: Default::default(), bottom_anim: None, lib_search: lib_search.clone(), hist_search: hist_search.clone(), lib_group: String::new(), lib_hist_all: false, lib_editor: None, lib_vars: None, lib_confirm: None, lib_notice: String::new(), lib_menu: None, ai_width: { let w = config::get().sidebar.ai_width; if (280.0..=560.0).contains(&w) { w } else { config::AI_DOCK_W } }, host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: !config::get().sidebar.collapsed_panel(), sb_anim: None, ws_seen: None, ws_last: HashMap::new(), tool: activity::Tool::from_id(&config::get().sidebar.tool), bottom_open: config::get().sidebar.bottom_open, bottom_tab: activity::Bottom::from_id(&config::get().sidebar.bottom_tab), bottom_h: config::get().sidebar.bottom_height.clamp(120., 600.), exec_log: Default::default(), dbp: Default::default(), kvp: Default::default(), toolsp: Default::default(), tool_hist: HashMap::new(), extm: None, audit, audit_verify: None, audit_filter: Default::default(),
                         settings_dirty: vec![], toast: None, toast_out: false, toast_seq: 0, _subs: vec![],
                     };
@@ -2725,21 +2590,4 @@ pub(crate) fn shell_display_name() -> String {
     let p = if s.is_empty() { ssh_term_proto::local::default_shell_path() } else { s };
     let base = p.rsplit(['/', '\\']).next().unwrap_or(&p).to_string();
     base.strip_suffix(".exe").or_else(|| base.strip_suffix(".EXE")).unwrap_or(&base).to_string()
-}
-
-/// Root view of a detached SFTP window (PRD 5.21). Closing it re-attaches the view as a tab.
-struct SftpWindow { view: Entity<sftp_view::SftpView> }
-impl Render for SftpWindow {
-    fn render(&mut self, w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let th = cur();
-        let v = self.view.clone();
-        let title = v.read(_cx).title();
-        // own title bar: traffic lights (close = re-attach as tab), drag to move
-        let bar = chrome::drag_region(div().id("sftp-win-titlebar")).h(px(chrome::TITLE_H)).flex_shrink_0().flex().items_center().bg(theme::chrome_bg()).border_b_1().border_color(theme::divider())
-            .child(chrome::traffic_lights("sftp-lights", w, move |_, cx| v.update(cx, |_, cx| cx.emit(sftp_view::SftpEvent::Move(SftpMode::Tab)))))
-            .child(div().flex_1().text_center().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.subtext)).child(title))
-            .child(div().w(px(chrome::LIGHTS_W)));
-        div().size_full().relative().flex().flex_col().bg(c(th.base)).font_family(theme::ui_font()).text_color(c(th.text))
-            .child(bar).child(self.view.clone()).children(chrome::resize_edges(w))
-    }
 }

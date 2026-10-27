@@ -242,15 +242,13 @@ impl Default for Audit { fn default() -> Self { Self { dir: s_auditdir(), retent
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct SessionCfg { pub persistent: String, pub restore_layout: bool, pub confirm_close: bool, pub auto_reconnect: bool, pub local_daemon: bool,
-    /// Default SFTP open mode (PRD 5.21): popup | tab | split | window.
-    pub sftp_mode: String,
     /// SFTP split pane follows the neighbouring terminal's cwd (OSC 7 / prompt).
     pub sftp_follow_cwd: bool,
     /// Double-click on a sidebar host asks before opening another tab (PRD 5.24).
     pub confirm_new_tab: bool,
     /// After a layout restore, ask before re-running the last Agent command. Off by default.
     pub prompt_resume_agent: bool }
-impl Default for SessionCfg { fn default() -> Self { Self { confirm_new_tab: t(), persistent: s_off(), restore_layout: t(), confirm_close: t(), auto_reconnect: t(), local_daemon: false, sftp_mode: "popup".into(), sftp_follow_cwd: t(), prompt_resume_agent: false } } }
+impl Default for SessionCfg { fn default() -> Self { Self { confirm_new_tab: t(), persistent: s_off(), restore_layout: t(), confirm_close: t(), auto_reconnect: t(), local_daemon: false, sftp_follow_cwd: t(), prompt_resume_agent: false } } }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -757,6 +755,8 @@ mod tests {
         assert!(!s.session.prompt_resume_agent);
         s.set("session.prompt_resume_agent", toml::Value::Boolean(true)).unwrap();
         assert!(s.get_bool("session.prompt_resume_agent"));
+        // old config files may still carry the removed SFTP open-mode key: ignored
+        assert!(Settings::parse("[session]\nsftp_mode = \"window\"\nrestore_layout = true\n").unwrap().session.restore_layout);
         let old = Settings::parse("[session]\nrestore_layout = true\n").unwrap();
         assert!(!old.session.prompt_resume_agent);
         assert!(s.set("font.size", toml::Value::String("abc".into())).is_err());

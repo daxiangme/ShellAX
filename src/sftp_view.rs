@@ -13,7 +13,7 @@ use ssh_term_proto::hosttree;
 use ssh_term_proto::i18n::{t, tf};
 use ssh_term_proto::session_store::SftpSide;
 use ssh_term_proto::sftp::{self, Dir, Entry, JobState, Queue, Side};
-use ssh_term_proto::sftp_mode::{Follow, Mode};
+use ssh_term_proto::sftp_follow::Follow;
 use ssh_term_proto::ssh::{self, SshTarget};
 
 use crate::theme::{c, cur, Appearance};
@@ -40,13 +40,10 @@ pub enum DirAction { Right, Down, Close }
 enum Edit { Mkdir, Rename, Chmod }
 
 pub enum SftpEvent {
-    Close,
     /// Insert a command (no Enter) into a session on this host (None = a local pane).
     Insert { target: Option<SshTarget>, command: String },
     /// Open a new tab on this host / locally and insert `cd -- dir`.
     CdTab { target: Option<SshTarget>, dir: String },
-    /// Move this view to another display mode (PRD 5.21); the entity (state, queue) is kept.
-    Move(Mode),
     /// Split or close the pane that contains this SFTP view.
     #[allow(dead_code)]
     Pane(DirAction),
@@ -148,7 +145,6 @@ pub struct SftpView {
     /// "Actions" dropdown: pane and anchor.
     ops_menu: Option<(usize, Point<Pixels>, std::time::Instant)>,
     pending_edit: Option<String>,
-    pub mode: Mode,
     follow_src: Option<(gpui::WeakEntity<crate::termview::TermView>, bool)>,
     pub follow: Follow,
     follow_task: bool,
@@ -189,16 +185,11 @@ impl SftpView {
     /// Left pane local; right pane connects to `target` (or shows the "connect to host" state).
     /// Does not connect yet: set `initial_dir`, then call [`start`].
     pub fn new_deferred(target: Option<SshTarget>, rt: tokio::runtime::Handle, prompts: ssh::Prompts, _w: &mut Window, _cx: &mut Context<Self>) -> Self {
-        let mut me = Self { rt, prompts, panes: [Pane::new(Src::Empty), Pane::new(Src::Empty)], active: 1, status: String::new(), error: false, edit: None, confirm_delete: None, editor: None, ticking: false, _subs: vec![], sync: None, ctx_menu: None, ops_menu: None, pending_edit: None, mode: Mode::Popup, follow_src: None, follow: Follow::new(false), follow_task: false, next_token: 0 };
+        let mut me = Self { rt, prompts, panes: [Pane::new(Src::Empty), Pane::new(Src::Empty)], active: 1, status: String::new(), error: false, edit: None, confirm_delete: None, editor: None, ticking: false, _subs: vec![], sync: None, ctx_menu: None, ops_menu: None, pending_edit: None, follow_src: None, follow: Follow::new(false), follow_task: false, next_token: 0 };
         if let Some(t) = target { me.panes[1].src = Src::Remote(Box::new(me.new_remote(host_name(&t), t))); }
         // 左栏默认是本机文件；主机选择器只在栏头下拉菜单里打开。右栏没有目标主机时仍显示主机列表
         me.panes[0].src = Src::Local;
         me.refresh_local(0);
-        me
-    }
-    pub fn new(target: Option<SshTarget>, rt: tokio::runtime::Handle, prompts: ssh::Prompts, w: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut me = Self::new_deferred(target, rt, prompts, w, cx);
-        me.start(cx);
         me
     }
     fn new_remote(&mut self, name: String, target: SshTarget) -> Remote {
@@ -215,7 +206,7 @@ impl SftpView {
     fn local_pane(&self) -> Option<usize> { [0, 1].into_iter().find(|&i| self.panes[i].is_local()) }
     /// Tab / window title: "SFTP · host" once a host is chosen.
     pub fn title(&self) -> String {
-        match self.remote_pane() { Some(i) => ssh_term_proto::sftp_mode::title(&self.panes[i].label()), None => "SFTP".into() }
+        match self.remote_pane() { Some(i) => ssh_term_proto::sftp_follow::title(&self.panes[i].label()), None => "SFTP".into() }
     }
     pub fn local_dir(&self) -> String { self.local_pane().map(|i| self.panes[i].dir()).unwrap_or_default() }
     pub fn set_local_dir(&mut self, d: &str) {
@@ -924,18 +915,8 @@ fn icon_btn(id: (&'static str, usize), ic: IconName, enabled: bool) -> gpui::Sta
 }
 
 impl SftpView {
-    fn mode_bar(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let th = cur();
+    fn follow_bar(&self, cx: &mut Context<Self>) -> gpui::Div {
         let mut bar = div().flex().items_center().gap_1();
-        // display-mode buttons removed: SFTP lives only in its module's tabs
-        for (i, m) in Mode::ALL.into_iter().enumerate().filter(|_| false) {
-            let on = self.mode == m;
-            let (ic, key) = match m { Mode::Popup => (IconName::Maximize, "sftp.mode_popup"), Mode::Tab => (IconName::PanelTop, "sftp.mode_tab"), Mode::Split => (IconName::Columns2, "sftp.mode_split"), Mode::Window => (IconName::ExternalLink, "sftp.mode_window") };
-            bar = bar.child(div().id(("sftp-mode", i)).h(px(H_COMPACT)).px_2().rounded(px(R_MD)).flex().items_center().gap_1().cursor_pointer().text_size(px(fs_small()))
-                .when(on, |d| d.bg(crate::theme::selected_bg()).text_color(c(th.accent))).when(!on, |d| d.text_color(c(th.subtext)).hover(|d| d.bg(crate::theme::hover_bg())))
-                .on_click(cx.listener(move |v, _, _, cx| if v.mode != m { cx.emit(SftpEvent::Move(m)) }))
-                .child(icon(ic, ui::IC_XS, if on { c(th.accent) } else { c(th.overlay1) })).when(self.mode != Mode::Split, |d| d.child(t(key))));
-        }
         if self.follow_src.is_some() {
             bar = bar.child(gpui_component::switch::Switch::new("sftp-follow").checked(self.follow.on).label(t("sftp.follow_cwd")).small()
                 .on_click(cx.listener(|v, on: &bool, _, cx| { v.follow.set(*on); cx.notify() })));
@@ -944,7 +925,7 @@ impl SftpView {
     }
     fn frame(&self) -> gpui::Div {
         let th = cur();
-        if self.mode.embedded() { div().size_full().min_h_0().flex().flex_col().bg(c(th.base)).overflow_hidden() } else { ui::card(1100.).h(px(700.)) }
+        div().size_full().min_h_0().flex().flex_col().bg(c(th.base)).overflow_hidden()
     }
     fn sync_panel(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         use ssh_term_proto::dirsync::Mode;
@@ -985,7 +966,7 @@ impl SftpView {
         if slot.key == key { slot.desc = !slot.desc; } else { *slot = PaneSort { key, desc: matches!(key, SortKey::Mtime | SortKey::Size) }; }
         cx.notify();
     }
-    fn sort_head(&self, pi: usize, compact: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn sort_head(&self, pi: usize, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
         let sort = self.panes[pi].sort;
         let mark = |key: SortKey| if sort.key != key { String::new() } else if sort.desc { " ↓".into() } else { " ↑".into() };
@@ -996,7 +977,7 @@ impl SftpView {
                 .on_click(cx.listener(move |v, _, _, cx| v.toggle_sort(pi, key, cx)))
                 .child(format!("{label}{}", mark(key)))
         };
-        let (wt, ws, wk) = col_widths(compact);
+        let (wt, ws, wk) = col_widths();
         ui::table_header().px_3().gap_2()
             .child(div().size(px(16.)).flex_shrink_0())
             .child(cell(0, t("sftp.col_name").into(), SortKey::Name).flex_1().min_w_0())
@@ -1067,7 +1048,7 @@ impl SftpView {
         bar.into_any_element()
     }
 
-    fn file_list(&self, pi: usize, compact: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn file_list(&self, pi: usize, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
         let p = &self.panes[pi];
         let mut list = div().id(("sftp-list", pi)).flex_1().min_h_0().overflow_y_scroll().flex().flex_col();
@@ -1094,7 +1075,7 @@ impl SftpView {
         }
         if p.loading { return list.child(remote_skeleton()).into_any_element(); }
         let q = p.filter.as_ref().map(|f| f.read(cx).value().trim().to_lowercase()).unwrap_or_default();
-        let (wt, ws, wk) = col_widths(compact);
+        let (wt, ws, wk) = col_widths();
         let selected_on = self.active == pi;
         let mut shown = 0;
         for i in sorted_indices(&p.entries, p.sort) {
@@ -1198,7 +1179,6 @@ impl SftpView {
     fn pane(&self, pi: usize, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
         let p = &self.panes[pi];
-        let compact = self.mode == Mode::Split;
         let mut card = div().id(("sftp-pane-card", pi)).flex_1().min_w_0().h_full().flex().flex_col().border_1().border_color(crate::theme::divider()).rounded(px(ui::R_LG)).overflow_hidden();
         if p.picker.is_some() { return card.child(self.picker_view(pi, cx)).into_any_element(); }
         if matches!(p.src, Src::Empty) { return card.child(self.empty_state(pi, cx)).into_any_element(); }
@@ -1219,9 +1199,9 @@ impl SftpView {
             if let Some(f) = &p.filter {
                 card = card.child(ui::field_row().py(px(6.)).border_b_1().border_color(crate::theme::divider()).child(ui::text_field(f, false).cleanable(true).prefix(icon(IconName::ListFilter, ui::IC_SM, c(th.overlay1)))));
             }
-            card = card.child(self.sort_head(pi, compact, cx));
+            card = card.child(self.sort_head(pi, cx));
         }
-        card.child(self.file_list(pi, compact, cx)).into_any_element()
+        card.child(self.file_list(pi, cx)).into_any_element()
     }
 
     /// "Actions" dropdown for one pane.
@@ -1271,7 +1251,7 @@ impl SftpView {
         let th = cur();
         let qs = self.queues();
         let jobs: Vec<(usize, Queue, Arc<sftp::Job>)> = qs.iter().flat_map(|(pi, q)| q.jobs.lock().unwrap().clone().into_iter().map(move |j| (*pi, q.clone(), j))).collect();
-        let mut col = div().id("sftp-queue").h(px(if self.mode == Mode::Split { 84. } else { 130. })).overflow_y_scroll().flex().flex_col().border_1().border_color(crate::theme::divider()).rounded(px(ui::R_LG));
+        let mut col = div().id("sftp-queue").h(px(130.)).overflow_y_scroll().flex().flex_col().border_1().border_color(crate::theme::divider()).rounded(px(ui::R_LG));
         col = col.child(ui::table_header().px_3().gap_2()
             .child(tf("sftp.queue_title", &[("n", &jobs.len())])).child(div().flex_1())
             .child(ui::button_sm("sftp-clear", t("sftp.clear_done"), 3).on_click(cx.listener(|v, _, _, cx| { for (_, q) in v.queues() { q.clear_done(); } cx.notify() }))));
@@ -1307,7 +1287,7 @@ impl SftpView {
 }
 
 /// Column widths (mtime, size, type); narrower in split mode.
-fn col_widths(compact: bool) -> (f32, f32, f32) { if compact { (112., 64., 64.) } else { (132., 76., 88.) } }
+fn col_widths() -> (f32, f32, f32) { (132., 76., 88.) }
 
 fn list_is_empty(hosts: &[HostEntry], groups: &[hosttree::GroupEntry], group: &str, query: &str, q: &hosttree::Query) -> bool {
     if query.is_empty() {
@@ -1352,7 +1332,7 @@ impl Render for SftpView {
                 .child(div().flex_1().min_h_0().border_1().border_color(crate::theme::divider()).rounded(px(ui::R_LG)).overflow_hidden().child(Editor::new(&st).h_full()));
             let status = div().px(px(SFTP_PX)).py_2().text_size(px(fs_small())).text_color(if self.error { c(th.error) } else { c(th.overlay1) }).child(self.status.clone());
             return self.frame()
-                .child(ui::dialog_header(Some(IconName::FolderSync), c(cur().accent), t("sftp.editor_title"), None, None).child(self.mode_bar(cx)))
+                .child(ui::dialog_header(Some(IconName::FolderSync), c(cur().accent), t("sftp.editor_title"), None, None).child(self.follow_bar(cx)))
                 .child(ed).child(status);
         }
         let sync = self.sync_panel(cx);
@@ -1367,13 +1347,11 @@ impl Render for SftpView {
         let (left, right) = (self.pane(0, cx), self.pane(1, cx));
         let body = div().flex_1().min_h_0().px(px(SFTP_PX)).pt_3().flex().gap(px(ui::SP_1)).child(left).child(mid).child(right);
         let status = div().px(px(SFTP_PX)).py_2().text_size(px(fs_small())).text_color(if self.error { c(th.error) } else { c(th.overlay1) }).child(if self.status.is_empty() { t("sftp.dnd_hint").to_string() } else { format!("{} · {}", self.status, t("sftp.dnd_hint")) });
-        let popup = !self.mode.embedded();
         let ctx = self.ctx_menu.as_ref().map(|(_, m)| crate::ctxmenu_view::render(m, cx, Self::ctx_pick, Self::ctx_close));
         let ops = self.ops_menu_el(cx);
         self.frame()
             .child(ui::dialog_header(Some(IconName::FolderSync), c(cur().accent), t("ui.sftp_files"), None, None)
-                .child(self.mode_bar(cx))
-                .when(popup, |d| d.child(ui::dialog_close("sftp-close", { let me = cx.entity().downgrade(); move |_w, cx| { let _ = me.update(cx, |_, cx| cx.emit(SftpEvent::Close)); } }))))
+                .child(self.follow_bar(cx)))
             .children(ctx).children(ops)
             .children(edit_bar).children(confirm).children(sync)
             .child(body)

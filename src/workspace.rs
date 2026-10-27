@@ -11,7 +11,6 @@ use crate::termview::{Embed, TermView};
 use crate::theme::{c, cur};
 use crate::ui::{self, icon, IconName};
 use crate::{config, Root, Tab};
-use ssh_term_proto::sftp_mode::Mode as SftpMode;
 
 impl Tool {
     /// The workspace a module shows: port forwarding works on terminal sessions.
@@ -102,7 +101,7 @@ impl Root {
     /// "+" in the tab row outside the terminal module; false = terminal (use the new-tab menu).
     pub(crate) fn new_module_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         match self.tool.workspace() {
-            Tool::Sftp => self.open_sftp_mode(None, SftpMode::Tab, window, cx),
+            Tool::Sftp => self.open_sftp_tab(None, None, None, window, cx),
             Tool::Database => self.db_new_query(None, window, cx),
             Tool::Redis => self.open_asset_dialog(crate::kv_ui::AssetKind::Redis, None, window, cx),
             Tool::Docker => self.open_asset_dialog(crate::kv_ui::AssetKind::Docker, None, window, cx),
@@ -146,9 +145,9 @@ impl Root {
                 for (i, h) in s.hosts.iter().take(12).enumerate() {
                     let name = h.name.clone();
                     list = list.child(row(format!("ws-h-{i}").into(), IconName::Server, h.name.clone(), h.host.clone())
-                        .on_click(cx.listener(move |this, _, w, cx| { let tg = this.target_for(&name); this.open_sftp_mode(tg, SftpMode::Tab, w, cx); })));
+                        .on_click(cx.listener(move |this, _, w, cx| { let tg = this.target_for(&name); this.open_sftp_tab(tg, None, None, w, cx); })));
                 }
-                buttons = buttons.child(ui::button("ws-sftp-new", t("ws.sftp_open"), 1).on_click(cx.listener(|this, _, w, cx| this.open_sftp_mode(None, SftpMode::Tab, w, cx))));
+                buttons = buttons.child(ui::button("ws-sftp-new", t("ws.sftp_open"), 1).on_click(cx.listener(|this, _, w, cx| this.open_sftp_tab(None, None, None, w, cx))));
             }
             Tool::Database => {
                 for (i, d) in s.db.iter().take(12).enumerate() {

@@ -1,4 +1,4 @@
-//! PRD 5.21 integration against the local test sshd (TEST_SSH_PORT, key auth):
+//! SFTP follow-cwd integration against the local test sshd (TEST_SSH_PORT, key auth):
 //! follow-terminal-cwd (OSC 7 and prompt fallback) drives the SFTP listing, and a saved
 //! layout with SFTP tabs restores to the same host + directory.
 use std::time::{Duration, Instant};
@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use ssh_term_proto::ctxmenu;
 use ssh_term_proto::session_store::{self, LayoutSave, NodeSave, PaneSave};
 use ssh_term_proto::sftp;
-use ssh_term_proto::sftp_mode::{Follow, Mode};
+use ssh_term_proto::sftp_follow::Follow;
 use ssh_term_proto::ssh::{self, SshTarget};
 use ssh_term_proto::term::{Session, Size};
 
@@ -83,7 +83,6 @@ fn follow_cwd_and_restore_against_sshd() {
         assert!(!rt.block_on(sftp::list_remote(&s2, rd, false)).unwrap().is_empty());
     }
     assert!(sftps[1].2 && !sftps[0].2, "follow flag persisted per pane");
-    assert_eq!(Mode::parse("split"), Mode::Split);
     let _ = std::fs::remove_file(p);
     s.close();
     exec(&format!("rm -rf {}", ctxmenu::quote(&base)));

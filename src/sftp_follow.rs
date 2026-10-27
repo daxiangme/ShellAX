@@ -1,20 +1,5 @@
-//! SFTP display modes (PRD 5.21): popup / tab / split / detached window, plus the pure
-//! logic behind "follow terminal cwd" and the per-view state that must survive a mode switch.
-use serde::{Deserialize, Serialize};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum Mode { #[default] Popup, Tab, Split, Window }
-
-impl Mode {
-    pub const ALL: [Mode; 4] = [Mode::Popup, Mode::Tab, Mode::Split, Mode::Window];
-    pub fn parse(s: &str) -> Mode {
-        match s.trim().to_ascii_lowercase().as_str() { "tab" => Mode::Tab, "split" => Mode::Split, "window" => Mode::Window, _ => Mode::Popup }
-    }
-    pub fn as_str(self) -> &'static str { match self { Mode::Popup => "popup", Mode::Tab => "tab", Mode::Split => "split", Mode::Window => "window" } }
-    /// Embedded modes fill their container (no modal card, no close-X).
-    pub fn embedded(self) -> bool { !matches!(self, Mode::Popup) }
-}
+//! Pure logic behind SFTP "follow terminal cwd": mapping a terminal cwd to an absolute
+//! directory and deciding when the SFTP pane should navigate.
 
 /// Map a terminal cwd (OSC 7 path or prompt text, maybe `~`-relative) to an absolute directory.
 pub fn follow_target(cwd: &str, home: &str) -> Option<String> {
@@ -52,14 +37,6 @@ pub fn title(host_label: &str) -> String { format!("SFTP · {host_label}") }
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn mode_parse_roundtrip() {
-        for m in Mode::ALL { assert_eq!(Mode::parse(m.as_str()), m); }
-        assert_eq!(Mode::parse("TAB"), Mode::Tab);
-        assert_eq!(Mode::parse("bogus"), Mode::Popup);
-        assert!(!Mode::Popup.embedded() && Mode::Split.embedded());
-        assert_eq!(serde_json::to_string(&Mode::Window).unwrap(), "\"window\"");
-    }
     #[test]
     fn follow_target_paths() {
         assert_eq!(follow_target("~", "/home/u").as_deref(), Some("/home/u"));
