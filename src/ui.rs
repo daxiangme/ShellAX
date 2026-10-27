@@ -91,6 +91,39 @@ pub fn field_row() -> Div {
     div().w_full().flex_shrink_0().px(px(LIST_INSET))
 }
 
+/// 进度环直径：与行内小图标同档，放得进 28px 高的状态条。
+pub const RING: f32 = 14.;
+const RING_STROKE: f32 = 2.;
+
+/// 紧凑进度环：淡色底环加一段按 `frac`（0–1）从 12 点顺时针画出的弧。
+pub fn ring(frac: f32, color: Hsla) -> impl IntoElement {
+    let frac = if frac.is_finite() { frac.clamp(0., 1.) } else { 0. };
+    let track = cur().text;
+    let track = c(track).opacity(0.14);
+    gpui::canvas(|_, _, _| {}, move |b, _, window, _| {
+        let size = f32::from(b.size.width.min(b.size.height));
+        let r = size / 2. - RING_STROKE / 2.;
+        let (cx, cy) = (f32::from(b.origin.x) + f32::from(b.size.width) / 2., f32::from(b.origin.y) + f32::from(b.size.height) / 2.);
+        arc(window, (cx, cy), r, 1., track);
+        if frac > 0.004 { arc(window, (cx, cy), r, frac, color); }
+    }).size(px(RING)).flex_shrink_0()
+}
+
+/// 以 (cx, cy) 为圆心、半径 r，从 12 点起顺时针画 `frac` 圈的描边弧。
+fn arc(window: &mut gpui::Window, (cx, cy): (f32, f32), r: f32, frac: f32, color: Hsla) {
+    let mut pb = gpui::PathBuilder::stroke(px(RING_STROKE));
+    let radii = gpui::point(px(r), px(r));
+    pb.move_to(gpui::point(px(cx), px(cy - r)));
+    if frac >= 0.999 {
+        pb.arc_to(radii, px(0.), false, true, gpui::point(px(cx), px(cy + r)));
+        pb.arc_to(radii, px(0.), false, true, gpui::point(px(cx), px(cy - r)));
+    } else {
+        let a = frac * std::f32::consts::TAU;
+        pb.arc_to(radii, px(0.), a > std::f32::consts::PI, true, gpui::point(px(cx + r * a.sin()), px(cy - r * a.cos())));
+    }
+    if let Ok(path) = pb.build() { window.paint_path(path, color); }
+}
+
 pub fn icon(name: IconName, size: f32, color: Hsla) -> impl IntoElement {
     svg().path(name.path()).size(px(size)).flex_shrink_0().text_color(color)
 }

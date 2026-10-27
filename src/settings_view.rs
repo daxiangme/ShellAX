@@ -227,6 +227,7 @@ impl SettingsView {
             r(Terminal, t("ui.default_shell"), t("ui.empty_uses_shell_applies_to"), Ctl::Text("terminal.shell", "/bin/zsh")),
             r(Terminal, t("ui.term_padding"), t("ui.term_padding_desc"), Ctl::Text("terminal.padding", "8")),
             r(Terminal, t("ui.show_cwd"), t("ui.show_cwd_desc"), Ctl::Toggle("terminal.show_cwd")),
+            r(Terminal, t("ui.show_host_stats"), t("ui.show_host_stats_desc"), Ctl::Toggle("terminal.show_host_stats")),
             r(Terminal, t("ui.style_optimize"), t("ui.style_optimize_desc"), Ctl::Toggle("terminal.style")),
             r(Terminal, t("ui.scrollback_lines"), t("ui.applies_to_new_sessions"), Ctl::Text("terminal.scrollback", "10000")),
             r(Terminal, t("ui.cursor_style"), "", Ctl::Choice("terminal.cursor_style", opts(&[("block", t("ui.block")), ("bar", t("ui.bar")), ("underline", t("ui.underline"))]))),

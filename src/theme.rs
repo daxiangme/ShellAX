@@ -579,6 +579,16 @@ pub fn menu_sel_bg() -> gpui::Hsla {
 pub fn divider() -> gpui::Hsla { c(cur().surface1).opacity(0.6) }
 /// 岛内子卡片底色：卡片底上叠一层很淡的前景色。
 pub fn sub_bg() -> gpui::Hsla { c(cur().text).opacity(0.035) }
+/// 资源占用（0–1）的状态色：低于 70% 成功色，70–90% 警告色，高于 90% 错误色。
+pub fn usage_color(frac: f32) -> gpui::Hsla {
+    let th = cur();
+    if frac > 0.9 { c(th.error) } else if frac > 0.7 { c(th.warning) } else { c(th.success) }
+}
+/// 延迟状态色：低于 100ms 成功色，100–300ms 警告色，更高或超时（None）错误色。
+pub fn latency_color(ms: Option<u32>) -> gpui::Hsla {
+    let th = cur();
+    match ms { Some(v) if v < 100 => c(th.success), Some(v) if v <= 300 => c(th.warning), _ => c(th.error) }
+}
 /// 危险操作悬停底色。
 pub fn danger_bg() -> gpui::Hsla { c(cur().error).opacity(0.12) }
 

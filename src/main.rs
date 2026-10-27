@@ -34,6 +34,7 @@ mod setup_view;
 mod sftp_view;
 mod port_view;
 mod host_tools_view;
+mod hoststats_view;
 mod chat_view;
 mod library;
 mod termview;
@@ -1682,15 +1683,16 @@ impl Root {
         let cwd = pane.as_ref().and_then(|p| p.read(cx).shell_cwd()).filter(|p| !p.is_empty());
         let crumbs = cwd.as_deref().map(termview::cwd_crumbs).unwrap_or_default();
         if crumbs.is_empty() { return None; }
-        let mut row = div().id("cwd-bar").h(px(28.)).flex_shrink_0().px_2().flex().items_center().gap(px(2.)).overflow_x_scroll()
+        let mut row = div().id("cwd-bar").h(px(28.)).flex_shrink_0().px_2().flex().items_center().gap(px(ui::SP_2))
             // 与终端内容之间一条细分隔线，底色略深一层
             .bg(c(th.mantle)).border_t_1().border_color(crate::theme::divider()).rounded_bl(px(card_layout::CARD_RADIUS)).rounded_br(px(card_layout::CARD_RADIUS));
+        let mut crumb_row = div().id("cwd-crumbs").h_full().flex_1().min_w_0().flex().items_center().gap(px(2.)).overflow_x_scroll();
         let last = crumbs.len().saturating_sub(1);
         for (i, (label, path)) in crumbs.into_iter().enumerate() {
-            if i > 0 { row = row.child(icon(IconName::ChevronRight, ui::IC_XS, c(th.overlay0))); }
+            if i > 0 { crumb_row = crumb_row.child(icon(IconName::ChevronRight, ui::IC_XS, c(th.overlay0))); }
             let pane = pane.clone();
             let here = i == last;
-            row = row.child(div().id(("cwd", i)).h(px(24.)).px_1().flex_shrink_0().rounded(px(ui::R_SM)).flex().items_center().gap(px(3.)).cursor_pointer()
+            crumb_row = crumb_row.child(div().id(("cwd", i)).h(px(24.)).px_1().flex_shrink_0().rounded(px(ui::R_SM)).flex().items_center().gap(px(3.)).cursor_pointer()
                 .hover(|d| d.bg(crate::theme::hover_bg()))
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(move |_, _, cx| {
@@ -1701,6 +1703,8 @@ impl Root {
                 .child(icon(IconName::Folder, ui::IC_XS, c(th.overlay1)))
                 .child(div().text_size(px(ui::fs_small())).text_color(if here { c(th.text) } else { c(th.subtext) }).whitespace_nowrap().child(label)));
         }
+        let stats = pane.as_ref().and_then(|p| { let spec = p.read(cx).spec.clone(); self.host_stats_el(&spec, cx) });
+        row = row.child(crumb_row).children(stats);
         Some(row.into_any_element())
     }
 
@@ -2493,6 +2497,11 @@ fn open_main(cx: &mut App, rt: Arc<tokio::runtime::Runtime>, themes: Vec<Arc<The
                             r.approvals.retain(|a| a.deadline > now && (slow || !a.reply.is_disconnected()));
                             cx.notify();
                         }).is_err() { break; }
+                    }).detach();
+                    // host metrics for the path bar: sample the focused pane's host while the window is active
+                    cx.spawn_in(window, async move |this, cx| loop {
+                        cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                        if this.update_in(cx, |r, w, cx| r.host_stats_tick(w, cx)).is_err() { break; }
                     }).detach();
                     // system tray: running-agent count + show / new terminal / quit (Linux SNI)
                     #[cfg(target_os = "linux")]

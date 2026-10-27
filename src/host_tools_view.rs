@@ -66,11 +66,30 @@ impl HostToolsView {
         }
         rx
     }
+    /// Monitor text. SSH hosts go through the shared sampler (the path bar reads the same sample, so the
+    /// host is never polled twice); local goes through `run`.
+    fn run_monitor(&self) -> flume::Receiver<Result<(Option<u32>, String), String>> {
+        let Some(tg) = self.target.clone() else { return self.run(Tab::Monitor.read_command().to_string(), Duration::from_secs(20)) };
+        let (tx, rx) = flume::bounded(1);
+        let p = self.prompts.clone();
+        self.rt.spawn(async move {
+            let r: Result<(Option<u32>, String), String> = async {
+                let (c, _) = ssh::connect_shared(&tg, &p).await.map_err(|e| format!("{e:#}"))?;
+                let s = ssh_term_proto::hoststats::refresh(&tg.pool_key(), &c, Duration::from_millis(ssh_term_proto::hoststats::FRESH_MS)).await?;
+                if s.monitor_text.is_empty() {
+                    let (code, o) = c.exec(&Tab::Monitor.read_command(), Duration::from_secs(20)).await.map_err(|e| format!("{e:#}"))?;
+                    Ok((code, String::from_utf8_lossy(&o).into_owned()))
+                } else { Ok((None, s.monitor_text)) }
+            }.await;
+            let _ = tx.send(r);
+        });
+        rx
+    }
     /// Overview / CPU / memory / disk / network / processes.
     pub fn refresh_stats(&mut self, cx: &mut Context<Self>) {
         if self.stats_busy { return; }
         self.stats_busy = true;
-        let m = self.run(Tab::Monitor.read_command().to_string(), Duration::from_secs(20));
+        let m = self.run_monitor();
         let p = self.run(Tab::Processes.read_command().to_string(), Duration::from_secs(20));
         let n = self.run(hosttools::NET_COMMAND.to_string(), Duration::from_secs(20));
         cx.spawn(async move |this, cx| {
@@ -150,7 +169,7 @@ impl HostToolsView {
     }
 }
 
-fn kb(n: u64) -> String { let g = n as f64 / 1048576.0; if g >= 1.0 { format!("{g:.1} GB") } else { format!("{:.0} MB", n as f64 / 1024.0) } }
+use ssh_term_proto::hoststats::fmt_kb as kb;
 fn rate(b: f64) -> String { if b >= 1048576. { format!("{:.1} MB/s", b / 1048576.) } else if b >= 1024. { format!("{:.0} KB/s", b / 1024.) } else { format!("{b:.0} B/s") } }
 
 impl HostToolsView {
@@ -167,7 +186,7 @@ impl HostToolsView {
     }
     fn meter(label: impl Into<SharedString>, pct: f32, value: String) -> gpui::Div {
         let th = cur();
-        let col = if pct > 0.9 { c(th.error) } else if pct > 0.7 { c(th.warning) } else { c(th.success) };
+        let col = crate::theme::usage_color(pct);
         div().flex().items_center().gap_2().text_size(px(ui::fs_small())).text_color(c(th.subtext))
             .child(div().w(px(64.)).flex_shrink_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(label.into()))
             .child(Self::bar(pct, col))

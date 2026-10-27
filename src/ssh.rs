@@ -580,6 +580,11 @@ exec bash --rcfile "$f" -i
 "#.to_string()
 }
 
+/// A live pooled connection for this target, if one exists. Never connects.
+pub async fn pooled(t: &SshTarget) -> Option<Arc<Conn>> {
+    POOL.lock().await.get(&t.pool_key()).and_then(|w| w.upgrade()).filter(|c| !c.is_closed())
+}
+
 pub async fn connect_shared(t: &SshTarget, prompts: &Prompts) -> Result<(Arc<Conn>, bool)> {
     let key = t.pool_key();
     let mut pool = POOL.lock().await;

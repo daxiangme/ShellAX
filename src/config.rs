@@ -122,6 +122,8 @@ pub struct Terminal {
     pub padding: f32,
     /// Clickable current-directory bar at the bottom of the terminal card.
     pub show_cwd: bool,
+    /// Compact CPU / memory / disk / load / latency readout on the right of the path bar.
+    pub show_host_stats: bool,
     /// On connect, turn on ls/grep colors for this session only. Does not edit remote shell rc files.
     #[serde(default = "t")]
     pub style: bool,
@@ -130,7 +132,7 @@ pub struct Terminal {
 #[serde(default)]
 pub struct HighlightRule { pub pattern: String, pub color: String, pub bold: bool }
 fn default_highlights() -> Vec<HighlightRule> { ssh_term_proto::highlight::DEFAULTS.iter().map(|(p, c, b)| HighlightRule { pattern: p.to_string(), color: c.to_string(), bold: *b }).collect() }
-impl Default for Terminal { fn default() -> Self { Self { padding: f_pad(), show_cwd: t(), style: t(), keyword_highlight: t(), highlights: default_highlights(), shell: String::new(), scrollback: u_scroll(), cursor_style: s_block(), cursor_blink: t(), bell: s_visual(), copy_on_select: false, paste_confirm: t(), mouse_reporting: t(), shell_integration: s_auto(), osc52_write: "allow".into(), osc52_read: false, block_select: "alt".into() } } }
+impl Default for Terminal { fn default() -> Self { Self { padding: f_pad(), show_cwd: t(), show_host_stats: t(), style: t(), keyword_highlight: t(), highlights: default_highlights(), shell: String::new(), scrollback: u_scroll(), cursor_style: s_block(), cursor_blink: t(), bell: s_visual(), copy_on_select: false, paste_confirm: t(), mouse_reporting: t(), shell_integration: s_auto(), osc52_write: "allow".into(), osc52_read: false, block_select: "alt".into() } } }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]

@@ -21,6 +21,8 @@ pub struct Snapshot {
     pub procs: Vec<(u32, String, f32, u64)>,
     /// (接口, 收到字节, 发出字节)
     pub nets: Vec<(String, u64, u64)>,
+    /// 1 / 5 / 15 分钟负载；Windows 没有这个概念，全为 0。
+    pub load: [f64; 3],
 }
 
 fn uptime_text(secs: u64) -> String {
@@ -93,7 +95,47 @@ pub fn snapshot() -> Snapshot {
         disks: disks.iter().map(|d| (d.name().to_string_lossy().into_owned(), d.total_space(), d.available_space(), d.mount_point().display().to_string())).collect(),
         procs: sys.processes().iter().map(|(pid, p)| (pid.as_u32(), p.name().to_string_lossy().into_owned(), p.cpu_usage() / sys.cpus().len().max(1) as f32, p.memory())).collect(),
         nets: nets.iter().map(|(n, d)| (n.clone(), d.total_received(), d.total_transmitted())).collect(),
+        load: load_avg(),
     }
+}
+
+fn load_avg() -> [f64; 3] {
+    if cfg!(windows) { return [0.0; 3]; }
+    let l = System::load_average();
+    [l.one, l.five, l.fifteen]
+}
+
+/// 只采 CPU、内存、磁盘（路径栏每几秒一次，不扫进程和网卡）。与 `snapshot` 共用同一份 CPU 基线。
+pub fn snapshot_light() -> Snapshot {
+    let mut g = SAMPLER.lock().unwrap_or_else(|e| e.into_inner());
+    let Sampler { sys, .. } = &mut *g;
+    sys.refresh_cpu_usage();
+    sys.refresh_memory();
+    let disks = Disks::new_with_refreshed_list();
+    Snapshot {
+        cpus: sys.cpus().len().max(1),
+        cpu_pct: sys.global_cpu_usage(),
+        mem_total: sys.total_memory(),
+        mem_avail: sys.available_memory(),
+        swap_total: sys.total_swap(),
+        swap_free: sys.free_swap(),
+        uptime_secs: System::uptime(),
+        disks: disks.iter().map(|d| (d.name().to_string_lossy().into_owned(), d.total_space(), d.available_space(), d.mount_point().display().to_string())).collect(),
+        load: load_avg(),
+        ..Default::default()
+    }
+}
+
+/// 系统盘 / 根卷：(挂载点, 总容量, 已用)，单位字节。Windows 取系统盘，Mac 优先数据卷，其余取 `/`。
+pub fn root_disk(s: &Snapshot) -> Option<(String, u64, u64)> {
+    let want: Vec<String> = if cfg!(windows) {
+        vec![format!("{}\\", std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into())), "C:\\".into()]
+    } else if cfg!(target_os = "macos") {
+        vec!["/System/Volumes/Data".into(), "/".into()]
+    } else { vec!["/".into()] };
+    let pick = want.iter().find_map(|m| s.disks.iter().find(|d| d.3.eq_ignore_ascii_case(m) && d.1 > 0));
+    let d = pick.or_else(|| s.disks.iter().filter(|d| d.1 > 0).max_by_key(|d| d.1))?;
+    Some((d.3.clone(), d.1, d.1.saturating_sub(d.2)))
 }
 
 static LAST: Mutex<Option<(std::time::Instant, Snapshot)>> = Mutex::new(None);
@@ -127,6 +169,7 @@ mod tests {
             disks: vec![("Local Disk".into(), 500 << 30, 100 << 30, "C:\\".into()), ("empty".into(), 0, 0, "Z:\\".into())],
             procs: vec![(4, "System".into(), 0.5, 1 << 20), (900, "Code Helper.exe".into(), 12.0, 800 << 20)],
             nets: vec![("Wi-Fi".into(), 1000, 2000)],
+            load: [0.0; 3],
         }
     }
     #[test]
@@ -143,6 +186,15 @@ mod tests {
         assert_eq!(p.len(), 2);
         let n = parse_netdev(&net_text(&s));
         assert_eq!((n[0].name.as_str(), n[0].rx, n[0].tx), ("Wi-Fi", 1000, 2000));
+    }
+    #[test]
+    fn root_disk_prefers_the_system_volume() {
+        let mut s = sample();
+        s.disks = vec![("data".into(), 900 << 30, 800 << 30, "/data".into()), ("root".into(), 100 << 30, 40 << 30, if cfg!(windows) { "C:\\".into() } else { "/".into() })];
+        let (_, total, used) = root_disk(&s).unwrap();
+        if !cfg!(target_os = "macos") { assert_eq!((total, used), (100 << 30, 60 << 30)); }
+        s.disks.clear();
+        assert!(root_disk(&s).is_none());
     }
     #[test]
     fn live_snapshot_has_something() {
