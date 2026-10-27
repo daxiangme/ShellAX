@@ -11,3 +11,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 shellax-ext-sdk.workspace = true
 hayro = { version = "0.8", default-features = false, features = ["embed-fonts"] }
+
+[dev-dependencies]
+ext-pdf = { path = "../pdf" }
+image = { version = "0.25", default-features = false, features = ["png"] }

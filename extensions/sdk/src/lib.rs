@@ -109,8 +109,12 @@ pub unsafe fn run_raw(ptr: i32, len: i32, manifest: fn(&Request) -> Value, run: 
 #[macro_export]
 macro_rules! export {
     ($m:path, $r:path) => {
+        const _: (fn(&$crate::Request) -> $crate::serde_json::Value, fn(&$crate::Request) -> $crate::Result<$crate::Reply>) = ($m, $r);
+        // 只在 wasm 目标导出，避免本机测试时多个包链接在一起符号重名。
+        #[cfg(target_arch = "wasm32")]
         #[no_mangle]
         pub extern "C" fn shellax_alloc(len: i32) -> i32 { $crate::alloc(len) }
+        #[cfg(target_arch = "wasm32")]
         #[no_mangle]
         pub unsafe extern "C" fn shellax_run(ptr: i32, len: i32) -> i64 { $crate::run_raw(ptr, len, $m, $r) }
     };

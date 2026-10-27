@@ -2,6 +2,8 @@
 use lopdf::{dictionary, Dictionary, Document, Object, ObjectId, Stream};
 use shellax_ext_sdk::{self as sdk, serde_json::Value, Reply, Request, Result};
 
+pub mod cjk;
+
 fn err<E: std::fmt::Display>(e: E) -> String { e.to_string() }
 
 pub fn load(data: &[u8], zh: bool) -> Result<Document> {
@@ -105,14 +107,16 @@ fn media_box(doc: &Document, id: ObjectId) -> [f32; 4] {
 }
 
 /// 给页面资源加上字体与透明度设置，返回 (字体名, 透明度名)。
-fn add_resources(doc: &mut Document, page: ObjectId, font: ObjectId, gs: ObjectId) -> Result<()> {
+/// 资源名带上对象号，多次叠加（水印后再加页码）互不覆盖。
+fn add_resources(doc: &mut Document, page: ObjectId, font: ObjectId, gs: ObjectId) -> Result<(String, String)> {
     let res = doc.get_dictionary(page).map_err(err)?.get(b"Resources").ok().cloned();
     let res_id = match res {
         Some(Object::Reference(r)) => r,
         Some(Object::Dictionary(d)) => { let id = doc.add_object(d); doc.get_dictionary_mut(page).map_err(err)?.set("Resources", Object::Reference(id)); id }
         _ => { let id = doc.add_object(Dictionary::new()); doc.get_dictionary_mut(page).map_err(err)?.set("Resources", Object::Reference(id)); id }
     };
-    for (cat, name, id) in [(&b"Font"[..], &b"SxF1"[..], font), (b"ExtGState", b"SxG1", gs)] {
+    let (fname, gname) = (format!("SxF{}", font.0), format!("SxG{}", gs.0));
+    for (cat, name, id) in [(&b"Font"[..], fname.as_bytes(), font), (b"ExtGState", gname.as_bytes(), gs)] {
         let sub = doc.get_dictionary(res_id).map_err(err)?.get(cat).ok().cloned();
         match sub {
             Some(Object::Reference(r)) => { doc.get_dictionary_mut(r).map_err(err)?.set(name, Object::Reference(id)); }
@@ -120,7 +124,7 @@ fn add_resources(doc: &mut Document, page: ObjectId, font: ObjectId, gs: ObjectI
             _ => { doc.get_dictionary_mut(res_id).map_err(err)?.set(cat, dictionary! { name => Object::Reference(id) }); }
         }
     }
-    Ok(())
+    Ok((fname, gname))
 }
 
 /// 在页面最上层叠加内容（原内容包进 q/Q，避免其图形状态影响叠加层）。
@@ -157,20 +161,38 @@ fn std_font(doc: &mut Document, bold: bool) -> ObjectId {
     doc.add_object(dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => if bold { "Helvetica-Bold" } else { "Helvetica" }, "Encoding" => "WinAnsiEncoding" })
 }
 
+/// 文字画笔：西文用标准字体，含中日韩等字符时用内置 CID 字体。
+enum TextPen { Std, Cjk(cjk::Shaper) }
+
+impl TextPen {
+    fn new(doc: &mut Document, texts: &[&str], bold: bool, zh: bool) -> Result<(TextPen, ObjectId)> {
+        if !texts.iter().any(|t| cjk::needs_cjk(t)) { return Ok((TextPen::Std, std_font(doc, bold))); }
+        let sh = cjk::Shaper::new(texts)?;
+        if !sh.missing().is_empty() {
+            let m: String = sh.missing().iter().take(10).collect();
+            return Err(if zh { format!("内置字体缺少这些字：{m}") } else { format!("The built-in font lacks these characters: {m}") });
+        }
+        let id = sh.embed(doc)?;
+        Ok((TextPen::Cjk(sh), id))
+    }
+    fn enc(&self, s: &str, size: f32) -> (String, f32) {
+        match self { TextPen::Std => (pdf_str(s).unwrap_or_default(), text_width(s, size)), TextPen::Cjk(sh) => sh.encode(s, size) }
+    }
+}
+
 pub struct Mark<'a> { pub text: &'a str, pub size: f32, pub rgb: [f32; 3], pub opacity: f32, pub pos: &'a str, pub angle: f32 }
 
 pub fn watermark(doc: &mut Document, m: &Mark, zh: bool) -> Result<()> {
-    let lit = pdf_str(m.text).ok_or(if zh { "PDF 水印目前只支持西文字符（内置字体没有中文字形）" } else { "PDF watermarks currently support Latin characters only" })?;
     materialize(doc);
-    let font = std_font(doc, true);
+    let (pen, font) = TextPen::new(doc, &[m.text], true, zh)?;
     let gs = doc.add_object(dictionary! { "Type" => "ExtGState", "ca" => Object::Real(m.opacity), "CA" => Object::Real(m.opacity) });
-    let w = text_width(m.text, m.size);
+    let (lit, w) = pen.enc(m.text, m.size);
     for page in page_ids(doc) {
-        add_resources(doc, page, font, gs)?;
+        let (fname, gname) = add_resources(doc, page, font, gs)?;
         let b = media_box(doc, page);
         let (pw, ph) = (b[2] - b[0], b[3] - b[1]);
         let [r, g, bl] = m.rgb;
-        let mut ops = format!("/SxG1 gs {r} {g} {bl} rg BT /SxF1 {} Tf\n", m.size);
+        let mut ops = format!("/{gname} gs {r} {g} {bl} rg BT /{fname} {} Tf\n", m.size);
         let place = |x: f32, y: f32, a: f32| {
             let (s, c) = a.to_radians().sin_cos();
             // 以文字中心为旋转中心
@@ -199,21 +221,22 @@ pub fn watermark(doc: &mut Document, m: &Mark, zh: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn page_numbers(doc: &mut Document, fmt: &str, pos: &str, size: f32, start: i64) -> Result<()> {
+pub fn page_numbers(doc: &mut Document, fmt: &str, pos: &str, size: f32, start: i64, zh: bool) -> Result<()> {
     materialize(doc);
-    let font = std_font(doc, false);
     let gs = doc.add_object(dictionary! { "Type" => "ExtGState", "ca" => Object::Real(1.0), "CA" => Object::Real(1.0) });
     let ids = page_ids(doc);
     let total = ids.len() as i64 + start - 1;
-    for (i, page) in ids.into_iter().enumerate() {
-        let n = i as i64 + start;
-        let s = match fmt { "n_of" => format!("{n} / {total}"), "dash" => format!("- {n} -"), "page_of" => format!("Page {n} of {total}"), _ => n.to_string() };
-        let lit = pdf_str(&s).unwrap();
-        add_resources(doc, page, font, gs)?;
+    let labels: Vec<String> = (0..ids.len() as i64).map(|i| {
+        let n = i + start;
+        match fmt { "n_of" => format!("{n} / {total}"), "dash" => format!("- {n} -"), "page_of" => format!("Page {n} of {total}"), "zh" => format!("第 {n} 页，共 {total} 页"), _ => n.to_string() }
+    }).collect();
+    let (pen, font) = TextPen::new(doc, &labels.iter().map(|s| s.as_str()).collect::<Vec<_>>(), false, zh)?;
+    for (page, s) in ids.into_iter().zip(&labels) {
+        let (fname, gname) = add_resources(doc, page, font, gs)?;
         let b = media_box(doc, page);
-        let w = text_width(&s, size);
+        let (lit, w) = pen.enc(s, size);
         let x = match pos { "right" => b[2] - 36. - w, "left" => b[0] + 36., _ => b[0] + (b[2] - b[0] - w) / 2. };
-        overlay(doc, page, format!("/SxG1 gs 0 0 0 rg BT /SxF1 {size} Tf {x:.2} {:.2} Td {lit} Tj ET", b[1] + 24.))?;
+        overlay(doc, page, format!("/{gname} gs 0 0 0 rg BT /{fname} {size} Tf {x:.2} {:.2} Td {lit} Tj ET", b[1] + 24.))?;
     }
     Ok(())
 }
@@ -312,12 +335,12 @@ fn manifest(q: &Request) -> Value {
         sdk::tool("pdf_reorder", "pdf", tr("PDF 重排", "Reorder PDF Pages"), tr("按指定顺序重新排列页面", "Rearrange pages in a given order"), "pdf reorder arrange sort pages",
             vec![pdf(), sdk::with_placeholder(sdk::text("order", tr("新顺序", "New order"), ""), tr("例如 3,1,2,4-；“reverse” 为倒序", "e.g. 3,1,2,4-; “reverse” to reverse"))], vec![]),
         sdk::tool("pdf_watermark", "pdf", tr("PDF 水印", "PDF Watermark"), tr("在每一页加文字水印", "Add a text watermark to every page"), "pdf watermark stamp",
-            vec![pdf(), sdk::text("text", tr("水印文字（西文）", "Watermark text"), "CONFIDENTIAL")],
+            vec![pdf(), sdk::text("text", tr("水印文字", "Watermark text"), tr("机密", "CONFIDENTIAL"))],
             vec![sdk::select("pos", tr("位置", "Position"), &[("center", tr("居中斜放", "Diagonal center")), ("tile", tr("平铺", "Tiled")), ("top", tr("顶部", "Top")), ("br", tr("右下角", "Bottom right"))]),
                  sdk::number("size", tr("字号", "Size"), "48"), sdk::text("color", tr("颜色", "Color"), "#ff0000"), sdk::number("opacity", tr("不透明度 %", "Opacity %"), "20")]),
         sdk::tool("pdf_pagenum", "pdf", tr("PDF 页码", "PDF Page Numbers"), tr("在页面底部加页码", "Add page numbers at the bottom of pages"), "pdf page numbers",
             vec![pdf()],
-            vec![sdk::select("fmt", tr("格式", "Format"), &[("n", "1"), ("n_of", "1 / N"), ("dash", "- 1 -"), ("page_of", "Page 1 of N")]),
+            vec![sdk::select("fmt", tr("格式", "Format"), &[("n", "1"), ("n_of", "1 / N"), ("dash", "- 1 -"), ("page_of", "Page 1 of N"), ("zh", "第 1 页，共 N 页")]),
                  sdk::select("pos", tr("位置", "Position"), &[("center", tr("居中", "Center")), ("right", tr("右侧", "Right")), ("left", tr("左侧", "Left"))]),
                  sdk::number("size", tr("字号", "Size"), "10"), sdk::number("start", tr("起始页码", "Start at"), "1")]),
         sdk::tool("img_to_pdf", "pdf", tr("图片转 PDF", "Images to PDF"), tr("把多张图片合成一个 PDF", "Combine images into one PDF"), "image jpg png to pdf",
@@ -399,7 +422,7 @@ fn run(q: &Request) -> Result<Reply> {
         "pdf_pagenum" => {
             let f = q.file("file")?;
             let mut d = load(&f.data, zh)?;
-            page_numbers(&mut d, q.get("fmt"), q.get("pos"), q.num("size", 10.).clamp(4., 72.) as f32, q.int("start", 1, -100000, 100000))?;
+            page_numbers(&mut d, q.get("fmt"), q.get("pos"), q.num("size", 10.).clamp(4., 72.) as f32, q.int("start", 1, -100000, 100000), zh)?;
             out(format!("{}-numbered.pdf", sdk::stem(&f.name)), d, String::new())
         }
         "img_to_pdf" => {

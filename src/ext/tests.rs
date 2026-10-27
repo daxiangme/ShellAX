@@ -133,4 +133,25 @@ fn built_packs_run_in_host() {
         let o = run(&w, "qr_gen", &[("input", "hello")]).unwrap();
         assert!(o.file.is_some());
     }
+    // 中文水印：在 wasm 里完成字体子集化与 CID 嵌入。
+    if let (Some(pdfw), Some(imgw)) = (load("pdf"), load("image")) {
+        let png = run(&imgw, "qr_gen", &[("input", "x")]).unwrap().file.unwrap().1;
+        let tmp = std::env::temp_dir().join(format!("shellax-ext-{}.png", std::process::id()));
+        std::fs::write(&tmp, &png).unwrap();
+        let mut a = Args::default();
+        a.files.insert("files".into(), vec![tmp.clone()]);
+        let pdf = run_tool(&pdfw, "img_to_pdf", &a).unwrap().file.unwrap().1;
+        let tmp2 = tmp.with_extension("pdf");
+        std::fs::write(&tmp2, &pdf).unwrap();
+        let mut a = Args::default();
+        a.files.insert("file".into(), vec![tmp2.clone()]);
+        a.values.insert("text".into(), "内部资料".into());
+        let out = run_tool(&pdfw, "pdf_watermark", &a).unwrap().file.unwrap().1;
+        assert!(out.windows(12).any(|w| w == b"CIDFontType2"));
+        let mut a = Args::default();
+        a.files.insert("file".into(), vec![tmp.clone()]);
+        a.values.insert("text".into(), "内部资料".into());
+        assert!(run_tool(&imgw, "img_watermark", &a).unwrap().file.is_some());
+        let _ = (std::fs::remove_file(tmp), std::fs::remove_file(tmp2));
+    }
 }

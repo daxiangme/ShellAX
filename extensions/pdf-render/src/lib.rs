@@ -52,7 +52,31 @@ fn run(q: &Request) -> Result<Reply> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn renders_cjk_watermark() {
+        let base = minimal();
+        let mut d = ext_pdf::load(&base, true).unwrap();
+        ext_pdf::watermark(&mut d, &ext_pdf::Mark { text: "机密", size: 40., rgb: [1., 0., 0.], opacity: 1., pos: "center", angle: 0. }, true).unwrap();
+        let pdf = ext_pdf::save(&mut d).unwrap();
+        let r = super::render_pages(pdf, "", 72.0, "t", true).unwrap();
+        let img = image_png_red_pixels(&r[0].1);
+        assert!(img > 50, "watermark glyphs not drawn: {img}");
+    }
+
+    /// 统计 PNG 里偏红的像素数（不引入解码库：渲染器自带 png 编码，这里用 hayro 的依赖解码）。
+    fn image_png_red_pixels(png: &[u8]) -> usize {
+        let img = image::load_from_memory(png).unwrap().to_rgba8();
+        img.pixels().filter(|p| p[0] > 200 && p[1] < 120 && p[2] < 120).count()
+    }
+
+    #[test]
     fn renders_generated_pdf() {
+        let pdf = minimal();
+        let r = super::render_pages(pdf, "", 72.0, "t", true).unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(&r[0].1[1..4], b"PNG");
+    }
+
+    fn minimal() -> Vec<u8> {
         // 最小 PDF：一页，画一个矩形。
         let content = b"0 0 1 rg 10 10 50 50 re f";
         let mut pdf = Vec::new();
@@ -69,9 +93,7 @@ mod tests {
         pdf.extend_from_slice(b"xref\n0 5\n0000000000 65535 f \n");
         for o in offs { pdf.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes()); }
         pdf.extend_from_slice(format!("trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{x}\n%%EOF").as_bytes());
-        let r = super::render_pages(pdf, "", 72.0, "t", true).unwrap();
-        assert_eq!(r.len(), 1);
-        assert_eq!(&r[0].1[1..4], b"PNG");
+        pdf
     }
 }
 

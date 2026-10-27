@@ -117,4 +117,6 @@ On Windows the default fallback chain also lists the system fonts "Segoe UI Symb
 - PDF 工具（pdf）：lopdf 0.46 — MIT；encoding_rs — (Apache-2.0 OR MIT) AND BSD-3-Clause；stringprep / unicode-normalization — MIT OR Apache-2.0（含 Unicode-3.0 数据）
 - PDF 渲染（pdf-render）：hayro 0.8 / hayro-interpret / hayro-syntax / hayro-jpeg2000 / hayro-jbig2 / hayro-ccitt / hayro-cmap / hayro-postscript、vello_cpu、vello_common、kurbo、peniko、skrifa、read-fonts、fearless_simd — Apache-2.0 OR MIT；pic-scale、moxcms、pxfm — BSD-3-Clause OR Apache-2.0；yoke / zerofrom — Unicode-3.0
   - 内嵌标准字体（.pfb）：Copyright 2014 PDFium Authors，原始代码 Copyright 2014 Foxit Software Inc.，BSD-3-Clause；内嵌 CMYK 配置文件 — CC0-1.0
+- 中文字体（image、pdf 扩展包内置）：`extensions/assets/NotoSansSC-common.ttf`，由 Noto Sans SC（Copyright 2014-2021 Adobe，Reserved Font Name 'Source'）裁剪为常用字子集（ASCII、常用中文标点与 GB2312 一级汉字 3755 字，常规字重），SIL Open Font License 1.1，许可全文见 `extensions/assets/NotoSansSC-OFL.txt`；PDF 中按文档再次子集化嵌入
+- PDF 中文字体嵌入（pdf）：subsetter 0.2 — MIT OR Apache-2.0；ttf-parser 0.25 — MIT OR Apache-2.0
 - 完整传递依赖清单可在 `extensions/` 下运行 `cargo tree --target wasm32-unknown-unknown -e normal` 查看；均为 MIT / Apache-2.0 / BSD / Zlib / Unicode-3.0 / CC0 等宽松许可。

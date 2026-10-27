@@ -52,13 +52,13 @@ fn rotate_mark_number_clean() {
 
     let mut d = load(&a, false).unwrap();
     watermark(&mut d, &Mark { text: "DRAFT (x)", size: 40., rgb: [1., 0., 0.], opacity: 0.3, pos: "tile", angle: 45. }, false).unwrap();
-    page_numbers(&mut d, "n_of", "center", 10., 1).unwrap();
+    page_numbers(&mut d, "n_of", "center", 10., 1, false).unwrap();
     let w = roundtrip(d);
     let t = texts(&w);
     assert!(t[0].contains("A page 1") && t[0].contains("DRAFT") && t[0].contains("1 / 3"), "{t:?}");
     assert!(t[2].contains("3 / 3"));
     let mut d = load(&a, false).unwrap();
-    assert!(watermark(&mut d, &Mark { text: "机密", size: 40., rgb: [0.; 3], opacity: 0.3, pos: "center", angle: 45. }, true).is_err());
+    assert!(watermark(&mut d, &Mark { text: "机密", size: 40., rgb: [0.; 3], opacity: 0.3, pos: "center", angle: 45. }, true).is_ok());
 
     let mut d = load(&a, false).unwrap();
     let removed = clean(&mut d);
@@ -88,4 +88,26 @@ fn via_abi() {
     let j: Value = sdk::serde_json::from_slice(&out[4..4 + n]).unwrap();
     assert_eq!(j["file_name"], "x-split.zip", "{j}");
     assert_eq!(&out[4 + n..4 + n + 4], b"PK\x03\x04");
+}
+
+#[test]
+fn cjk_watermark_and_page_numbers() {
+    let mut d = load(&sample(2, "Doc"), true).unwrap();
+    watermark(&mut d, &Mark { text: "内部资料 机密", size: 40., rgb: [1., 0., 0.], opacity: 0.3, pos: "center", angle: 45. }, true).unwrap();
+    page_numbers(&mut d, "zh", "center", 10., 1, true).unwrap();
+    let out = roundtrip(d);
+    // 子集化后整个文件应远小于内置字体本身。
+    assert!(out.len() < 200_000, "pdf too large: {}", out.len());
+    let d = load(&out, true).unwrap();
+    let fonts: Vec<_> = d.objects.values().filter_map(|o| o.as_dict().ok()).filter(|o| o.get(b"Subtype").ok().and_then(|s| s.as_name().ok()) == Some(b"CIDFontType2")).collect();
+    assert!(!fonts.is_empty());
+    let t = texts(&out).join("\n");
+    assert!(t.contains("机密") && t.contains("第 1 页，共 2 页"), "{t}");
+}
+
+#[test]
+fn cjk_missing_glyph_reported() {
+    let mut d = load(&sample(1, "Doc"), true).unwrap();
+    let e = watermark(&mut d, &Mark { text: "𠀀", size: 40., rgb: [0.; 3], opacity: 0.3, pos: "center", angle: 0. }, true).unwrap_err();
+    assert!(e.contains("𠀀"));
 }

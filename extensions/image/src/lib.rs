@@ -146,6 +146,17 @@ impl Pen {
     }
 }
 
+/// 内置中文字体（思源黑体常用字子集，SIL OFL 1.1）。
+pub static CJK_FONT: &[u8] = include_bytes!("../../assets/NotoSansSC-common.ttf");
+
+/// 用内置中文字体的画笔；字库里没有的字会报错而不是画成空框。
+pub fn cjk_pen(text: &str, px: f32, zh: bool) -> Result<Pen> {
+    let f = FontVec::try_from_vec(CJK_FONT.to_vec()).map_err(err)?;
+    let miss: String = text.chars().filter(|c| !c.is_whitespace() && f.glyph_id(*c).0 == 0).take(10).collect();
+    if !miss.is_empty() { return Err(if zh { format!("内置字体缺少这些字：{miss}；可选择其他字体文件") } else { format!("The built-in font lacks: {miss}; choose a font file") }); }
+    Ok(Pen::Font(f, px))
+}
+
 pub fn parse_color(s: &str) -> [u8; 3] {
     let h = s.trim().trim_start_matches('#');
     if h.len() == 6 { if let Ok(v) = u32::from_str_radix(h, 16) { return [(v >> 16) as u8, (v >> 8) as u8, v as u8]; } }
@@ -220,7 +231,7 @@ fn manifest(q: &Request) -> Value {
             vec![sdk::file("file", tr("图片", "Image"))],
             vec![sdk::select("format", tr("输出格式", "Output format"), &[("jpeg", "JPEG"), ("png", "PNG")]), sdk::number("quality", tr("JPEG 质量", "JPEG quality"), "80"), sdk::number("max", tr("最长边（像素，0 为不缩放）", "Longest side (px, 0 = keep)"), "1920")]),
         sdk::tool("img_watermark", "image", tr("图片水印", "Image Watermark"), tr("给图片加文字水印", "Add a text watermark to an image"), "image watermark text",
-            vec![sdk::file("file", tr("图片", "Image")), sdk::text("text", tr("水印文字", "Watermark text"), ""), sdk::file("font", tr("字体文件（可选，中文需要）", "Font file (optional, needed for CJK)"))],
+            vec![sdk::file("file", tr("图片", "Image")), sdk::text("text", tr("水印文字", "Watermark text"), ""), sdk::file("font", tr("字体文件（可选）", "Font file (optional)"))],
             vec![sdk::select("pos", tr("位置", "Position"), &pos), sdk::number("size", tr("字号（像素）", "Size (px)"), "32"), sdk::text("color", tr("颜色", "Color"), "#ffffff"), sdk::number("opacity", tr("不透明度 %", "Opacity %"), "50")]),
     ])
 }
@@ -262,10 +273,8 @@ fn run(q: &Request) -> Result<Reply> {
             let size = q.num("size", 32.).clamp(6., 1000.);
             let pen = match q.files("font").first() {
                 Some(ff) => Pen::Font(FontVec::try_from_vec(ff.data.clone()).map_err(|_| q.tr("无法读取字体文件", "Can't read the font file").to_string())?, size as f32),
-                None => {
-                    if !text.is_ascii() { return Err(q.tr("内置字体只支持英文、数字和符号；中文水印请选择一个字体文件（.ttf/.otf）", "The built-in font only covers ASCII; choose a font file (.ttf/.otf) for other text").into()); }
-                    Pen::Bitmap(((size / 8.).round() as u32).max(1))
-                }
+                None if text.is_ascii() => Pen::Bitmap(((size / 8.).round() as u32).max(1)),
+                None => cjk_pen(text, size as f32, zh)?,
             };
             let img = load(&f.data, zh)?;
             let out = watermark(&img, text, &pen, q.get("pos"), parse_color(q.get("color")), (q.num("opacity", 50.) / 100.).clamp(0.02, 1.) as f32);
@@ -311,5 +320,17 @@ mod tests {
         let tiled = watermark(&img, "A", &Pen::Bitmap(1), "tile", [0, 0, 0], 0.5);
         assert_ne!(tiled.to_rgba8(), img.to_rgba8());
         assert_eq!(parse_color("#f00"), [255, 0, 0]);
+    }
+
+    #[test]
+    fn cjk_watermark() {
+        let img = DynamicImage::ImageRgba8(RgbaImage::from_pixel(300, 120, Rgba([255, 255, 255, 255])));
+        let pen = cjk_pen("内部资料", 40., true).unwrap();
+        let (w, _) = pen.measure("内部资料");
+        assert!(w > 80, "width {w}");
+        let out = watermark(&img, "内部资料", &pen, "center", [255, 0, 0], 1.0).to_rgba8();
+        let red = out.pixels().filter(|p| p[0] > 200 && p[1] < 100).count();
+        assert!(red > 300, "red pixels {red}");
+        assert!(cjk_pen("𠀀", 40., true).err().unwrap().contains("𠀀"));
     }
 }
