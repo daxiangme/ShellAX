@@ -399,6 +399,7 @@ island
 - **数据库视图**（`db_view.rs`）：工具栏 36/34 → `toolbar()`；结果表头 `table_header`；单元格 `mono_family` + `fs_mono`；SQL 编辑器/结果子卡片 `R_SUB`；错误条 `notice(error)`。
 - **Redis 视图**（`kv_view.rs:659`）、**Docker 视图**（`dock_view.rs:346,396,570,679`）、**文档视图**（`doc_view.rs:403`）、**工具页**（`tools_view.rs:258`）、**工作区头**（`workspace.rs:130`）：头部统一 `toolbar()`；分组头 `table_header`；`small()/mono()` 辅助函数改为调用 `ui` 组件；弹出表单 → `ui::card` + `dialog_header/footer`。
 - **SFTP**（`sftp_view.rs`）：工具栏 `toolbar()`；行高与文件图标尺寸保持（26/18 已单独调过，改为引用 `row_h()` 与 `IC_MD` 时若视觉变化须在提交说明注明）；弹窗头 `dialog_header`。
+  - 左右留白只来自工作区包裹层的 `CARD_PAD`，SFTP 自身不再叠加内边距：标题栏（`dialog_header(...).px_0()`）、双栏面板卡片、传输队列、状态行、编辑/确认/同步条的左右边缘都落在同一条竖线上，标题图标左边缘 = 面板卡片左边缘，右侧同理。
 - **终端内浮层**（`termview.rs:1623,2252-2380`）：连接中卡片、错误卡片、AI 建议卡片里的手写按钮 `btn` 闭包 → `ui::button` / `button_sm`；卡片 → `ui::card` 风格（`R_LG`、`divider()` 边框、`soft_shadow`）；标题 `fs_title`、正文 `fs_small`；命令 `mono_family` `fs_mono_block`。历史下拉（`termview.rs:1096`）选中行改 `menu_sel_bg()`。
 
 ### 5.5 浮层
