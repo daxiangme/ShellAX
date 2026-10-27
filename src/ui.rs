@@ -226,6 +226,15 @@ pub fn chip(id: impl Into<ElementId>, label: impl Into<SharedString>, on: bool) 
 
 /// Segmented choice control. Returns the row; each option gets an id `(base, index)`.
 pub fn segmented(base: &'static str, options: &[(String, String)], selected: &str, on: impl Fn(String, &mut gpui::Window, &mut gpui::App) + 'static + Clone) -> impl IntoElement {
+    segmented_with(base, options, selected, false, on)
+}
+
+/// 占满容器宽度的分段控件：各选项等分、文字居中（卡片内的二选一筛选）。
+pub fn segmented_fill(base: &'static str, options: &[(String, String)], selected: &str, on: impl Fn(String, &mut gpui::Window, &mut gpui::App) + 'static + Clone) -> impl IntoElement {
+    segmented_with(base, options, selected, true, on)
+}
+
+fn segmented_with(base: &'static str, options: &[(String, String)], selected: &str, fill: bool, on: impl Fn(String, &mut gpui::Window, &mut gpui::App) + 'static + Clone) -> impl IntoElement {
     let th = cur();
     let mut row = div().w_full().flex().flex_wrap().items_center().p(px(2.)).gap(px(2.)).rounded(px(R_MD)).bg(hover_bg());
     for (i, (val, label)) in options.iter().enumerate() {
@@ -234,6 +243,7 @@ pub fn segmented(base: &'static str, options: &[(String, String)], selected: &st
         let on = on.clone();
         row = row.child(
             div().id((base, i)).h(px(H_COMPACT)).px(px(10.)).rounded(px(R_MD)).flex().items_center().cursor_pointer().text_size(px(fs_small()))
+                .when(fill, |d| d.flex_1().justify_center())
                 .when(active, |d| d.bg(crate::theme::card_bg()).shadow_sm().font_weight(FontWeight::MEDIUM))
                 .text_color(if active { c(th.text) } else { c(th.subtext) })
                 .hover(|s| s.text_color(c(cur().text)))

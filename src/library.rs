@@ -1,12 +1,12 @@
 //! Right-hand docks for saved commands and command history. Same card as the AI assistant.
-use gpui::{div, prelude::*, px, AnyElement, ClipboardItem, Context, Entity, FontWeight, SharedString, Window};
+use gpui::{anchored, deferred, div, prelude::*, px, AnyElement, ClipboardItem, Context, Entity, FontWeight, Pixels, Point, SharedString, Window};
 use gpui_component::input::{InputState, Textarea, TextareaState};
 use ssh_term_proto::i18n::{t, tf};
 use ssh_term_proto::snippets::Snippet;
 use ssh_term_proto::suggest::HistItem;
 
 use crate::theme::{c, cur};
-use crate::ui::{self, icon, IconName};
+use crate::ui::{self, IconName};
 use crate::{data_dir, Root};
 
 /// Filter value for snippets that have no group. Not a name a user can type.
@@ -35,6 +35,13 @@ pub(crate) struct LibConfirm {
     pub reasons: Vec<String>,
 }
 
+/// 行内「更多」菜单针对的那一行。
+#[derive(Clone)]
+pub(crate) enum LibMenu {
+    Snippet { id: String, name: String, group: String, note: String, body: String },
+    History { key: String, cmd: String },
+}
+
 struct HistRow {
     key: String,
     cmd: String,
@@ -46,15 +53,6 @@ fn fmt_ts(ts: i64) -> String {
     chrono::DateTime::from_timestamp(ts, 0)
         .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_default()
-}
-
-fn chip(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, on: bool) -> gpui::Stateful<gpui::Div> {
-    let th = cur();
-    div().id(id).h(px(24.)).px_2().rounded_full().flex().items_center().cursor_pointer().text_size(px(11.))
-        .bg(if on { c(th.accent).opacity(0.16) } else { c(th.surface0) })
-        .text_color(if on { c(th.accent) } else { c(th.subtext) })
-        .hover(|d| d.bg(c(cur().surface1)))
-        .child(label.into())
 }
 
 impl Root {
@@ -72,16 +70,15 @@ impl Root {
         let notice = if owns_forms { self.lib_notice.clone() } else { String::new() };
         let module = self.snippet_module();
         let ready = module != "terminal" || self.focused_pane(window, cx).is_some_and(|p| p.read(cx).ready());
-        let th = cur();
+        let mut actions: Vec<AnyElement> = vec![];
         let mut body = div().flex_1().min_h_0().flex().flex_col();
-        body = body.child(ui::field_row().pt_2().child(ui::search_field(&search, false)));
+        body = body.child(ui::field_row().pb(px(ui::SP_2)).child(ui::search_field(&search, false)));
         if !ready {
-            body = body.child(div().px_3().pt_2().text_size(px(12.)).text_color(c(th.overlay1)).child(t("lib.need_terminal")));
+            body = body.child(ui::notice(ui::Notice::Info, t("lib.need_terminal")).mb(px(ui::SP_2)));
         }
         if snippets_mode {
             let mut all = ssh_term_proto::snippets::load();
             all.retain(|s| s.module == module);
-            body = body.child(div().px_3().pt_2().text_size(px(11.)).text_color(c(th.overlay1)).child(tf("lib.module_scope", &[("module", &crate::library::module_label(module))])));
             body = body.child(self.snippet_groups(&all, &group, cx));
             if let Some(ed) = editor {
                 body = body.child(self.snippet_editor(&ed, cx));
@@ -90,121 +87,107 @@ impl Root {
             } else if let Some(cfn) = confirm {
                 body = body.child(self.confirm_form(&cfn, cx));
             } else {
-                let empty = all.is_empty();
-                body = body.child(self.snippet_list(&all, &q, &group, cx));
-                body = body.child(div().px_3().py_2().flex_shrink_0().flex().gap_2().child(
-                    ui::button("lib-new", t("lib.new"), 1).on_click(cx.listener(|this, _, w, cx| {
-                        this.open_lib_editor(None, String::new(), String::new(), String::new(), String::new(), w, cx);
-                    })),
-                ).when(empty, |d| d.child(ui::button("lib-starters", t("lib.add_examples"), 0).on_click(cx.listener(move |this, _, _w, cx| this.add_starters(module, cx))))));
+                actions.push(ui::icon_button("lib-new", IconName::Plus, ui::IconBtn::Md, t("lib.new")).on_click(cx.listener(|this, _, w, cx| {
+                    this.open_lib_editor(None, String::new(), String::new(), String::new(), String::new(), w, cx);
+                })).into_any_element());
+                body = body.child(self.snippet_list(&all, &q, &group, module, cx));
             }
         } else {
-            body = body.child(div().px_3().pt_2().flex().gap_1()
-                .child(chip("lib-host-this", t("lib.this_host"), !hist_all).on_click(cx.listener(|this, _, _, cx| { this.lib_hist_all = false; cx.notify(); })))
-                .child(chip("lib-host-all", t("lib.all_hosts"), hist_all).on_click(cx.listener(|this, _, _, cx| { this.lib_hist_all = true; cx.notify(); }))));
+            let opts = [("this".to_string(), t("lib.this_host").to_string()), ("all".to_string(), t("lib.all_hosts").to_string())];
+            let me = cx.entity();
+            body = body.child(div().w_full().flex_shrink_0().px(px(ui::LIST_INSET)).pb(px(ui::SP_2))
+                .child(ui::segmented_fill("lib-host", &opts, if hist_all { "all" } else { "this" }, move |v, _w, cx| { me.update(cx, |this, cx| { this.lib_hist_all = v == "all"; cx.notify(); }); })));
             if let Some(v) = vars {
                 body = body.child(self.var_form(&v, cx));
             } else if let Some(cfn) = confirm {
                 body = body.child(self.confirm_form(&cfn, cx));
             } else {
+                actions.push(ui::icon_button_state("lib-clear-host", IconName::Trash, ui::IconBtn::Md, t("lib.clear_host"), false, true)
+                    .on_click(cx.listener(|this, _, w, cx| this.clear_current_history(w, cx))).into_any_element());
                 let rows = self.history_rows(window, cx);
                 body = body.child(self.history_list(&rows, &q, hist_all, cx));
-                body = body.child(div().px_3().py_2().flex_shrink_0().child(
-                    ui::button("lib-clear-host", t("lib.clear_host"), 2).on_click(cx.listener(|this, _, w, cx| this.clear_current_history(w, cx))),
-                ));
             }
         }
         if !notice.is_empty() {
-            body = body.child(div().px_3().pb_2().text_size(px(12.)).text_color(c(th.warning)).child(notice));
+            body = body.child(ui::notice(ui::Notice::Warn, notice).my(px(ui::SP_2)));
         }
-        let (id, title, ic) = if snippets_mode { ("snip-dock", t("lib.snippets"), IconName::Code) } else { ("hist-dock", t("lib.history"), IconName::Clock) };
-        self.dock_frame(id, title.into(), None, ic, vec![], body, cx)
+        if let Some((target, pos)) = self.lib_menu.clone() {
+            body = body.child(self.lib_menu_el(target, pos, cx));
+        }
+        let (id, title, sub, ic) = if snippets_mode { ("snip-dock", t("lib.snippets"), Some(SharedString::from(module_label(module))), IconName::Code) } else { ("hist-dock", t("lib.history"), None, IconName::Clock) };
+        self.dock_frame(id, title.into(), sub, ic, actions, body, cx)
     }
 
-    fn snippet_groups(&mut self, all: &[Snippet], group: &str, cx: &mut Context<Self>) -> gpui::Div {
+    fn snippet_groups(&mut self, all: &[Snippet], group: &str, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         let mut names: Vec<String> = all.iter().map(|s| s.group.clone()).filter(|g| !g.is_empty()).collect();
         names.sort();
         names.dedup();
         let ungrouped = all.iter().any(|s| s.group.is_empty());
-        let mut row = div().px_3().pt_2().flex().flex_wrap().gap_1()
-            .child(chip("lib-g-all", t("lib.all_groups"), group.is_empty()).on_click(cx.listener(|this, _, _, cx| { this.lib_group.clear(); cx.notify(); })));
+        // 单行不换行，超出横向滚动
+        let mut row = div().id("lib-groups").w_full().flex_shrink_0().px(px(ui::LIST_INSET)).pb(px(ui::SP_2)).flex().flex_nowrap().gap(px(ui::SP_1)).overflow_x_scroll()
+            .child(ui::chip("lib-g-all", t("lib.all_groups"), group.is_empty()).on_click(cx.listener(|this, _, _, cx| { this.lib_group.clear(); cx.notify(); })));
         for (i, name) in names.iter().enumerate() {
             let n = name.clone();
             let on = group == name;
-            row = row.child(chip(("lib-g", i), name.clone(), on).on_click(cx.listener(move |this, _, _, cx| { this.lib_group = n.clone(); cx.notify(); })));
+            row = row.child(ui::chip(("lib-g", i), name.clone(), on).on_click(cx.listener(move |this, _, _, cx| { this.lib_group = n.clone(); cx.notify(); })));
         }
         if ungrouped {
-            row = row.child(chip("lib-g-none", t("lib.ungrouped"), group == UNGROUPED).on_click(cx.listener(|this, _, _, cx| { this.lib_group = UNGROUPED.into(); cx.notify(); })));
+            row = row.child(ui::chip("lib-g-none", t("lib.ungrouped"), group == UNGROUPED).on_click(cx.listener(|this, _, _, cx| { this.lib_group = UNGROUPED.into(); cx.notify(); })));
         }
         row
     }
 
-    fn snippet_list(&mut self, all: &[Snippet], q: &str, group: &str, cx: &mut Context<Self>) -> AnyElement {
+    fn snippet_list(&mut self, all: &[Snippet], q: &str, group: &str, module: &'static str, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
         let shown: Vec<Snippet> = all.iter().filter(|s| snip_visible(s, q, group)).cloned().collect();
-        let mut list = div().id("lib-snip-list").flex_1().min_h_0().overflow_y_scroll().px_2().py_1().flex().flex_col().gap(px(2.));
-        if shown.is_empty() {
-            list = list.child(div().p_4().text_size(px(12.)).text_color(c(th.overlay1)).child(t("lib.empty_snippets")));
+        if all.is_empty() {
+            return ui::empty_state(IconName::Code, t("lib.empty_snippets_title"), Some(t("lib.empty_snippets_desc").into()), vec![
+                ui::button("lib-new-empty", t("lib.new"), 1).on_click(cx.listener(|this, _, w, cx| {
+                    this.open_lib_editor(None, String::new(), String::new(), String::new(), String::new(), w, cx);
+                })).into_any_element(),
+                ui::button("lib-starters", t("lib.add_examples"), 0).on_click(cx.listener(move |this, _, _w, cx| this.add_starters(module, cx))).into_any_element(),
+            ], false).into_any_element();
         }
+        if shown.is_empty() {
+            return ui::empty_state(IconName::Search, t("ui.no_matching_commands"), None, vec![], false).into_any_element();
+        }
+        let mut list = div().id("lib-snip-list").flex_1().min_h_0().overflow_y_scroll().pb(px(ui::SP_2)).flex().flex_col();
         for (i, s) in shown.iter().enumerate() {
             let body = s.body.clone();
-            let id = s.id.clone();
-            let name = s.name.clone();
             let group_name = s.group.clone();
-            let note = s.note.clone();
             let preview: String = s.body.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim().chars().take(80).collect();
             let run_body = body.clone();
             let ins_body = body.clone();
             let copy_body = body.clone();
-            let edit = (id.clone(), name, group_name.clone(), note, body.clone());
-            let del = id.clone();
-            let dup = id.clone();
-            list = list.child(div().id(("lib-sn", i)).px_2().py_1().rounded(px(6.)).flex().items_center().gap_1().cursor_pointer()
-                .hover(|d| d.bg(c(cur().surface0)))
+            let menu = LibMenu::Snippet { id: s.id.clone(), name: s.name.clone(), group: group_name.clone(), note: s.note.clone(), body };
+            let gid = SharedString::from(format!("lib-sn-{i}"));
+            list = list.child(ui::list_row(("lib-sn", i), 0, false).min_h(px(ui::row2_h())).group(gid.clone())
                 .on_click(cx.listener(move |this, _, w, cx| this.start_snippet(run_body.clone(), true, w, cx)))
-                .child(div().flex_1().min_w_0().flex().flex_col().gap(px(1.))
-                    .child(div().flex().items_center().gap_1()
-                        .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(s.name.clone()))
-                        .when(!group_name.is_empty(), |d| d.child(div().text_size(px(11.)).text_color(c(th.overlay0)).child(group_name.clone()))))
-                    .child(div().text_size(px(11.)).text_color(c(th.subtext)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(preview)))
-                .child(self.row_icon(("lib-ins", i), IconName::CornerDownLeft, t("lib.insert").into(), cx).on_click(cx.listener(move |this, _, w, cx| { cx.stop_propagation(); this.start_snippet(ins_body.clone(), false, w, cx); })))
-                .child(self.row_icon(("lib-cp", i), IconName::Copy, t("lib.copy").into(), cx).on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.copy_lib(copy_body.clone(), cx); })))
-                .child(self.row_icon(("lib-ed", i), IconName::Pencil, t("lib.edit").into(), cx).on_click(cx.listener(move |this, _, w, cx| {
-                    cx.stop_propagation();
-                    let (id, name, group, note, body) = edit.clone();
-                    this.open_lib_editor(Some(id), name, group, note, body, w, cx);
-                })))
-                .child(self.row_icon(("lib-dup", i), IconName::CopyPlus, t("lib.duplicate").into(), cx).on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    match ssh_term_proto::snippets::duplicate(&dup) { Ok(_) => this.lib_notice = t("lib.saved").into(), Err(e) => this.lib_notice = e }
-                    cx.notify();
-                })))
-                .child(self.row_icon(("lib-del", i), IconName::Trash, t("lib.delete").into(), cx).on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    if let Err(e) = ssh_term_proto::snippets::delete(&del) { this.lib_notice = e; } else { this.lib_notice.clear(); }
-                    cx.notify();
-                }))));
+                .child(div().flex_1().min_w_0().flex().flex_col()
+                    .child(div().flex().items_center().gap(px(ui::SP_1))
+                        .child(ui::row_title(s.name.clone()).font_weight(FontWeight::MEDIUM))
+                        .when(!group_name.is_empty(), |d| d.child(div().flex_shrink_0().child(ui::tag(group_name.clone(), c(th.subtext))))))
+                    .child(self.mono_line(preview, c(th.subtext))))
+                .child(ui::row_actions(gid)
+                    .child(self.act_btn(("lib-ins", i), IconName::CornerDownLeft, t("lib.insert")).on_click(cx.listener(move |this, _, w, cx| { cx.stop_propagation(); this.start_snippet(ins_body.clone(), false, w, cx); })))
+                    .child(self.act_btn(("lib-cp", i), IconName::Copy, t("lib.copy")).on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.copy_lib(copy_body.clone(), cx); })))
+                    .child(self.more_btn(("lib-more", i), menu, cx))));
         }
         list.into_any_element()
     }
 
     fn snippet_editor(&mut self, ed: &LibEditor, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
-        // Full-size controls: the dock is narrow, so a 24px compact input reads as cramped next to
-        // the editor's own 12px labels.
-        let field = |label: &'static str, input: &Entity<InputState>| {
-            div().flex().flex_col().gap(px(4.))
-                .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t(label)))
-                .child(ui::text_field(input, false))
-        };
-        div().id("lib-editor").flex_1().min_h_0().overflow_y_scroll().px_3().py_3().flex().flex_col().gap_3()
+        let label = |s: &'static str| div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(t(s));
+        let field = |name: &'static str, input: &Entity<InputState>| div().flex().flex_col().gap(px(ui::SP_1)).child(label(name)).child(ui::text_field(input, false));
+        div().id("lib-editor").flex_1().min_h_0().overflow_y_scroll().px(px(ui::PANEL_PX)).py(px(ui::SP_3)).flex().flex_col().gap(px(ui::SP_3))
             .child(field("lib.name", &ed.name))
             .child(field("lib.group", &ed.group))
             .child(field("lib.note", &ed.note))
-            .child(div().flex().flex_col().gap(px(4.))
-                .child(div().text_size(px(12.)).text_color(c(th.overlay1)).child(t("lib.body")))
-                .child(Textarea::new(&ed.body)))
-            .child(div().pt_1().flex().gap_2().justify_end()
+            .child(div().flex().flex_col().gap(px(ui::SP_1))
+                .child(label("lib.body"))
+                .child(Textarea::new(&ed.body).min_h(px(120.)).font_family(ui::mono_family()).text_size(px(ui::fs_mono()))))
+            .child(div().pt(px(ui::SP_1)).flex().gap(px(ui::SP_2)).justify_end()
                 .child(ui::button("lib-ed-cancel", t("ui.cancel"), 0).on_click(cx.listener(|this, _, _, cx| { this.lib_editor = None; cx.notify(); })))
                 .child(ui::button("lib-ed-save", t("lib.save"), 1).on_click(cx.listener(|this, _, _, cx| this.save_lib_editor(cx)))))
             .into_any_element()
@@ -212,15 +195,14 @@ impl Root {
 
     fn var_form(&mut self, v: &LibVars, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
-        let mut col = div().id("lib-vars").flex_1().min_h_0().overflow_y_scroll().px_3().py_2().flex().flex_col().gap_2()
-            .child(div().text_size(px(12.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("lib.fill_title")));
-        for (i, (name, inp)) in v.names.iter().zip(v.inputs.iter()).enumerate() {
-            col = col.child(div().flex().flex_col().gap(px(2.))
-                .child(div().text_size(px(11.)).text_color(c(th.overlay1)).child(name.clone()))
+        let mut col = div().id("lib-vars").flex_1().min_h_0().overflow_y_scroll().px(px(ui::PANEL_PX)).py(px(ui::SP_3)).flex().flex_col().gap(px(ui::SP_3))
+            .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("lib.fill_title")));
+        for (name, inp) in v.names.iter().zip(v.inputs.iter()) {
+            col = col.child(div().flex().flex_col().gap(px(ui::SP_1))
+                .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(name.clone()))
                 .child(ui::text_field(inp, false)));
-            let _ = i;
         }
-        col.child(div().flex().gap_2().justify_end()
+        col.child(div().flex().gap(px(ui::SP_2)).justify_end()
             .child(ui::button("lib-var-cancel", t("ui.cancel"), 0).on_click(cx.listener(|this, _, _, cx| { this.lib_vars = None; cx.notify(); })))
             .child(ui::button("lib-var-ok", if v.exec { t("lib.run") } else { t("lib.insert") }, 1).on_click(cx.listener(|this, _, w, cx| this.submit_vars(w, cx)))))
             .into_any_element()
@@ -228,12 +210,12 @@ impl Root {
 
     fn confirm_form(&mut self, cfn: &LibConfirm, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
-        let mut col = div().id("lib-confirm").flex_1().min_h_0().overflow_y_scroll().px_3().py_2().flex().flex_col().gap_1()
-            .child(div().text_size(px(12.)).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("lib.confirm_title")));
+        let mut col = div().id("lib-confirm").flex_1().min_h_0().overflow_y_scroll().px(px(ui::PANEL_PX)).py(px(ui::SP_3)).flex().flex_col().gap(px(ui::SP_3))
+            .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("lib.confirm_title")));
         for (i, reason) in cfn.reasons.iter().enumerate() {
-            col = col.child(div().id(("lib-ask", i)).text_size(px(12.)).text_color(c(th.subtext)).child(reason.clone()));
+            col = col.child(ui::notice(ui::Notice::Warn, reason.clone()).mx_0().id(("lib-ask", i)));
         }
-        col.child(div().pt_2().flex().gap_2().justify_end()
+        col.child(div().flex().gap(px(ui::SP_2)).justify_end()
             .child(ui::button("lib-ask-no", t("ui.cancel"), 0).on_click(cx.listener(|this, _, _, cx| { this.lib_confirm = None; cx.notify(); })))
             .child(ui::button("lib-ask-yes", t("lib.confirm_ok"), 1).on_click(cx.listener(|this, _, w, cx| this.confirm_script(w, cx)))))
             .into_any_element()
@@ -245,49 +227,95 @@ impl Root {
             if q.is_empty() { return true; }
             r.cmd.to_lowercase().contains(q) || r.key.to_lowercase().contains(q)
         }).take(300).collect();
-        let mut list = div().id("lib-hist-list").flex_1().min_h_0().overflow_y_scroll().px_2().py_1().flex().flex_col().gap(px(2.));
-        if shown.is_empty() {
-            list = list.child(div().p_4().text_size(px(12.)).text_color(c(th.overlay1)).child(t("lib.empty_history")));
+        if rows.is_empty() {
+            return ui::empty_state(IconName::Clock, t("lib.empty_history_title"), None, vec![], false).into_any_element();
         }
+        if shown.is_empty() {
+            return ui::empty_state(IconName::Search, t("ui.no_matching_commands"), None, vec![], false).into_any_element();
+        }
+        let mut list = div().id("lib-hist-list").flex_1().min_h_0().overflow_y_scroll().pb(px(ui::SP_2)).flex().flex_col();
         for (i, r) in shown.iter().enumerate() {
             let cmd = r.cmd.clone();
-            let key = r.key.clone();
             let run = cmd.clone();
             let ins = cmd.clone();
             let copy = cmd.clone();
-            let save = cmd.clone();
-            let forget = (key.clone(), cmd.clone());
+            let menu = LibMenu::History { key: r.key.clone(), cmd: cmd.clone() };
             let meta = match (show_host, r.ts) {
                 (true, Some(ts)) => format!("{} · {}", r.key, fmt_ts(ts)),
                 (true, None) => r.key.clone(),
                 (false, Some(ts)) => fmt_ts(ts),
                 (false, None) => String::new(),
             };
-            list = list.child(div().id(("lib-h", i)).px_2().py_1().rounded(px(6.)).flex().items_center().gap_1().cursor_pointer()
-                .hover(|d| d.bg(c(cur().surface0)))
+            let gid = SharedString::from(format!("lib-h-{i}"));
+            list = list.child(ui::list_row(("lib-h", i), 0, false).min_h(px(ui::row2_h())).group(gid.clone())
                 .on_click(cx.listener(move |this, _, w, cx| this.start_snippet(run.clone(), true, w, cx)))
-                .child(div().flex_1().min_w_0().flex().flex_col().gap(px(1.))
-                    .child(div().text_size(px(13.)).text_color(c(th.text)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(cmd.clone()))
-                    .when(!meta.is_empty(), |d| d.child(div().text_size(px(11.)).text_color(c(th.overlay0)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(meta))))
-                .child(self.row_icon(("lib-hi", i), IconName::CornerDownLeft, t("lib.insert").into(), cx).on_click(cx.listener(move |this, _, w, cx| { cx.stop_propagation(); this.start_snippet(ins.clone(), false, w, cx); })))
-                .child(self.row_icon(("lib-hc", i), IconName::Copy, t("lib.copy").into(), cx).on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.copy_lib(copy.clone(), cx); })))
-                .child(self.row_icon(("lib-hs", i), IconName::Bookmark, t("lib.save_snippet").into(), cx).on_click(cx.listener(move |this, _, w, cx| { cx.stop_propagation(); this.save_hist_as_snippet(save.clone(), w, cx); })))
-                .child(self.row_icon(("lib-hd", i), IconName::Trash, t("lib.delete").into(), cx).on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    let (key, cmd) = forget.clone();
-                    this.forget_history(&key, &cmd, cx);
-                }))));
+                .child(div().flex_1().min_w_0().flex().flex_col()
+                    .child(self.mono_line(cmd, c(th.text)))
+                    .when(!meta.is_empty(), |d| d.child(ui::row_meta(meta))))
+                .child(ui::row_actions(gid)
+                    .child(self.act_btn(("lib-hi", i), IconName::CornerDownLeft, t("lib.insert")).on_click(cx.listener(move |this, _, w, cx| { cx.stop_propagation(); this.start_snippet(ins.clone(), false, w, cx); })))
+                    .child(self.act_btn(("lib-hc", i), IconName::Copy, t("lib.copy")).on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.copy_lib(copy.clone(), cx); })))
+                    .child(self.more_btn(("lib-hm", i), menu, cx))));
         }
         list.into_any_element()
     }
 
-    fn row_icon(&self, id: impl Into<gpui::ElementId>, ic: IconName, tip: SharedString, _cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
-        let th = cur();
-        div().id(id).size(px(22.)).flex_shrink_0().rounded(px(4.)).flex().items_center().justify_center().cursor_pointer()
-            .hover(|d| d.bg(c(cur().surface1)))
-            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
-            .child(icon(ic, 13., c(th.overlay1)))
+    /// 单行省略的等宽文本（命令预览、历史命令）。
+    fn mono_line(&self, text: impl Into<SharedString>, color: gpui::Hsla) -> gpui::Div {
+        div().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().font_family(ui::mono_family()).text_size(px(ui::fs_mono())).line_height(px(ui::lh(ui::fs_mono()))).text_color(color).child(text.into())
+    }
+
+    /// 行内图标按钮：按下不触发整行点击。
+    fn act_btn(&self, id: impl Into<gpui::ElementId>, ic: IconName, tip: impl Into<SharedString>) -> gpui::Stateful<gpui::Div> {
+        ui::icon_button(id, ic, ui::IconBtn::Sm, tip).on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+    }
+
+    /// 「更多」按钮：在按钮下方弹出该行的小菜单。
+    fn more_btn(&self, id: impl Into<gpui::ElementId>, target: LibMenu, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        self.act_btn(id, IconName::Ellipsis, t("lib.more")).on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| {
+            cx.stop_propagation();
+            this.lib_menu = Some((target.clone(), e.position() + Point::new(px(-8.), px(14.))));
+            cx.notify();
+        }))
+    }
+
+    /// 「更多」菜单：常用命令 = 编辑 / 复制一份 / 删除；历史 = 存为常用命令 / 删除。
+    fn lib_menu_el(&mut self, target: LibMenu, pos: Point<Pixels>, cx: &mut Context<Self>) -> AnyElement {
+        let mut m = ui::popover().py_1().flex().flex_col();
+        let close = |this: &mut Root| { this.lib_menu = None; };
+        match target {
+            LibMenu::Snippet { id, name, group, note, body } => {
+                let (dup, del) = (id.clone(), id.clone());
+                m = m.child(ui::menu_item("lib-m-edit", Some(IconName::Pencil), t("lib.edit"), true, false).on_click(cx.listener(move |this, _, w, cx| {
+                    close(this);
+                    this.open_lib_editor(Some(id.clone()), name.clone(), group.clone(), note.clone(), body.clone(), w, cx);
+                })))
+                .child(ui::menu_item("lib-m-dup", Some(IconName::CopyPlus), t("lib.duplicate"), true, false).on_click(cx.listener(move |this, _, _, cx| {
+                    close(this);
+                    match ssh_term_proto::snippets::duplicate(&dup) { Ok(_) => this.lib_notice = t("lib.saved").into(), Err(e) => this.lib_notice = e }
+                    cx.notify();
+                })))
+                .child(ui::menu_sep())
+                .child(ui::menu_item("lib-m-del", Some(IconName::Trash), t("lib.delete"), true, true).on_click(cx.listener(move |this, _, _, cx| {
+                    close(this);
+                    if let Err(e) = ssh_term_proto::snippets::delete(&del) { this.lib_notice = e; } else { this.lib_notice.clear(); }
+                    cx.notify();
+                })));
+            }
+            LibMenu::History { key, cmd } => {
+                let save = cmd.clone();
+                m = m.child(ui::menu_item("lib-m-save", Some(IconName::Bookmark), t("lib.save_snippet"), true, false).on_click(cx.listener(move |this, _, w, cx| {
+                    close(this);
+                    this.save_hist_as_snippet(save.clone(), w, cx);
+                })))
+                .child(ui::menu_sep())
+                .child(ui::menu_item("lib-m-forget", Some(IconName::Trash), t("lib.delete"), true, true).on_click(cx.listener(move |this, _, _, cx| {
+                    close(this);
+                    this.forget_history(&key, &cmd, cx);
+                })));
+            }
+        }
+        deferred(anchored().position(pos).child(m.occlude().on_mouse_down_out(cx.listener(|this, _, _, cx| { this.lib_menu = None; cx.notify(); })))).with_priority(2).into_any_element()
     }
 
     fn history_rows(&self, window: &Window, cx: &gpui::App) -> Vec<HistRow> {

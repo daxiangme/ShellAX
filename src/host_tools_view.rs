@@ -9,7 +9,7 @@ use ssh_term_proto::policy::{self, Effect, Risk};
 use ssh_term_proto::ssh::{self, SshTarget};
 
 use crate::config;
-use crate::theme::{c, cur};
+use crate::theme::{c, cur, hover_bg, sub_bg};
 use crate::ui::{self, icon, IconName};
 
 #[allow(dead_code)]
@@ -155,40 +155,39 @@ fn rate(b: f64) -> String { if b >= 1048576. { format!("{:.1} MB/s", b / 1048576
 
 impl HostToolsView {
     fn bar(pct: f32, col: gpui::Hsla) -> AnyElement {
-        let th = cur();
-        div().flex_1().min_w(px(60.)).h(px(6.)).rounded_full().bg(c(th.surface0)).child(div().h_full().rounded_full().bg(col).w(gpui::relative(pct.clamp(0., 1.)))).into_any_element()
+        div().flex_1().min_w(px(60.)).h(px(6.)).rounded_full().bg(hover_bg()).child(div().h_full().rounded_full().bg(col).w(gpui::relative(pct.clamp(0., 1.)))).into_any_element()
     }
-    /// A titled sub-card in the dock column (same radius / border / padding as the AI panel's cards).
+    /// 停靠栏里的带标题子卡片（`sub_card`：淡底 + 发丝边框 + `R_SUB`）。
     fn card(title: impl Into<SharedString>, ic: IconName, right: Option<String>) -> gpui::Div {
         let th = cur();
         crate::card_layout::sub_card().flex_shrink_0().p(px(crate::card_layout::CARD_PAD + 4.)).flex().flex_col().gap(px(crate::card_layout::CARD_PAD))
-            .child(div().flex().items_center().gap_2().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text))
-                .child(icon(ic, 13., c(th.accent))).child(div().flex_1().child(title.into()))
-                .children(right.map(|r| div().text_size(px(11.)).font_weight(FontWeight::NORMAL).text_color(c(th.overlay1)).child(r))))
+            .child(div().flex().items_center().gap_2().text_size(px(ui::fs_body())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text))
+                .child(icon(ic, ui::IC_SM, c(th.overlay1))).child(div().flex_1().child(title.into()))
+                .children(right.map(|r| div().text_size(px(ui::fs_small())).font_weight(FontWeight::NORMAL).text_color(c(th.subtext)).child(r))))
     }
     fn meter(label: impl Into<SharedString>, pct: f32, value: String) -> gpui::Div {
         let th = cur();
         let col = if pct > 0.9 { c(th.error) } else if pct > 0.7 { c(th.warning) } else { c(th.success) };
-        div().flex().items_center().gap_2().text_size(px(11.)).text_color(c(th.subtext))
+        div().flex().items_center().gap_2().text_size(px(ui::fs_small())).text_color(c(th.subtext))
             .child(div().w(px(64.)).flex_shrink_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(label.into()))
             .child(Self::bar(pct, col))
             .child(div().flex_shrink_0().text_color(c(th.text)).child(value))
     }
-    fn muted(s: impl Into<SharedString>) -> AnyElement { div().text_size(px(11.)).text_color(c(cur().overlay1)).child(s.into()).into_any_element() }
+    fn muted(s: impl Into<SharedString>) -> AnyElement { div().text_size(px(ui::fs_small())).text_color(c(cur().overlay1)).child(s.into()).into_any_element() }
 
     fn stat_cards(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let th = cur();
-        let mono = SharedString::from(config::get().font.family.clone());
+        let mono = ui::mono_family();
         let mut v: Vec<AnyElement> = vec![];
         match &self.mon {
             None => v.push(Self::card(t("hosttools.overview"), IconName::Monitor, None).child(Self::muted(t("hosttools.loading"))).into_any_element()),
-            Some(Err(e)) => v.push(Self::card(t("hosttools.overview"), IconName::Monitor, None).child(div().text_size(px(11.)).text_color(c(th.error)).child(e.clone())).into_any_element()),
+            Some(Err(e)) => v.push(Self::card(t("hosttools.overview"), IconName::Monitor, None).child(div().text_size(px(ui::fs_small())).text_color(c(th.error)).child(e.clone())).into_any_element()),
             Some(Ok(out)) => {
                 let m = hosttools::parse_monitor(out);
                 let used = m.mem_total_kb.saturating_sub(m.mem_avail_kb);
                 let mp = if m.mem_total_kb > 0 { used as f32 / m.mem_total_kb as f32 } else { 0. };
                 let lp = if m.cpus > 0 { m.load[0] / m.cpus as f32 } else { 0. };
-                let kv = |k: SharedString, val: String| div().flex().gap_2().text_size(px(11.)).child(div().w(px(64.)).text_color(c(th.overlay1)).child(k)).child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().text_color(c(th.text)).child(val));
+                let kv = |k: SharedString, val: String| div().flex().gap_2().text_size(px(ui::fs_small())).child(div().w(px(64.)).text_color(c(th.overlay1)).child(k)).child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().text_color(c(th.text)).child(val));
                 v.push(Self::card(t("hosttools.overview"), IconName::Monitor, None)
                     .child(kv(t("hosttools.host").into(), self.label()))
                     .when(!m.uptime.is_empty(), |d| d.child(kv(t("hosttools.uptime").into(), m.uptime.trim_start_matches("up ").to_string())))
@@ -214,7 +213,7 @@ impl HostToolsView {
         if !self.net_rate.is_empty() {
             let mut d = Self::card(t("hosttools.network"), IconName::Network, None);
             for (name, rx, tx) in self.net_rate.iter().take(6) {
-                d = d.child(div().flex().items_center().gap_2().text_size(px(11.)).text_color(c(th.text))
+                d = d.child(div().flex().items_center().gap_2().text_size(px(ui::fs_small())).text_color(c(th.text))
                     .child(div().w(px(64.)).overflow_hidden().text_ellipsis().text_color(c(th.subtext)).child(name.clone()))
                     .child(div().flex_1().child(format!("↓ {}", rate(*rx)))).child(div().flex_1().child(format!("↑ {}", rate(*tx)))));
             }
@@ -222,14 +221,14 @@ impl HostToolsView {
         }
         if let Some(Ok(out)) = &self.ps {
             let mut d = Self::card(t("hosttools.processes"), IconName::List, None)
-                .child(div().flex().gap_2().text_size(px(10.)).text_color(c(th.overlay1)).child(div().w(px(52.)).child("PID")).child(div().flex_1().child(t("hosttools.command"))).child(div().w(px(40.)).child("CPU%")).child(div().w(px(40.)).child("MEM%")).child(div().w(px(36.))));
+                .child(ui::table_header().px(px(ui::SP_2)).gap_2().child(div().w(px(52.)).child("PID")).child(div().flex_1().child(t("hosttools.command"))).child(div().w(px(40.)).text_size(px(ui::fs_caption())).child("CPU%")).child(div().w(px(40.)).text_size(px(ui::fs_caption())).child("MEM%")).child(div().w(px(36.))));
             for (i, p) in hosttools::parse_ps(out).into_iter().take(10).enumerate() {
                 let pid = p.pid;
-                d = d.child(div().flex().items_center().gap_2().text_size(px(11.)).text_color(c(th.text)).font_family(mono.clone())
+                d = d.child(div().flex().items_center().gap_2().text_size(px(ui::fs_mono())).text_color(c(th.text)).font_family(mono.clone())
                     .child(div().w(px(52.)).text_color(c(th.subtext)).child(p.pid.to_string()))
                     .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(p.comm))
                     .child(div().w(px(40.)).child(format!("{:.1}", p.cpu))).child(div().w(px(40.)).child(format!("{:.1}", p.mem)))
-                    .child(div().w(px(36.)).when(!(cfg!(windows) && self.target.is_none()), |d| d.child(ui::button(("ht-kill", i), t("hosttools.kill"), 2).h(px(18.)).px_1().text_size(px(10.)).on_click(cx.listener(move |v, _, _, cx| v.act(Action::Kill { pid, force: false }, cx)))))));
+                    .child(div().w(px(36.)).when(!(cfg!(windows) && self.target.is_none()), |d| d.child(ui::button_sm(("ht-kill", i), t("hosttools.kill"), 2).on_click(cx.listener(move |v, _, _, cx| v.act(Action::Kill { pid, force: false }, cx)))))));
             }
             v.push(d.into_any_element());
         }
@@ -239,18 +238,18 @@ impl HostToolsView {
     /// Services / containers: loaded only when the user picks one.
     fn extra_card(&self, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
-        let mono = SharedString::from(config::get().font.family.clone());
-        let mut head = div().flex().items_center().gap_1();
-        for (i, tb) in [Tab::Services, Tab::Docker].into_iter().enumerate() {
-            let label = if tb == Tab::Services { t("hosttools.services") } else { "Docker" };
-            head = head.child(ui::button(("ht-tab", i), label, if self.out.is_some() && tb == self.tab { 1 } else { 0 }).h(px(22.)).text_size(px(11.)).on_click(cx.listener(move |v, _, _, cx| v.set_tab(tb, cx))));
-        }
+        let mono = ui::mono_family();
+        let tabs = [("services".to_string(), t("hosttools.services").to_string()), ("docker".to_string(), "Docker".to_string())];
+        let me = cx.entity();
+        // 未选择时不高亮任何一项
+        let selected = if self.out.is_none() { "" } else if self.tab == Tab::Docker { "docker" } else { "services" };
+        let head = ui::segmented("ht-tab", &tabs, selected, move |v, _w, cx| { me.update(cx, |this, cx| this.set_tab(if v == "docker" { Tab::Docker } else { Tab::Services }, cx)); });
         let mut d = Self::card(t("hosttools.more"), IconName::Settings2, None).child(head);
-        let row = || div().flex().items_center().gap_2().text_size(px(11.)).text_color(c(th.text));
+        let row = || div().flex().items_center().gap_2().text_size(px(ui::fs_small())).text_color(c(th.text));
         match &self.out {
             None if self.busy => d = d.child(Self::muted(t("hosttools.loading"))),
             None => d = d.child(Self::muted(t("hosttools.pick"))),
-            Some(Err(e)) => d = d.child(div().text_size(px(11.)).text_color(c(th.error)).child(e.clone())),
+            Some(Err(e)) => d = d.child(div().text_size(px(ui::fs_small())).text_color(c(th.error)).child(e.clone())),
             Some(Ok(out)) => match self.tab {
                 Tab::Docker => match hosttools::parse_docker(out) {
                     Err(e) => d = d.child(Self::muted(tf("hosttools.no_docker", &[("out", &e)]))),
@@ -260,9 +259,9 @@ impl HostToolsView {
                             let (a, b, l) = (k.id.clone(), k.id.clone(), k.id.clone());
                             let col = if k.state == "running" { c(th.success) } else { c(th.overlay1) };
                             d = d.child(row().child(div().size(px(6.)).rounded_full().bg(col)).child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(k.name))
-                                .child(ui::button(("ht-dl", i), t("hosttools.logs"), 3).h(px(18.)).px_1().text_size(px(10.)).on_click(cx.listener(move |v, _, _, cx| v.act(Action::Docker { verb: "logs", id: l.clone() }, cx))))
-                                .child(ui::button(("ht-dr", i), t("hosttools.restart"), 0).h(px(18.)).px_1().text_size(px(10.)).on_click(cx.listener(move |v, _, _, cx| v.act(Action::Docker { verb: "restart", id: a.clone() }, cx))))
-                                .child(ui::button(("ht-ds", i), t("hosttools.stop"), 2).h(px(18.)).px_1().text_size(px(10.)).on_click(cx.listener(move |v, _, _, cx| v.act(Action::Docker { verb: "stop", id: b.clone() }, cx)))));
+                                .child(ui::button_sm(("ht-dl", i), t("hosttools.logs"), 3).on_click(cx.listener(move |v, _, _, cx| v.act(Action::Docker { verb: "logs", id: l.clone() }, cx))))
+                                .child(ui::button_sm(("ht-dr", i), t("hosttools.restart"), 0).on_click(cx.listener(move |v, _, _, cx| v.act(Action::Docker { verb: "restart", id: a.clone() }, cx))))
+                                .child(ui::button_sm(("ht-ds", i), t("hosttools.stop"), 2).on_click(cx.listener(move |v, _, _, cx| v.act(Action::Docker { verb: "stop", id: b.clone() }, cx)))));
                         }
                     }
                 },
@@ -271,9 +270,9 @@ impl HostToolsView {
                     Some(svcs) => for (i, s) in svcs.into_iter().enumerate().take(60) {
                         let (u1, u2) = (s.unit.clone(), s.unit.clone());
                         let col = if s.active == "active" { c(th.success) } else if s.active == "failed" { c(th.error) } else { c(th.overlay1) };
-                        d = d.child(row().font_family(mono.clone()).child(div().size(px(6.)).rounded_full().bg(col)).child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(s.unit))
-                            .child(ui::button(("ht-rs", i), t("hosttools.restart"), 0).h(px(18.)).px_1().text_size(px(10.)).on_click(cx.listener(move |v, _, _, cx| v.act(Action::Service { verb: "restart", unit: u1.clone() }, cx))))
-                            .child(ui::button(("ht-st", i), t("hosttools.stop"), 2).h(px(18.)).px_1().text_size(px(10.)).on_click(cx.listener(move |v, _, _, cx| v.act(Action::Service { verb: "stop", unit: u2.clone() }, cx)))));
+                        d = d.child(row().font_family(mono.clone()).text_size(px(ui::fs_mono())).child(div().size(px(6.)).rounded_full().bg(col)).child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(s.unit))
+                            .child(ui::button_sm(("ht-rs", i), t("hosttools.restart"), 0).on_click(cx.listener(move |v, _, _, cx| v.act(Action::Service { verb: "restart", unit: u1.clone() }, cx))))
+                            .child(ui::button_sm(("ht-st", i), t("hosttools.stop"), 2).on_click(cx.listener(move |v, _, _, cx| v.act(Action::Service { verb: "stop", unit: u2.clone() }, cx)))));
                     },
                 },
             },
@@ -286,12 +285,12 @@ impl Render for HostToolsView {
     fn render(&mut self, _w: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
         let gap = px(crate::card_layout::CARD_PAD);
-        let pending = self.pending.clone().map(|(_, cmd, why)| div().p_2().rounded(px(crate::card_layout::SUB_RADIUS)).bg(c(th.warning).opacity(0.1)).border_1().border_color(c(th.warning).opacity(0.6)).flex().flex_col().gap_2().text_size(px(12.)).text_color(c(th.text))
-            .child(div().flex().gap_2().child(icon(IconName::ShieldCheck, 14., c(th.warning))).child(div().flex_1().child(tf("hosttools.confirm", &[("cmd", &cmd), ("why", &why)]))))
+        let pending = self.pending.clone().map(|(_, cmd, why)| div().p_2().rounded(px(crate::card_layout::SUB_RADIUS)).bg(c(th.warning).opacity(0.1)).border_1().border_color(c(th.warning).opacity(0.6)).flex().flex_col().gap_2().text_size(px(ui::fs_body())).text_color(c(th.text))
+            .child(div().flex().gap_2().child(icon(IconName::ShieldCheck, ui::IC_MD, c(th.warning))).child(div().flex_1().child(tf("hosttools.confirm", &[("cmd", &cmd), ("why", &why)]))))
             .child(div().flex().gap_2().justify_end()
                 .child(ui::button("ht-ok", t("ui.allow"), 1).on_click(cx.listener(move |v, _, _, cx| { let c2 = cmd.clone(); let _ = crate::audit_log().append("hosttools.approval", "user", &format!("allow command={c2:?}")); v.execute(c2, "user", cx); })))
                 .child(ui::button("ht-no", t("ui.deny"), 3).on_click(cx.listener(|v, _, _, cx| { if let Some((_, c2, _)) = v.pending.take() { let _ = crate::audit_log().append("hosttools.approval", "user", &format!("deny command={c2:?}")); } cx.notify(); })))));
-        let note = self.note.clone().map(|(m, err)| div().p_2().rounded(px(crate::card_layout::SUB_RADIUS)).bg(c(th.crust)).text_size(px(11.)).text_color(if err { c(th.error) } else { c(th.subtext) }).child(m));
+        let note = self.note.clone().map(|(m, err)| div().p_2().rounded(px(crate::card_layout::SUB_RADIUS)).bg(sub_bg()).text_size(px(ui::fs_small())).text_color(if err { c(th.error) } else { c(th.subtext) }).child(m));
         let cards = self.stat_cards(cx);
         let extra = self.extra_card(cx);
         div().id("ht-scroll").size_full().min_h_0().overflow_y_scroll().p(gap).flex().flex_col().gap(gap)

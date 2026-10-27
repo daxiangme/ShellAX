@@ -8,7 +8,7 @@ use ssh_term_proto::policy::Effect;
 
 use crate::config;
 use crate::termview::{StepOutput, TermView};
-use crate::theme::{c, cur};
+use crate::theme::{c, cur, divider, selected_bg, sub_bg};
 use crate::ui::{self, icon, IconName};
 
 pub enum ChatEvent { Close, Insert(String) }
@@ -442,9 +442,9 @@ impl ChatView {
     fn plan_el(&self, i: usize, m: &Msg, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let plan = m.plan.as_ref()?;
         let th = cur();
-        let mono = SharedString::from(config::get().font.family.clone());
-        let mut col = div().mt_2().pt_2().border_t_1().border_color(c(th.surface0)).flex().flex_col().gap_1()
-            .child(div().flex().gap_2().items_center().text_size(px(11.)).text_color(c(th.overlay1)).child(tf("chat.plan_title", &[("n", &plan.steps.len())]))
+        let mono = ui::mono_family();
+        let mut col = div().mt(px(ui::SP_2)).pt(px(ui::SP_2)).border_t_1().border_color(divider()).flex().flex_col().gap(px(ui::SP_1))
+            .child(div().flex().gap(px(ui::SP_2)).items_center().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(tf("chat.plan_title", &[("n", &plan.steps.len())]))
                 .when(plan.done(), |d| d.child(ui::tag(t("chat.plan_done"), c(th.success)))));
         for (k, st) in plan.steps.iter().enumerate() {
             let (mark, col_c, why) = match &st.state {
@@ -454,17 +454,17 @@ impl ChatView {
                 StepState::Denied(r) => ("✗", c(th.error), r.clone()),
                 StepState::Skipped => ("–", c(th.overlay0), t("chat.step_skipped").to_string()),
             };
-            let mut row = div().flex().flex_col().gap(px(2.)).p_2().rounded_md().bg(c(th.crust))
-                .child(div().flex().items_center().gap_2()
+            let mut row = div().flex().flex_col().gap(px(2.)).p(px(ui::SP_2)).rounded(px(ui::R_MD)).bg(sub_bg())
+                .child(div().flex().items_center().gap(px(ui::SP_2))
                     .child(div().w(px(14.)).text_color(col_c).child(mark))
-                    .child(div().flex_1().font_family(mono.clone()).text_size(px(12.)).child(st.cmd.clone()))
+                    .child(div().flex_1().font_family(mono.clone()).text_size(px(ui::fs_mono())).child(st.cmd.clone()))
                     .when(!st.risk.is_empty(), |d| d.child(ui::tag(st.risk.clone(), col_c))));
-            if !why.is_empty() { row = row.child(div().pl(px(22.)).text_size(px(11.)).text_color(c(th.overlay1)).child(why)); }
+            if !why.is_empty() { row = row.child(div().pl(px(22.)).text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(why)); }
             if matches!(st.state, StepState::Ask(_)) {
-                row = row.child(div().pl(px(22.)).pt_1().flex().gap_2()
-                    .child(ui::button(("plan-allow", i * 1000 + k), t("chat.step_allow"), 1).h(px(22.)).on_click(cx.listener(move |v, _, _, cx| v.step(i, Some(true), cx))))
-                    .child(ui::button(("plan-skip", i * 1000 + k), t("chat.step_skip"), 0).h(px(22.)).on_click(cx.listener(move |v, _, _, cx| v.step(i, Some(false), cx))))
-                    .child(ui::button(("plan-stop", i * 1000 + k), t("chat.step_stop"), 2).h(px(22.)).on_click(cx.listener(move |v, _, _, cx| { if let Some(p) = v.msgs.get_mut(i).and_then(|m| m.plan.as_mut()) { p.cancel(); } let _ = crate::audit_log().append("ai.plan.stop", "user", ""); cx.notify(); }))));
+                row = row.child(div().pl(px(22.)).pt(px(ui::SP_1)).flex().gap(px(ui::SP_2))
+                    .child(ui::button_sm(("plan-allow", i * 1000 + k), t("chat.step_allow"), 1).on_click(cx.listener(move |v, _, _, cx| v.step(i, Some(true), cx))))
+                    .child(ui::button_sm(("plan-skip", i * 1000 + k), t("chat.step_skip"), 0).on_click(cx.listener(move |v, _, _, cx| v.step(i, Some(false), cx))))
+                    .child(ui::button_sm(("plan-stop", i * 1000 + k), t("chat.step_stop"), 2).on_click(cx.listener(move |v, _, _, cx| { if let Some(p) = v.msgs.get_mut(i).and_then(|m| m.plan.as_mut()) { p.cancel(); } let _ = crate::audit_log().append("ai.plan.stop", "user", ""); cx.notify(); }))));
             }
             col = col.child(row);
         }
@@ -486,8 +486,8 @@ fn first_code_block(s: &str) -> Option<String> {
 impl Render for ChatView {
     fn render(&mut self, _w: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
-        let mut list = div().id("chat-list").track_scroll(&self.scroll).flex_1().min_h_0().overflow_y_scroll().p_4().flex().flex_col().gap_3();
-        if self.msgs.is_empty() { list = list.child(div().text_size(px(13.)).text_color(c(th.overlay1)).child(t("chat.empty"))); }
+        let mut list = div().id("chat-list").track_scroll(&self.scroll).flex_1().min_h_0().overflow_y_scroll().p(px(ui::PANEL_PX)).flex().flex_col().gap(px(ui::SP_3));
+        if self.msgs.is_empty() { list = list.child(div().text_size(px(ui::fs_body())).text_color(c(th.overlay1)).child(t("chat.empty"))); }
         let n = self.msgs.len();
         let view = cx.entity();
         let term = self.target.is_terminal();
@@ -517,38 +517,36 @@ impl Render for ChatView {
                         } else { Some(block.code().trim_end().to_string()).filter(|s| !s.trim().is_empty()) };
                         let view = view.clone();
                         div().when_some(cmd, |d, cmd| d.child(
-                            div().id("ins").size(px(22.)).rounded(px(6.)).flex().items_center().justify_center().cursor_pointer()
-                                .hover(|d| d.bg(c(cur().surface0)))
-                                .on_click(move |_, _, cx| { let cmd = cmd.clone(); let _ = view.update(cx, |_, cx| cx.emit(ChatEvent::Insert(cmd))); })
-                                .child(icon(IconName::SquareTerminal, 13., c(cur().overlay1))),
+                            ui::icon_button("ins", IconName::SquareTerminal, ui::IconBtn::Sm, "")
+                                .on_click(move |_, _, cx| { let cmd = cmd.clone(); let _ = view.update(cx, |_, cx| cx.emit(ChatEvent::Insert(cmd))); }),
                         )).into_any_element()
                     })
                     .into_any_element()
             };
             let one = cmds.len() == 1;
             let only = cmds.first().cloned();
-            let mut bubble = div().max_w(relative(if user { 0.72 } else { 0.92 })).p_3().rounded(px(18.)).text_size(px(13.)).text_color(c(th.text))
-                .bg(if user { c(th.accent).opacity(0.14) } else { c(th.mantle) }).border_1().border_color(c(th.surface0));
+            let mut bubble = div().max_w(relative(if user { 0.72 } else { 0.92 })).p(px(ui::SP_3)).rounded(px(ui::R_XL)).text_size(px(ui::fs_body())).text_color(c(th.text))
+                .bg(if user { selected_bg() } else { sub_bg() }).border_1().border_color(divider());
             if !user { bubble = bubble.w_full(); }
             list = list.child(div().w_full().flex().when(user, |d| d.justify_end()).child(bubble
                     .child(body)
-                    .when(streaming && !m.text.is_empty(), |d| d.child(div().pt_1().child(stream_caret())))
-                    .when(!waiting, |d| d.when_some(m.note.clone(), |d, note| d.child(div().pt_1().text_size(px(11.)).text_color(c(th.overlay0)).child(note))))
-                    .when(one && !streaming, |d| d.child(div().pt_2().flex().gap_2()
-                        .child(ui::button(("chat-ins", i), t("chat.insert"), 0).h(px(22.)).on_click(cx.listener({
+                    .when(streaming && !m.text.is_empty(), |d| d.child(div().pt(px(ui::SP_1)).child(stream_caret())))
+                    .when(!waiting, |d| d.when_some(m.note.clone(), |d, note| d.child(div().pt(px(ui::SP_1)).text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(note))))
+                    .when(one && !streaming, |d| d.child(div().pt(px(ui::SP_2)).flex().gap(px(ui::SP_2))
+                        .child(ui::button_sm(("chat-ins", i), t("chat.insert"), 0).on_click(cx.listener({
                             let only = only.clone().unwrap_or_default();
                             move |_, _, _, cx| cx.emit(ChatEvent::Insert(only.clone()))
                         })))))
-                    .when(cmds.len() > 1 && m.plan.is_none() && !streaming, |d| d.child(div().pt_2()
-                        .child(ui::button(("chat-plan", i), t("chat.run_steps"), 1).h(px(22.)).on_click(cx.listener(move |v, _, _, cx| v.start_plan(i, cx))))))
+                    .when(cmds.len() > 1 && m.plan.is_none() && !streaming, |d| d.child(div().pt(px(ui::SP_2))
+                        .child(ui::button_sm(("chat-plan", i), t("chat.run_steps"), 1).on_click(cx.listener(move |v, _, _, cx| v.start_plan(i, cx))))))
                     .when_some(plan_el, |d, p| d.child(p))));
         }
         let consent = self.pending.is_some().then(|| {
             let text = self.source.as_ref().and_then(|w| w.upgrade()).map(|v| v.read(cx).ai_consent_text()).unwrap_or_default();
-            div().mx_3().mb_2().p_3().rounded_lg().border_1().border_color(c(th.warning)).bg(c(th.warning).opacity(0.08)).flex().flex_col().gap_2().text_size(px(12.))
+            div().mx(px(ui::SP_3)).mb(px(ui::SP_2)).p(px(ui::SP_3)).rounded(px(ui::R_SUB)).border_1().border_color(c(th.warning)).bg(c(th.warning).opacity(0.08)).flex().flex_col().gap(px(ui::SP_2)).text_size(px(ui::fs_small()))
                 .child(div().font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("ai.consent_title")))
                 .child(div().text_color(c(th.subtext)).child(text))
-                .child(div().flex().gap_2().justify_end()
+                .child(div().flex().gap(px(ui::SP_2)).justify_end()
                     .child(ui::button("chat-consent-no", t("ui.cancel"), 0).on_click(cx.listener(|v, _, _, cx| { v.pending = None; cx.notify() })))
                     .child(ui::button("chat-consent-ok", t("ai.consent_ok"), 1).on_click(cx.listener(|v, _, _, cx| {
                         crate::ai_consent_ack();
@@ -571,31 +569,22 @@ impl Render for ChatView {
         };
         let has_text = !self.input.read(cx).value().trim().is_empty();
         let can_send = has_text && !self.busy;
-        let send_bg = if self.busy || can_send { c(th.accent) } else { c(th.surface1) };
+        let send_bg = if self.busy || can_send { c(th.accent) } else { crate::theme::hover_bg() };
         let send_fg = if self.busy || can_send { gpui::white() } else { c(th.overlay0) };
-        let composer = div().mx_3().mb_3().rounded(px(22.)).border_1().border_color(c(th.surface1)).bg(c(th.mantle)).flex().flex_col()
-            .child(div().px_3().pt_2().flex().items_center().gap_2().min_w_0()
-                .child(div().id("chat-ctx").h(px(24.)).max_w(px(240.)).px_2().rounded_full().flex().items_center().cursor_pointer()
-                    .bg(if ctx_on { c(th.surface0) } else { gpui::transparent_black() })
-                    .border_1().border_color(c(th.surface1))
-                    .on_click(cx.listener(|v, _, _, cx| { v.with_context = !v.with_context; cx.notify(); }))
-                    .child(div().text_size(px(11.)).text_color(if ctx_on { c(th.text) } else { c(th.overlay1) }).whitespace_nowrap().overflow_hidden().text_ellipsis().child(ctx_label)))
+        let composer = div().mx(px(ui::SP_3)).mb(px(ui::SP_3)).rounded(px(ui::R_XL)).border_1().border_color(divider()).bg(sub_bg()).flex().flex_col()
+            .child(div().px(px(ui::SP_3)).pt(px(ui::SP_2)).flex().items_center().gap(px(ui::SP_2)).min_w_0()
+                .child(ui::chip("chat-ctx", ctx_label, ctx_on).max_w(px(240.)).overflow_hidden().text_ellipsis()
+                    .on_click(cx.listener(|v, _, _, cx| { v.with_context = !v.with_context; cx.notify(); })))
                 .child(div().flex_1())
-                .child(div().text_size(px(11.)).text_color(c(th.overlay0)).whitespace_nowrap().child(if config::get().ai.redact { t("chat.redact_on") } else { t("chat.redact_off") })))
+                .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).whitespace_nowrap().child(if config::get().ai.redact { t("chat.redact_on") } else { t("chat.redact_off") })))
             .child(Textarea::new(&self.input).appearance(false).bordered(false))
-            .child(div().px_2().pb_2().flex().items_center().gap_2()
-                .when(!self.msgs.is_empty(), |d| d.child(div().id("chat-clear").h(px(28.)).px_2().rounded_full().flex().items_center().cursor_pointer()
-                    .text_size(px(12.)).text_color(c(th.overlay1))
-                    .hover(|d| d.bg(c(cur().surface0)).text_color(c(cur().text)))
-                    .on_click(cx.listener(|v, _, _, cx| { if !v.busy { v.msgs.clear(); } cx.notify(); }))
-                    .child(t("chat.clear"))))
+            .child(div().px(px(ui::SP_2)).pb(px(ui::SP_2)).flex().items_center().gap(px(ui::SP_2))
+                .when(!self.msgs.is_empty(), |d| d.child(ui::chip("chat-clear", t("chat.clear"), false)
+                    .on_click(cx.listener(|v, _, _, cx| { if !v.busy { v.msgs.clear(); } cx.notify(); }))))
                 .children(self.target.quick().iter().enumerate().map(|(k, (label, q, deep))| {
                     let (q, deep) = (*q, *deep);
-                    div().id(("chat-quick", k)).h(px(28.)).px_2().rounded_full().flex().items_center().cursor_pointer()
-                        .text_size(px(12.)).text_color(c(th.overlay1)).border_1().border_color(c(th.surface1))
-                        .hover(|d| d.bg(c(cur().surface0)).text_color(c(cur().text)))
+                    ui::chip(("chat-quick", k), t(label), false)
                         .on_click(cx.listener(move |v, _, _, cx| { if !v.busy { v.send_deep(t(q).to_string(), deep, cx); } }))
-                        .child(t(label))
                 }))
                 .child(div().flex_1())
                 .child(div().id("chat-send").size(px(32.)).rounded_full().flex().items_center().justify_center()
@@ -605,20 +594,15 @@ impl Render for ChatView {
                         if v.busy { v.stop.store(true, std::sync::atomic::Ordering::Relaxed); v.busy = false; cx.notify(); }
                         else { v.send(w, cx); }
                     }))
-                    .child(icon(if self.busy { IconName::Square } else { IconName::ArrowUp }, 15., send_fg))));
+                    .child(icon(if self.busy { IconName::Square } else { IconName::ArrowUp }, ui::IC_MD, send_fg))));
         let column = div().flex_1().min_h_0().flex().flex_col().child(list).children(consent).child(composer);
         if self.docked {
             column.size_full()
         } else {
+            let me = cx.entity();
             ui::card(900.).h(px(680.))
-                .child(div().h(px(48.)).px_5().flex().items_center().gap_2().border_b_1().border_color(c(th.surface0))
-                    .child(icon(IconName::Sparkles, 16., c(th.accent)))
-                    .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("ui.built_in_ai_assistant")))
-                    .child(div().pl_2().text_size(px(11.)).text_color(c(th.overlay0)).child(t("chat.subtitle")))
-                    .child(div().flex_1())
-                    .child(div().id("chat-close").size(px(28.)).rounded_md().flex().items_center().justify_center().cursor_pointer()
-                        .hover(|d| d.bg(c(cur().surface0))).on_click(cx.listener(|_, _, _, cx| cx.emit(ChatEvent::Close)))
-                        .child(icon(IconName::X, 16., c(th.overlay1)))))
+                .child(ui::dialog_header(Some(IconName::Sparkles), t("ui.built_in_ai_assistant"), Some(t("chat.subtitle").into()),
+                    Some(ui::dialog_close("chat-close", move |_, cx| { me.update(cx, |_, cx| cx.emit(ChatEvent::Close)); }))))
                 .child(column)
         }
     }

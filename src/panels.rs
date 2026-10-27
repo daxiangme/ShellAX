@@ -219,8 +219,8 @@ impl Root {
         let term = self.tool.workspace() == crate::activity::Tool::Hosts && target.is_terminal();
         if let Some(v) = self.chat_view.clone() { v.update(cx, |c, cx| c.set_target(target, cx)); }
         // one compact row: running agents / hint on the left, quick-launch buttons on the right
-        let mut strip = div().px_3().py(px(6.)).flex_shrink_0().flex().items_center().gap_1().overflow_hidden();
-        let mut launch = div().flex().flex_shrink_0().items_center().gap_1();
+        let mut strip = div().px(px(ui::PANEL_PX)).py(px(ui::SP_2)).flex_shrink_0().flex().items_center().gap(px(ui::SP_1)).overflow_hidden();
+        let mut launch = div().flex().flex_shrink_0().items_center().gap(px(ui::SP_1));
         let mut n = 0usize;
         for (ti, tab) in self.tabs.iter().enumerate() {
             for p in tab.layout.leaves() {
@@ -232,10 +232,10 @@ impl Root {
                 }
             }
         }
-        if n == 0 { strip = strip.child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_size(px(11.)).text_color(c(th.overlay1)).child(t("ui.no_running_claude_code_codex"))); } else { strip = strip.child(div().flex_1()); }
+        if n == 0 { strip = strip.child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(t("ui.no_running_claude_code_codex"))); } else { strip = strip.child(div().flex_1()); }
         for (k, q) in s.agents.quick_launch.iter().enumerate().take(6) {
             if q.command.trim().is_empty() { continue; }
-            launch = launch.child(ui::button(("aidock-ql", k), q.name.clone(), 0).h(px(24.)).px_2().text_size(px(11.))
+            launch = launch.child(ui::button_sm(("aidock-ql", k), q.name.clone(), 0)
                 .on_click(cx.listener(move |this, _, w, cx| this.launch_agent(k, w, cx))));
         }
         strip = strip.child(launch).when(n > 0, |d| d.flex_wrap());
