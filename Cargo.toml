@@ -62,7 +62,7 @@ russh-sftp = "3"
 getrandom = { version = "0.4", features = ["sys_rng"] }
 serde_yaml = "0.9"
 # Inline graphics: decode Kitty PNG payloads and build frames for gpui (MIT/Apache-2.0; already a gpui dependency)
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 # Database connections (MIT OR Apache-2.0): MySQL/MariaDB, PostgreSQL, SQLite (bundled)
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 libsqlite3-sys = { version = "0.37", default-features = false }

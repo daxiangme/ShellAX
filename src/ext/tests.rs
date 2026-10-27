@@ -155,3 +155,23 @@ fn built_packs_run_in_host() {
         let _ = (std::fs::remove_file(tmp), std::fs::remove_file(tmp2));
     }
 }
+
+#[test]
+fn reply_old_and_rows() {
+    // 旧包的回复没有 rows / meta，仍是纯文本结果
+    let old: RunReply = serde_json::from_str(r#"{"text":"3 页","file_name":"a.pdf"}"#).unwrap();
+    let o = output_of(old, b"%PDF-1.4", 10);
+    assert_eq!((o.kind, o.text.as_str()), (crate::tools::OutKind::Text, "3 页"));
+    assert_eq!(o.file.as_ref().map(|f| f.0.as_str()), Some("a.pdf"));
+    assert_eq!(o.info.as_ref().map(|i| i.kind), Some(crate::tools::fileinfo::FileKind::Pdf));
+    assert_eq!(o.in_size, Some(10));
+    // 新包带 rows：按键值行显示
+    let new: RunReply = serde_json::from_str(r#"{"text":"","meta":"m","rows":[{"label":"a","value":"1","primary":true,"tone":"good","tag":"x"},{"value":"2"}]}"#).unwrap();
+    let o = output_of(new, &[], 0);
+    assert_eq!(o.kind, crate::tools::OutKind::Kv);
+    assert_eq!(o.rows.len(), 2);
+    assert!(o.rows[0].primary && o.rows[0].tone == Some(Tone::Good) && o.rows[0].tag.is_some());
+    assert_eq!(o.text, "a: 1\n2");
+    assert_eq!(o.meta, "m");
+    assert!(o.in_size.is_none() && o.info.is_none());
+}

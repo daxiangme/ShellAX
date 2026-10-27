@@ -11,6 +11,7 @@
 //! 文件内容按 `files` 顺序依次拼在 JSON 之后。`op=run` 时还带 `now_ms`（Unix 毫秒）与 `utc_offset`（秒），
 //! 因为扩展包里没有时钟。
 //! 响应 JSON：`op=manifest` 时为 [`PackManifest`]；`op=run` 时为 [`RunReply`]，附加字节是输出文件内容。
+//! `RunReply` 的 `rows` / `meta` 是可选的按行结果，旧包不带这两个字段时按 `text` 显示。
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
@@ -18,7 +19,7 @@ use std::sync::RwLock;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::tools::{Args, Output, ToolSpec};
+use crate::tools::{Args, Output, Row, RowFmt, ToolSpec, Tone};
 
 pub const ABI: u32 = 1;
 /// 扩展索引：发布在 ext-index 版本下的 index.json。
@@ -50,6 +51,66 @@ pub struct RunReply {
     pub color: Option<[u8; 4]>,
     #[serde(default)]
     pub file_name: Option<String>,
+    /// 可选：按行的结果（键值）。旧包没有这个字段，仍按 `text` 显示。
+    #[serde(default)]
+    pub rows: Vec<ReplyRow>,
+    /// 可选：键值结果上方的一行说明。
+    #[serde(default)]
+    pub meta: String,
+}
+
+/// 扩展包回复里的一行结果。除 `value` 外都可省略。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ReplyRow {
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub value: String,
+    /// 主结果：加大加粗。
+    #[serde(default)]
+    pub primary: bool,
+    /// 行尾小标签。
+    #[serde(default)]
+    pub tag: String,
+    /// 悬停提示。
+    #[serde(default)]
+    pub hint: String,
+    /// 内容颜色：`good` / `warn` / `danger` / `accent` / `muted`；其它值忽略。
+    #[serde(default)]
+    pub tone: String,
+}
+
+fn tone_of(s: &str) -> Option<Tone> {
+    match s { "good" => Some(Tone::Good), "warn" => Some(Tone::Warn), "danger" => Some(Tone::Danger), "accent" => Some(Tone::Accent), "muted" => Some(Tone::Muted), _ => None }
+}
+
+impl ReplyRow {
+    fn into_row(self) -> Row {
+        let mut r = Row::kv(self.label, self.value);
+        r.primary = self.primary;
+        r.hint = self.hint;
+        r.tone = tone_of(&self.tone);
+        if !self.tag.is_empty() { r.tag = Some((self.tag, Tone::Muted)); }
+        r
+    }
+}
+
+/// 把回复整理成界面用的结果：有 `rows` 时按键值行显示，文件结果附带描述，其余按文本。
+fn output_of(r: RunReply, rest: &[u8], in_size: u64) -> Output {
+    let file = r.file_name.map(|n| (n, rest.to_vec()));
+    let info = file.as_ref().map(|(n, b)| crate::tools::fileinfo::inspect(n, b));
+    let mut o = if r.rows.is_empty() { Output { text: r.text, ..Default::default() } } else {
+        let rows: Vec<Row> = r.rows.into_iter().map(ReplyRow::into_row).collect();
+        let mut o = Output::kv(rows, RowFmt::Colon);
+        if !r.text.is_empty() { o.text = r.text; }
+        o
+    };
+    o.meta = r.meta;
+    o.color = r.color;
+    o.file = file;
+    o.info = info;
+    o.in_size = (in_size > 0).then_some(in_size);
+    o
 }
 
 #[derive(Serialize)]
@@ -136,7 +197,7 @@ pub fn run_tool(wasm: &[u8], tool: &str, a: &Args) -> Result<Output> {
     let (j, rest) = unframe(&out)?;
     let r: RunReply = serde_json::from_slice(j).context("bad reply")?;
     if let Some(e) = r.error { bail!(e); }
-    Ok(Output { text: r.text, color: r.color, file: r.file_name.map(|n| (n, rest.to_vec())), ..Default::default() })
+    Ok(output_of(r, rest, bytes.len() as u64))
 }
 
 // ---------- 本地安装 ----------

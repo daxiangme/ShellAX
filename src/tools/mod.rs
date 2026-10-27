@@ -11,6 +11,7 @@ use crate::i18n::t;
 pub mod crypto;
 pub mod dev;
 pub mod gen;
+pub mod fileinfo;
 pub mod history;
 pub mod num;
 pub mod text;
@@ -194,6 +195,10 @@ pub struct Output {
     pub source: Option<Source>,
     /// 第二个结果页的文本（正则的“替换”页）。
     pub alt: Option<String>,
+    /// 文件结果的描述（名称、大小、页数、压缩包文件数、预览）。
+    pub info: Option<fileinfo::FileInfo>,
+    /// 输入文件的总字节数（压缩前后对比用）。
+    pub in_size: Option<u64>,
 }
 impl Output {
     pub fn text(s: impl Into<String>) -> Output { Output { text: s.into(), ..Default::default() } }

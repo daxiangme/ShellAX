@@ -117,3 +117,28 @@ pub fn source_preview(id: &'static str, src: &ssh_term_proto::tools::Source) -> 
             .font_family(ui::mono_family()).text_size(px(ui::fs_mono())).text_color(c(th.text)).whitespace_normal()
             .child(gpui::StyledText::new(SharedString::from(src.text.clone())).with_highlights(hl)))
 }
+
+/// 文件结果卡片的内容：文件名、说明（大小 / 页数 / 压缩包文件数）与操作。
+pub struct FileCard {
+    pub name: SharedString,
+    pub meta: String,
+    pub kind: ssh_term_proto::tools::fileinfo::FileKind,
+    pub on_save: ClickFn,
+    /// 保存之后才有：在文件夹中显示。
+    pub on_reveal: Option<ClickFn>,
+}
+
+/// 文件结果卡片：类型图标 + 文件名 + 说明，右侧“保存”和（保存后的）“在文件夹中显示”。
+pub fn file_card(f: FileCard) -> Div {
+    use ssh_term_proto::tools::fileinfo::FileKind;
+    let th = cur();
+    let ic = match f.kind { FileKind::Zip => IconName::FileArchive, _ => IconName::FileText };
+    div().mx(px(crate::card_layout::SUB_PAD)).mt(px(crate::card_layout::SUB_PAD)).px(px(ui::ROW_PX)).py(px(ui::SP_2)).rounded(px(ui::R_MD)).border_1().border_color(crate::theme::divider())
+        .flex().items_center().gap(px(ui::SP_3)).flex_shrink_0()
+        .child(ui::icon(ic, ui::IC_LG, c(th.overlay1)))
+        .child(div().flex_1().min_w_0().flex().flex_col()
+            .child(div().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(f.name))
+            .child(div().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(f.meta)))
+        .when_some(f.on_reveal, |d, cb| d.child(ui::button_sm("file-reveal", t("tools.file_show"), 0).on_click(cb)))
+        .child(ui::button_sm("file-save", t("tools.ui_save"), 1).on_click(f.on_save))
+}

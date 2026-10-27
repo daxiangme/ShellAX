@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{div, prelude::*, px, AnyElement, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, ExternalPaths, FontWeight, SharedString, Window};
@@ -42,6 +43,10 @@ pub struct ToolView {
     copy_seq: u64,
     /// 正则工具的结果页：`match` / `replace`。
     tab: &'static str,
+    /// 文件结果的图片预览（从内存加载，不落盘）。
+    preview: Option<Arc<gpui::Image>>,
+    /// 最近一次保存的路径（保存后才能“在文件夹中显示”）。
+    saved: Option<PathBuf>,
     ws: Option<WsState>,
     rt: tokio::runtime::Handle,
     _subs: Vec<gpui::Subscription>,
@@ -87,7 +92,8 @@ impl ToolView {
             subs.push(cx.subscribe_in(&w.msg, window, |this: &mut Self, _, ev: &InputEvent, w, cx| if let InputEvent::PressEnter { .. } = ev { this.ws_send(w, cx) }));
         }
         let title = spec.name.clone();
-        let mut me = Self { spec, title, texts, areas, picks, files: HashMap::new(), out_ed, output: Output::default(), error: None, notice: None, busy: false, seq: 0, pending_out: None, hist, copied: None, copy_seq: 0, tab: "match", ws, rt, _subs: subs };
+        let spec_id = spec.id.clone();
+        let mut me = Self { spec, title, texts, areas, picks, files: HashMap::new(), out_ed, output: Output::default(), error: None, notice: None, busy: false, seq: 0, pending_out: None, hist, copied: None, copy_seq: 0, tab: if spec_id == "md_html" { "preview" } else { "match" }, preview: None, saved: None, ws, rt, _subs: subs };
         if me.spec.live && !me.spec.interactive && !me.spec.heavy { me.run(cx); }
         me
     }
@@ -144,6 +150,11 @@ impl ToolView {
                     // 带原文预览的键值结果（正则）：替换页的文本放进输出编辑器
                     OutKind::Kv => if o.source.is_some() { self.pending_out = Some(o.alt.clone().unwrap_or_default()); },
                 }
+                self.preview = o.info.as_ref().and_then(|i| i.preview.as_ref()).map(|(fmt, bytes)| {
+                    let f = match fmt { tools::fileinfo::PreviewFmt::Png => gpui::ImageFormat::Png, tools::fileinfo::PreviewFmt::Jpeg => gpui::ImageFormat::Jpeg };
+                    Arc::new(gpui::Image::from_bytes(f, bytes.clone()))
+                });
+                self.saved = None;
                 self.output = o;
             }
             Err(e) => { self.error = Some(e.to_string()); }
@@ -217,6 +228,7 @@ impl ToolView {
             let Ok(Ok(Some(path))) = rx.await else { return };
             let r = std::fs::write(&path, bytes);
             let _ = this.update(cx, |v, cx| {
+                if r.is_ok() { v.saved = Some(path.clone()); }
                 v.notice = Some(match r { Ok(()) => tf("tools.ui_saved", &[("path", &path.display())]), Err(e) => tf("tools.ui_save_failed", &[("e", &e)]) });
                 cx.notify();
             });
@@ -378,6 +390,65 @@ impl ToolView {
         list.into_any_element()
     }
 
+    /// 文件结果：文件卡片（名称、大小、页数 / 文件数、保存与在文件夹中显示）、压缩前后对比、图片预览与包里回传的说明文字。
+    fn render_file(&self, cx: &mut Context<Self>) -> AnyElement {
+        use tools::fileinfo::{human, FileKind};
+        let th = cur();
+        let Some((name, data)) = &self.output.file else { return div().into_any_element() };
+        let fallback = tools::fileinfo::inspect(name, data);
+        let info = self.output.info.as_ref().unwrap_or(&fallback);
+        let mut parts = vec![human(info.size)];
+        if let Some((w, h)) = info.dims { parts.push(tf("tools.file_dims", &[("w", &w), ("h", &h)])); }
+        if let Some(n) = info.pages { parts.push(tf("tools.file_pages", &[("n", &n)])); }
+        if let Some(n) = info.entries { parts.push(tf("tools.file_entries", &[("n", &n)])); }
+        let on_reveal: Option<ClickFn> = self.saved.clone().map(|p| -> ClickFn { Box::new(move |_, _, _| { let _ = ssh_term_proto::updater::reveal(&p); }) });
+        let card = result_list::file_card(result_list::FileCard {
+            name: SharedString::from(info.name.clone()), meta: parts.join(" · "), kind: info.kind,
+            on_save: Box::new(cx.listener(|this, _: &ClickEvent, _w, cx| this.save(cx))), on_reveal,
+        });
+        let mut col = div().id("file-scroll").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().pb(px(SUB_PAD)).child(card);
+        // 图片压缩：压缩前 → 压缩后
+        if let (true, Some(before), FileKind::Image) = (self.spec.id == "img_compress", self.output.in_size, info.kind) {
+            let after = info.size;
+            let pct = format!("{:.1}", tools::fileinfo::change_pct(before, after).abs());
+            let (txt, col_t) = if after <= before {
+                (tf("tools.cmp_saved", &[("a", &human(before)), ("b", &human(after)), ("pct", &pct)]), th.success)
+            } else {
+                (tf("tools.cmp_bigger", &[("a", &human(before)), ("b", &human(after)), ("pct", &pct)]), th.warning)
+            };
+            col = col.child(div().mx(px(SUB_PAD)).mt(px(ui::SP_2)).text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(col_t)).child(txt));
+        }
+        if !self.output.text.is_empty() && self.output.rows.is_empty() {
+            col = col.child(div().mx(px(SUB_PAD)).mt(px(ui::SP_2)).whitespace_normal().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(self.output.text.clone()));
+        }
+        if let Some(img) = &self.preview {
+            // 按像素尺寸等比缩进 480×320 的框；小图保持原大小，不放大
+            let (w, h) = info.preview_dims.map(|(w, h)| (w as f32, h as f32)).unwrap_or((320., 240.));
+            let k = (480. / w).min(320. / h).min(1.);
+            let zip = info.kind == FileKind::Zip;
+            col = col.child(div().mx(px(SUB_PAD)).mt(px(ui::SP_3)).flex().flex_col().gap(px(ui::SP_1))
+                .when(zip, |d| d.child(div().text_size(px(ui::fs_caption())).text_color(c(th.overlay1)).child(t("tools.preview_zip_note"))))
+                .child(div().p(px(ui::SP_2)).rounded(px(ui::R_MD)).border_1().border_color(crate::theme::divider()).bg(crate::theme::hover_bg()).flex().justify_center()
+                    .child(gpui::img(img.clone()).w(px(w * k)).h(px(h * k)))));
+        }
+        col.into_any_element()
+    }
+
+    /// Markdown 转 HTML：预览页渲染输入的 Markdown，源码页是生成的 HTML（复制 / 保存始终是 HTML）。
+    fn render_markdown(&self, cx: &mut Context<Self>) -> AnyElement {
+        let me = cx.entity().downgrade();
+        let tabs = [("preview".to_string(), t("tools.tab_preview").to_string()), ("source".to_string(), t("tools.tab_source").to_string())];
+        let bar = div().mx(px(SUB_PAD)).mt(px(ui::SP_2)).flex_shrink_0()
+            .child(ui::segmented("md-tab", &tabs, self.tab, move |v, _w, cx| { let _ = me.update(cx, |this, cx| { this.tab = if v == "source" { "source" } else { "preview" }; cx.notify(); }); }));
+        let body: AnyElement = if self.tab == "source" {
+            sub_card_body().flex_1().min_h_0().child(Editor::new(&self.out_ed).h_full()).into_any_element()
+        } else {
+            let src = self.areas.get("input").map(|a| a.read(cx).value().to_string()).unwrap_or_default();
+            div().id("md-preview").flex_1().min_h_0().overflow_y_scroll().px(px(SUB_PAD)).py(px(ui::SP_2)).child(gpui_component::text::TextView::markdown("tool-md", src).selectable(true)).into_any_element()
+        };
+        div().flex_1().min_h_0().flex().flex_col().child(bar).child(body).into_any_element()
+    }
+
     /// 正则结果：匹配 / 替换两页。匹配页是原文高亮预览 + 逐处匹配；替换页是替换后的全文。
     fn render_regex(&self, cx: &mut Context<Self>) -> AnyElement {
         let me = cx.entity().downgrade();
@@ -484,6 +555,10 @@ impl Render for ToolView {
         if let (Some(v), false) = (&self.output.verdict, self.error.is_some()) { out = out.child(result_list::verdict_banner(v)); }
         if tools::has_history(&self.spec.id) {
             out = out.child(self.render_history(cx));
+        } else if self.output.file.is_some() {
+            out = out.child(self.render_file(cx));
+        } else if self.spec.id == "md_html" && !self.output.text.is_empty() {
+            out = out.child(self.render_markdown(cx));
         } else if self.output.kind == OutKind::Kv && self.output.source.is_some() {
             out = out.child(self.render_regex(cx));
         } else if self.output.kind == OutKind::Kv {
