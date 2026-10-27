@@ -227,8 +227,8 @@ impl Root {
     }
 
     // ------------------------------------------------------------------ rows
-    /// 实体图标 + 右上角连接状态点（灰空闲 / 绿已连接 / 琥珀呼吸连接中 / 红失败），生产环境另在右下加盾牌。
-    fn entity_icon(ic: IconName, st: u8, anim_id: usize, shield: Option<gpui::Hsla>) -> gpui::Div {
+    /// 填充实体图标（`glyph`）+ 右上角连接状态点（灰空闲 / 绿已连接 / 琥珀呼吸连接中 / 红失败），生产环境另在右下加盾牌。
+    fn entity_icon(glyph: AnyElement, st: u8, anim_id: usize, shield: Option<gpui::Hsla>) -> gpui::Div {
         let th = cur();
         // 状态点描边用卡片底色，与岛融为一体
         let dot = div().absolute().top(px(-2.)).right(px(-2.)).size(px(7.)).rounded_full().border_1().border_color(crate::theme::card_bg())
@@ -237,7 +237,7 @@ impl Root {
             dot.with_animation(("host-dot", anim_id), gpui::Animation::new(crate::motion::ms(crate::motion::BREATHE_MS)).repeat().with_max_fps(30.).with_easing(|t| (t * std::f32::consts::PI).sin()), |d, t| d.opacity(0.35 + 0.65 * t)).into_any_element()
         } else { dot.into_any_element() };
         div().relative().size(px(ui::IC_MD)).flex_shrink_0()
-            .child(icon(ic, ui::IC_MD, c(th.overlay1)))
+            .child(glyph)
             .child(dot)
             .children(shield.map(|col| div().absolute().bottom(px(-3.)).right(px(-4.)).child(icon(IconName::ShieldAlert, ui::IC_BADGE, col))))
     }
@@ -256,7 +256,7 @@ impl Root {
         // 比同级分组多一级缩进（对齐分组的展开箭头槽位）
         let mut row = ui::list_row(("host", idx), depth + 1, sel).min_h(px(ui::row2_h())).group(gid.clone())
             // 一个信号一件事：单色服务器图标，右上角连接状态点，生产环境右下盾牌；标签最多 3 个色点（+N）
-            .child(Self::entity_icon(IconName::Server, st, idx, prod.then(|| c(s.tags.rgb(&s.tags.production)))))
+            .child(Self::entity_icon(crate::file_icon::server_icon(ui::IC_MD), st, idx, prod.then(|| c(s.tags.rgb(&s.tags.production)))))
             .child(div().flex_1().min_w_0().flex().flex_col().overflow_hidden()
                 .child(div().flex().items_center().gap(px(4.))
                     .child(ui::row_title(h.name.clone()))
@@ -298,7 +298,7 @@ impl Root {
         ui::list_row(("place", idx), depth + 1, false).min_h(px(ui::row2_h()))
             .on_click(cx.listener(move |this, _, w, cx| this.open_place(idx, w, cx)))
             .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.show_sb_menu(SbMenu { target: SbTarget::Place(idx), pos: ev.position, sub: SbSub::Main }); cx.notify(); }))
-            .child(icon(IconName::Bookmark, ui::IC_MD, c(cur().overlay1)))
+            .child(crate::file_icon::folder_icon(ui::IC_MD, false))
             .child(div().flex_1().min_w_0().flex().flex_col().overflow_hidden()
                 .child(ui::row_title(p.name.clone()))
                 .child(ui::row_meta(sub)))
@@ -323,7 +323,7 @@ impl Root {
                 this.sb_save("hosts.group_move", format!("group={from:?} into={to:?}"), |s| { hosttree::move_group(&mut s.hosts, &mut s.groups, &from, &to, None); }, cx);
             }))
             .child(div().w(px(ui::INDENT)).flex_shrink_0().flex().items_center().child(icon(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown }, ui::IC_XS, c(th.overlay1))))
-            .child(icon(IconName::Folder, ui::IC_MD, c(th.overlay1)))
+            .child(crate::file_icon::folder_icon(ui::IC_MD, !collapsed))
             .child(ui::row_title(name.to_string()).font_weight(FontWeight::MEDIUM))
             .children(ui::tag_dot(tags.first()))
             .child(div().flex_1())
@@ -382,7 +382,7 @@ impl Root {
             list = list.child(ui::list_row("host-local", 0, local_sel).min_h(px(ui::row2_h()))
                 .on_click(cx.listener(|this, ev: &gpui::ClickEvent, w, cx| this.sb_activate(Spec::Local, t("ui.local_terminal").to_string(), ev.click_count() >= 2, w, cx)))
                 .on_mouse_down(gpui::MouseButton::Right, cx.listener(|this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.show_sb_menu(SbMenu { target: SbTarget::Local, pos: ev.position, sub: SbSub::Main }); cx.notify(); }))
-                .child(Self::entity_icon(IconName::Monitor, if local_on { 2 } else { 0 }, usize::MAX, None))
+                .child(Self::entity_icon(crate::file_icon::monitor_icon(ui::IC_MD), if local_on { 2 } else { 0 }, usize::MAX, None))
                 .child(div().flex_1().min_w_0().flex().flex_col().overflow_hidden()
                     .child(ui::row_title(t("ui.local_terminal")))
                     .child(ui::row_meta(sh))));
@@ -392,7 +392,7 @@ impl Root {
             let on = ctx.open.iter().any(|(x, o)| *x == l && *o == 2);
             list = list.child(ui::list_row("host-env", 0, false).min_h(px(ui::row2_h()))
                 .on_click(cx.listener(move |this, _, w, cx| this.new_tab(Spec::Ssh(dt.clone()), w, cx)))
-                .child(Self::entity_icon(IconName::Server, if on { 2 } else { 0 }, usize::MAX - 1, None))
+                .child(Self::entity_icon(crate::file_icon::server_icon(ui::IC_MD), if on { 2 } else { 0 }, usize::MAX - 1, None))
                 .child(div().flex_1().min_w_0().flex().flex_col().overflow_hidden()
                     .child(ui::row_title(l))
                     .child(ui::row_meta(t("ui.ssh_host_environment_variable")))));

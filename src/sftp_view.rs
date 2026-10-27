@@ -999,7 +999,7 @@ impl SftpView {
     fn pane_header(&self, pi: usize, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
         let p = &self.panes[pi];
-        let (ic, name) = match &p.src { Src::Remote(_) => (IconName::Server, p.label()), _ => (IconName::Monitor, p.label()) };
+        let (ic, name) = match &p.src { Src::Remote(_) => (crate::file_icon::server_icon(ui::IC_MD), p.label()), _ => (crate::file_icon::monitor_icon(ui::IC_MD), p.label()) };
         let tags = p.target().and_then(|t| config_hosts().iter().find(|(_, x)| x.pool_key() == t.pool_key()).cloned()).map(|(h, _)| h.tags).unwrap_or_default();
         let s = crate::config::get();
         let filter_on = p.filter.is_some();
@@ -1008,7 +1008,7 @@ impl SftpView {
                 .hover(|d| d.bg(crate::theme::hover_bg()))
                 .tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(t("sftp.change_source")).build(w, cx))
                 .on_click(cx.listener(move |v, _, w, cx| v.open_picker(pi, w, cx)))
-                .child(icon(ic, ui::IC_MD, c(th.accent)))
+                .child(ic)
                 .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(fs_body())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(name))
                 .children(tags.iter().take(3).map(|tg| div().size(px(7.)).flex_shrink_0().rounded_full().bg(c(s.tags.rgb(tg)))))
                 .child(icon(IconName::ChevronDown, ui::IC_XS, c(th.overlay1))))

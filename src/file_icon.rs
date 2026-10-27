@@ -12,6 +12,12 @@ pub struct Assets;
 const FILES: &[(&str, &[u8])] = &[
     ("shellax/files/folder_back.svg", include_bytes!("../assets/icons/files/folder_back.svg")),
     ("shellax/files/folder_front.svg", include_bytes!("../assets/icons/files/folder_front.svg")),
+    ("shellax/files/folder_open_back.svg", include_bytes!("../assets/icons/files/folder_open_back.svg")),
+    ("shellax/files/folder_open_front.svg", include_bytes!("../assets/icons/files/folder_open_front.svg")),
+    ("shellax/files/monitor_body.svg", include_bytes!("../assets/icons/files/monitor_body.svg")),
+    ("shellax/files/monitor_screen.svg", include_bytes!("../assets/icons/files/monitor_screen.svg")),
+    ("shellax/files/server_body.svg", include_bytes!("../assets/icons/files/server_body.svg")),
+    ("shellax/files/server_leds.svg", include_bytes!("../assets/icons/files/server_leds.svg")),
     ("shellax/files/doc_page.svg", include_bytes!("../assets/icons/files/doc_page.svg")),
     ("shellax/files/doc_edge.svg", include_bytes!("../assets/icons/files/doc_edge.svg")),
     ("shellax/files/doc_fold.svg", include_bytes!("../assets/icons/files/doc_fold.svg")),
@@ -72,8 +78,7 @@ pub fn file_icon(cls: Class, size: f32, dark: bool) -> AnyElement {
     let h = |x: u32| gpui::Hsla::from(rgb(x));
     let mut d = div().relative().size(px(size)).flex_shrink_0();
     if cls == Class::Folder {
-        let (back, front) = if dark { (0x3d8fd6, 0x62aef0) } else { (0x5aa9ec, 0x8cc8f8) };
-        return d.child(layer("shellax/files/folder_back.svg", size, h(back))).child(layer("shellax/files/folder_front.svg", size, h(front))).into_any_element();
+        return folder_icon(size, false);
     }
     let (page, edge, fold) = if dark { (0xe9edf2, 0x8b95a3, 0xc5ccd6) } else { (0xffffff, 0xa7b0bd, 0xdfe4ea) };
     d = d.child(layer("shellax/files/doc_page.svg", size, h(page))).child(layer("shellax/files/doc_edge.svg", size, h(edge))).child(layer("shellax/files/doc_fold.svg", size, h(fold)));
@@ -87,6 +92,27 @@ pub fn file_icon(cls: Class, size: f32, dark: bool) -> AnyElement {
     };
     if let Some((p, col)) = mark { d = d.child(layer(p, size, h(col))); }
     d.into_any_element()
+}
+
+/// 填充文件夹（SFTP 文件列表与主机列表共用）：`open` 为展开态。颜色来自 `theme::folder_colors`。
+pub fn folder_icon(size: f32, open: bool) -> AnyElement {
+    let (back, front) = crate::theme::folder_colors();
+    let (b, f) = if open { ("shellax/files/folder_open_back.svg", "shellax/files/folder_open_front.svg") } else { ("shellax/files/folder_back.svg", "shellax/files/folder_front.svg") };
+    div().relative().size(px(size)).flex_shrink_0().child(layer(b, size, back)).child(layer(f, size, front)).into_any_element()
+}
+
+/// 填充服务器：浅中性机身加强调色指示灯。
+pub fn server_icon(size: f32) -> AnyElement {
+    div().relative().size(px(size)).flex_shrink_0()
+        .child(layer("shellax/files/server_body.svg", size, crate::theme::entity_body()))
+        .child(layer("shellax/files/server_leds.svg", size, crate::theme::entity_accent())).into_any_element()
+}
+
+/// 填充显示器：浅中性机身加强调色屏幕。
+pub fn monitor_icon(size: f32) -> AnyElement {
+    div().relative().size(px(size)).flex_shrink_0()
+        .child(layer("shellax/files/monitor_body.svg", size, crate::theme::entity_body()))
+        .child(layer("shellax/files/monitor_screen.svg", size, crate::theme::entity_accent())).into_any_element()
 }
 
 /// 文件列表里一行文件 / 文件夹的图标：本机与远程窗格、「..」行共用同一个入口，样式只在这里定义。

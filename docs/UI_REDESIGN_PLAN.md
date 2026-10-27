@@ -62,7 +62,7 @@
 1. **岛（Island）是唯一容器**：左工具岛、中间内容岛、每张右侧卡片、底部面板，用同一个函数生成：同圆角、同底色、无边框。岛之间只靠外框底色与 6px 间距区分。
 2. **一套字号，跟随设置**：所有字号都由 `appearance.ui_font_size`（默认 13）推导，改设置即全局生效。
 3. **一种悬停、一种选中**：悬停 = `hover_bg()`，持久选中 = `selected_bg()`，键盘高亮（菜单/面板）= `menu_sel_bg()`。不再使用实心强调色 + 白字（主按钮除外）。
-4. **图标单色**：实体图标统一 `overlay1`，颜色只用于传达状态（连接点、标签点、危险/警告）。品牌图标（数据库引擎 SVG、文件类型 SVG）除外。
+4. **图标分两类**：通用功能图标（按钮、菜单、工具栏、数据库 / Redis 树的实体图标）保持单色 `overlay1`，颜色只用于传达状态（连接点、标签点、危险/警告）。**主机列表与 SFTP 里的“实体”用填充图标**（`file_icon.rs`，多层 SVG）：文件夹 / 位置 = 蓝色两层填充（`theme::folder_colors`，深浅色各一档，分组展开用 `folder_open_*`）；SSH 主机 / 本地终端 = 浅中性机身（`theme::entity_body`）加强调色指示灯 / 屏幕（`theme::entity_accent`）。品牌图标（数据库引擎 SVG、文件类型 SVG）同样除外。
 5. **安静的默认态**：行内操作按钮默认隐藏，悬停/选中时出现；标题不大写；次要信息用颜色而不是更小的字号区分。
 6. **4px 网格**：间距只用 2/4/6/8/12/16/20/24/32。
 
@@ -264,10 +264,10 @@ island
 #### 主机 / SFTP（`sidebar.rs`）
 - 新增 `panel_header("主机"/"SFTP")`，原搜索框右侧的「+」移到标题行 actions（`IconBtn::Md`，`Plus`，点击仍弹出原菜单）。搜索框独占一行。
 - 分区：`本地`、`连接`、`标签` 用 `ui::section_header`；`连接`/`标签` 可折叠（折叠状态可只存内存，不改配置格式）；`连接` 右侧显示主机总数。拖放到「连接」标题移到顶层的逻辑保留。
-- **主机行**：`list_row` + `min_h(row2_h())`；图标 `Server` `IC_MD` `overlay1`；状态点 7px 位于图标右上角、带 `card_bg()` 描边（不是 `crust`）；生产环境盾牌保留在图标右下；第一行 `row_title(name)` + 最多 3 个标签点（6px）+ `+N`（`fs_caption`）；第二行 `row_meta("user@host:port · OS")`；编辑按钮放入 `row_actions`（`IconBtn::Sm`）。缩进 `INDENT` 16/级，展开箭头占 16px 宽槽位以对齐。
-- **本地终端行 / 环境变量主机行**：与主机行完全同构（图标 `Monitor` / `Server` 单色 + 右上角状态点），去掉独立圆点与 `info`/`accent` 图标色。
-- **分组行**：`list_row` 单行；箭头 `IC_XS`；文件夹图标 `IC_MD` `overlay1`（不再按标签着色、不用强调色）；名称 `fs_body` MEDIUM；有标签时名称后跟 8px 标签点；右侧计数 `fs_caption` `overlay1`。
-- **位置行（places）**：双行同主机行；图标与分组文件夹区分（如 `FolderOpen` 或 `Bookmark`，以 `IconName` 中实际存在的为准），单色。
+- **主机行**：`list_row` + `min_h(row2_h())`；图标 `file_icon::server_icon(IC_MD)`（填充服务器：浅中性机身 + 强调色指示灯）；状态点 7px 位于图标右上角、带 `card_bg()` 描边（不是 `crust`；指示灯在机身左侧，不被状态点遮住）；生产环境盾牌保留在图标右下；第一行 `row_title(name)` + 最多 3 个标签点（6px）+ `+N`（`fs_caption`）；第二行 `row_meta("user@host:port · OS")`；编辑按钮放入 `row_actions`（`IconBtn::Sm`）。缩进 `INDENT` 16/级，展开箭头占 16px 宽槽位以对齐。
+- **本地终端行 / 环境变量主机行**：与主机行完全同构（图标 `file_icon::monitor_icon` / `server_icon` 填充图标 + 右上角状态点），去掉独立圆点与 `info`/`accent` 图标色。
+- **分组行**：`list_row` 单行；箭头 `IC_XS`；文件夹图标 `file_icon::folder_icon(IC_MD, open)`（蓝色填充，折叠闭合、展开用打开态；不再按标签着色）；名称 `fs_body` MEDIUM；有标签时名称后跟 8px 标签点；右侧计数 `fs_caption` `overlay1`。
+- **位置行（places）**：双行同主机行；图标用同一个蓝色填充文件夹（闭合态，无徽标），靠第二行路径与分组行区分。
 - **标签行**：`list_row` 单行；8px 色点 + 名称 + 生产盾牌 + 计数。
 - 空状态改 `ui::empty_state(Server, "还没有连接", 说明, [新建连接(主), 导入 ~/.ssh/config])`。无匹配时 `empty_state(Search, "没有匹配的主机", None, [])`。
 - 右键菜单内「移动到」小标题改 `ui::menu_label`，不大写。

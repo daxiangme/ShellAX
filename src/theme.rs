@@ -579,6 +579,17 @@ pub fn menu_sel_bg() -> gpui::Hsla {
 pub fn divider() -> gpui::Hsla { c(cur().surface1).opacity(0.6) }
 /// 岛内子卡片底色：卡片底上叠一层很淡的前景色。
 pub fn sub_bg() -> gpui::Hsla { c(cur().text).opacity(0.035) }
+/// 文件夹图标的两层填充色（后层、前层），深浅色各一档；SFTP 文件列表与主机列表共用。
+pub fn folder_colors() -> (gpui::Hsla, gpui::Hsla) {
+    if cur().appearance == Appearance::Dark { (c(0x3d8fd6), c(0x62aef0)) } else { (c(0x5aa9ec), c(0x8cc8f8)) }
+}
+/// 主机 / 终端填充图标的机身：次要图标色与卡片底色各一半，浅色主题里是浅灰，深色主题里是深灰。
+pub fn entity_body() -> gpui::Hsla {
+    let (a, b) = (gpui::Rgba::from(c(cur().overlay1)), gpui::Rgba::from(card_bg()));
+    gpui::Rgba { r: (a.r + b.r) / 2., g: (a.g + b.g) / 2., b: (a.b + b.b) / 2., a: 1. }.into()
+}
+/// 主机 / 终端填充图标的指示灯与屏幕：强调色。
+pub fn entity_accent() -> gpui::Hsla { c(cur().accent) }
 /// 资源占用（0–1）的状态色：低于 70% 成功色，70–90% 警告色，高于 90% 错误色。
 pub fn usage_color(frac: f32) -> gpui::Hsla {
     let th = cur();
