@@ -99,7 +99,9 @@ pub struct Session {
     pub history_seed: Mutex<Option<String>>,
     /// Local PTYs: returns the foreground process name (for agent identification).
     pub fg_probe: Mutex<Option<FgProbe>>,
-    /// Current working directory of the shell (local panes), for layout snapshots.
+    /// Process cwd of the local shell. Layout save prefers OSC 7 / OSC 9;9 over this:
+    /// on Windows the process cwd stays at the spawn directory, and a foreground program can
+    /// report a different directory than the shell.
     pub cwd_probe: Mutex<Option<FgProbe>>,
     /// Shell cwd reported via OSC 7 (`file://host/path`), local or remote.
     pub osc7_cwd: Arc<Mutex<Option<String>>>,

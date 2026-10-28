@@ -1768,14 +1768,20 @@ impl TermView {
         if let Some(cmd) = self.pending_cd.take() { s.write(format!("{cmd}\r").into_bytes()); }
         true
     }
-    /// Shell cwd: OSC 7 → local /proc probe → `user@host:dir$` prompt on the cursor line.
+    /// Shell cwd for the path bar and for layout save. OSC 7 / OSC 9;9 (the shell's report)
+    /// wins over the process probe. A bare folder name, the kind a window title carries, is
+    /// not treated as a directory.
     pub fn shell_cwd(&self) -> Option<String> {
         let s = self.session.as_ref()?;
-        if let Some(c) = s.osc7_cwd.lock().unwrap().clone() { return Some(c); }
-        if let Some(c) = s.cwd_probe.lock().unwrap().as_ref().and_then(|f| f()) { return Some(c); }
-        let t = s.term.lock().unwrap();
-        let g = t.grid();
-        ssh_term_proto::ctxmenu::prompt_cwd(&row_chars(g, g.cursor.point.line.0))
+        let osc = s.osc7_cwd.lock().unwrap().clone();
+        let process = s.cwd_probe.lock().unwrap().as_ref().and_then(|f| f());
+        let prompt = {
+            let t = s.term.lock().unwrap();
+            let g = t.grid();
+            ssh_term_proto::ctxmenu::prompt_cwd(&row_chars(g, g.cursor.point.line.0))
+        };
+        let c = ssh_term_proto::session_store::pick_saved_cwd(osc.as_deref(), process.as_deref(), prompt.as_deref());
+        (!c.is_empty()).then_some(c)
     }
     /// Enter `path` in this shell. Clears a half-typed line first.
     pub fn cd_to(&mut self, path: &str, cx: &mut Context<Self>) {

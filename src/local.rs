@@ -123,7 +123,9 @@ fn default_shell() -> String {
     { "/bin/bash".into() }
 }
 
-fn home() -> Option<std::path::PathBuf> { std::env::var_os("HOME").map(Into::into) }
+fn home() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(std::path::PathBuf::from).filter(|p| p.is_dir())
+}
 
 /// Spawn the user's shell in a local PTY and wire it to a new Session.
 /// Shell integration (OSC 133 hooks for bash/zsh): 0 = off, 1 = only for the default $SHELL, 2 = always.

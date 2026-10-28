@@ -727,13 +727,14 @@ impl Root {
             Spec::Local => {
                 let shell = config::get().terminal.shell.clone();
                 let title = tf("main.local_title", &[("shell", &shell_display_name())]);
-                let cwd = pi.cwd.as_deref().map(std::path::Path::new);
+                // Missing directory (deleted since quit, or a bare folder name from a title): default home.
+                let spawn_at = pi.cwd.as_deref().and_then(ssh_term_proto::session_store::restore_local_dir_fs);
                 #[cfg(unix)]
                 if config::get().session.local_daemon {
                     let id = pi.daemon_id.clone().unwrap_or_else(ssh_term_proto::session_store::uuid_like);
                     let sock = ssh_term_proto::daemon::socket_path(&data_dir());
                     let exe = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join(format!("shellax-cli{}", std::env::consts::EXE_SUFFIX)))).unwrap_or_else(|| "shellax-cli".into());
-                    match ssh_term_proto::daemon::ensure(&sock, &exe).and_then(|_| ssh_term_proto::daemon::attach(&sock, &id, init, &shell, pi.cwd.as_deref().unwrap_or(""))) {
+                    match ssh_term_proto::daemon::ensure(&sock, &exe).and_then(|_| ssh_term_proto::daemon::attach(&sock, &id, init, &shell, spawn_at.as_deref().unwrap_or(""))) {
                         Ok(sess) => {
                             let title = format!("{title} · {}", t("main.daemon_tag"));
                             let v = cx.new(|cx| TermView::new(&title, Spec::Local, Ok(sess), h, m, window, cx));
@@ -743,7 +744,7 @@ impl Root {
                         Err(e) => self.toast(tf("main.daemon_failed", &[("e", &format!("{e:#}"))]), cx),
                     }
                 }
-                let sess = local::spawn_local_in(init, (!shell.is_empty()).then_some(shell.as_str()), cwd);
+                let sess = local::spawn_local_in(init, (!shell.is_empty()).then_some(shell.as_str()), spawn_at.as_deref().map(std::path::Path::new));
                 cx.new(|cx| TermView::new(&title, Spec::Local, sess, h, m, window, cx))
             }
             Spec::Ssh(mut t) => {
@@ -1199,7 +1200,7 @@ impl Root {
     }
     /// Recent local working directories (open panes and layout snapshots).
     fn recent_dirs(&self, cx: &App) -> Vec<String> {
-        let mut v: Vec<String> = self.tabs.iter().flat_map(|t| t.layout.leaves()).filter_map(|p| p.read(cx).session.as_ref().and_then(|s| s.cwd_probe.lock().unwrap().as_ref().and_then(|f| f()))).collect();
+        let mut v: Vec<String> = self.tabs.iter().flat_map(|t| t.layout.leaves()).filter_map(|p| p.read(cx).shell_cwd()).collect();
         let st = ssh_term_proto::snapshot::Store::load(&Self::snapshots_path());
         let re = regex::Regex::new(r#""cwd":"([^"]+)""#).unwrap();
         for sn in st.snaps { let s = sn.layout.to_string(); for m in re.captures_iter(&s) { v.push(m[1].to_string()); } }
@@ -1273,9 +1274,14 @@ impl Root {
                 if let Some(dv) = &v.db { return NodeSave::Leaf { pane: dv.read(cx).save(cx) }; }
                 if let Some(e) = &v.embed { if let Some(pane) = e.save(cx) { return NodeSave::Leaf { pane }; } }
                 let resume = v.agent_label().map(|a| a.0).or(v.last_agent.clone()).and_then(|a| resume_command(&a)).map(str::to_string).or(v.resume_offer.clone());
+                // Same directory the path bar shows (OSC 7 / OSC 9;9, then the process probe, then the
+                // prompt). The process probe alone is the spawn directory on Windows, and it can be
+                // the foreground program's directory, so a restored tab would keep the folder name
+                // in the title and open somewhere else.
+                let cwd = v.shell_cwd().unwrap_or_default();
                 let pane = match &v.spec {
-                    Spec::Local => PaneSave::Local { cwd: v.session.as_ref().and_then(|s| s.cwd_probe.lock().unwrap().as_ref().and_then(|f| f())).unwrap_or_default(), daemon_id: v.daemon_id.clone(), resume },
-                    Spec::Ssh(t) => PaneSave::Ssh { target: t.clone(), resume },
+                    Spec::Local => PaneSave::Local { cwd, daemon_id: v.daemon_id.clone(), resume },
+                    Spec::Ssh(t) => PaneSave::Ssh { target: t.clone(), cwd, resume },
                 };
                 NodeSave::Leaf { pane }
             }
@@ -1309,7 +1315,12 @@ impl Root {
         match n {
             NodeSave::Leaf { pane } => Node::Leaf(match pane.clone() {
                 PaneSave::Local { cwd, daemon_id, resume } => r.open_pane_with(Spec::Local, PaneInit { cwd: (!cwd.is_empty()).then_some(cwd), daemon_id, resume }, window, cx),
-                PaneSave::Ssh { target, resume } => r.open_pane_with(Spec::Ssh(target), PaneInit { resume, ..Default::default() }, window, cx),
+                PaneSave::Ssh { target, resume, cwd } => {
+                    let v = r.open_pane_with(Spec::Ssh(target), PaneInit { resume, ..Default::default() }, window, cx);
+                    // Directory only. The previous program stays on the resume button and is not sent.
+                    if let Some(cmd) = ssh_term_proto::session_store::remote_cd_command(&cwd) { v.update(cx, |v, cx| v.queue_cd(cmd, cx)); }
+                    v
+                }
                 PaneSave::Sftp { target, local_dir, remote_dir, follow, panes } => {
                     let target = (!target.host.is_empty()).then_some(target);
                     let v = r.new_sftp_view(target, (!remote_dir.is_empty()).then_some(remote_dir), (!local_dir.is_empty()).then_some(local_dir), panes, window, cx);
@@ -1664,7 +1675,7 @@ impl Root {
             Action::SnapshotLayout => { if self.push_snapshot("manual", cx) { self.toast(t("snap.saved").into(), cx); } }
             Action::RollbackLayout => self.modal = Some(Modal::Snapshots),
             Action::QuickStart => {
-                let dir = self.focused_pane(window, cx).and_then(|p| p.read(cx).session.as_ref().and_then(|s| s.cwd_probe.lock().unwrap().as_ref().and_then(|f| f()))).unwrap_or_else(|| std::env::var("HOME").unwrap_or_default());
+                let dir = self.focused_pane(window, cx).and_then(|p| p.read(cx).shell_cwd()).unwrap_or_else(dir_view::local_home);
                 self.modal = Some(Modal::QuickStart { dir });
             }
             Action::AiCommand => {
