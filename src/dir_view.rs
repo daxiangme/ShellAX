@@ -104,6 +104,8 @@ pub struct DirView {
     sort: Sort,
     back: Vec<String>,
     sel: Option<usize>,
+    /// 每个目标里用户手动走过的目录。切换时优先于该目标的 cwd，避免沿用上一个目标的路径。
+    browsed: std::collections::HashMap<u64, String>,
     follow: Follow,
     home: String,
     sess: Option<Arc<SftpSession>>,
@@ -130,7 +132,7 @@ impl DirView {
             rt, prompts, feed, path_in, search_in, _subs: subs,
             choices: vec![], pick: None, label: String::new(), remote: false, host_key: String::new(), ssh: None,
             dir: String::new(), entries: vec![], loading: false, error: None, path_err: None,
-            gen: 0, token: 0, sort: Sort::default(), back: vec![], sel: None,
+            gen: 0, token: 0, sort: Sort::default(), back: vec![], sel: None, browsed: std::collections::HashMap::new(),
             follow: Follow::new(true), home: String::new(), sess: None, conn: None, connecting: false, menu: None,
         }
     }
@@ -163,10 +165,10 @@ impl DirView {
         self.label = feed.label;
         if !self.loading && !self.connecting && !self.path_focused(window, cx) {
             if let Some(dir) = filelist::follow_step(&mut self.follow, feed.cwd.as_deref(), &self.home, &self.dir, self.remote) {
-                self.navigate(dir, true, cx);
+                self.navigate(dir, true, false, window, cx);
             }
         }
-        self.sync_path(window, cx);
+        self.sync_path(false, window, cx);
     }
 
     fn clear_idle(&mut self) {
@@ -186,9 +188,13 @@ impl DirView {
         self.error = None;
     }
 
-    /// 先写好身份和 follow.last，再发起连接 / 列表，最后才改输入框。
+    /// 先写好身份和要列出的目录，再发起连接 / 列表，最后才改输入框。
     /// 输入框的 `set_value` 会通知它自己，下一帧再进来时不能当成又换了一个目标。
     fn retarget(&mut self, feed: &DirFeed, window: &mut Window, cx: &mut Context<Self>) {
+        // 同一个标签换成了另一台主机：旧的手动路径属于上一台，不能带过去。
+        if self.pick == Some(feed.pick) && (self.remote != feed.remote || self.host_key != feed.host_key) {
+            self.browsed.remove(&feed.pick);
+        }
         self.pick = Some(feed.pick);
         self.remote = feed.remote;
         self.host_key = feed.host_key.clone();
@@ -206,37 +212,78 @@ impl DirView {
         self.sel = None;
         self.follow.set(true);
         self.home.clear();
-        let want = feed.cwd.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| if feed.remote { "~".into() } else { local_home() });
+        let fallback = if feed.remote { "~".into() } else { local_home() };
+        let want = filelist::path_for_target(&self.browsed, feed.pick, feed.cwd.as_deref(), &fallback).to_string();
         if feed.remote {
-            if let Some(d) = filelist::resolve_cwd(&want, "", true) {
-                self.dir = d.clone();
-                self.follow.last = Some(d);
-            } else {
-                self.dir = want.clone();
-                self.follow.last = None;
-            }
+            self.dir = filelist::resolve_cwd(&want, "", true).unwrap_or_else(|| want.clone());
             self.connect(want, cx);
         } else {
             self.home = local_home();
-            let dir = filelist::resolve_cwd(&want, &self.home, false).unwrap_or_else(|| self.home.clone());
-            self.dir = dir.clone();
-            self.follow.last = Some(dir);
+            self.dir = filelist::resolve_cwd(&want, &self.home, false).unwrap_or_else(|| self.home.clone());
             self.list(cx);
         }
+        // last 记终端 cwd，而不是列出来的目录：手动走过的路径才能留住，直到终端自己再移动。
+        self.follow.last = self.terminal_dir().or_else(|| Some(self.dir.clone()));
         if !self.search_in.read(cx).value().is_empty() {
             self.search_in.update(cx, |s, cx| s.set_value("", window, cx));
         }
-        self.sync_path(window, cx);
+        // 渲染里 set_value 不会再排一帧。先写上新目录，帧结束后再强制写一次，把输入框标脏。
+        self.sync_path(true, window, cx);
+        cx.defer_in(window, |v, window, cx| v.sync_path(true, window, cx));
     }
 
-    fn sync_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.path_focused(window, cx) { return; }
-        self.path_err = None;
+    fn terminal_dir(&self) -> Option<String> {
+        let cwd = self.feed.borrow().cwd.clone()?;
+        filelist::resolve_cwd(&cwd, &self.home, self.remote)
+    }
+
+    fn remember_here(&mut self) {
+        let Some(k) = self.pick else { return };
+        if self.dir.is_empty() { return; }
+        self.browsed.insert(k, self.dir.clone());
+    }
+
+    /// `force` 用于换目标：即使用户正在编辑上一个目标的路径，也要改成新目标的目录。
+    fn sync_path(&mut self, force: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let focused = !force && self.path_focused(window, cx);
+        if !focused { self.path_err = None; }
         let cur = self.path_in.read(cx).value();
-        if cur.as_ref() != self.dir {
+        if let Some(next) = filelist::path_field_update(focused, cur.as_ref(), &self.dir) {
+            let next = next.to_string();
+            self.path_in.update(cx, |s, cx| s.set_value(next, window, cx));
+        } else if force {
             let dir = self.dir.clone();
             self.path_in.update(cx, |s, cx| s.set_value(dir, window, cx));
         }
+    }
+
+    /// 连接回调里的结果。返回 false 表示这一代已经被更新的目标作废。
+    fn take_connect(
+        &mut self,
+        token: u64,
+        r: Result<Result<(Arc<SftpSession>, Arc<ssh::Conn>, String, String, String, Result<Vec<Entry>, String>), anyhow::Error>, flume::RecvError>,
+    ) -> bool {
+        if self.token != token { return false; }
+        self.connecting = false;
+        match r {
+            Ok(Ok((s, conn, dir, home, _resolved, ls))) => {
+                self.sess = Some(s);
+                self.conn = Some(conn);
+                self.home = home;
+                self.dir = dir;
+                if let Some(k) = self.pick {
+                    if self.browsed.contains_key(&k) { self.browsed.insert(k, self.dir.clone()); }
+                }
+                self.follow.last = self.terminal_dir().or_else(|| Some(self.dir.clone()));
+                match ls {
+                    Ok(entries) => { self.entries = entries; self.error = None; }
+                    Err(e) => { self.entries.clear(); self.error = Some(e); }
+                }
+            }
+            Ok(Err(e)) => { self.entries.clear(); self.error = Some(format!("{e:#}")); }
+            Err(_) => {}
+        }
+        true
     }
 
     fn connect(&mut self, mut want: String, cx: &mut Context<Self>) {
@@ -282,27 +329,19 @@ impl DirView {
             let _ = tx.send(r);
         });
         cx.spawn(async move |this, cx| {
-            let r = rx.recv_async().await;
-            let _ = this.update(cx, |v, cx| {
-                if v.token != token { return; }
-                v.connecting = false;
-                match r {
-                    Ok(Ok((s, conn, dir, home, resolved, ls))) => {
-                        v.sess = Some(s);
-                        v.conn = Some(conn);
-                        v.home = home;
-                        v.dir = dir;
-                        v.follow.last = Some(if resolved.is_empty() { v.dir.clone() } else { resolved });
-                        match ls {
-                            Ok(entries) => { v.entries = entries; v.error = None; }
-                            Err(e) => { v.entries.clear(); v.error = Some(e); }
-                        }
-                    }
-                    Ok(Err(e)) => { v.entries.clear(); v.error = Some(format!("{e:#}")); }
-                    Err(_) => {}
-                }
+            let mut pending = Some(rx.recv_async().await);
+            // 窗口不在更新栈上时才能写输入框。写不了也要把列表接上，下一帧 apply 再对齐路径。
+            let wrote = this.update_in(cx, |v, window, cx| {
+                let Some(r) = pending.take() else { return; };
+                if !v.take_connect(token, r) { return; }
+                v.sync_path(false, window, cx);
                 cx.notify();
             });
+            if wrote.is_err() {
+                if let Some(r) = pending.take() {
+                    let _ = this.update(cx, |v, cx| if v.take_connect(token, r) { cx.notify(); });
+                }
+            }
         }).detach();
     }
 
@@ -353,42 +392,46 @@ impl DirView {
         }
     }
 
-    fn navigate(&mut self, dir: String, push: bool, cx: &mut Context<Self>) {
+    fn navigate(&mut self, dir: String, push: bool, manual: bool, window: &mut Window, cx: &mut Context<Self>) {
         let dir = filelist::tidy(&dir, self.remote);
         if dir.is_empty() { return; }
         self.path_err = None;
-        if dir == self.dir {
-            self.list(cx);
-            return;
+        if dir != self.dir {
+            if push && !self.dir.is_empty() { self.back.push(self.dir.clone()); }
+            self.dir = dir;
+            self.sel = None;
         }
-        if push && !self.dir.is_empty() { self.back.push(self.dir.clone()); }
-        self.dir = dir;
-        self.sel = None;
+        if manual { self.remember_here(); }
+        // 在点击回调里写输入框（绘制阶段之外），避免只靠渲染期 set_value。
+        self.sync_path(false, window, cx);
         self.list(cx);
     }
 
-    fn go_back(&mut self, cx: &mut Context<Self>) {
+    fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(prev) = self.back.pop() else { return; };
         self.dir = prev;
         self.sel = None;
         self.path_err = None;
+        self.remember_here();
+        self.sync_path(false, window, cx);
         self.list(cx);
     }
 
-    fn open_entry(&mut self, i: usize, cx: &mut Context<Self>) {
+    fn open_entry(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(e) = self.entries.get(i) else { return; };
         if !e.is_dir { return; }
         let dir = filelist::child_path(&self.dir, &e.name, self.remote);
-        self.navigate(dir, true, cx);
+        self.navigate(dir, true, true, window, cx);
     }
 
-    fn up(&mut self, cx: &mut Context<Self>) {
+    fn up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(p) = filelist::parent_of(&self.dir, self.remote) else { return; };
-        self.navigate(p, true, cx);
+        self.navigate(p, true, true, window, cx);
     }
 
-    fn refresh(&mut self, cx: &mut Context<Self>) {
+    fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.path_err = None;
+        self.sync_path(false, window, cx);
         self.list(cx);
         cx.notify();
     }
@@ -399,7 +442,7 @@ impl DirView {
             Some(d) => {
                 self.path_err = None;
                 self.path_in.update(cx, |s, cx| s.set_value(d.clone(), window, cx));
-                self.navigate(d, true, cx);
+                self.navigate(d, true, true, window, cx);
             }
             None => self.path_err = Some(t("dir.bad_path").to_string()),
         }
@@ -428,9 +471,9 @@ impl DirView {
         let back_ok = !self.back.is_empty();
         let back = ui::icon_button("dir-back", IconName::ArrowLeft, ui::IconBtn::Md, t("dir.back"))
             .when(!back_ok, |d| d.opacity(0.4))
-            .when(back_ok, |d| d.on_click(cx.listener(|v, _, _, cx| { v.go_back(cx); cx.notify(); })));
+            .when(back_ok, |d| d.on_click(cx.listener(|v, _, window, cx| { v.go_back(window, cx); cx.notify(); })));
         let refresh = ui::icon_button("dir-refresh", IconName::RefreshCw, ui::IconBtn::Md, t("sftp.refresh"))
-            .on_click(cx.listener(|v, _, _, cx| v.refresh(cx)));
+            .on_click(cx.listener(|v, _, window, cx| v.refresh(window, cx)));
         ui::toolbar()
             .child(back)
             .child(refresh)
@@ -462,14 +505,14 @@ impl DirView {
         if let Some(e) = &self.error {
             if self.entries.is_empty() && !self.loading {
                 return list.child(ui::empty_state(IconName::CircleAlert, t("sftp.failed_title"), Some(e.clone().into()), vec![
-                    ui::button("dir-retry", t("sftp.retry"), 1).on_click(cx.listener(|v, _, _, cx| v.refresh(cx))).into_any_element(),
+                    ui::button("dir-retry", t("sftp.retry"), 1).on_click(cx.listener(|v, _, window, cx| v.refresh(window, cx))).into_any_element(),
                 ], false)).into_any_element();
             }
         }
         let dark = th.appearance == Appearance::Dark;
         if filelist::parent_of(&self.dir, self.remote).is_some() {
             list = list.child(filelist::parent_row("dir-up", dark)
-                .on_click(cx.listener(|v, ev: &gpui::ClickEvent, _, cx| if ev.click_count() >= 2 { v.up(cx); cx.notify(); })));
+                .on_click(cx.listener(|v, ev: &gpui::ClickEvent, window, cx| if ev.click_count() >= 2 { v.up(window, cx); cx.notify(); })));
         }
         if self.loading {
             return list.child(div().p(px(ui::PANEL_PX)).flex().items_center().gap_2().text_size(px(ui::fs_small())).text_color(c(th.subtext))
@@ -486,8 +529,8 @@ impl DirView {
             if shown > 2000 { break; }
             let selected = self.sel == Some(i);
             list = list.child(filelist::entry_row(("dir-row", i), e, selected, dark, cols)
-                .on_click(cx.listener(move |v, ev: &gpui::ClickEvent, _, cx| {
-                    if ev.click_count() >= 2 { v.open_entry(i, cx); } else { v.sel = Some(i); }
+                .on_click(cx.listener(move |v, ev: &gpui::ClickEvent, window, cx| {
+                    if ev.click_count() >= 2 { v.open_entry(i, window, cx); } else { v.sel = Some(i); }
                     cx.notify();
                 })));
         }

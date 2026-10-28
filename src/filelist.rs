@@ -249,6 +249,22 @@ pub fn resolve_cwd(cwd: &str, home: &str, remote: bool) -> Option<String> {
     (!t.is_empty()).then_some(t)
 }
 
+/// 路径框在导航后该显示的文字。聚焦表示用户正在改，不覆盖；已经和目录一致也不写。
+pub fn path_field_update<'a>(focused: bool, shown: &str, dir: &'a str) -> Option<&'a str> {
+    if focused || shown == dir { None } else { Some(dir) }
+}
+
+fn path_text(s: &str) -> bool { !s.trim().is_empty() }
+
+/// 切到某个目标时要列出、并写进路径框的目录。
+/// 这个目标里用户手动走过的路径优先，否则用它现在的 cwd，都没有再用 `fallback`。
+/// 只查 `target` 自己的记录，不会带回另一个目标的路径。
+pub fn path_for_target<'a>(remembered: &'a std::collections::HashMap<u64, String>, target: u64, cwd: Option<&'a str>, fallback: &'a str) -> &'a str {
+    remembered.get(&target).map(|s| s.as_str()).filter(|s| path_text(s))
+        .or_else(|| cwd.filter(|s| path_text(s)))
+        .unwrap_or(fallback)
+}
+
 /// 与 `Follow::step` 相同的节奏（只在终端 cwd 变化时跳转），但用 `resolve_cwd`，本地 Windows 路径也能跟上。
 pub fn follow_step(follow: &mut Follow, cwd: Option<&str>, home: &str, current: &str, remote: bool) -> Option<String> {
     if !follow.on { return None; }
@@ -308,6 +324,29 @@ mod tests {
         assert_eq!(resolve_cwd("~/a", "", false), None);
         assert_eq!(resolve_cwd("rel", "/home/u", false), None);
         assert_eq!(resolve_cwd(r"C:\Users\a\", "", false).as_deref(), Some(r"C:\Users\a"));
+    }
+
+    #[test]
+    fn path_field_updates_unless_focused_or_same() {
+        assert_eq!(path_field_update(false, "/opt", "/opt/src"), Some("/opt/src"));
+        assert_eq!(path_field_update(false, "", "/opt"), Some("/opt"));
+        assert_eq!(path_field_update(false, "/opt", "/opt"), None);
+        assert_eq!(path_field_update(true, "/opt", "/opt/src"), None);
+        assert_eq!(path_field_update(true, "/opt/src", "/opt/src"), None);
+    }
+
+    #[test]
+    fn path_for_target_prefers_that_targets_manual_path() {
+        let mut remembered = std::collections::HashMap::new();
+        remembered.insert(1, "/opt/src".into());
+        remembered.insert(2, "/var/log".into());
+        assert_eq!(path_for_target(&remembered, 1, Some("/opt"), "~"), "/opt/src");
+        assert_eq!(path_for_target(&remembered, 2, Some("/home/b"), "~"), "/var/log");
+        assert_eq!(path_for_target(&remembered, 3, Some("/home/c"), "~"), "/home/c");
+        assert_eq!(path_for_target(&remembered, 3, None, "~"), "~");
+        assert_eq!(path_for_target(&remembered, 3, Some("  "), "/home"), "/home");
+        remembered.insert(4, "  ".into());
+        assert_eq!(path_for_target(&remembered, 4, Some("/tmp"), "~"), "/tmp");
     }
 
     #[test]
