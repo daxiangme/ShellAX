@@ -4,8 +4,8 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use dm_conn::{ConnectOptions, Value};
-use dm_pool::{Pool, PoolConfig, PooledConnection};
+use dm_rust::{ConnectOptions, Value};
+use dm_rust::{Pool, PoolConfig, PooledConnection};
 use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 
 use super::{split, BoxFut, CancelSlot, ColumnInfo, ResultSet, RunOpts, Session, Sink, SqlDriver};
@@ -389,7 +389,7 @@ fn cell_text(v: &Value, full: bool) -> Option<String> {
     }
 }
 
-fn columns_of(cols: &[dm_conn::Column]) -> Vec<ColumnInfo> {
+fn columns_of(cols: &[dm_rust::Column]) -> Vec<ColumnInfo> {
     cols.iter()
         .map(|c| ColumnInfo {
             name: c.name.clone(),
@@ -401,7 +401,7 @@ fn columns_of(cols: &[dm_conn::Column]) -> Vec<ColumnInfo> {
         .collect()
 }
 
-fn from_query(sql: &str, q: dm_conn::QueryResult, max: usize) -> ResultSet {
+fn from_query(sql: &str, q: dm_rust::QueryResult, max: usize) -> ResultSet {
     let mut truncated = false;
     let mut rows = Vec::new();
     for row in &q.rows {
@@ -683,7 +683,7 @@ impl SqlDriver for DmDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dm_conn::Compression;
+    use dm_rust::Compression;
 
     fn sample() -> DmUrl {
         DmUrl {

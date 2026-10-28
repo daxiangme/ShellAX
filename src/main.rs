@@ -2381,7 +2381,7 @@ const TAB_MIN_W: f32 = 110.;
 fn main() {
     ssh_term_proto::platform::init_env();
     ssh_term_proto::platform::init_log_file(&data_dir());
-    // RUST_LOG (e.g. dm_conn=trace) → stderr, which on Windows is the log file above
+    // RUST_LOG (e.g. dm_rust=trace) → stderr, which on Windows is the log file above
     if let Ok(f) = tracing_subscriber::EnvFilter::try_from_default_env() {
         let _ = tracing_subscriber::fmt().with_env_filter(f).with_writer(std::io::stderr).with_ansi(cfg!(not(windows))).try_init();
     }
