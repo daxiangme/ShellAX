@@ -26,6 +26,12 @@ pub(crate) fn action_tip(label: &str, binding: &str) -> String {
     format!("{label}  ({keys})")
 }
 
+/// Hover text for a sidebar row whose title or detail is single-line ellipsized.
+/// Same shape as the SSH host row: the title, then the full detail when it adds information.
+fn row_tip(title: &str, detail: &str) -> String {
+    if detail.is_empty() || detail == title { title.to_string() } else { format!("{title}\n{detail}") }
+}
+
 /// Command that enters `path`. Windows local shells are PowerShell; SSH shells are POSIX.
 fn cd_command(path: &str, local_windows: bool) -> String {
     if local_windows {
@@ -330,11 +336,8 @@ impl Root {
                     .children(h.tags.iter().take(3).map(|t| div().size(px(6.)).flex_shrink_0().rounded_full().bg(c(s.tags.rgb(t)))))
                     .when(h.tags.len() > 3, |d| d.child(div().text_size(px(ui::fs_caption())).text_color(c(cur().subtext)).child(format!("+{}", h.tags.len() - 3)))))
                 .child(ui::row_meta(detail.clone())));
-        {
-            // full name + user@host:port on hover (names are often truncated)
-            let tip = format!("{}\n{}", h.name, label);
-            row = row.tooltip(crate::ui::tip(tip.clone()));
-        }
+        // full name + user@host:port on hover (names are often truncated)
+        row = row.tooltip(ui::tip(row_tip(&h.name, &label)));
         {
             let n = name.clone();
             row = row.on_click(cx.listener(move |this, ev: &gpui::ClickEvent, w, cx| {
@@ -362,7 +365,9 @@ impl Root {
 
     fn place_row(&self, idx: usize, p: &config::Place, depth: usize, cx: &mut Context<Self>) -> AnyElement {
         let sub = if p.host.is_empty() { p.path.clone() } else { format!("{} · {}", p.host, p.path) };
+        // full name + path on hover (the path line is usually truncated)
         ui::list_row(("place", idx), depth + 1, false).min_h(px(ui::row2_h()))
+            .tooltip(ui::tip(row_tip(&p.name, &sub)))
             .on_click(cx.listener(move |this, _, w, cx| this.open_place(idx, w, cx)))
             .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.show_sb_menu(SbMenu { target: SbTarget::Place(idx), pos: ev.position, sub: SbSub::Main }); cx.notify(); }))
             .child(crate::file_icon::folder_icon_styled(ui::IC_MD, false, p.icon_color.as_deref(), p.icon.as_deref()))
@@ -379,7 +384,9 @@ impl Root {
         let tags = entry.map(|g| g.tags.clone()).unwrap_or_default();
         let (g_icon, g_color) = entry.map(|g| (g.icon.clone(), g.icon_color.clone())).unwrap_or_default();
         let (p1, p2, p3, p4) = (path.to_string(), path.to_string(), path.to_string(), path.to_string());
+        // leaf is shown; a long leaf or a nested path is the rest of the full group path
         ui::list_row(SharedString::from(format!("grp-{path}")), depth, false)
+            .tooltip(ui::tip(row_tip(name, path)))
             .on_click(cx.listener(move |this, _, _w, cx| this.toggle_collapsed(&p1, cx)))
             .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.show_sb_menu(SbMenu { target: SbTarget::Group(p2.clone()), pos: ev.position, sub: SbSub::Main }); cx.notify(); }))
             .on_drag(GroupDrag { path: path.to_string() }, |d: &GroupDrag, _, _, cx| cx.new(|_| d.clone()))
@@ -449,6 +456,7 @@ impl Root {
             let local_sel = ctx.selected.as_deref() == Some("local");
             let local_on = ctx.open.iter().any(|(l, on)| l == "local" && *on == 2);
             list = list.child(ui::list_row("host-local", 0, local_sel).min_h(px(ui::row2_h()))
+                .tooltip(ui::tip(row_tip(t("ui.local_terminal"), &sh)))
                 .on_click(cx.listener(|this, ev: &gpui::ClickEvent, w, cx| this.sb_activate(Spec::Local, t("ui.local_terminal").to_string(), ev.click_count() >= 2, w, cx)))
                 .on_mouse_down(gpui::MouseButton::Right, cx.listener(|this, ev: &gpui::MouseDownEvent, _, cx| { cx.stop_propagation(); this.show_sb_menu(SbMenu { target: SbTarget::Local, pos: ev.position, sub: SbSub::Main }); cx.notify(); }))
                 .child(Self::entity_icon(crate::file_icon::local_icon(ui::IC_MD), if local_on { 2 } else { 0 }, usize::MAX, None))
@@ -459,7 +467,9 @@ impl Root {
         if let Some(dt) = self.default_target.clone() {
             let l = dt.label();
             let on = ctx.open.iter().any(|(x, o)| *x == l && *o == 2);
+            let env_tip = row_tip(&l, t("ui.ssh_host_environment_variable"));
             list = list.child(ui::list_row("host-env", 0, false).min_h(px(ui::row2_h()))
+                .tooltip(ui::tip(env_tip))
                 .on_click(cx.listener(move |this, _, w, cx| this.new_tab(Spec::Ssh(dt.clone()), w, cx)))
                 .child(Self::entity_icon(crate::file_icon::server_icon(ui::IC_MD), if on { 2 } else { 0 }, usize::MAX - 1, None))
                 .child(div().flex_1().min_w_0().flex().flex_col().overflow_hidden()
@@ -524,6 +534,7 @@ impl Root {
             let cc = color.clone();
             let is_prod = color == s.tags.production;
             list = list.child(ui::list_row(("tagf", i), 0, on)
+                .tooltip(ui::tip(name.clone()))
                 .on_click(cx.listener(move |this, _, _w, cx| { if let Some(p) = this.tag_filter.iter().position(|t| *t == cc) { this.tag_filter.remove(p); } else { this.tag_filter.push(cc.clone()); } cx.notify(); }))
                 .child(div().size(px(8.)).flex_shrink_0().rounded_full().bg(c(s.tags.rgb(&color))))
                 .child(ui::row_title(name))
@@ -873,6 +884,21 @@ impl Root {
     pub(crate) fn save_ai_width(&mut self) {
         let w = self.ai_width.round();
         if (config::get().sidebar.ai_width - w).abs() >= 1.0 { let _ = config::update(|s| s.sidebar.ai_width = w); }
+    }
+}
+
+#[cfg(test)]
+mod row_tip_tests {
+    use super::row_tip;
+
+    #[test]
+    fn full_text_for_truncated_rows() {
+        assert_eq!(row_tip("timezone", "/Users/Enigma/WorkSpace/timezone"), "timezone\n/Users/Enigma/WorkSpace/timezone");
+        assert_eq!(row_tip("web", "root@web.example:22"), "web\nroot@web.example:22");
+        assert_eq!(row_tip("place", "host · /var/log"), "place\nhost · /var/log");
+        assert_eq!(row_tip("db", "prod/db"), "db\nprod/db");
+        assert_eq!(row_tip("prod", "prod"), "prod");
+        assert_eq!(row_tip("Local terminal", ""), "Local terminal");
     }
 }
 
