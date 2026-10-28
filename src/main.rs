@@ -32,6 +32,8 @@ mod panels;
 mod settings_view;
 mod setup_view;
 mod sftp_view;
+mod filelist;
+mod dir_view;
 mod port_view;
 mod host_tools_view;
 mod hoststats_view;
@@ -238,9 +240,15 @@ pub(crate) struct Root {
     tag_filter: Vec<String>,
     /// live sidebar width (px); saved to sidebar.width when a resize drag ends
     sb_width: f32,
-    /// 右侧栏卡片：主机工具、AI、常用命令、历史命令；由 `sidebar.dock_multi` 决定可否同时展开（默认可以）。
+    /// 右侧栏卡片：主机工具、AI、常用命令、历史命令、目录；由 `sidebar.dock_multi` 决定可否同时展开（默认可以）。
     dock_snip: bool,
     dock_hist: bool,
+    /// 目录卡片：浏览当前选中终端的工作目录。
+    dock_dir: bool,
+    dir_view: Option<Entity<dir_view::DirView>>,
+    /// 用户在目录卡片里点选的终端；打开时写成活动标签，之后不跟着焦点跑。
+    dir_pick: Option<u64>,
+    dir_feed: std::rc::Rc<std::cell::RefCell<dir_view::DirFeed>>,
     /// AI assistant card open in the right column (independent of the library card).
     dock_ai: bool,
     /// Host status card open in the right column.
@@ -419,13 +427,21 @@ impl Root {
             actions::Action::OpenHostTools => self.dock_host.is_some(),
             actions::Action::OpenSnippets => self.dock_snip,
             actions::Action::OpenHistory => self.dock_hist,
+            actions::Action::OpenDirectory => self.dock_dir,
             _ => false,
         }
     }
 
     /// 右侧栏卡片是否已打开。
     fn dock_open_flag(&self, id: &str) -> bool {
-        match id { "ai-dock" => self.dock_ai, "host-dock" => self.dock_host.is_some(), "snip-dock" => self.dock_snip, _ => self.dock_hist }
+        match id {
+            "ai-dock" => self.dock_ai,
+            "host-dock" => self.dock_host.is_some(),
+            "snip-dock" => self.dock_snip,
+            "hist-dock" => self.dock_hist,
+            "dir-dock" => self.dock_dir,
+            _ => false,
+        }
     }
 
     /// 不带动画地关闭一张右侧栏卡片（只清状态，不移焦点）。
@@ -434,7 +450,9 @@ impl Root {
             "ai-dock" => { self.dock_ai = false; chat_view::set_dock_open(false); }
             "host-dock" => self.dock_host = None,
             "snip-dock" => self.dock_snip = false,
-            _ => self.dock_hist = false,
+            "hist-dock" => self.dock_hist = false,
+            "dir-dock" => { self.dock_dir = false; self.dir_view = None; }
+            _ => {}
         }
         self.dock_order.retain(|x| *x != id);
     }
@@ -446,7 +464,7 @@ impl Root {
         self.dock_order.retain(|x| *x != id);
         self.dock_order.push(id);
         if !config::get().sidebar.dock_multi {
-            for other in ["host-dock", "ai-dock", "snip-dock", "hist-dock"] {
+            for other in panels::DOCK_IDS {
                 if other != id && self.dock_open_flag(other) { self.close_dock_now(other); }
             }
         }
@@ -456,7 +474,7 @@ impl Root {
     /// 切换到单卡片模式时只留最近打开的一张。
     fn collapse_docks_to_latest(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(keep) = self.dock_order.iter().rev().copied().find(|id| self.dock_open_flag(id)) else { return };
-        for other in ["host-dock", "ai-dock", "snip-dock", "hist-dock"] {
+        for other in panels::DOCK_IDS {
             if other != keep && self.dock_open_flag(other) { self.close_dock_now(other); }
         }
         self.save_docks();
@@ -495,8 +513,8 @@ impl Root {
         self.dock_order.retain(|x| *x != id);
         self.save_docks();
         // closing the last card shrinks the whole column first, then removes it
-        let left = [self.dock_ai && id != "ai-dock", self.dock_host.is_some() && id != "host-dock", self.dock_snip && id != "snip-dock", self.dock_hist && id != "hist-dock"];
-        if !left.iter().any(|x| *x) && !motion::reduced() {
+        let left = panels::DOCK_IDS.iter().any(|other| *other != id && self.dock_open_flag(other));
+        if !left && !motion::reduced() {
             if let Some(r) = self.dock_reveal.as_mut() {
                 if !r.expanding() { return; }
                 r.reverse();
@@ -511,7 +529,7 @@ impl Root {
                     r.dock_reveal = None;
                     r.dock_shown = false;
                     r.dock_close_ids.clear();
-                    r.dock_ai = false; chat_view::set_dock_open(false); r.dock_host = None; r.dock_snip = false; r.dock_hist = false;
+                    r.dock_ai = false; chat_view::set_dock_open(false); r.dock_host = None; r.dock_snip = false; r.dock_hist = false; r.dock_dir = false; r.dir_view = None;
                     r.focus_active(w, cx); cx.notify();
                 });
             }).detach();
@@ -535,10 +553,53 @@ impl Root {
         if self.dock_host.is_some() { self.close_dock("host-dock", window, cx); return; }
         self.open_host_dock(window, cx);
     }
+    /// 活动标签里第一个窗格的 id；这个标签没有普通终端时返回 None。
+    fn active_dir_key(&self, cx: &App) -> Option<u64> {
+        let tab = self.tabs.get(self.active)?;
+        let leaves = tab.layout.leaves();
+        if !leaves.iter().any(|p| !p.read(cx).embedded()) { return None; }
+        Some(leaves[0].entity_id().as_u64())
+    }
+    /// 目录卡片这一帧该看哪个终端。嵌入式窗格（SFTP / 数据库等）不进列表。
+    pub(crate) fn dir_feed_now(&self, cx: &App) -> dir_view::DirFeed {
+        let mut snaps = Vec::new();
+        for tab in &self.tabs {
+            let leaves = tab.layout.leaves();
+            if leaves.is_empty() { continue; }
+            let shells: Vec<_> = leaves.iter().filter(|p| !p.read(cx).embedded()).cloned().collect();
+            if shells.is_empty() { continue; }
+            let key = leaves[0].entity_id().as_u64();
+            let pane = if !tab.focused.read(cx).embedded() { tab.focused.clone() } else { shells[0].clone() };
+            let v = pane.read(cx);
+            let remote = matches!(v.spec, Spec::Ssh(_));
+            let ssh = match &v.spec { Spec::Ssh(t) => Some(t.clone()), _ => None };
+            let cwd = v.shell_cwd().filter(|s| !s.is_empty()).or_else(|| (!remote).then(dir_view::local_home));
+            let label = tab.name.as_deref().filter(|s| !s.trim().is_empty()).map(|s| s.to_string()).unwrap_or_else(|| v.shown_title().to_string());
+            snaps.push(dir_view::DirSnap { key, label, remote, ssh, cwd });
+        }
+        dir_view::build_feed(&snaps, self.dir_pick, self.active_dir_key(cx))
+    }
+    fn open_dir_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.dir_pick = self.active_dir_key(cx);
+        *self.dir_feed.borrow_mut() = self.dir_feed_now(cx);
+        let (rt, pr, feed) = (self.rt.handle().clone(), self.prompts.clone(), self.dir_feed.clone());
+        let v = cx.new(|cx| dir_view::DirView::new(rt, pr, feed, window, cx));
+        self._subs.push(cx.subscribe_in(&v, window, |this, _, ev: &dir_view::DirEvent, _, cx| match ev {
+            dir_view::DirEvent::Pick(k) => { this.dir_pick = Some(*k); cx.notify(); }
+        }));
+        self.dir_view = Some(v);
+        self.dock_dir = true;
+        self.open_dock_exclusive("dir-dock");
+        cx.notify();
+    }
+    fn toggle_dir_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dock_dir { self.close_dock("dir-dock", window, cx); return; }
+        self.open_dir_dock(window, cx);
+    }
     /// 启动时按配置恢复右侧栏卡片（单卡片模式只恢复最后一张），不播放滑入动画。
     fn restore_docks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let sb = config::get().sidebar.clone();
-        let mut ids: Vec<&'static str> = ["host-dock", "ai-dock", "snip-dock", "hist-dock"].into_iter().filter(|id| sb.dock_open.iter().any(|x| x == id)).collect();
+        let mut ids: Vec<&'static str> = panels::DOCK_IDS.into_iter().filter(|id| sb.dock_open.iter().any(|x| x == id)).collect();
         ids.sort_by_key(|id| sb.dock_open.iter().position(|x| x == id));
         if !sb.dock_multi && ids.len() > 1 { ids = vec![*ids.last().unwrap()]; }
         if ids.is_empty() { return; }
@@ -547,7 +608,9 @@ impl Root {
                 "host-dock" => self.open_host_dock(window, cx),
                 "ai-dock" => { self.open_chat(window, cx); }
                 "snip-dock" => { self.dock_snip = true; self.open_dock_exclusive("snip-dock"); }
-                _ => { self.dock_hist = true; self.open_dock_exclusive("hist-dock"); }
+                "hist-dock" => { self.dock_hist = true; self.open_dock_exclusive("hist-dock"); }
+                "dir-dock" => self.open_dir_dock(window, cx),
+                _ => {}
             }
         }
         for id in &ids { if sb.dock_min.iter().any(|x| x == id) { self.dock_min.insert(id); } }
@@ -1591,6 +1654,7 @@ impl Root {
             Action::OpenAi => self.toggle_dock(SideDock::Ai, window, cx),
             Action::OpenSnippets => self.toggle_dock(SideDock::Snippets, window, cx),
             Action::OpenHistory => self.toggle_dock(SideDock::History, window, cx),
+            Action::OpenDirectory => self.toggle_dir_dock(window, cx),
             Action::LaunchAgent1 => self.launch_agent(0, window, cx),
             Action::LaunchAgent2 => self.launch_agent(1, window, cx),
             Action::LaunchAgent3 => self.launch_agent(2, window, cx),
@@ -2103,6 +2167,7 @@ impl Render for Root {
             .on_action(cx.listener(|this, _: &app_menu::OpenAiPanel, w, cx| { this.run(Action::OpenAi, w, cx); cx.stop_propagation(); }))
             .on_action(cx.listener(|this, _: &app_menu::OpenSnippets, w, cx| { this.run(Action::OpenSnippets, w, cx); cx.stop_propagation(); }))
             .on_action(cx.listener(|this, _: &app_menu::OpenHistory, w, cx| { this.run(Action::OpenHistory, w, cx); cx.stop_propagation(); }))
+            .on_action(cx.listener(|this, _: &app_menu::OpenDirectory, w, cx| { this.run(Action::OpenDirectory, w, cx); cx.stop_propagation(); }))
             .on_action(cx.listener(|this, _: &app_menu::OpenAuditLog, w, cx| { this.run(Action::OpenAudit, w, cx); cx.stop_propagation(); }))
             .on_action(cx.listener(|_, _: &app_menu::MinimizeWindow, w, cx| { w.minimize_window(); cx.stop_propagation(); }))
             // 编辑菜单只作用于终端；焦点在设置或对话框的输入框时不抢它们的复制粘贴。
@@ -2401,7 +2466,7 @@ fn open_main(cx: &mut App, rt: Arc<tokio::runtime::Runtime>, themes: Vec<Arc<The
                     let mut root = Root {
                         rt, default_target, tabs: vec![], active: 0, themes, schemes, histories: HashMap::new(),
                         manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], deny_reason: None, policy_port: None, overlay: Overlay::None, settings: None, drag_div: None, port_view: None, quit_confirm: false, modal: None, quit_ok: false, chat_view: None,
-                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, menu_last: (None, None), menu_ghost: None, menu_ghost_seq: 0, sb_menu_at: std::time::Instant::now(), sb_modal: None, tag_filter: vec![], tab_menu: None, tab_menu_at: std::time::Instant::now(), new_menu: None, new_menu_at: std::time::Instant::now(), new_menu_closed: std::time::Instant::now(), new_menu_collapsed: config::get().sidebar.collapsed.clone(), new_menu_sel: 0, new_menu_search: new_menu_search.clone(), tab_scroll: gpui::ScrollHandle::new(), tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), dock_snip: false, dock_hist: false, dock_ai: false, dock_host: None, dock_min: HashSet::new(), dock_order: vec![], sb_fold: HashSet::new(), dock_split: config::get().sidebar.dock_split.clamp(0.15, 0.85), dock_reveal: None, dock_close_ids: vec![], center_w: Default::default(), freeze_w: None, dock_shown: false, dock_tween: HashMap::new(), dock_seen: HashSet::new(), dock_col_h: Default::default(), bottom_anim: None, lib_search: lib_search.clone(), hist_search: hist_search.clone(), lib_group: String::new(), lib_hist_all: false, lib_editor: None, lib_vars: None, lib_confirm: None, lib_notice: String::new(), lib_menu: None, ai_width: { let w = config::get().sidebar.ai_width; if (280.0..=560.0).contains(&w) { w } else { config::AI_DOCK_W } }, host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: !config::get().sidebar.collapsed_panel(), sb_reveal: None, ws_seen: None, ws_last: HashMap::new(), tool: activity::Tool::from_id(&config::get().sidebar.tool), bottom_open: config::get().sidebar.bottom_open, bottom_tab: activity::Bottom::from_id(&config::get().sidebar.bottom_tab), bottom_h: config::get().sidebar.bottom_height.clamp(120., 600.), exec_log: Default::default(), dbp: Default::default(), kvp: Default::default(), toolsp: Default::default(), tool_hist: HashMap::new(), extm: None, audit, audit_verify: None, audit_filter: Default::default(),
+                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, menu_last: (None, None), menu_ghost: None, menu_ghost_seq: 0, sb_menu_at: std::time::Instant::now(), sb_modal: None, tag_filter: vec![], tab_menu: None, tab_menu_at: std::time::Instant::now(), new_menu: None, new_menu_at: std::time::Instant::now(), new_menu_closed: std::time::Instant::now(), new_menu_collapsed: config::get().sidebar.collapsed.clone(), new_menu_sel: 0, new_menu_search: new_menu_search.clone(), tab_scroll: gpui::ScrollHandle::new(), tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), dock_snip: false, dock_hist: false, dock_dir: false, dir_view: None, dir_pick: None, dir_feed: std::rc::Rc::new(std::cell::RefCell::new(dir_view::DirFeed::default())), dock_ai: false, dock_host: None, dock_min: HashSet::new(), dock_order: vec![], sb_fold: HashSet::new(), dock_split: config::get().sidebar.dock_split.clamp(0.15, 0.85), dock_reveal: None, dock_close_ids: vec![], center_w: Default::default(), freeze_w: None, dock_shown: false, dock_tween: HashMap::new(), dock_seen: HashSet::new(), dock_col_h: Default::default(), bottom_anim: None, lib_search: lib_search.clone(), hist_search: hist_search.clone(), lib_group: String::new(), lib_hist_all: false, lib_editor: None, lib_vars: None, lib_confirm: None, lib_notice: String::new(), lib_menu: None, ai_width: { let w = config::get().sidebar.ai_width; if (280.0..=560.0).contains(&w) { w } else { config::AI_DOCK_W } }, host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: !config::get().sidebar.collapsed_panel(), sb_reveal: None, ws_seen: None, ws_last: HashMap::new(), tool: activity::Tool::from_id(&config::get().sidebar.tool), bottom_open: config::get().sidebar.bottom_open, bottom_tab: activity::Bottom::from_id(&config::get().sidebar.bottom_tab), bottom_h: config::get().sidebar.bottom_height.clamp(120., 600.), exec_log: Default::default(), dbp: Default::default(), kvp: Default::default(), toolsp: Default::default(), tool_hist: HashMap::new(), extm: None, audit, audit_verify: None, audit_filter: Default::default(),
                         settings_dirty: vec![], toast: None, toast_out: false, toast_seq: 0, _subs: vec![],
                     };
                     crate::ctxmenu_view::init(root.rt.handle().clone(), root.prompts.clone());

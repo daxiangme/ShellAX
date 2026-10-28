@@ -6,7 +6,7 @@ use crate::ui::IconName;
 pub enum Action {
     CommandPalette, OpenSettings, NewLocalTab, NewHost, SplitAuto, SplitRight, SplitDown, ClosePane,
     NextTab, PrevTab, CycleTheme, ThemeSystem, CyclePermissionMode, ModeAsk, ModePlan, ModeAuto,
-    OpenSftp, OpenPortForward, OpenHostTools, OpenSnippets, OpenHistory, OpenAi, AiCommand, OpenAudit, OpenAbout, ClearHistory, ToggleSidebar,
+    OpenSftp, OpenPortForward, OpenHostTools, OpenSnippets, OpenHistory, OpenDirectory, OpenAi, AiCommand, OpenAudit, OpenAbout, ClearHistory, ToggleSidebar,
     SettingsPermissions, SettingsAppearance, SettingsTerminal, SettingsSsh, SettingsKeys,
     LaunchAgent1, LaunchAgent2, LaunchAgent3,
     ToggleBroadcast, ToggleRecording, PlayRecording, SnapshotLayout, RollbackLayout, QuickStart,
@@ -20,7 +20,7 @@ impl Action {
     pub const ALL: &'static [Action] = &[
         Action::CommandPalette, Action::OpenSettings, Action::OpenAbout, Action::NewLocalTab, Action::SplitAuto, Action::SplitRight,
         Action::SplitDown, Action::ClosePane, Action::NextTab, Action::PrevTab, Action::NewHost, Action::CycleTheme, Action::ThemeSystem,
-        Action::ToggleSidebar, Action::CyclePermissionMode, Action::ModeAsk, Action::ModePlan, Action::ModeAuto, Action::OpenSftp, Action::OpenPortForward, Action::OpenHostTools, Action::OpenSnippets, Action::OpenHistory,
+        Action::ToggleSidebar, Action::CyclePermissionMode, Action::ModeAsk, Action::ModePlan, Action::ModeAuto, Action::OpenSftp, Action::OpenPortForward, Action::OpenHostTools, Action::OpenSnippets, Action::OpenHistory, Action::OpenDirectory,
         Action::OpenAi, Action::AiCommand, Action::OpenAudit, Action::ClearHistory,
         Action::SettingsPermissions, Action::SettingsAppearance, Action::SettingsTerminal, Action::SettingsSsh, Action::SettingsKeys,
         Action::LaunchAgent1, Action::LaunchAgent2, Action::LaunchAgent3,
@@ -52,6 +52,7 @@ impl Action {
             Action::OpenHostTools => i("host_tools", t("hosttools.title"), t("ui.tools"), "", I::Monitor),
             Action::OpenSnippets => i("snippets", t("lib.snippets"), t("ui.tools"), "alt-7", I::Code),
             Action::OpenHistory => i("history_panel", t("lib.history"), t("ui.tools"), "", I::Clock),
+            Action::OpenDirectory => i("directory", t("dir.title"), t("ui.tools"), "", I::Folder),
             Action::OpenPortForward => i("port_forward", t("ui.port_forwarding"), t("ui.tools"), "", I::ArrowLeftRight),
             Action::OpenAi => i("ai_panel", t("ui.ai_agent_panel"), t("ui.tools"), "ctrl-shift-a", I::Bot),
             Action::AiCommand => i("ai_command", t("ai.action_nl"), t("ui.tools"), "ctrl-shift-g", I::Sparkles),

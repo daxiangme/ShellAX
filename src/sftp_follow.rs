@@ -17,7 +17,7 @@ pub fn follow_target(cwd: &str, home: &str) -> Option<String> {
 /// Follow state: navigates only when the *terminal's* cwd changes, so the user can still browse
 /// elsewhere in the SFTP pane until the shell moves again.
 #[derive(Default, Debug, Clone)]
-pub struct Follow { pub on: bool, last: Option<String> }
+pub struct Follow { pub on: bool, pub last: Option<String> }
 impl Follow {
     pub fn new(on: bool) -> Self { Self { on, last: None } }
     /// Returns the directory to navigate to, if any.

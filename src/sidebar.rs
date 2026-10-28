@@ -560,11 +560,12 @@ impl Root {
         // Left activity strip owns the modules (terminal, SFTP, database, Redis, Docker, ports);
         // this right strip holds the tool windows that work on the focused session.
         let _ = th;
-        let items: [(Action, &str, IconName); 6] = [
+        let items: [(Action, &str, IconName); 7] = [
             (Action::OpenAi, "AI / Agent", IconName::Bot),
             (Action::OpenHostTools, t("hosttools.title"), IconName::Monitor),
             (Action::OpenSnippets, t("lib.snippets"), IconName::Code),
             (Action::OpenHistory, t("lib.history"), IconName::Clock),
+            (Action::OpenDirectory, t("dir.title"), IconName::Folder),
             (Action::CommandPalette, t("ui.command_palette"), IconName::Command),
             (Action::OpenAbout, t("ui.help_about"), IconName::CircleQuestionMark),
         ];

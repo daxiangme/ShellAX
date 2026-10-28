@@ -194,7 +194,7 @@ impl Root {
         }).detach();
     }
 
-    /// Right column: host status, AI, snippets and history cards stacked top to bottom (several may be open; `sidebar.dock_multi` limits it to one).
+    /// Right column: host status, AI, snippets, history and directory cards stacked top to bottom (several may be open; `sidebar.dock_multi` limits it to one).
     /// Shared width (drag the left edge); two expanded cards split by `dock_split`, three or more share equally with a minimum height.
     pub(crate) fn dock_column(&mut self, window: &mut gpui::Window, cx: &mut Context<Root>) -> Option<AnyElement> {
         // 新打开的卡片（栏里已有别的卡片时）播放展开补间；第一张卡片由整栏滑入负责
@@ -218,6 +218,20 @@ impl Root {
         if self.dock_ai { cards.push(("ai-dock", self.ai_dock(cx))); }
         if self.dock_snip { cards.push(("snip-dock", self.library_dock(true, window, cx))); }
         if self.dock_hist { cards.push(("hist-dock", self.library_dock(false, window, cx))); }
+        if self.dock_dir {
+            if let Some(v) = self.dir_view.clone() {
+                // 选中的标签已经关掉时，锁到这一帧算出的回退目标，避免之后跟着活动标签跳。
+                let mut feed = self.dir_feed_now(cx);
+                let missing = self.dir_pick.map(|k| feed.choices.iter().all(|c| c.key != k)).unwrap_or(true);
+                if missing && !feed.choices.is_empty() {
+                    self.dir_pick = Some(feed.pick);
+                    feed = self.dir_feed_now(cx);
+                }
+                *self.dir_feed.borrow_mut() = feed;
+                let body = div().flex_1().min_h_0().child(v);
+                cards.push(("dir-dock", self.dock_frame("dir-dock", t("dir.title").into(), None, IconName::Folder, vec![], body, cx)));
+            }
+        }
         if cards.is_empty() { self.dock_shown = false; return None; }
         // 收起动画进行中又打开了新卡片：取消收起，反向展开回来（正在收起的旧卡片直接去掉）
         if self.dock_reveal.as_ref().is_some_and(|r| !r.expanding()) && present.iter().any(|i| !self.dock_close_ids.contains(i)) {
@@ -344,7 +358,7 @@ fn _unused(_: Overlay) {}
 /// 三张及以上卡片同时展开时，每张展开卡片的最小高度（px），放不下时右侧栏内部滚动。
 const DOCK_MIN_H: f32 = 160.;
 /// 右侧栏卡片的显示顺序。
-const DOCK_IDS: [&str; 4] = ["host-dock", "ai-dock", "snip-dock", "hist-dock"];
+pub(crate) const DOCK_IDS: [&str; 5] = ["host-dock", "ai-dock", "snip-dock", "hist-dock", "dir-dock"];
 
 /// Drag payload for the split between stacked right-column cards.
 #[derive(Clone)]

@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use gpui::{div, prelude::*, px, AnimationExt, AnyElement, Context, Entity, ExternalPaths, FontWeight, Pixels, Point, Window};
+use gpui::{div, prelude::*, px, AnyElement, Context, Entity, ExternalPaths, FontWeight, Pixels, Point, Window};
 use gpui_component::input::{Editor, EditorState, InputEvent, InputState};
 use gpui_component::Sizable;
 use russh_sftp::client::SftpSession;
@@ -16,8 +16,9 @@ use ssh_term_proto::sftp::{self, Dir, Entry, JobState, Queue, Side};
 use ssh_term_proto::sftp_follow::Follow;
 use ssh_term_proto::ssh::{self, SshTarget};
 
+use crate::filelist::{self, Sort, SortKey};
 use crate::theme::{c, cur, Appearance};
-use crate::ui::{self, fs_body, fs_small, icon, IconName, H_COMPACT, H_DEFAULT, R_MD, R_SM};
+use crate::ui::{self, fs_body, fs_small, icon, IconName, H_COMPACT, H_DEFAULT, R_MD};
 
 // 左右留白：只由工作区包裹层的 `card_layout::CARD_PAD` 提供（与数据库等模块一致）。
 // 标题栏、双栏面板、传输队列、状态行都不再叠加自己的左右内边距，所以标题图标的左边缘与面板卡片左边缘对齐，右侧同理。
@@ -73,12 +74,6 @@ enum Src { Empty, Local, Remote(Box<Remote>) }
 
 struct Picker { search: Entity<InputState>, group: String }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SortKey { Name, Mtime, Size, Kind }
-#[derive(Clone, Copy)]
-struct PaneSort { key: SortKey, desc: bool }
-impl Default for PaneSort { fn default() -> Self { Self { key: SortKey::Name, desc: false } } }
-
 struct Pane {
     src: Src,
     picker: Option<Picker>,
@@ -88,7 +83,7 @@ struct Pane {
     entries: Vec<Entry>,
     loading: bool,
     gen: u64,
-    sort: PaneSort,
+    sort: Sort,
     hidden: bool,
     filter: Option<Entity<InputState>>,
     back: Vec<String>,
@@ -98,7 +93,7 @@ struct Pane {
 }
 impl Pane {
     fn new(src: Src) -> Self {
-        Self { src, picker: None, ldir: default_local_dir(), rdir: String::new(), entries: vec![], loading: false, gen: 0, sort: PaneSort::default(), hidden: false, filter: None, back: vec![], fwd: vec![], sel: None, multi: vec![] }
+        Self { src, picker: None, ldir: default_local_dir(), rdir: String::new(), entries: vec![], loading: false, gen: 0, sort: Sort::default(), hidden: false, filter: None, back: vec![], fwd: vec![], sel: None, multi: vec![] }
     }
     fn remote(&self) -> Option<&Remote> { match &self.src { Src::Remote(r) => Some(r), _ => None } }
     fn remote_mut(&mut self) -> Option<&mut Remote> { match &mut self.src { Src::Remote(r) => Some(r), _ => None } }
@@ -789,10 +784,6 @@ impl SftpView {
     }
 }
 
-fn human(n: u64) -> String {
-    if n < 1024 { format!("{n} B") } else if n < 1 << 20 { format!("{:.1} KB", n as f64 / 1024.0) } else if n < 1 << 30 { format!("{:.1} MB", n as f64 / 1048576.0) } else { format!("{:.1} GB", n as f64 / 1073741824.0) }
-}
-
 fn is_drive_root(path: &Path) -> bool {
     let s = path.to_string_lossy().replace('/', "\\");
     let t = s.trim_end_matches('\\');
@@ -830,67 +821,6 @@ fn local_parts(path: &Path) -> Vec<(String, PathBuf)> {
         }
     }
     out
-}
-
-fn remote_skeleton() -> AnyElement {
-    let th = cur();
-    let widths = [148., 96., 188., 120., 164., 84., 210., 132.];
-    let mut col = div().flex().flex_col();
-    for (i, w) in widths.into_iter().enumerate() {
-        col = col.child(div().h(px(32.)).px_3().flex().items_center().gap(px(10.))
-            .child(div().id(("skel-ico", i)).size(px(16.)).flex_shrink_0().rounded(px(R_SM)).bg(c(th.surface1)))
-            .child(div().id(("skel-name", i)).h(px(12.)).w(px(w)).rounded(px(R_SM)).bg(c(th.surface1)))
-            .child(div().flex_1())
-            .child(div().id(("skel-meta", i)).h(px(10.)).w(px(64.)).rounded(px(R_SM)).bg(c(th.surface0))));
-    }
-    if crate::motion::reduced() { return col.into_any_element(); }
-    col.with_animation(
-        "sftp-skel",
-        gpui::Animation::new(std::time::Duration::from_millis(1100))
-            .repeat_synced()
-            .with_max_fps(30.)
-            .with_easing(|t| (t * std::f32::consts::PI).sin()),
-        |d, t| d.opacity(0.35 + 0.65 * t),
-    ).into_any_element()
-}
-
-fn fmt_mtime(t: u64) -> String {
-    if t == 0 { return "—".into(); }
-    chrono::DateTime::from_timestamp(t as i64, 0)
-        .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
-        .unwrap_or_else(|| "—".into())
-}
-
-/// File extension used for the "type" column ("" for folders and extension-less files).
-fn ext_of(e: &Entry) -> String {
-    if e.is_dir { return String::new(); }
-    match e.name.rsplit_once('.') { Some((stem, x)) if !stem.is_empty() && !x.is_empty() => x.to_lowercase(), _ => String::new() }
-}
-fn kind_label(e: &Entry) -> String {
-    if e.is_dir { return t("sftp.type_folder").to_string(); }
-    let x = ext_of(e);
-    if x.is_empty() { t("sftp.type_plain").to_string() } else { tf("sftp.type_file", &[("x", &x.to_uppercase())]) }
-}
-
-/// Directories stay above files. Within each group, the chosen column decides the order.
-fn sorted_indices(entries: &[Entry], sort: PaneSort) -> Vec<usize> {
-    let mut idx: Vec<usize> = (0..entries.len()).collect();
-    idx.sort_by(|&a, &b| {
-        let (ea, eb) = (&entries[a], &entries[b]);
-        let dir = match (ea.is_dir, eb.is_dir) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => std::cmp::Ordering::Equal,
-        };
-        let ord = match sort.key {
-            SortKey::Name => ea.name.to_lowercase().cmp(&eb.name.to_lowercase()),
-            SortKey::Mtime => ea.mtime.cmp(&eb.mtime),
-            SortKey::Size => ea.size.cmp(&eb.size),
-            SortKey::Kind => ext_of(ea).cmp(&ext_of(eb)).then(ea.name.to_lowercase().cmp(&eb.name.to_lowercase())),
-        };
-        dir.then(if sort.desc { ord.reverse() } else { ord }).then(a.cmp(&b))
-    });
-    idx
 }
 
 fn remote_parts(path: &str) -> Vec<(String, String)> {
@@ -970,28 +900,21 @@ impl SftpView {
     }
 
     fn toggle_sort(&mut self, pi: usize, key: SortKey, cx: &mut Context<Self>) {
-        let slot = &mut self.panes[pi].sort;
-        if slot.key == key { slot.desc = !slot.desc; } else { *slot = PaneSort { key, desc: matches!(key, SortKey::Mtime | SortKey::Size) }; }
+        self.panes[pi].sort.toggle(key);
         cx.notify();
     }
     fn sort_head(&self, pi: usize, cx: &mut Context<Self>) -> AnyElement {
-        let th = cur();
         let sort = self.panes[pi].sort;
-        let mark = |key: SortKey| if sort.key != key { String::new() } else if sort.desc { " ↓".into() } else { " ↑".into() };
         let cell = |id: usize, label: String, key: SortKey| {
-            div().id(("sftp-sort", pid(pi, id))).h(px(H_DEFAULT)).px_1().flex().items_center().rounded(px(R_SM)).cursor_pointer().overflow_hidden().whitespace_nowrap()
-                .text_size(px(fs_small())).text_color(if sort.key == key { c(th.accent) } else { c(th.overlay1) })
-                .hover(|d| d.bg(crate::theme::hover_bg()))
+            filelist::sort_cell(("sftp-sort", pid(pi, id)), label, sort.key == key, sort.desc)
                 .on_click(cx.listener(move |v, _, _, cx| v.toggle_sort(pi, key, cx)))
-                .child(format!("{label}{}", mark(key)))
         };
-        let (wt, ws, wk) = col_widths();
-        ui::table_header().px_3().gap_2()
-            .child(div().size(px(16.)).flex_shrink_0())
+        let cols = filelist::cols_wide();
+        filelist::sort_header()
             .child(cell(0, t("sftp.col_name").into(), SortKey::Name).flex_1().min_w_0())
-            .child(cell(1, t("sftp.col_mtime").into(), SortKey::Mtime).w(px(wt)).flex_shrink_0())
-            .child(cell(2, t("sftp.col_size").into(), SortKey::Size).w(px(ws)).flex_shrink_0())
-            .child(cell(3, t("sftp.col_type").into(), SortKey::Kind).w(px(wk)).flex_shrink_0())
+            .child(cell(1, t("sftp.col_mtime").into(), SortKey::Mtime).w(px(cols.mtime.unwrap_or(0.))).flex_shrink_0())
+            .child(cell(2, t("sftp.col_size").into(), SortKey::Size).w(px(cols.size.unwrap_or(0.))).flex_shrink_0())
+            .child(cell(3, t("sftp.col_type").into(), SortKey::Kind).w(px(cols.kind.unwrap_or(0.))).flex_shrink_0())
             .into_any_element()
     }
 
@@ -1056,7 +979,7 @@ impl SftpView {
             if r.connecting {
                 return list.child(div().p_4().flex().items_center().gap_2().text_size(px(fs_small())).text_color(c(th.subtext))
                     .child(icon(IconName::LoaderCircle, ui::IC_SM, c(th.accent))).child(tf("sftp.connecting", &[("t", &r.name)])))
-                    .child(remote_skeleton()).into_any_element();
+                    .child(filelist::listing_skeleton(if pi == 0 { "sftp-skel-0" } else { "sftp-skel-1" })).into_any_element();
             }
             if let Some(e) = &r.error {
                 return list.child(ui::empty_state(IconName::CircleAlert, t("sftp.failed_title"), Some(e.clone().into()), vec![
@@ -1068,35 +991,25 @@ impl SftpView {
         let at_drives = p.is_local() && p.ldir.as_os_str().is_empty();
         let dark = th.appearance == Appearance::Dark;
         if !at_drives {
-            list = list.child(div().id(("sftp-up", pi)).h(px(26.)).flex_shrink_0().px_3().flex().items_center().gap_2().text_size(px(fs_body())).text_color(c(th.subtext)).cursor_pointer()
-                .hover(|d| d.bg(crate::theme::hover_bg()))
-                .on_click(cx.listener(move |v, ev: &gpui::ClickEvent, _, cx| if ev.click_count() >= 2 { v.up(pi, cx) }))
-                .child(crate::file_icon::entry_icon("..", true, 0, ui::IC_LG, dark)).child(".."));
+            list = list.child(filelist::parent_row(("sftp-up", pi), dark)
+                .on_click(cx.listener(move |v, ev: &gpui::ClickEvent, _, cx| if ev.click_count() >= 2 { v.up(pi, cx) })));
         }
-        if p.loading { return list.child(remote_skeleton()).into_any_element(); }
+        if p.loading { return list.child(filelist::listing_skeleton(if pi == 0 { "sftp-skel-0" } else { "sftp-skel-1" })).into_any_element(); }
         let q = p.filter.as_ref().map(|f| f.read(cx).value().trim().to_lowercase()).unwrap_or_default();
-        let (wt, ws, wk) = col_widths();
+        let cols = filelist::cols_wide();
         let selected_on = self.active == pi;
         let mut shown = 0;
-        for i in sorted_indices(&p.entries, p.sort) {
+        for i in filelist::sorted_indices(&p.entries, p.sort) {
             let e = &p.entries[i];
             if !q.is_empty() && !e.name.to_lowercase().contains(&q) { continue; }
             shown += 1;
             if shown > 2000 { break; }
             let selected = selected_on && (p.multi.contains(&i) || p.sel == Some(i));
             let drag = DragFile { pane: pi, path: p.path_of(&e.name), name: e.name.clone() };
-            let hidden = e.name.starts_with('.');
-            list = list.child(div().id(("sftp-row", pid(pi, i))).h(px(26.)).flex_shrink_0().px_3().flex().items_center().gap_2().text_size(px(fs_body())).text_color(c(th.text)).cursor_pointer()
-                .when(hidden, |d| d.opacity(0.72))
-                .when(selected, |d| d.bg(c(th.accent).opacity(0.2))).when(!selected, |d| d.hover(|d| d.bg(crate::theme::hover_bg())))
+            list = list.child(filelist::entry_row(("sftp-row", pid(pi, i)), e, selected, dark, cols)
                 .on_click(cx.listener(move |v, ev: &gpui::ClickEvent, _, cx| { if ev.click_count() >= 2 { v.open(pi, i, cx) } else { v.select(pi, i, ev.modifiers()); cx.notify() } }))
                 .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |v, ev: &gpui::MouseDownEvent, _, cx| { v.open_ctx_menu(pi, i, ev.position, cx); cx.stop_propagation(); }))
-                .on_drag(drag, |d: &DragFile, _, _, cx| cx.new(|_| DragPreview(d.name.clone())))
-                .child(crate::file_icon::entry_icon(&e.name, e.is_dir, e.mode, ui::IC_LG, dark))
-                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(e.name.clone()))
-                .child(div().w(px(wt)).flex_shrink_0().px_1().overflow_hidden().whitespace_nowrap().text_size(px(fs_small())).text_color(c(th.overlay0)).child(fmt_mtime(e.mtime)))
-                .child(div().w(px(ws)).flex_shrink_0().px_1().overflow_hidden().whitespace_nowrap().text_size(px(fs_small())).text_color(c(th.overlay0)).child(if e.is_dir { "—".to_string() } else { human(e.size) }))
-                .child(div().w(px(wk)).flex_shrink_0().px_1().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(fs_small())).text_color(c(th.overlay0)).child(kind_label(e))));
+                .on_drag(drag, |d: &DragFile, _, _, cx| cx.new(|_| DragPreview(d.name.clone()))));
         }
         if shown == 0 && !q.is_empty() {
             list = list.child(div().p_4().text_size(px(fs_small())).text_color(c(th.overlay1)).child(t("sftp.filter_none")));
@@ -1277,7 +1190,7 @@ impl SftpView {
                 .child(icon(if j.dir == Dir::Upload { IconName::Upload } else { IconName::Download }, ui::IC_SM, c(th.accent)))
                 .child(div().w(px(200.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(format!("{host}{}", j.name())))
                 .child(div().flex_1().h(px(6.)).rounded_full().bg(c(th.surface0)).child(div().h_full().rounded_full().bg(color).w(gpui::relative(pct.clamp(0., 1.)))))
-                .child(div().w(px(150.)).text_size(px(fs_small())).text_color(c(th.overlay1)).child(format!("{} / {}{}", human(done), human(total), if resumed > 0 { format!(" · {}", tf("sftp.resumed", &[("n", &human(resumed))])) } else { String::new() })))
+                .child(div().w(px(150.)).text_size(px(fs_small())).text_color(c(th.overlay1)).child(format!("{} / {}{}", filelist::human(done), filelist::human(total), if resumed > 0 { format!(" · {}", tf("sftp.resumed", &[("n", &filelist::human(resumed))])) } else { String::new() })))
                 .child(div().w(px(60.)).child(ui::tag(label, color)))
                 .children(btn)
                 .when_some(j.error.lock().unwrap().clone(), |d, e| d.child(div().text_color(c(th.error)).text_size(px(fs_small())).child(e))));
@@ -1285,9 +1198,6 @@ impl SftpView {
         col.into_any_element()
     }
 }
-
-/// Column widths (mtime, size, type); narrower in split mode.
-fn col_widths() -> (f32, f32, f32) { (132., 76., 88.) }
 
 fn list_is_empty(hosts: &[HostEntry], groups: &[hosttree::GroupEntry], group: &str, query: &str, q: &hosttree::Query) -> bool {
     if query.is_empty() {
@@ -1362,19 +1272,6 @@ impl Render for SftpView {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn e(name: &str, dir: bool, size: u64, mtime: u64) -> Entry {
-        Entry { name: name.into(), is_dir: dir, size, mode: 0, mtime }
-    }
-
-    #[test]
-    fn dirs_stay_above_files() {
-        let v = vec![e("z.log", false, 10, 300), e("a", true, 0, 100), e("m.log", false, 99, 200), e("b", true, 0, 400), e("c.txt", false, 1, 1)];
-        let names = |s: PaneSort| sorted_indices(&v, s).into_iter().map(|i| v[i].name.as_str()).collect::<Vec<_>>();
-        assert_eq!(names(PaneSort { key: SortKey::Name, desc: false }), ["a", "b", "c.txt", "m.log", "z.log"]);
-        assert_eq!(names(PaneSort { key: SortKey::Mtime, desc: true }), ["b", "a", "z.log", "m.log", "c.txt"]);
-        assert_eq!(names(PaneSort { key: SortKey::Kind, desc: false }), ["a", "b", "m.log", "z.log", "c.txt"]);
-    }
 
     #[test]
     fn local_copy_tree() {

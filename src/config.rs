@@ -331,7 +331,7 @@ pub struct Sidebar {
     pub tools_recent: Vec<String>,
     /// 右侧栏：允许多张卡片同时展开（默认）；关闭后同一时间只保留一张。
     pub dock_multi: bool,
-    /// 右侧栏已打开的卡片 id（`host-dock` / `ai-dock` / `snip-dock` / `hist-dock`），按打开先后排列，最后一个最近打开。
+    /// 右侧栏已打开的卡片 id（`host-dock` / `ai-dock` / `snip-dock` / `hist-dock` / `dir-dock`），按打开先后排列，最后一个最近打开。
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub dock_open: Vec<String>,
     /// 右侧栏中折叠为标题行的卡片 id。
