@@ -99,7 +99,7 @@ On Windows the default fallback chain also lists the system fonts "Segoe UI Symb
 ## tokio-util 0.7 — MIT (dependency, unmodified)
 ## mongodb 3 — Apache-2.0; bson 2 — MIT (dependencies, unmodified; MongoDB client)
 ## dm-conn 0.1.0 / dm-pool 0.1.0 — Apache-2.0 (dependencies, unmodified; async DM8 client and connection pool)
-- Source: https://github.com/daxiangme/dm-rust revision b8421ca954686f0462d9bfbf154a95966efeb52e (crates `dm-conn`, `dm-pool`, and the internal `dm-proto` crate they build). License: Apache License 2.0. The upstream LICENSE file does not name a copyright holder.
+- Source: https://github.com/daxiangme/dm-rust revision 5a25bdf954686f0462d9bfbf154a95966efeb52e (crates `dm-conn`, `dm-pool`, and the internal `dm-proto` crate they build). License: Apache License 2.0. The upstream LICENSE file does not name a copyright holder.
 ## rustls 0.23 — Apache-2.0 OR ISC OR MIT (dependency, unmodified; TLS crypto provider selection)
 ## duckdb 1.x / libduckdb-sys (bundled DuckDB, optional `duckdb` build feature) — MIT; DuckDB itself MIT, Copyright (c) DuckDB Foundation (dependency, unmodified)
 ## lsp-types 0.97 — MIT (dependency, unmodified; completion item types for the SQL editor)
