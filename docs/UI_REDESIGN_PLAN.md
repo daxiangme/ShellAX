@@ -549,3 +549,18 @@ exit $fail
 | 菜单 / 命令面板 / 弹窗 | `src/ctxmenu_view.rs`、`src/palette.rs`、`src/tabs_ui.rs`、`src/host_dialog.rs`、`src/host_picker.rs`、`src/setup_view.rs`、`src/update_ui.rs` |
 | 设置 | `src/settings_view.rs` |
 | 文案 | `locales/zh-CN.toml`、`locales/en.toml` |
+
+
+## 浮层宽度与贴边规范
+
+| token | 值 | 用途 |
+|---|---|---|
+| `TIP_MAX_W` | 360 | 悬浮提示（`ui::tip`）最大宽度，超出换行 |
+| `POPOVER_MAX_W` | 480 | 锚定弹层（菜单、下拉、悬浮卡片）最大宽度 |
+| `TOAST_MAX_W` | 400 | 角落卡片（toast、更新提示）最大宽度 |
+| `EDGE_MARGIN` | 8 | 浮层距窗口边缘的最小距离 |
+
+- 悬浮提示一律用 `ui::tip(text)`：限宽、自动换行，长路径/主机名等无空格片段做中间省略；禁止直接 `Tooltip::new`（`tools/ui_lint.sh` 检查）。
+- 角落卡片用 `ui::corner_card(window, bottom, right)`：宽度取 `min(TOAST_MAX_W, 窗口宽 - 2×EDGE_MARGIN - 右偏移)`；文字区 `flex_1().min_w_0()` 换行，图标与色条 `flex_shrink_0`，`items_start` 对齐。
+- 所有 `anchored()` 必须带 `snap_to_window_with_margin(px(EDGE_MARGIN))`（lint 检查），靠右/靠下的触发点向上、向左展开。
+- 终端内浮层（搜索条、AI 解释按钮）用 `max_w(relative(0.9))`，窄分屏不越界。

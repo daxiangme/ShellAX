@@ -223,7 +223,7 @@ impl Root {
                         .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_color(c(th.subtext)).child(format!("{src} · {}", j.remote)))
                         .child(div().w(px(120.)).h(px(4.)).flex_shrink_0().rounded_full().bg(c(th.surface1)).child(div().h_full().rounded_full().bg(c(col)).w(px(120. * p))))
                         .child(div().w(px(56.)).flex_shrink_0().text_color(c(col)).child(label.to_string()))
-                        .when_some(j.error.lock().unwrap().clone(), |d, e| d.tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(e.clone()).build(w, cx))));
+                        .when_some(j.error.lock().unwrap().clone(), |d, e| d.tooltip(crate::ui::tip(e.clone()))));
                 }
             }
             Bottom::Log => {
@@ -236,7 +236,7 @@ impl Root {
                         .child(div().w(px(120.)).flex_shrink_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_color(c(th.subtext)).child(e.source.clone()))
                         .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().font_family(ui::mono_family()).text_size(px(ui::fs_mono())).child(e.text.replace('\n', " ")))
                         .child(div().flex_shrink_0().text_color(if e.ok { c(th.subtext) } else { c(th.error) }).max_w(px(260.)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(e.detail.clone()))
-                        .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(detail.clone()).build(w, cx)));
+                        .tooltip(crate::ui::tip(detail.clone())));
                 }
             }
         }

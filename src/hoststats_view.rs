@@ -105,7 +105,7 @@ impl Root {
             .hover(|d| d.bg(theme::hover_bg()))
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(|this, _, w, cx| this.show_host_dock(w, cx)))
-            .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+            .tooltip(crate::ui::tip(tip.clone()))
             .children(items).into_any_element())
     }
 

@@ -44,6 +44,17 @@ pub const INDENT: f32 = 16.;
 pub const INPUT_PX: f32 = 8.;
 
 /// Corner radius scale: tag/kbd, button/input/row, sub-card, island/popover/dialog, chat bubble.
+/// 悬浮提示最大宽度；超出换行。
+pub const TIP_MAX_W: f32 = 360.;
+/// 锚定弹层（菜单、下拉、悬浮卡片）最大宽度。
+pub const POPOVER_MAX_W: f32 = 480.;
+/// 角落提示卡片（toast、更新提示）最大宽度。
+pub const TOAST_MAX_W: f32 = 400.;
+/// 浮层与窗口边缘的最小距离。
+pub const EDGE_MARGIN: f32 = 8.;
+/// 提示里单段无空格文本超过此长度时做中间省略。
+const TIP_TOKEN_MAX: usize = 56;
+
 pub const R_SM: f32 = 4.;
 pub const R_MD: f32 = 6.;
 pub const R_SUB: f32 = 8.;
@@ -170,7 +181,7 @@ pub fn icon_button_svg(id: impl Into<ElementId>, path: impl Into<SharedString>, 
         .when(active, |d| d.bg(selected_bg()))
         .when(!active, |d| d.hover(move |s| s.bg(if danger { crate::theme::danger_bg() } else { hover_bg() })).active(|s| s.bg(selected_bg())))
         // 提示为空时不挂 tooltip（仅用于菜单展开期间避免遮住第一项）
-        .when(!tip.is_empty(), |d| d.tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx)))
+        .when(!tip.is_empty(), |d| d.tooltip(crate::ui::tip(tip.clone())))
         .child(svg().path(path).size(px(glyph)).flex_shrink_0().text_color(rest).group_hover(group, move |s| s.text_color(hot)))
 }
 
@@ -412,7 +423,7 @@ pub fn modal(card: impl IntoElement + 'static) -> Div {
 /// 弹出面（菜单、命令面板）：圆角 10、发丝边框、柔和分层阴影。
 pub fn popover() -> Div {
     let th = cur();
-    div().rounded(px(R_LG)).bg(c(th.base)).border_1().border_color(divider()).shadow(crate::chrome::soft_shadow(true))
+    div().max_w(px(POPOVER_MAX_W)).rounded(px(R_LG)).bg(c(th.base)).border_1().border_color(divider()).shadow(crate::chrome::soft_shadow(true))
 }
 
 pub fn card(w: f32) -> Div {
@@ -438,7 +449,7 @@ pub fn tag_picker(base: &'static str, selected: &[String], names: &[(String, Str
             .bg(c(crate::config::get().tags.rgb(color)))
             .border_2().border_color(if sel { c(cur().text).opacity(0.55) } else { gpui::transparent_black() })
             .hover(|d| d.opacity(0.85))
-            .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+            .tooltip(crate::ui::tip(tip.clone()))
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(move |_, w, cx| on(col.clone(), w, cx))
             .when(sel, |d| d.child(icon(IconName::Check, IC_XS, gpui::white()))));
@@ -455,7 +466,7 @@ pub fn swatch_row(base: &'static str, colors: &[(String, Hsla, String)], selecte
         row = row.child(div().id((base, i)).size(px(SWATCH)).rounded_full().cursor_pointer().flex().items_center().justify_center()
             .bg(*col).border_2().border_color(if sel { c(cur().text).opacity(0.55) } else { gpui::transparent_black() })
             .hover(|d| d.opacity(0.85))
-            .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+            .tooltip(crate::ui::tip(tip.clone()))
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(move |_, w, cx| on(idc.clone(), w, cx))
             .when(sel, |d| d.child(icon(IconName::Check, IC_XS, gpui::white()))));
@@ -481,7 +492,7 @@ pub fn icon_grid(base: &'static str, cells: Vec<(String, AnyElement, String)>, s
                 .border_1().border_color(if sel { c(cur().accent) } else { gpui::transparent_black() })
                 .when(sel, |d| d.bg(selected_bg()))
                 .when(!sel, |d| d.hover(|d| d.bg(hover_bg())))
-                .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+                .tooltip(crate::ui::tip(tip.clone()))
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(move |_, w, cx| on(idc.clone(), w, cx))
                 .child(el));
@@ -621,4 +632,51 @@ pub fn menu_sep() -> Div { div().mx(px(8.)).my(px(4.)).h(px(1.)).bg(divider()) }
 /// 菜单内的分组小标题：次要字号半粗、不大写。
 pub fn menu_label(text: impl Into<SharedString>) -> Div {
     div().h(px(H_COMPACT)).px(px(10.)).flex().items_center().text_size(px(fs_small())).font_weight(FontWeight::SEMIBOLD).text_color(c(cur().subtext)).child(text.into())
+}
+
+/// 长路径、主机名等无空格片段做中间省略，避免撑破浮层。
+pub fn mid_ellipsis_tokens(text: &str) -> String {
+    text.split('\n').map(|line| line.split(' ').map(|w| {
+        let n = w.chars().count();
+        if n <= TIP_TOKEN_MAX { return w.to_string(); }
+        let keep = (TIP_TOKEN_MAX - 1) / 2;
+        let head: String = w.chars().take(keep).collect();
+        let tail: String = w.chars().skip(n - keep).collect();
+        format!("{head}…{tail}")
+    }).collect::<Vec<_>>().join(" ")).collect::<Vec<_>>().join("\n")
+}
+
+/// 统一悬浮提示：限宽 TIP_MAX_W、自动换行，长片段中间省略。业务代码一律用它，不直接用 Tooltip::new。
+pub fn tip(text: impl Into<SharedString>) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
+    let text: SharedString = mid_ellipsis_tokens(&text.into()).into();
+    move |w, cx| {
+        let text = text.clone();
+        gpui_component::tooltip::Tooltip::element(move |_, _| div().max_w(px(TIP_MAX_W)).min_w_0().whitespace_normal().child(text.clone())).max_w(px(TIP_MAX_W + 2. * SP_3)).build(w, cx)
+    }
+}
+
+/// 角落提示卡片宽度：min(TOAST_MAX_W, 窗口宽 - 2*EDGE_MARGIN - 右偏移)。
+pub fn corner_w(window: &gpui::Window, right: f32) -> f32 {
+    let ww = f32::from(window.viewport_size().width);
+    TOAST_MAX_W.min((ww - 2. * EDGE_MARGIN - right).max(160.))
+}
+
+/// 右下角浮层卡片（toast、更新提示）的统一外壳：限宽、可换行、不越出窗口。
+pub fn corner_card(window: &gpui::Window, bottom: f32, right: f32) -> Div {
+    let th = cur();
+    div().absolute().bottom(px(bottom)).right(px(right)).max_w(px(corner_w(window, right))).min_w_0()
+        .rounded(px(R_LG)).bg(c(th.base)).border_1().border_color(divider()).shadow(crate::chrome::soft_shadow(true))
+}
+
+#[cfg(test)]
+mod tip_tests {
+    use super::*;
+    #[test]
+    fn mid_ellipsis() {
+        assert_eq!(mid_ellipsis_tokens("短 文本"), "短 文本");
+        let long = "/very/long/".repeat(20);
+        let r = mid_ellipsis_tokens(&format!("x {long}\ny"));
+        assert!(r.contains('…') && r.starts_with("x /very") && r.ends_with("\ny"));
+        assert!(r.lines().next().unwrap().chars().count() <= TIP_TOKEN_MAX + 2);
+    }
 }

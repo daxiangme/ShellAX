@@ -186,7 +186,7 @@ impl Root {
                     let Some(h) = s.hosts.get(*index) else { continue };
                     n_hosts += 1;
                     let addr = format!("{}{}", h.user.as_ref().map(|u| format!("{u}@")).unwrap_or_default(), h.host);
-                    list = list.child(row(i).pl(px(10. + *depth as f32 * 14. + if *depth > 0 { 12. } else { 0. })).tooltip({ let a = addr.clone(); move |w, cx| gpui_component::tooltip::Tooltip::new(a.clone()).build(w, cx) })
+                    list = list.child(row(i).pl(px(10. + *depth as f32 * 14. + if *depth > 0 { 12. } else { 0. })).tooltip(crate::ui::tip(addr.clone()))
                         .child(icon(IconName::Server, ui::IC_SM, c(th.overlay1)))
                         .child(div().flex_shrink_0().max_w(px(180.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(h.name.clone()))
                         .children(h.tags.iter().take(3).map(|t| div().size(px(6.)).flex_shrink_0().rounded_full().bg(c(s.tags.rgb(t)))))
@@ -221,7 +221,7 @@ impl Root {
             }))
             .child(div().p(px(3.)).child(ui::search_field(&self.new_menu_search, false)))
             .child(list);
-        gpui::deferred(gpui::anchored().position(pos).snap_to_window_with_margin(px(8.)).child(chrome::pop_in("new-menu-pop", pop))).with_priority(3).into_any_element()
+        gpui::deferred(gpui::anchored().position(pos).snap_to_window_with_margin(px(ui::EDGE_MARGIN)).child(chrome::pop_in("new-menu-pop", pop))).with_priority(3).into_any_element()
     }
 
     pub(crate) fn tab_menu_el(&self, i: usize, pos: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) -> AnyElement {
@@ -249,7 +249,7 @@ impl Root {
             .child(item!(IconName::X, t("tab.close_right"), i + 1 < n, move |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.close_right(i, w, cx)))
             .child(ui::menu_sep())
             .child(item!(IconName::RotateCcw, t("tab.reopen"), !self.closed_tabs.is_empty(), |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.reopen_closed(w, cx)));
-        gpui::deferred(gpui::anchored().position(pos).snap_to_window_with_margin(px(8.)).child(chrome::pop_in("tab-menu-pop", list))).with_priority(3).into_any_element()
+        gpui::deferred(gpui::anchored().position(pos).snap_to_window_with_margin(px(ui::EDGE_MARGIN)).child(chrome::pop_in("tab-menu-pop", list))).with_priority(3).into_any_element()
     }
 
     /// Small header at the top-right of a pane, visible while the pointer is over the pane:

@@ -58,7 +58,7 @@ impl Root {
             let _ = this;
             let gid = SharedString::from(format!("tr-{key}"));
             ui::list_row(SharedString::from(key), 0, open).group(gid.clone())
-                .tooltip({ let d = sp.desc.clone(); move |w, cx| gpui_component::tooltip::Tooltip::new(d.clone()).build(w, cx) })
+                .tooltip(crate::ui::tip(sp.desc.clone()))
                 .on_click(cx.listener(move |this, _, w, cx| this.open_tool(&id, None, w, cx)))
                 .child(ui::icon(ui::tool_icon(sp), ui::IC_MD, c(if open { cur().text } else { cur().overlay1 })))
                 .child(ui::row_title(sp.name.clone()))
@@ -77,7 +77,7 @@ impl Root {
             let label = match prog { Some(p) => format!("{:.0}%", p * 100.), None if busy => t("ext.preparing").to_string(), None => t("ext.download").to_string() };
             // 未安装的扩展工具：只读行，文字用提示色，右侧是下载按钮
             div().id(SharedString::from(key)).min_h(px(ui::row_h())).mx(px(ui::LIST_INSET)).pl(px(ui::ROW_PX)).pr(px(4.)).rounded(px(ui::R_MD)).flex().items_center().gap(px(6.))
-                .tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+                .tooltip(crate::ui::tip(tip.clone()))
                 .child(ui::icon(ui::tool_icon(sp), ui::IC_MD, c(cur().overlay1)))
                 .child(ui::row_title(sp.name.clone()).text_color(c(cur().overlay1)))
                 .child(div().flex_1())

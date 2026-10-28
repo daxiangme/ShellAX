@@ -1903,7 +1903,7 @@ impl SettingsView {
             }
             trigger = trigger.child(
                 gpui::deferred(
-                    gpui::anchored().anchor(anchor).position(pos).snap_to_window_with_margin(px(8.)).child(popover)
+                    gpui::anchored().anchor(anchor).position(pos).snap_to_window_with_margin(px(crate::ui::EDGE_MARGIN)).child(popover)
                 ).with_priority(3)
             );
         }

@@ -479,7 +479,7 @@ impl DockView {
         Some(div().absolute().top_0().left_0().size_full()
             .child(div().id("dk-menu-bg").absolute().top_0().left_0().size_full().on_mouse_down(gpui::MouseButton::Left, cx.listener(|v, _, _w, cx| { v.menu = None; cx.notify(); }))
                 .on_mouse_down(gpui::MouseButton::Right, cx.listener(|v, _, _w, cx| { v.menu = None; cx.notify(); })))
-            .child(gpui::deferred(gpui::anchored().position(at).snap_to_window().child(pop.occlude())))
+            .child(gpui::deferred(gpui::anchored().position(at).snap_to_window_with_margin(px(crate::ui::EDGE_MARGIN)).child(pop.occlude())))
             .into_any_element())
     }
 

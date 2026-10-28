@@ -1006,7 +1006,7 @@ impl SftpView {
         ui::toolbar()
             .child(div().id(("sftp-src", pi)).h(px(H_DEFAULT)).px_2().min_w_0().rounded(px(R_MD)).flex().items_center().gap_2().cursor_pointer()
                 .hover(|d| d.bg(crate::theme::hover_bg()))
-                .tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(t("sftp.change_source")).build(w, cx))
+                .tooltip(crate::ui::tip(t("sftp.change_source")))
                 .on_click(cx.listener(move |v, _, w, cx| v.open_picker(pi, w, cx)))
                 .child(ic)
                 .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(fs_body())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(name))

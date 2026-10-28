@@ -320,7 +320,7 @@ impl Root {
                 })));
             }
         }
-        deferred(anchored().position(pos).child(m.occlude().on_mouse_down_out(cx.listener(|this, _, _, cx| { this.lib_menu = None; cx.notify(); })))).with_priority(2).into_any_element()
+        deferred(anchored().position(pos).snap_to_window_with_margin(gpui::px(crate::ui::EDGE_MARGIN)).child(m.occlude().on_mouse_down_out(cx.listener(|this, _, _, cx| { this.lib_menu = None; cx.notify(); })))).with_priority(2).into_any_element()
     }
 
     fn history_rows(&self, window: &Window, cx: &gpui::App) -> Vec<HistRow> {

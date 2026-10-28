@@ -1105,7 +1105,7 @@ impl TermView {
         let pop = ui::popover().occlude().min_w(px(260.)).max_w(px(640.)).py_1()
             .on_mouse_down_out(cx.listener(|v, _, _, cx| { if let Some(p) = v.hist_pop.take() { v.hist_pop_dismissed = Some(p.input); cx.notify(); } }))
             .child(list);
-        Some(gpui::deferred(gpui::anchored().anchor(anchor).position(pos).snap_to_window_with_margin(px(8.)).child(pop)).with_priority(5).into_any_element())
+        Some(gpui::deferred(gpui::anchored().anchor(anchor).position(pos).snap_to_window_with_margin(px(ui::EDGE_MARGIN)).child(pop)).with_priority(5).into_any_element())
     }
 
     fn compute_suggestion(&self) -> Option<String> {
@@ -2317,7 +2317,7 @@ impl Render for TermView {
         }
         if let Some(bar) = self.search.clone() {
             let status = match bar.found { Some(true) => t("term.search_found"), Some(false) => t("term.search_none"), None => t("term.search_hint") };
-            body = body.child(div().id("search-bar").occlude().absolute().top(px(6.)).right(px(16.)).w(px(360.)).p_2().rounded(px(ui::R_LG)).bg(c(th.base).opacity(0.97)).border_1().border_color(c(th.accent)).shadow(crate::chrome::soft_shadow(true))
+            body = body.child(div().id("search-bar").occlude().absolute().top(px(6.)).right(px(16.)).w(px(360.)).max_w(gpui::relative(0.9)).p_2().rounded(px(ui::R_LG)).bg(c(th.base).opacity(0.97)).border_1().border_color(c(th.accent)).shadow(crate::chrome::soft_shadow(true))
                 .flex().items_center().gap_2().text_size(px(ui::fs_small())).text_color(c(th.text))
                 .child(crate::ui::icon(crate::ui::IconName::Search, ui::IC_SM, c(th.overlay1)))
                 .child(div().flex_1().px_1().rounded(px(ui::R_SM)).bg(c(th.base)).font_family(ui::mono_family()).child(format!("{}▏", bar.query)))
@@ -2375,7 +2375,7 @@ impl Render for TermView {
         }
         // 命令失败时的“AI 解释”入口：浮在终端右下角，不占布局空间；智能体状态已显示在标签上
         if let Some((_cmd, code)) = self.failed.clone() {
-            body = body.child(div().absolute().bottom(px(10.)).right(px(14.)).flex().items_center().gap_1().pl_2().pr_1().py(px(3.)).rounded_full()
+            body = body.child(div().absolute().bottom(px(10.)).right(px(14.)).max_w(gpui::relative(0.9)).flex().items_center().gap_1().pl_2().pr_1().py(px(3.)).rounded_full()
                 .bg(c(th.base)).border_1().border_color(c(th.error).opacity(0.4)).shadow_md().text_size(px(ui::fs_body()))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(div().id("explain-fail").cursor_pointer().text_color(c(th.error)).hover(|s| s.underline())

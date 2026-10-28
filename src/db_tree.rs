@@ -514,7 +514,7 @@ impl Root {
             if self.db_up(&id) { let k = key.clone(); item!("dbm-refresh", IconName::RefreshCw, t("db.refresh"), false, |this, _w, cx| this.db_refresh(&k, cx)); }
             if db.is_none() { let i2 = id.clone(); item!("dbm-edit", IconName::Pencil, t("db.edit"), false, |this, w, cx| this.open_db_dialog(Some(i2.clone()), w, cx)); }
         }
-        deferred(anchored().position(pos).child(m.occlude().on_mouse_down_out(cx.listener(|this, _, _w, cx| { this.dbp.menu = None; this.dbp.arm = None; cx.notify(); })))).with_priority(2).into_any_element()
+        deferred(anchored().position(pos).snap_to_window_with_margin(gpui::px(crate::ui::EDGE_MARGIN)).child(m.occlude().on_mouse_down_out(cx.listener(|this, _, _w, cx| { this.dbp.menu = None; this.dbp.arm = None; cx.notify(); })))).with_priority(2).into_any_element()
     }
 }
 

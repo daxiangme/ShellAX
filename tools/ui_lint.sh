@@ -19,6 +19,8 @@ check "悬停底色使用 surface"                'hover\(.*bg\(c\(cur\(\)\.surf
 check "monospace 字面量"                    'font_family\("monospace"\)'                               '^$'
 check "界面标签大写"                        'child\(.*to_uppercase\(\)\)'                              "$TOKENS|^src/(tools|db)/"
 check "10px 及以下字号"                     'text_size\(px\((10|[1-9])(\.|\))'                         '^$'
+check "直接使用 Tooltip::new（请用 ui::tip）"  'Tooltip::new\('                                          '^src/ui\.rs:'
+check "anchored 未贴边约束"                 'anchored\(\)' 'snap_to_window_with_margin'
 allow=$(grep -rn --include='*.rs' 'ui-lint: allow' src | wc -l | tr -d ' ')
 echo "例外标注：${allow} 处（上限 15）"
 [ "$allow" -le 15 ] || fail=1

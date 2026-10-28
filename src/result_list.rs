@@ -45,7 +45,7 @@ pub fn result_row(id: impl Into<SharedString>, r: &Row, mode: RowMode, masked: b
         .text_color(vcol).when(r.primary, |d| d.font_weight(FontWeight::SEMIBOLD))
         .when(wrap, |d| d.whitespace_normal())
         .when(!wrap, |d| d.whitespace_nowrap().overflow_hidden().text_ellipsis())
-        .when(!wrap && !masked, |d| { let tip = r.value.clone(); d.tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx)) })
+        .when(!wrap && !masked, |d| { let tip = r.value.clone(); d.tooltip(crate::ui::tip(tip.clone())) })
         .child(shown);
     let label_w = if mode == RowMode::Kv { LABEL_W_KV } else { LABEL_W_LIST };
     let row = div().id(id.clone()).group(gid.clone()).min_h(px(ui::row_h())).mx(px(ui::LIST_INSET)).pl(px(ui::ROW_PX)).pr(px(4.)).rounded(px(ui::R_MD)).flex().items_center().gap(px(6.))
@@ -56,7 +56,7 @@ pub fn result_row(id: impl Into<SharedString>, r: &Row, mode: RowMode, masked: b
         .when_some(r.tag.clone(), |d, (text, tone)| {
             let hint = r.hint.clone();
             d.child(div().id(SharedString::from(format!("{id}-t"))).flex_shrink_0()
-                .when(!hint.is_empty(), |d| d.tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(hint.clone()).build(w, cx)))
+                .when(!hint.is_empty(), |d| d.tooltip(crate::ui::tip(hint.clone())))
                 .child(ui::tag(text, tone_color(tone))))
         })
         .child(ui::icon_button(SharedString::from(format!("{id}-cp")), if copied { IconName::Check } else { IconName::Copy }, IconBtn::Sm, t("tools.ui_copy")).on_click(on_copy))
@@ -85,7 +85,7 @@ pub fn batch_head(h: BatchHead) -> Div {
     let id = h.id;
     div().h(px(ui::SECTION_H)).mx(px(ui::LIST_INSET)).pl(px(ui::ROW_PX)).pr(px(4.)).flex().items_center().gap(px(ui::SP_1))
         .child(div().id(SharedString::from(format!("bh-{id}"))).flex_1().min_w_0().h_full().flex().items_center().gap(px(ui::SP_1)).cursor_pointer().on_click(h.on_fold)
-            .tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(t("tools.hist_fold")).build(w, cx))
+            .tooltip(crate::ui::tip(t("tools.hist_fold")))
             .child(ui::icon(if h.folded { IconName::ChevronRight } else { IconName::ChevronDown }, ui::IC_XS, c(th.overlay1)))
             .child(div().flex_shrink_0().text_size(px(ui::fs_small())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.subtext)).child(h.time))
             .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(h.meta))

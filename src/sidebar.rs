@@ -333,7 +333,7 @@ impl Root {
         {
             // full name + user@host:port on hover (names are often truncated)
             let tip = format!("{}\n{}", h.name, label);
-            row = row.tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx));
+            row = row.tooltip(crate::ui::tip(tip.clone()));
         }
         {
             let n = name.clone();
@@ -704,7 +704,7 @@ impl Root {
                 .child(item!(Some(IconName::SquarePlus), t("sb.new_connection"), move |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.open_host_dialog(None, (!g2.is_empty()).then(|| g2.clone()), w, cx)))
                 .child(item!(Some(IconName::FolderPlus), t("place.add"), move |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.add_place(g3.clone(), w, cx)));
         }
-        gpui::deferred(gpui::anchored().position(m.pos).snap_to_window_with_margin(px(8.)).child(chrome::pop_in("sb-menu-pop", list))).with_priority(3).into_any_element()
+        gpui::deferred(gpui::anchored().position(m.pos).snap_to_window_with_margin(px(ui::EDGE_MARGIN)).child(chrome::pop_in("sb-menu-pop", list))).with_priority(3).into_any_element()
     }
 
     // ------------------------------------------------------------------ modals

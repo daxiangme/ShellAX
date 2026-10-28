@@ -107,5 +107,5 @@ pub fn render<V: 'static>(st: &MenuState, cx: &mut Context<V>, pick: fn(&mut V, 
             .children((st.errors > 0).then(|| div().text_size(px(ui::fs_small())).text_color(c(th.error)).child(tf("cm.custom_errors", &[("n", &st.errors)])))))
         .child(list)
         .when(has_insert, |d| d.child(div().px_3().py_1().border_t_1().border_color(crate::theme::divider()).text_size(px(ui::fs_small())).text_color(c(th.overlay1)).whitespace_nowrap().overflow_hidden().text_ellipsis().child(t("cm.insert_hint"))));
-    deferred(anchored().position(st.pos).snap_to_window_with_margin(px(8.)).child(crate::chrome::pop_in("ctxmenu-pop", menu))).with_priority(10).into_any_element()
+    deferred(anchored().position(st.pos).snap_to_window_with_margin(px(crate::ui::EDGE_MARGIN)).child(crate::chrome::pop_in("ctxmenu-pop", menu))).with_priority(10).into_any_element()
 }

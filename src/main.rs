@@ -1292,7 +1292,7 @@ impl Root {
     }
     /// 退出并更新：启动安装或替换流程后退出；无法自动安装时显示安装包并提示。
     /// “发现新版本”通知卡片：关闭、稍后、下载更新 / 退出并更新、查看更新说明。下载进度就地显示。
-    fn update_offer_el(&mut self, m: ssh_term_proto::update::Manifest, cx: &mut Context<Self>) -> impl IntoElement {
+    fn update_offer_el(&mut self, m: ssh_term_proto::update::Manifest, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         use ssh_term_proto::updater::Phase;
         let th = theme::cur();
         let notes_url = format!("https://github.com/{}/releases/tag/v{}", ssh_term_proto::update::REPO, m.version.trim_start_matches('v'));
@@ -1330,7 +1330,7 @@ impl Root {
                 actions = actions.child(ui::button("upd-offer-open", t("settings.update_download"), 1).on_click(move |_, _w, cx| cx.open_url(&url)));
             }
         }
-        div().id("upd-offer").absolute().bottom(px(40.)).right(px(16.)).w(px(380.)).p_4().rounded(px(ui::R_LG)).bg(c(th.base)).border_1().border_color(theme::divider()).shadow(chrome::soft_shadow(true))
+        ui::corner_card(window, 40., 16.).id("upd-offer").w(px(ui::corner_w(window, 16.))).p_4()
             .flex().flex_col().gap_3().on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(div().flex().items_center().gap_2()
                 .child(icon(IconName::Download, ui::IC_MD, c(th.accent)))
@@ -1857,7 +1857,7 @@ impl Render for Root {
             let mut tabel = div().id(("tab", i)).relative().group(tg.clone()).h(px(card_layout::TAB_PILL_H)).w(px(TAB_W)).flex_shrink(1.).min_w(px(TAB_MIN_W)).pl(px(10.)).pr(px(4.)).rounded(px(ui::R_MD)).flex().items_center().gap(px(6.)).cursor_pointer()
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .when(active, |d| d.bg(pill_bg).shadow(pill_shadow.clone()).rounded_tl(px(ui::R_LG)).rounded_tr(px(ui::R_LG)))
-                .when_some(tip, |d, tip| d.tooltip(move |w, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(w, cx)))
+                .when_some(tip, |d, tip| d.tooltip(crate::ui::tip(tip.clone())))
                 .when(!active, |d| d.hover(move |s| s.bg(hover_bg)))
                 .on_click(cx.listener({ let title = title.to_string(); move |this, ev: &gpui::ClickEvent, w, cx| {
                     this.active = i;
@@ -1996,7 +1996,7 @@ impl Render for Root {
         let statusbar = div().h(px(28.)).px_3().flex().items_center().gap_3()
             .text_size(px(ui::fs_small())).text_color(theme::muted_text())
             // 原标题栏右上角的“本地终端”入口
-            .child(sb_btn("sb-local").tooltip(|w, cx| gpui_component::tooltip::Tooltip::new(t("ui.local_terminal")).build(w, cx))
+            .child(sb_btn("sb-local").tooltip(crate::ui::tip(t("ui.local_terminal")))
                 .on_click(cx.listener(|this, _, w, cx| this.new_tab(Spec::Local, w, cx)))
                 .child(icon(IconName::SquareTerminal, ui::IC_XS, c(th.overlay1))).child(t("ui.local_terminal")))
             .child(div().flex().items_center().gap_2().child(div().size(px(7.)).rounded_full().bg(scolor)).child(status))
@@ -2264,14 +2264,15 @@ impl Render for Root {
             if self.tab_menu.is_none() { if let Some((i, pos)) = gt { if i < self.tabs.len() { let el = self.tab_menu_el(i, pos, cx); root = root.child(chrome::pop_out(("menu-out-tab", seq as usize), div().absolute().top_0().left_0().size_full().child(el))); } } }
         }
         if let (Some(m), None) = (update_ui::offered(), update_ui::prompt()) {
-            root = root.child(self.update_offer_el(m, cx));
+            root = root.child(self.update_offer_el(m, window, cx));
         }
         if let Some((msg, seq)) = &self.toast {
             // info toast: neutral text + info icon, 3px semantic bar on the left
-            let el = div().absolute().bottom(px(40.)).right(px(16.)).min_w(px(320.)).max_w(px(400.)).pl(px(12.)).pr_4().py_2().rounded(px(ui::R_LG)).bg(c(th.base)).border_1().border_color(theme::divider()).shadow(chrome::soft_shadow(true))
-                .flex().items_center().gap_2().text_size(px(ui::fs_body())).text_color(c(th.text))
-                .child(div().w(px(3.)).h(px(18.)).rounded_full().bg(c(th.info)))
-                .child(icon(IconName::Info, ui::IC_SM, c(th.info))).child(msg.clone());
+            let el = ui::corner_card(window, 40., 16.).min_w(px(ui::corner_w(window, 16.).min(320.))).pl(px(12.)).pr_4().py_2()
+                .flex().items_start().gap_2().text_size(px(ui::fs_body())).text_color(c(th.text))
+                .child(div().flex_shrink_0().w(px(3.)).h(px(18.)).rounded_full().bg(c(th.info)))
+                .child(div().flex_shrink_0().h(px(18.)).flex().items_center().child(icon(IconName::Info, ui::IC_SM, c(th.info))))
+                .child(div().flex_1().min_w_0().whitespace_normal().child(ui::mid_ellipsis_tokens(msg)));
             let el = if motion::reduced() { el.into_any_element() }
                 else if self.toast_out { el.with_animation(("toast-out", *seq as usize), gpui::Animation::new(motion::ms(motion::TOAST_EXIT_MS)).with_easing(gpui::ease_in_out), |d, t| d.opacity(1. - t)).into_any_element() }
                 else { el.with_animation(("toast-in", *seq as usize), gpui::Animation::new(motion::ms(motion::TOAST_ENTER_MS)).with_easing(gpui::ease_out_quint()), |d, t| d.opacity(t).bottom(px(40. - (1. - t) * 8.))).into_any_element() };

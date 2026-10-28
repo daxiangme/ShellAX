@@ -328,6 +328,6 @@ impl Root {
                 { let i = id.clone(); item!("kvm-dtab", IconName::SquareTerminal, t("kvt.open_tab"), false, |this, w, cx| this.kv_open_tab(&i, Some(n), None, w, cx)); }
             }
         }
-        deferred(anchored().position(pos).child(m.occlude().on_mouse_down_out(cx.listener(|this, _, _w, cx| { this.kvp.menu = None; cx.notify(); })))).with_priority(2).into_any_element()
+        deferred(anchored().position(pos).snap_to_window_with_margin(gpui::px(crate::ui::EDGE_MARGIN)).child(m.occlude().on_mouse_down_out(cx.listener(|this, _, _w, cx| { this.kvp.menu = None; cx.notify(); })))).with_priority(2).into_any_element()
     }
 }
