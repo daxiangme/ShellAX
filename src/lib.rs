@@ -23,6 +23,7 @@ pub mod clipfiles;
 pub mod hosttree;
 pub mod assets;
 pub mod db;
+pub mod db_mcp;
 pub mod kv;
 pub mod dock;
 pub mod doc;

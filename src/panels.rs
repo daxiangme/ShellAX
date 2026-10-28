@@ -218,6 +218,7 @@ impl Root {
         if self.dock_ai { cards.push(("ai-dock", self.ai_dock(cx))); }
         if self.dock_snip { cards.push(("snip-dock", self.library_dock(true, window, cx))); }
         if self.dock_hist { cards.push(("hist-dock", self.library_dock(false, window, cx))); }
+        if self.dock_mcp { cards.push(("mcp-dock", self.mcp_dock(cx))); }
         if self.dock_dir {
             if let Some(v) = self.dir_view.clone() {
                 // 选中的标签已经关掉时，锁到这一帧算出的回退目标，避免之后跟着活动标签跳。
@@ -358,7 +359,7 @@ fn _unused(_: Overlay) {}
 /// 三张及以上卡片同时展开时，每张展开卡片的最小高度（px），放不下时右侧栏内部滚动。
 const DOCK_MIN_H: f32 = 160.;
 /// 右侧栏卡片的显示顺序。
-pub(crate) const DOCK_IDS: [&str; 5] = ["host-dock", "ai-dock", "snip-dock", "hist-dock", "dir-dock"];
+pub(crate) const DOCK_IDS: [&str; 6] = ["host-dock", "ai-dock", "snip-dock", "hist-dock", "dir-dock", "mcp-dock"];
 
 /// Drag payload for the split between stacked right-column cards.
 #[derive(Clone)]

@@ -39,6 +39,8 @@ mod host_tools_view;
 mod hoststats_view;
 mod chat_view;
 mod library;
+mod mcp_backend;
+mod mcp_view;
 mod termview;
 mod theme;
 mod ui;
@@ -245,6 +247,9 @@ pub(crate) struct Root {
     dock_hist: bool,
     /// 目录卡片：浏览当前选中终端的工作目录。
     dock_dir: bool,
+    /// Database MCP card.
+    dock_mcp: bool,
+    mcp: mcp_view::McpState,
     dir_view: Option<Entity<dir_view::DirView>>,
     /// 用户在目录卡片里点选的终端；打开时写成活动标签，之后不跟着焦点跑。
     dir_pick: Option<u64>,
@@ -428,6 +433,7 @@ impl Root {
             actions::Action::OpenSnippets => self.dock_snip,
             actions::Action::OpenHistory => self.dock_hist,
             actions::Action::OpenDirectory => self.dock_dir,
+            actions::Action::OpenMcp => self.dock_mcp,
             _ => false,
         }
     }
@@ -440,6 +446,7 @@ impl Root {
             "snip-dock" => self.dock_snip,
             "hist-dock" => self.dock_hist,
             "dir-dock" => self.dock_dir,
+            "mcp-dock" => self.dock_mcp,
             _ => false,
         }
     }
@@ -452,6 +459,7 @@ impl Root {
             "snip-dock" => self.dock_snip = false,
             "hist-dock" => self.dock_hist = false,
             "dir-dock" => { self.dock_dir = false; self.dir_view = None; }
+            "mcp-dock" => self.dock_mcp = false,
             _ => {}
         }
         self.dock_order.retain(|x| *x != id);
@@ -529,7 +537,7 @@ impl Root {
                     r.dock_reveal = None;
                     r.dock_shown = false;
                     r.dock_close_ids.clear();
-                    r.dock_ai = false; chat_view::set_dock_open(false); r.dock_host = None; r.dock_snip = false; r.dock_hist = false; r.dock_dir = false; r.dir_view = None;
+                    r.dock_ai = false; chat_view::set_dock_open(false); r.dock_host = None; r.dock_snip = false; r.dock_hist = false; r.dock_dir = false; r.dock_mcp = false; r.dir_view = None;
                     r.focus_active(w, cx); cx.notify();
                 });
             }).detach();
@@ -610,6 +618,7 @@ impl Root {
                 "snip-dock" => { self.dock_snip = true; self.open_dock_exclusive("snip-dock"); }
                 "hist-dock" => { self.dock_hist = true; self.open_dock_exclusive("hist-dock"); }
                 "dir-dock" => self.open_dir_dock(window, cx),
+                "mcp-dock" => { self.dock_mcp = true; self.mcp_sync_token(); self.open_dock_exclusive("mcp-dock"); }
                 _ => {}
             }
         }
@@ -1666,6 +1675,7 @@ impl Root {
             Action::OpenSnippets => self.toggle_dock(SideDock::Snippets, window, cx),
             Action::OpenHistory => self.toggle_dock(SideDock::History, window, cx),
             Action::OpenDirectory => self.toggle_dir_dock(window, cx),
+            Action::OpenMcp => self.toggle_mcp_dock(window, cx),
             Action::LaunchAgent1 => self.launch_agent(0, window, cx),
             Action::LaunchAgent2 => self.launch_agent(1, window, cx),
             Action::LaunchAgent3 => self.launch_agent(2, window, cx),
@@ -2179,6 +2189,7 @@ impl Render for Root {
             .on_action(cx.listener(|this, _: &app_menu::OpenSnippets, w, cx| { this.run(Action::OpenSnippets, w, cx); cx.stop_propagation(); }))
             .on_action(cx.listener(|this, _: &app_menu::OpenHistory, w, cx| { this.run(Action::OpenHistory, w, cx); cx.stop_propagation(); }))
             .on_action(cx.listener(|this, _: &app_menu::OpenDirectory, w, cx| { this.run(Action::OpenDirectory, w, cx); cx.stop_propagation(); }))
+            .on_action(cx.listener(|this, _: &app_menu::OpenMcp, w, cx| { this.run(Action::OpenMcp, w, cx); cx.stop_propagation(); }))
             .on_action(cx.listener(|this, _: &app_menu::OpenAuditLog, w, cx| { this.run(Action::OpenAudit, w, cx); cx.stop_propagation(); }))
             .on_action(cx.listener(|_, _: &app_menu::MinimizeWindow, w, cx| { w.minimize_window(); cx.stop_propagation(); }))
             // 编辑菜单只作用于终端；焦点在设置或对话框的输入框时不抢它们的复制粘贴。
@@ -2303,6 +2314,9 @@ impl Render for Root {
                     .child(ui::button("ap-session", tf("ui.allow_session_prefix", &[("p", &ssh_term_proto::policy_server::command_prefix(&a.req.command))]), 0).on_click(cx.listener(|this, _, _w, cx| this.answer_approval(ssh_term_proto::policy_server::Answer::Session, cx))))
                     .child(ui::button("ap-allow", t("ui.allow_once"), 1).on_click(cx.listener(|this, _, _w, cx| this.answer_approval(ssh_term_proto::policy_server::Answer::Once, cx)))))));
         } }
+        if self.hk_pending.is_empty() && self.auth_pending.is_empty() && self.approvals.is_empty() {
+            if let Some(el) = self.mcp_confirm_el(cx) { root = root.child(el); }
+        }
         if self.quit_confirm {
             let agents = self.running_agents(cx);
             let panes = self.tabs.iter().map(|t| t.layout.leaves().len()).sum::<usize>();
@@ -2478,10 +2492,14 @@ fn open_main(cx: &mut App, rt: Arc<tokio::runtime::Runtime>, themes: Vec<Arc<The
                     let lib_search = cx.new(|cx| InputState::new(window, cx).placeholder(t("lib.search")));
                     let hist_search = cx.new(|cx| InputState::new(window, cx).placeholder(t("lib.search")));
                     let audit = audit_log();
+                    let prompts = ssh::Prompts { hostkey: hk_tx, auth: au_tx };
+                    let (mcp_tx, mcp_rx) = flume::unbounded();
+                    let mcp_backend = Arc::new(mcp_backend::McpBackend::new(rt.clone(), prompts.clone(), mcp_tx, audit.clone()));
+                    let mcp = mcp_view::McpState::new(mcp_backend, window, cx);
                     let mut root = Root {
                         rt, default_target, tabs: vec![], active: 0, themes, schemes, histories: HashMap::new(),
-                        manifests: Arc::new(agent::bundled()), prompts: ssh::Prompts { hostkey: hk_tx, auth: au_tx }, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], deny_reason: None, policy_port: None, overlay: Overlay::None, settings: None, drag_div: None, port_view: None, quit_confirm: false, modal: None, quit_ok: false, chat_view: None,
-                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, menu_last: (None, None), menu_ghost: None, menu_ghost_seq: 0, sb_menu_at: std::time::Instant::now(), sb_modal: None, tag_filter: vec![], tab_menu: None, tab_menu_at: std::time::Instant::now(), new_menu: None, new_menu_at: std::time::Instant::now(), new_menu_closed: std::time::Instant::now(), new_menu_collapsed: config::get().sidebar.collapsed.clone(), new_menu_sel: 0, new_menu_search: new_menu_search.clone(), tab_scroll: gpui::ScrollHandle::new(), tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), dock_snip: false, dock_hist: false, dock_dir: false, dir_view: None, dir_pick: None, dir_feed: std::rc::Rc::new(std::cell::RefCell::new(dir_view::DirFeed::default())), dock_ai: false, dock_host: None, dock_min: HashSet::new(), dock_order: vec![], sb_fold: HashSet::new(), dock_split: config::get().sidebar.dock_split.clamp(0.15, 0.85), dock_reveal: None, dock_close_ids: vec![], center_w: Default::default(), freeze_w: None, dock_shown: false, dock_tween: HashMap::new(), dock_seen: HashSet::new(), dock_col_h: Default::default(), bottom_anim: None, lib_search: lib_search.clone(), hist_search: hist_search.clone(), lib_group: String::new(), lib_hist_all: false, lib_editor: None, lib_vars: None, lib_confirm: None, lib_notice: String::new(), lib_menu: None, ai_width: { let w = config::get().sidebar.ai_width; if (280.0..=560.0).contains(&w) { w } else { config::AI_DOCK_W } }, host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: !config::get().sidebar.collapsed_panel(), sb_reveal: None, ws_seen: None, ws_last: HashMap::new(), tool: activity::Tool::from_id(&config::get().sidebar.tool), bottom_open: config::get().sidebar.bottom_open, bottom_tab: activity::Bottom::from_id(&config::get().sidebar.bottom_tab), bottom_h: config::get().sidebar.bottom_height.clamp(120., 600.), exec_log: Default::default(), dbp: Default::default(), kvp: Default::default(), toolsp: Default::default(), tool_hist: HashMap::new(), extm: None, audit, audit_verify: None, audit_filter: Default::default(),
+                        manifests: Arc::new(agent::bundled()), prompts, auth_pending: vec![], auth_input: None, auth_save: false, hk_pending: vec![], approvals: vec![], deny_reason: None, policy_port: None, overlay: Overlay::None, settings: None, drag_div: None, port_view: None, quit_confirm: false, modal: None, quit_ok: false, chat_view: None,
+                        host_search: host_search.clone(), lang_seen: ssh_term_proto::i18n::current() as u8, bg_seen: None, ui_size_seen: 0., sb_menu: None, menu_last: (None, None), menu_ghost: None, menu_ghost_seq: 0, sb_menu_at: std::time::Instant::now(), sb_modal: None, tag_filter: vec![], tab_menu: None, tab_menu_at: std::time::Instant::now(), new_menu: None, new_menu_at: std::time::Instant::now(), new_menu_closed: std::time::Instant::now(), new_menu_collapsed: config::get().sidebar.collapsed.clone(), new_menu_sel: 0, new_menu_search: new_menu_search.clone(), tab_scroll: gpui::ScrollHandle::new(), tab_rename: None, closed_tabs: vec![], sb_width: config::get().sidebar.width.clamp(180.0, 480.0), dock_snip: false, dock_hist: false, dock_dir: false, dock_mcp: false, mcp, dir_view: None, dir_pick: None, dir_feed: std::rc::Rc::new(std::cell::RefCell::new(dir_view::DirFeed::default())), dock_ai: false, dock_host: None, dock_min: HashSet::new(), dock_order: vec![], sb_fold: HashSet::new(), dock_split: config::get().sidebar.dock_split.clamp(0.15, 0.85), dock_reveal: None, dock_close_ids: vec![], center_w: Default::default(), freeze_w: None, dock_shown: false, dock_tween: HashMap::new(), dock_seen: HashSet::new(), dock_col_h: Default::default(), bottom_anim: None, lib_search: lib_search.clone(), hist_search: hist_search.clone(), lib_group: String::new(), lib_hist_all: false, lib_editor: None, lib_vars: None, lib_confirm: None, lib_notice: String::new(), lib_menu: None, ai_width: { let w = config::get().sidebar.ai_width; if (280.0..=560.0).contains(&w) { w } else { config::AI_DOCK_W } }, host_os: Default::default(), os_probing: HashSet::new(), sidebar_visible: !config::get().sidebar.collapsed_panel(), sb_reveal: None, ws_seen: None, ws_last: HashMap::new(), tool: activity::Tool::from_id(&config::get().sidebar.tool), bottom_open: config::get().sidebar.bottom_open, bottom_tab: activity::Bottom::from_id(&config::get().sidebar.bottom_tab), bottom_h: config::get().sidebar.bottom_height.clamp(120., 600.), exec_log: Default::default(), dbp: Default::default(), kvp: Default::default(), toolsp: Default::default(), tool_hist: HashMap::new(), extm: None, audit, audit_verify: None, audit_filter: Default::default(),
                         settings_dirty: vec![], toast: None, toast_out: false, toast_seq: 0, _subs: vec![],
                     };
                     crate::ctxmenu_view::init(root.rt.handle().clone(), root.prompts.clone());
@@ -2559,6 +2577,7 @@ fn open_main(cx: &mut App, rt: Arc<tokio::runtime::Runtime>, themes: Vec<Arc<The
                         Ok(srv) => { root.policy_port = Some(srv.port); *ssh::POLICY_ENDPOINT.lock().unwrap() = Some((srv.port, srv.token.clone())); root.log("policy.server", format!("listening on 127.0.0.1:{}", srv.port)); }
                         Err(e) => root.toast(tf("main.policy_server_failed", &[("e", &e)]), cx),
                     }}
+                    if !secondary() && config::get().db_mcp.enabled { root.mcp_listen(cx); }
                     // links: from this launch's command line and from later launches (/v1/open)
                     let (otx, orx) = flume::unbounded::<String>();
                     let _ = ssh_term_proto::policy_server::OPEN_TX.set(otx.clone());
@@ -2573,14 +2592,22 @@ fn open_main(cx: &mut App, rt: Arc<tokio::runtime::Runtime>, themes: Vec<Arc<The
                             if this.update(cx, |r, cx| { r.approvals.push(a); r.notify_desktop(t("ui.approval_title"), cx); cx.notify(); }).is_err() { break; }
                         }
                     }).detach();
+                    cx.spawn(async move |this, cx| {
+                        while let Ok(ask) = mcp_rx.recv_async().await {
+                            if this.update(cx, |r, cx| { r.mcp.confirms.push(ask); r.notify_desktop(t("mcp.confirm_title"), cx); cx.notify(); }).is_err() { break; }
+                        }
+                    }).detach();
                     cx.spawn(async move |this, cx| loop {
                         cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
-                        if this.update(cx, |r, cx| if !r.approvals.is_empty() {
+                        if this.update(cx, |r, cx| {
                             let now = std::time::Instant::now();
                             // SHELLAX_TEST_SLOW_WITHDRAW: test hook that keeps a withdrawn card on screen so a late "allow" can be clicked
                             let slow = std::env::var_os("SHELLAX_TEST_SLOW_WITHDRAW").is_some();
-                            r.approvals.retain(|a| a.deadline > now && (slow || !a.reply.is_disconnected()));
-                            cx.notify();
+                            let approvals = !r.approvals.is_empty();
+                            if approvals { r.approvals.retain(|a| a.deadline > now && (slow || !a.reply.is_disconnected())); }
+                            let mcp = !r.mcp.confirms.is_empty();
+                            if mcp { r.mcp.confirms.retain(|a| a.deadline > now && !a.reply.is_disconnected()); }
+                            if approvals || mcp { cx.notify(); }
                         }).is_err() { break; }
                     }).detach();
                     // host metrics for the path bar: sample the focused pane's host while the window is active

@@ -408,6 +408,9 @@ pub struct Settings {
     /// Docker engines (`[[docker]]`, v0.2 PRD §6.5).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub docker: Vec<ssh_term_proto::assets::DockerEndpoint>,
+    /// Local database MCP server. Omitted from config.toml until the user changes it.
+    #[serde(default, skip_serializing_if = "ssh_term_proto::db_mcp::McpConfig::is_default")]
+    pub db_mcp: ssh_term_proto::db_mcp::McpConfig,
     /// legacy top-level keys (v0.5 files); folded into sections on load
     #[serde(skip_serializing)] pub theme: Option<String>,
     #[serde(skip_serializing)] pub known_hosts: Option<String>,

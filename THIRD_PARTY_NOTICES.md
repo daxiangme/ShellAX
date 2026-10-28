@@ -39,6 +39,7 @@ MIT License — Copyright (c) 2020 Zellij contributors. The full permission noti
 | keyring 3.6.3 (OS keychain; features async-secret-service + crypto-rust on Linux, apple-native, windows-native) | MIT OR Apache-2.0 |
 | secret-service 4.0.0, zbus 4.4 (pure-Rust D-Bus, pulled in by keyring) | secret-service: MIT OR Apache-2.0; zbus: MIT |
 | chacha20poly1305 0.10.1 (encrypted fallback file for API keys), rand 0.8 | Apache-2.0 OR MIT |
+| sqlparser 0.63.0 (database MCP statement classification) | Apache-2.0 |
 | ureq 2.12.1 (AI HTTP client) | MIT OR Apache-2.0 |
 | rustls 0.23 (via ureq "tls") | Apache-2.0 OR ISC OR MIT |
 | socks 0.3.4 (via ureq "socks-proxy"; SOCKS5 for AI/update requests) | MIT OR Apache-2.0 |
