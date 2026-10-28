@@ -31,6 +31,10 @@ pub struct DbDialog {
     group: Entity<InputState>,
     uri: Entity<InputState>,
     tls: String,
+    tls_ca: Entity<InputState>,
+    tls_server: Entity<InputState>,
+    /// DM only. Kept off the TLS mode control so it is not saved for other engines.
+    skip_verify: bool,
     read_only: bool,
     via: Entity<crate::host_picker::HostPicker>,
     targets: HashMap<String, SshTarget>,
@@ -39,8 +43,13 @@ pub struct DbDialog {
     error: Option<String>,
     /// None = not run; Some(None) = running; Some(Some(Ok/Err)).
     test: Option<Option<Result<String, String>>>,
-    test_task: Option<tokio::task::JoinHandle<()>>,
+    test_gen: u64,
+    test_abort: Option<tokio::task::AbortHandle>,
     _subs: Vec<gpui::Subscription>,
+}
+
+impl Drop for DbDialog {
+    fn drop(&mut self) { if let Some(h) = self.test_abort.take() { h.abort(); } }
 }
 
 impl EventEmitter<DbDialogEvent> for DbDialog {}
@@ -61,14 +70,17 @@ impl DbDialog {
         let file = mk("/path/to/data.db".into(), e.file.clone(), false, window, cx);
         let group_in = mk(t("ui.e_g_prod_test").into(), e.group.clone().unwrap_or_default(), false, window, cx);
         let uri = mk("mysql://user:pass@host:3306/db".into(), String::new(), false, window, cx);
+        let tls_ca = mk(t("db.tls_ca_ph").into(), e.tls_ca.clone(), false, window, cx);
+        let tls_server = mk(t("db.tls_server_name_ph").into(), e.tls_server_name.clone(), false, window, cx);
         name.update(cx, |s, cx| s.focus(window, cx));
         let mut subs = vec![];
         subs.push(cx.subscribe_in(&uri, window, |this: &mut Self, _, ev: &InputEvent, window, cx| { if matches!(ev, InputEvent::Change) { this.apply_uri(window, cx); } }));
         let via = cx.new(|cx| crate::host_picker::HostPicker::new("db-via", e.ssh_via.clone(), hosts.clone(), window, cx));
         subs.push(cx.subscribe(&via, |this: &mut Self, _, _: &crate::host_picker::HostChanged, cx| { this.test = None; cx.notify(); }));
-        let tls = if e.tls.is_empty() { "prefer".to_string() } else { e.tls.clone() };
-        Self { kind: e.kind, name, host, port, user, password, database, file, group: group_in, uri, tls, read_only: e.read_only, via,
-            targets, prompts, rt, error: None, test: None, test_task: None, editing: existing, _subs: subs }
+        let skip_verify = e.kind == DbKind::Dameng && e.tls == "insecure";
+        let tls = if e.tls.is_empty() || e.tls == "insecure" { "prefer".to_string() } else { e.tls.clone() };
+        Self { kind: e.kind, name, host, port, user, password, database, file, group: group_in, uri, tls, tls_ca, tls_server, skip_verify, read_only: e.read_only, via,
+            targets, prompts, rt, error: None, test: None, test_gen: 0, test_abort: None, editing: existing, _subs: subs }
     }
 
     fn v(e: &Entity<InputState>, cx: &Context<Self>) -> String { e.read(cx).value().trim().to_string() }
@@ -85,6 +97,20 @@ impl DbDialog {
             set(&self.user.clone(), user, window, cx);
             set(&self.database.clone(), db, window, cx);
             if let Some(p) = pass { set(&self.password.clone(), p, window, cx); }
+            cx.notify();
+            return;
+        }
+        if let Some((c, pass)) = ssh_term_proto::db::dm::parse_conn(&raw) {
+            self.kind = DbKind::Dameng;
+            self.skip_verify = c.tls == "insecure";
+            set(&self.host.clone(), c.host.clone(), window, cx);
+            set(&self.port.clone(), c.port.map(|p| p.to_string()).unwrap_or_default(), window, cx);
+            set(&self.user.clone(), c.user, window, cx);
+            set(&self.database.clone(), c.database, window, cx);
+            set(&self.tls_ca.clone(), c.tls_ca, window, cx);
+            set(&self.tls_server.clone(), c.tls_server_name, window, cx);
+            if let Some(p) = pass { set(&self.password.clone(), p, window, cx); }
+            if Self::v(&self.name, cx).is_empty() { set(&self.name.clone(), c.host, window, cx); }
             cx.notify();
             return;
         }
@@ -123,6 +149,13 @@ impl DbDialog {
             d.file.clear();
             d.ssh_via = self.via.read(cx).value.clone();
             d.tls = if self.tls == "prefer" { String::new() } else { self.tls.clone() };
+            d.tls_server_name.clear();
+            if d.kind == DbKind::Dameng {
+                d.database.clear();
+                d.tls = if self.skip_verify { "insecure".into() } else { String::new() };
+                d.tls_ca = Self::v(&self.tls_ca, cx);
+                d.tls_server_name = Self::v(&self.tls_server, cx);
+            }
             if d.kind == DbKind::Mongodb && d.host.contains("://") {
                 d.port = None;
                 d.ssh_via.clear(); // a URI may name several hosts / SRV records; tunnels only work for one standalone host
@@ -155,7 +188,10 @@ impl DbDialog {
         let via = if d.ssh_via.is_empty() { None } else {
             match self.targets.get(&d.ssh_via) { Some(t) => Some((t.clone(), self.prompts.clone())), None => { self.test = Some(Some(Err(tf("db.via_missing", &[("host", &d.ssh_via)])))); cx.notify(); return; } }
         };
-        if !d.kind.dialog_ready() { self.test = Some(Some(Err(tf("db.kind_unsupported", &[("kind", &d.kind.label())])))); cx.notify(); return; }
+        if !d.kind.dialog_ready() { self.test = Some(Some(Err(tf("db.kind_unsupported", &[("kind", &d.kind.ui_name())])))); cx.notify(); return; }
+        if let Some(h) = self.test_abort.take() { h.abort(); }
+        self.test_gen = self.test_gen.wrapping_add(1);
+        let gen = self.test_gen;
         self.error = None;
         self.test = Some(None);
         let me = cx.entity().downgrade();
@@ -174,11 +210,13 @@ impl DbDialog {
             l.close().await;
             Ok::<_, anyhow::Error>((v, via))
         });
+        self.test_abort = Some(h.abort_handle());
         let task = cx.spawn(async move |_, cx| {
             let r = h.await.map_err(anyhow::Error::from).and_then(|r| r);
             let ms = started.elapsed().as_millis();
             let _ = me.update(cx, |this, cx| {
-                this.test_task = None;
+                if this.test_gen != gen { return; }
+                this.test_abort = None;
                 this.test = Some(Some(match r {
                     Ok((v, via)) => Ok(match via { Some(h) => tf("db.test_ok_via", &[("version", &v), ("ms", &ms), ("host", &h)]), None => tf("db.test_ok", &[("version", &v), ("ms", &ms)]) }),
                     Err(e) => Err(format!("{e:#}")),
@@ -199,7 +237,7 @@ impl Render for DbDialog {
         let mut form = div().p_5().flex().flex_col().gap_3().max_h(px(600.)).id("db-form").overflow_y_scroll();
 
         // engine
-        let kinds: Vec<(String, String)> = DbKind::ALL.iter().filter(|k| k.dialog_ready()).map(|k| (k.id().to_string(), k.label().to_string())).collect();
+        let kinds: Vec<(String, String)> = DbKind::ALL.iter().filter(|k| k.dialog_ready()).map(|k| (k.id().to_string(), k.ui_name().to_string())).collect();
         let me = cx.entity().downgrade();
         form = form.child(div().flex().items_start().gap_3().child(label(t("db.kind")).pt_1())
             .child(div().flex_1().flex().flex_col().gap_1()
@@ -214,14 +252,35 @@ impl Render for DbDialog {
             form = form.child(div().flex().items_center().gap_3().child(label(t("ui.address")))
                 .child(div().flex_1().min_w_0().child(ui::text_field(&self.host, false)))
                 .child(div().w(px(90.)).flex_shrink_0().child(ui::text_field(&self.port, false))));
+            if self.kind == DbKind::Dameng {
+                form = form.child(div().flex().gap_3().child(div().w(px(84.)).flex_shrink_0())
+                    .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(t("db.dm_port_hint"))));
+            }
             form = form.child(line(t("host.username"), ui::text_field(&self.user, false).into_any_element()));
             form = form.child(line(t("ui.password"), ui::text_field(&self.password, false).into_any_element()));
-            form = form.child(line(t("db.database"), ui::text_field(&self.database, false).into_any_element()));
+            if self.kind != DbKind::Dameng {
+                form = form.child(line(t("db.database"), ui::text_field(&self.database, false).into_any_element()));
+            }
             form = form.child(line(t("db.via"), self.via.clone().into_any_element()));
-            let tls: Vec<(String, String)> = TLS_MODES.iter().map(|m| (m.to_string(), t(&format!("db.tls_{}", m.replace('-', "_"))).to_string())).collect();
-            let me = cx.entity().downgrade();
-            form = form.child(div().flex().items_center().gap_3().child(label("TLS"))
-                .child(div().flex_1().child(ui::segmented("db-tls", &tls, &self.tls, move |v, _w, cx| { let _ = me.update(cx, |this, cx| { this.tls = v; cx.notify(); }); }))));
+            if self.kind == DbKind::Dameng {
+                let ca = self.tls_ca.clone();
+                form = form.child(div().flex().items_center().gap_3().child(label(t("db.tls_ca")))
+                    .child(div().flex_1().min_w_0().child(ui::text_field(&self.tls_ca, false)))
+                    .child(ui::button("db-dm-ca", t("host.browse"), 0).on_click(cx.listener(move |_this, _, w, cx| {
+                        let rx = cx.prompt_for_paths(gpui::PathPromptOptions { files: true, directories: false, multiple: false, prompt: None });
+                        let ca = ca.clone();
+                        cx.spawn_in(w, async move |_this, cx| { if let Ok(Ok(Some(p))) = rx.await { if let Some(f) = p.first() { let f = f.display().to_string(); let _ = cx.update(|w, cx| ca.update(cx, |s, cx| s.set_value(f, w, cx))); } } }).detach();
+                    }))));
+                form = form.child(line(t("db.tls_server_name"), ui::text_field(&self.tls_server, false).into_any_element()));
+                form = form.child(div().flex().items_center().gap_3().child(label(t("db.tls_skip_verify")))
+                    .child(Switch::new("db-dm-verify").checked(self.skip_verify).on_click(cx.listener(|this, on: &bool, _, cx| { this.skip_verify = *on; cx.notify(); })))
+                    .child(div().flex_1().min_w_0().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(t("db.tls_skip_verify_hint"))));
+            } else {
+                let tls: Vec<(String, String)> = TLS_MODES.iter().map(|m| (m.to_string(), t(&format!("db.tls_{}", m.replace('-', "_"))).to_string())).collect();
+                let me = cx.entity().downgrade();
+                form = form.child(div().flex().items_center().gap_3().child(label("TLS"))
+                    .child(div().flex_1().child(ui::segmented("db-tls", &tls, &self.tls, move |v, _w, cx| { let _ = me.update(cx, |this, cx| { this.tls = v; cx.notify(); }); }))));
+            }
         }
         form = form.child(line(t("ui.group"), ui::text_field(&self.group, false).into_any_element()));
         form = form.child(div().flex().items_center().gap_3().child(label(t("db.read_only")))

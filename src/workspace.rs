@@ -149,7 +149,7 @@ impl Root {
             Tool::Database => {
                 for (i, d) in s.db.iter().take(12).enumerate() {
                     let id = d.id.clone();
-                    list = list.child(row(format!("ws-d-{i}").into(), IconName::Database, d.name.clone(), d.kind.label().to_string())
+                    list = list.child(row(format!("ws-d-{i}").into(), IconName::Database, d.name.clone(), d.kind.ui_name().to_string())
                         .on_click(cx.listener(move |this, _, w, cx| this.db_new_query(Some(id.clone()), w, cx))));
                 }
                 buttons = buttons.child(ui::button("ws-db-new", t("db.new_connection"), 1).on_click(cx.listener(|this, _, w, cx| this.run(Action::NewDbConnection, w, cx))));

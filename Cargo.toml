@@ -77,6 +77,9 @@ tiberius = { version = "0.13", default-features = false, features = ["tds73", "r
 tokio-util = { version = "0.7", features = ["compat"] }
 # MongoDB (Apache-2.0)
 mongodb = { version = "3", default-features = false, features = ["compat-3-0-0", "rustls-tls", "dns-resolver"] }
+# DM8 async client and pool (Apache-2.0). Pin the revision; both crates come from one repo.
+dm-conn = { git = "https://github.com/daxiangme/dm-rust", rev = "f5e9492" }
+dm-pool = { git = "https://github.com/daxiangme/dm-rust", rev = "f5e9492" }
 # DuckDB (MIT), optional: the bundled engine is a large C++ build
 duckdb = { version = "1", optional = true, features = ["bundled"] }
 md-5 = "0.10"

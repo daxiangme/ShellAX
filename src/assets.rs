@@ -24,7 +24,7 @@ pub enum DbKind {
 
 /// Wire protocol family: decides which driver adapter serves a kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Family { Mysql, Postgres, Sqlite, Mssql, Clickhouse, Duckdb, Other }
+pub enum Family { Mysql, Postgres, Sqlite, Mssql, Clickhouse, Duckdb, Dameng, Other }
 
 impl DbKind {
     pub const ALL: [DbKind; 15] = [
@@ -57,6 +57,7 @@ impl DbKind {
             DbKind::Sqlite => Family::Sqlite,
             DbKind::Sqlserver => Family::Mssql,
             DbKind::Clickhouse => Family::Clickhouse,
+            DbKind::Dameng => Family::Dameng,
             #[cfg(feature = "duckdb")]
             DbKind::Duckdb => Family::Duckdb,
             _ => Family::Other,
@@ -86,6 +87,10 @@ impl DbKind {
     pub fn dialog_ready(self) -> bool { self.driver_ready() || self == DbKind::Mongodb }
     /// Has schemas between database and tables (PostgreSQL family).
     pub fn has_schemas(self) -> bool { matches!(self.family(), Family::Postgres | Family::Mssql) }
+    /// The first tree level is a schema (模式), and tables hang off that node.
+    pub fn schema_root(self) -> bool { self == DbKind::Dameng }
+    /// Name shown in the connection dialog and lists.
+    pub fn ui_name(self) -> &'static str { if self == DbKind::Dameng { crate::i18n::t("db.kind_dameng") } else { self.label() } }
 }
 
 /// `[[db]]` in config.toml. Secrets are never stored here: the password lives in the
@@ -119,11 +124,14 @@ pub struct DbConn {
     /// Client refuses writes; MySQL / PostgreSQL sessions are also set read-only.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub read_only: bool,
-    /// disable | prefer | require | verify-ca | verify-full
+    /// disable | prefer | require | verify-ca | verify-full. DM stores "insecure" when certificate checks are off.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub tls: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub tls_ca: String,
+    /// Name checked on the DM certificate. Empty uses the host, or the real host behind an SSH tunnel.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub tls_server_name: String,
     /// 0 = default (10 s).
     #[serde(skip_serializing_if = "is_zero")]
     pub connect_timeout_secs: u64,
@@ -422,6 +430,10 @@ mod tests {
         assert_eq!(DbKind::Postgres.default_port(), Some(5432));
         assert!(DbKind::Sqlite.is_file() && DbKind::Sqlite.default_port().is_none());
         assert!(DbKind::Mysql.driver_ready() && DbKind::Opengauss.driver_ready() && !DbKind::Mongodb.driver_ready() && DbKind::Mongodb.dialog_ready());
+        assert!(DbKind::Dameng.driver_ready() && DbKind::Dameng.dialog_ready() && DbKind::Dameng.schema_root());
+        assert_eq!(DbKind::Dameng.default_port(), Some(5236));
+        assert_eq!(DbKind::Dameng.ui_name(), "DM");
+        assert!(!DbKind::Mysql.schema_root());
         let c = DbConn { kind: DbKind::Mysql, host: "h".into(), user: "u".into(), database: "d".into(), ..Default::default() };
         assert_eq!(c.address(), "u@h:3306/d");
     }

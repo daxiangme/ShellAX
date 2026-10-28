@@ -5,6 +5,7 @@ pub mod dialect;
 pub mod driver;
 pub mod mssql;
 pub mod clickhouse;
+pub mod dm;
 #[cfg(feature = "duckdb")]
 pub mod duck;
 pub mod live;
@@ -122,6 +123,8 @@ pub trait SqlDriver: Send + Sync {
     fn stream<'a>(&'a self, db: &'a str, sql: String, opts: &'a RunOpts, sink: Sink<'a>) -> BoxFut<'a, u64>;
     fn cancel<'a>(&'a self, db: &'a str, slot: &'a CancelSlot) -> BoxFut<'a, bool>;
     fn close(&self) -> BoxFut<'_, ()>;
+    /// Login banner captured while connecting. `Some` (even empty) skips the version query.
+    fn startup_version(&self) -> Option<String> { None }
 }
 
 impl dyn SqlDriver {
@@ -134,6 +137,7 @@ impl dyn SqlDriver {
     }
 
     pub async fn server_version(&self) -> Result<String> {
+        if let Some(v) = self.startup_version() { return Ok(v); }
         let q = match self.family() {
             Family::Mysql => "SELECT VERSION()", Family::Postgres => "SHOW server_version",
             Family::Mssql => "SELECT CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(64))",
@@ -239,6 +243,27 @@ impl dyn SqlDriver {
                 let cols = self.columns(db, schema, table).await?;
                 Ok(dialect::mssql_create_table(&q, &cols))
             }
+            Family::Dameng => {
+                let schema_name = if !db.is_empty() { db } else { schema.unwrap_or("") };
+                let kind = self.one(db, dm::object_kind_sql(schema_name, table)).await?.first().unwrap_or("TABLE").to_string();
+                let ddl_kind = if kind.eq_ignore_ascii_case("VIEW") { "VIEW" } else { "TABLE" };
+                let base = self.one(db, dm::get_ddl_sql(ddl_kind, table, schema_name)).await?.first().unwrap_or("").to_string();
+                let table_comment = self.one(db, dm::table_comment_sql(schema_name, table)).await?.first().map(|s| s.to_string());
+                let cols = self.one(db, dm::column_comments_sql(schema_name, table)).await?;
+                let comments: Vec<(String, String)> = cols.rows.iter().map(|r| (r.first().cloned().flatten().unwrap_or_default(), r.get(1).cloned().flatten().unwrap_or_default())).collect();
+                let names = self.one(db, dm::normal_index_names_sql(schema_name, table)).await?;
+                let mut index_ddls = Vec::new();
+                for name in names.col(0) {
+                    if name.is_empty() { continue; }
+                    match self.one(db, dm::get_ddl_sql("INDEX", &name, schema_name)).await {
+                        Ok(r) => { if let Some(s) = r.first() { if !s.trim().is_empty() { index_ddls.push(s.to_string()); } } }
+                        Err(_) => continue,
+                    }
+                }
+                let comment_refs: Vec<(&str, &str)> = comments.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+                let idx_refs: Vec<&str> = index_ddls.iter().map(String::as_str).collect();
+                Ok(dm::assemble_ddl(&base, ddl_kind, &q, table_comment.as_deref(), &comment_refs, &idx_refs))
+            }
             _ => {
                 let r = self.one(db, format!("SELECT sql FROM sqlite_master WHERE tbl_name = {} AND sql IS NOT NULL ORDER BY type = 'index', name", dialect::quote_lit(f, table))).await?;
                 Ok(r.col(0).map(|s| s + ";").collect::<Vec<_>>().join("\n\n"))
@@ -256,7 +281,7 @@ impl dyn SqlDriver {
     }
 
     pub async fn foreign_keys(&self, db: &str, schema: Option<&str>, table: &str) -> Result<Vec<alter::FkDef>> {
-        if matches!(self.family(), Family::Clickhouse | Family::Duckdb) { return Ok(vec![]); }
+        if matches!(self.family(), Family::Clickhouse | Family::Duckdb | Family::Dameng) { return Ok(vec![]); }
         let r = self.one(db, alter::list_fks(self.family(), db, schema, table)).await?;
         Ok(r.rows.iter().map(|row| {
             let g = |i: usize| row.get(i).cloned().flatten().unwrap_or_default();

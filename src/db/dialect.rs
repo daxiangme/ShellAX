@@ -24,6 +24,10 @@ pub fn qualified(f: Family, db: &str, schema: Option<&str>, table: &str) -> Stri
         Family::Mssql => format!("{}.{}", quote_ident(f, schema.filter(|s| !s.is_empty()).unwrap_or("dbo")), quote_ident(f, table)),
         Family::Duckdb => match schema { Some(s) if !s.is_empty() => format!("{}.{}", quote_ident(f, s), quote_ident(f, table)), _ => quote_ident(f, table) },
         Family::Postgres => match schema { Some(s) if !s.is_empty() => format!("{}.{}", quote_ident(f, s), quote_ident(f, table)), _ => quote_ident(f, table) },
+        Family::Dameng => {
+            let s = if !db.is_empty() { Some(db) } else { schema.filter(|s| !s.is_empty()) };
+            match s { Some(s) => format!("{}.{}", quote_ident(f, s), quote_ident(f, table)), None => quote_ident(f, table) }
+        }
         _ => quote_ident(f, table),
     }
 }
@@ -35,6 +39,7 @@ pub fn list_databases(f: Family) -> &'static str {
         Family::Mssql => "SELECT name FROM sys.databases WHERE HAS_DBACCESS(name) = 1 ORDER BY name",
         Family::Clickhouse => "SELECT name FROM system.databases ORDER BY name",
         Family::Duckdb => "SELECT database_name FROM duckdb_databases() WHERE NOT internal ORDER BY database_name",
+        Family::Dameng => super::dm::SCHEMAS_SQL,
         _ => "SELECT name FROM pragma_database_list ORDER BY seq",
     }
 }
@@ -59,6 +64,7 @@ pub fn list_tables(f: Family, db: &str, schema: Option<&str>) -> String {
         Family::Mssql => format!("SELECT TABLE_NAME, TABLE_TYPE FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = {} ORDER BY TABLE_NAME", quote_lit(f, schema.unwrap_or("dbo"))),
         Family::Clickhouse => format!("SELECT name, if(engine LIKE '%View', 'VIEW', 'TABLE') FROM system.tables WHERE database = {} ORDER BY name", quote_lit(f, db)),
         Family::Duckdb => format!("SELECT table_name, table_type FROM information_schema.tables WHERE table_catalog = current_database() AND table_schema = {} ORDER BY table_name", quote_lit(f, schema.unwrap_or("main"))),
+        Family::Dameng => super::dm::list_tables_sql(super::dm::owner(db, schema)),
         _ => "SELECT name, type FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY name".into(),
     }
 }
@@ -98,6 +104,7 @@ pub fn list_columns(f: Family, db: &str, schema: Option<&str>, table: &str) -> S
              CASE WHEN EXISTS (SELECT 1 FROM duckdb_constraints() k WHERE k.constraint_type = 'PRIMARY KEY' AND k.schema_name = c.table_schema AND k.table_name = c.table_name AND list_contains(k.constraint_column_names, c.column_name)) THEN 'PRI' ELSE '' END, \
              c.column_default, '', '' FROM information_schema.columns c WHERE c.table_catalog = current_database() AND c.table_schema = {} AND c.table_name = {} ORDER BY c.ordinal_position",
             quote_lit(f, schema.unwrap_or("main")), quote_lit(f, table)),
+        Family::Dameng => super::dm::columns_sql(super::dm::owner(db, schema), table),
         _ => format!(
             "SELECT name, type, CASE WHEN \"notnull\" = 1 THEN 'NO' ELSE 'YES' END, CASE WHEN pk > 0 THEN 'PRI' ELSE '' END, dflt_value, '', CASE hidden WHEN 2 THEN 'generated virtual' WHEN 3 THEN 'generated stored' ELSE '' END \
              FROM pragma_table_xinfo({}) ORDER BY cid", quote_lit(f, table)),

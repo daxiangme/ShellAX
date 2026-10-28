@@ -24,24 +24,36 @@ impl Live {
     }
 }
 
+/// Stops a tunnel if `open` is dropped before the [`Live`] value is returned (cancelled test).
+struct TunnelGuard(Option<Arc<Running>>);
+impl Drop for TunnelGuard {
+    fn drop(&mut self) {
+        if let Some(t) = self.0.take() { tokio::spawn(async move { t.stop().await; }); }
+    }
+}
+impl TunnelGuard {
+    async fn stop_now(&mut self) { if let Some(t) = self.0.take() { t.stop().await; } }
+    fn release(&mut self) -> Option<Arc<Running>> { self.0.take() }
+}
+
 /// Connect `c`. With `via`, an SSH connection to that host is opened (or reused) and the
 /// database is reached through a 127.0.0.1 tunnel on a free port.
 pub async fn open(c: &DbConn, password: Option<String>, via: Option<(SshTarget, Prompts)>) -> Result<Live> {
-    let mut tunnel = None;
+    let mut tunnel = TunnelGuard(None);
     let mut endpoint = None;
     let mut via_label = None;
     if let Some((t, prompts)) = via.filter(|_| !c.kind.is_file()) {
         let (r, port) = tunnel_to(&t, &prompts, &c.host, c.effective_port()).await?;
         endpoint = Some(("127.0.0.1".to_string(), port));
         via_label = Some(t.label());
-        tunnel = Some(r);
+        tunnel = TunnelGuard(Some(r));
     }
     let driver = match super::driver::connect(c, password, endpoint).await {
         Ok(d) => d,
-        Err(e) => { if let Some(t) = &tunnel { t.stop().await; } return Err(e); }
+        Err(e) => { tunnel.stop_now().await; return Err(e); }
     };
     let version = driver.server_version().await.unwrap_or_default();
-    Ok(Live { driver, version, via: via_label, tunnel })
+    Ok(Live { driver, version, via: via_label, tunnel: tunnel.release() })
 }
 
 /// Local 127.0.0.1 port forwarded through the (shared) SSH connection of `t` to `host:port`.

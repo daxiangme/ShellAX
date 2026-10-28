@@ -63,7 +63,7 @@ impl Root {
         if matches!(self.dbp.live.get(id), Some(LiveState::Connecting | LiveState::Ready(_) | LiveState::Doc(_))) { return; }
         let Some(conn) = Self::db_conn(id) else { return };
         if conn.kind == assets::DbKind::Mongodb { self.mongo_connect(conn, cx); return; }
-        if !conn.kind.driver_ready() { self.dbp.live.insert(id.into(), LiveState::Failed(tf("db.kind_unsupported", &[("kind", &conn.kind.label())]))); cx.notify(); return; }
+        if !conn.kind.driver_ready() { self.dbp.live.insert(id.into(), LiveState::Failed(tf("db.kind_unsupported", &[("kind", &conn.kind.ui_name())]))); cx.notify(); return; }
         let password = crate::secret_store().get(&conn.password_secret()).map(|x| x.0);
         let via = match Some(conn.ssh_via.as_str()).filter(|s| !s.is_empty()) {
             Some(h) => match self.target_for(h) { Some(t) => Some((t, self.prompts.clone())), None => { self.dbp.live.insert(id.into(), LiveState::Failed(tf("db.via_missing", &[("host", &h)]))); cx.notify(); return; } },

@@ -1363,7 +1363,7 @@ impl DbView {
                 let fam = live.driver.family();
                 if !sql.is_empty() {
                     out.push_str(&format!("\nCurrent SQL:\n{sql}\n"));
-                    let explain = match fam { Family::Sqlite => Some(format!("EXPLAIN QUERY PLAN {sql}")), Family::Mysql | Family::Postgres | Family::Clickhouse | Family::Duckdb => Some(format!("EXPLAIN {sql}")), _ => None };
+                    let explain = match fam { Family::Sqlite => Some(format!("EXPLAIN QUERY PLAN {sql}")), Family::Mysql | Family::Postgres | Family::Clickhouse | Family::Duckdb | Family::Dameng => Some(format!("EXPLAIN {sql}")), _ => None };
                     if let Some(e) = explain {
                         match live.driver.execute(&db, &e, true).await { Ok(rs) => { for r in rs.iter().filter(|r| r.returns_rows) { out.push_str(&format!("EXPLAIN:\n{}\n", crate::ai_ctx::table_text(r, 60))); } } Err(err) => out.push_str(&format!("EXPLAIN failed: {err:#}\n")) }
                     }

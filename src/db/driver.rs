@@ -68,6 +68,7 @@ pub async fn connect(c: &DbConn, password: Option<String>, endpoint: Option<(Str
         }
         Family::Mssql => return Ok(Arc::new(super::mssql::connect(c, password, host, port).await?)),
         Family::Clickhouse => return Ok(Arc::new(super::clickhouse::connect(c, password, host, port).await?)),
+        Family::Dameng => return Ok(Arc::new(super::dm::connect(c, password, host, port).await?)),
         #[cfg(feature = "duckdb")]
         Family::Duckdb => return Ok(Arc::new(super::duck::connect(c).await?)),
         #[cfg(not(feature = "duckdb"))]

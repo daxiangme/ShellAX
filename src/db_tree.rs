@@ -63,6 +63,12 @@ pub fn saved_dir(node: &str) -> PathBuf {
 impl Root {
     fn db_kind(id: &str) -> Option<DbKind> { Self::db_conn(id).map(|c| c.kind) }
 
+    /// A schema node: an explicit schema key, or the first level of an engine whose root is 模式.
+    fn db_schema_node(key: &str) -> bool {
+        let (id, db, schema) = key_parts(key);
+        schema.is_some() || (db.is_some() && Self::db_kind(&id).is_some_and(|k| k.schema_root()))
+    }
+
     /// Does `node` (a database or schema key) carry object groups directly?
     fn holds_groups(node: &str) -> bool {
         let (id, db, schema) = key_parts(node);
@@ -329,7 +335,7 @@ impl Root {
             .child(chev(open, true))
             .child(crate::file_icon::db_glyph(kind.id(), ui::IC_MD, glyph_col))
             .child(label(d.name.clone(), if ready { c(th.text) } else { c(th.subtext) }))
-            .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(kind.label()));
+            .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(kind.ui_name()));
         if !d.ssh_via.is_empty() { r = r.child(icon(IconName::Waypoints, ui::IC_XS, c(th.overlay1))); }
         if d.read_only { r = r.child(icon(IconName::Lock, ui::IC_XS, c(th.warning))); }
         if let Some(col) = dot { r = r.child(div().size(px(7.)).rounded_full().bg(col)); }
@@ -351,7 +357,8 @@ impl Root {
             Some(Kids::Ready(v)) => v.clone(),
         };
         if names.is_empty() { return list.child(note_row(&t("db.no_objects"), depth)); }
-        let is_schema = key_parts(key).1.is_some();
+        let (pid, parent_db, _) = key_parts(key);
+        let is_schema = parent_db.is_some() || Self::db_kind(&pid).is_some_and(|k| k.schema_root());
         for name in names {
             let ck = format!("{key}{SEP}{name}");
             let opened = self.dbp.opened.contains(&ck);
@@ -503,10 +510,10 @@ impl Root {
                 else { let i2 = id.clone(); item!("dbm-open", IconName::Plug, t("dbt.open_conn"), false, |this, _w, cx| this.db_open_conn(&i2, cx)); }
             } else if self.dbp.opened.contains(&key) {
                 let k = key.clone();
-                item!("dbm-dclose", IconName::FolderClosed, t(if key_parts(&key).2.is_some() { "dbt.close_schema" } else { "dbt.close_db" }), false, |this, _w, cx| this.db_close_node(&k, cx));
+                item!("dbm-dclose", IconName::FolderClosed, t(if Self::db_schema_node(&key) { "dbt.close_schema" } else { "dbt.close_db" }), false, |this, _w, cx| this.db_close_node(&k, cx));
             } else {
                 let k = key.clone();
-                item!("dbm-dopen", IconName::FolderOpen, t(if key_parts(&key).2.is_some() { "dbt.open_schema" } else { "dbt.open_db" }), false, |this, _w, cx| this.db_open_node(&k, cx));
+                item!("dbm-dopen", IconName::FolderOpen, t(if Self::db_schema_node(&key) { "dbt.open_schema" } else { "dbt.open_db" }), false, |this, _w, cx| this.db_open_node(&k, cx));
             }
             m = m.child(ui::menu_sep());
             { let k = key.clone(); item!("dbm-query", IconName::SquareTerminal, t("db.new_query"), false, |this, w, cx| this.db_new_query(Some(k.clone()), w, cx)); }

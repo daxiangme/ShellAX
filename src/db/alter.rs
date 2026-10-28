@@ -191,6 +191,7 @@ pub fn list_indexes(f: Family, db: &str, schema: Option<&str>, table: &str) -> S
              JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id \
              WHERE i.object_id = OBJECT_ID({}) AND i.is_primary_key = 0 AND i.name IS NOT NULL GROUP BY i.name, i.is_unique, i.is_unique_constraint ORDER BY i.name",
             quote_lit(f, &super::dialect::qualified(f, db, schema, table))),
+        Family::Dameng => super::dm::indexes_sql(super::dm::owner(db, schema), table),
         _ => format!(
             "SELECT il.name, il.\"unique\", (SELECT group_concat(name, char(31)) FROM (SELECT name FROM pragma_index_info(il.name) ORDER BY seqno)), 0 \
              FROM pragma_index_list({}) il WHERE il.origin <> 'pk' ORDER BY il.name", quote_lit(f, table)),

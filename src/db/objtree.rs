@@ -44,6 +44,7 @@ pub fn groups(kind: DbKind) -> &'static [Group] {
             Family::Mssql => &[Tables, Views, Procedures, Functions, Synonyms, Queries],
             Family::Clickhouse => &[Tables, Views, MatViews, Dictionaries, Functions, Queries],
             Family::Sqlite | Family::Duckdb => &[Tables, Views, Triggers, Queries],
+            Family::Dameng => &[Tables, Views, Queries],
             Family::Other => &[Tables, Views, Queries],
         },
     }
@@ -80,6 +81,9 @@ pub fn list_sql(f: Family, g: Group, db: &str, schema: Option<&str>) -> Option<S
         (Family::Clickhouse, Group::Dictionaries) => format!("SELECT name FROM system.dictionaries WHERE database = {} ORDER BY name", l(db)),
         (Family::Clickhouse, Group::Functions) => "SELECT name FROM system.functions WHERE origin = 'SQLUserDefined' ORDER BY name".into(),
 
+        (Family::Dameng, Group::Tables) => super::dm::tables_sql(super::dm::owner(db, schema)),
+        (Family::Dameng, Group::Views) => super::dm::views_sql(super::dm::owner(db, schema)),
+
         (Family::Sqlite, Group::Tables) => "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name".into(),
         (Family::Sqlite, Group::Views) => "SELECT name FROM sqlite_master WHERE type = 'view' ORDER BY name".into(),
         (Family::Sqlite, Group::Triggers) => "SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name".into(),
@@ -106,6 +110,7 @@ pub fn view_definition_sql(f: Family, db: &str, schema: Option<&str>, view: &str
         Family::Clickhouse => format!("SELECT create_table_query FROM system.tables WHERE database = {} AND name = {}", l(db), l(view)),
         Family::Sqlite => format!("SELECT sql FROM sqlite_master WHERE type = 'view' AND name = {}", l(view)),
         Family::Duckdb => format!("SELECT sql FROM duckdb_views() WHERE view_name = {}", l(view)),
+        Family::Dameng => super::dm::get_ddl_sql("VIEW", view, super::dm::owner(db, schema)),
         Family::Other => return None,
     })
 }
