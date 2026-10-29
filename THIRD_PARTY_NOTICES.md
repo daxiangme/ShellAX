@@ -83,7 +83,7 @@ Fonts are **not** bundled (see README "字体许可").
 - fxc.exe / d3dcompiler_47.dll (Microsoft Windows SDK, NuGet package Microsoft.Windows.SDK.CPP) are build tools only and are not redistributed. Only the compiled shader bytecode ends up in the binary.
 ## windows-sys 0.61 — MIT OR Apache-2.0 (dependency, unmodified; Windows only: redirects stderr to the log file)
 ## sysinfo 0.31 — MIT (dependency, unmodified; local CPU / memory / disk / process / network readings on Windows and Mac; already a transitive dependency). Copyright (c) Guillaume Gomez.
-## App icon (packaging/windows/shellax.ico) — original artwork for this project, generated with ImageMagick
+## App icon (assets/brand/shellax-icon.svg and the packaging/ PNG / ICO / ICNS rendered from it) — original artwork for this project
 ## Symbols Nerd Font Mono (assets/fonts/SymbolsNerdFontMono-Regular.ttf) — MIT (bundled, unmodified)
 Nerd Fonts v3.4.0 "NerdFontsSymbolsOnly" release, Copyright (c) 2014 Ryan L McIntyre. The release ships under the MIT
 license (full text: `assets/fonts/SymbolsNerdFont-LICENSE.txt`). It is embedded in the binary and registered at startup as
