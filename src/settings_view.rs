@@ -1048,8 +1048,16 @@ impl SettingsView {
             _ => None,
         };
 
+        let repo_url = format!("https://github.com/{}", ssh_term_proto::update::REPO);
+        let github_card = card()
+            .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(t("settings.github_title")))
+            .child(muted(repo_url.clone()))
+            .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).whitespace_normal().child(t("settings.github_star")))
+            .child(div().pt_1().child(ui::button("open-github", t("settings.github_open"), 0).on_click(move |_, _w, cx| cx.open_url(&repo_url))));
+
         div().flex().flex_col().gap_3().child(Self::section_title(t("ui.updates")))
             .child(version_card)
+            .child(github_card)
             .children(new_card)
             .children(history)
             .into_any_element()
@@ -1184,11 +1192,24 @@ impl SettingsView {
                 else { div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(l.to_string()) };
             list = list.child(el);
         }
+        let dm_src = "https://github.com/daxiangme/dm-rust";
+        let dm_crate = "https://crates.io/crates/dm-rust";
         div().flex().flex_col()
             .child(div().flex().items_center().gap_3().py_3()
                 .child(div().size(px(40.)).flex().items_center().justify_center().child(crate::file_icon::brand_icon(40.)))
                 .child(div().flex().flex_col().child(div().text_size(px(ui::fs_title())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child("shellax"))
                     .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(tf("settings.version", &[("v", &env!("CARGO_PKG_VERSION"))])))))
+            .child(Self::section_title(t("settings.about_drivers")))
+            .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).flex().flex_col().gap_1().pb_2()
+                .child(t("settings.about_dm_rust"))
+                .child(div().flex().items_center().gap_3()
+                    .child(div().id("about-dm-gh").text_color(c(th.accent)).cursor_pointer().hover(|s| s.underline())
+                        .child("github.com/daxiangme/dm-rust")
+                        .on_click(move |_, _w, cx| cx.open_url(dm_src)))
+                    .child(div().id("about-dm-crates").text_color(c(th.accent)).cursor_pointer().hover(|s| s.underline())
+                        .child("crates.io/crates/dm-rust")
+                        .on_click(move |_, _w, cx| cx.open_url(dm_crate))))
+                .child(t("settings.about_dm_creds")))
             .child(Self::section_title(t("ui.quick_start")))
             .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).flex().flex_col().gap_1()
                 .child(t("ui.ctrl_shift_p_opens_the")).child(t("ui.tab_accepts_grey_suggestions_shift"))

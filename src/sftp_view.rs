@@ -166,17 +166,6 @@ fn host_name(t: &SshTarget) -> String {
 }
 fn config_hosts() -> std::sync::Arc<Vec<(HostEntry, SshTarget)>> { crate::config::resolved_hosts() }
 
-/// Recursive local copy; returns the number of files copied.
-fn copy_tree(from: &Path, to: &Path) -> std::io::Result<usize> {
-    if from.is_dir() {
-        if to.starts_with(from) { return Err(std::io::Error::other("cannot copy a folder into itself")); }
-        std::fs::create_dir_all(to)?;
-        let mut n = 0;
-        for e in std::fs::read_dir(from)?.flatten() { n += copy_tree(&e.path(), &to.join(e.file_name()))?; }
-        Ok(n)
-    } else { std::fs::copy(from, to).map(|_| 1) }
-}
-
 impl SftpView {
     /// Left pane local; right pane connects to `target` (or shows the "connect to host" state).
     /// Does not connect yet: set `initial_dir`, then call [`start`].
@@ -578,7 +567,7 @@ impl SftpView {
                 for (p, name) in items {
                     let (a, b) = (PathBuf::from(&p), dst.join(&name));
                     if a == b { anyhow::bail!("{}", tf("sftp.same_place", &[("p", &p)])); }
-                    n += copy_tree(&a, &b).map_err(|e| anyhow::anyhow!("{p}: {e}"))?;
+                    n += sftp::copy_tree(&a, &b).map_err(|e| anyhow::anyhow!("{p}: {e}"))?;
                 }
                 Ok(n)
             }).await?
@@ -1279,8 +1268,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("a/b")).unwrap();
         std::fs::write(d.join("a/b/f.txt"), "x").unwrap();
-        assert_eq!(copy_tree(&d.join("a"), &d.join("c")).unwrap(), 1);
-        assert!(copy_tree(&d.join("a"), &d.join("a/b/inner")).is_err());
+        assert_eq!(sftp::copy_tree(&d.join("a"), &d.join("c")).unwrap(), 1);
+        assert!(sftp::copy_tree(&d.join("a"), &d.join("a/b/inner")).is_err());
         let _ = std::fs::remove_dir_all(&d);
     }
 }

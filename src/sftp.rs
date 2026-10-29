@@ -113,16 +113,22 @@ async fn version(s: &SftpSession, path: &str) -> Result<Version> {
     Ok((m.size.unwrap_or(0), m.mtime.unwrap_or(0) as u64))
 }
 
+fn too_big(len: u64) -> Result<()> {
+    if len > EDIT_MAX { Err(anyhow!("file is {len} bytes; the built-in editor opens files up to {EDIT_MAX} bytes")) } else { Ok(()) }
+}
+fn decode_text(buf: Vec<u8>) -> Result<String> {
+    if buf.contains(&0) { return Err(anyhow!("binary file (NUL bytes); not opened in the editor")); }
+    String::from_utf8(buf).map_err(|_| anyhow!("not valid UTF-8; not opened in the editor"))
+}
+
 /// Open a remote text file for editing: UTF-8 only, at most [`EDIT_MAX`] bytes.
 pub async fn read_text(s: &SftpSession, path: &str) -> Result<(String, Version)> {
     let v = version(s, path).await?;
-    if v.0 > EDIT_MAX { return Err(anyhow!("file is {} bytes; the built-in editor opens files up to {} bytes", v.0, EDIT_MAX)); }
+    too_big(v.0)?;
     let mut f = s.open_with_flags(path.to_string(), OpenFlags::READ).await?;
     let mut buf = Vec::new();
     f.read_to_end(&mut buf).await?;
-    if buf.contains(&0) { return Err(anyhow!("binary file (NUL bytes); not opened in the editor")); }
-    let text = String::from_utf8(buf).map_err(|_| anyhow!("not valid UTF-8; not opened in the editor"))?;
-    Ok((text, v))
+    Ok((decode_text(buf)?, v))
 }
 
 /// Save edited text. With `expect`, refuses when the file changed on the server since it was
@@ -136,6 +142,53 @@ pub async fn write_text(s: &SftpSession, path: &str, text: &str, expect: Option<
     f.shutdown().await?;
     drop(f);
     version(s, path).await
+}
+
+fn local_version(path: &Path) -> Result<Version> {
+    let m = std::fs::metadata(path)?;
+    let mtime = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+    Ok((m.len(), mtime))
+}
+
+/// Local text file, same limits as [`read_text`].
+pub fn read_text_local(path: &Path) -> Result<(String, Version)> {
+    let v = local_version(path)?;
+    too_big(v.0)?;
+    Ok((decode_text(std::fs::read(path)?)?, v))
+}
+
+/// Save local text. With `expect`, refuses when size or mtime changed since the file was opened.
+pub fn write_text_local(path: &Path, text: &str, expect: Option<Version>) -> Result<Version> {
+    if let Some(e) = expect {
+        if let Ok(now) = local_version(path) { if now != e { return Err(anyhow!("{path:?} changed since it was opened (size/mtime {e:?} → {now:?}); reopen or save again to overwrite")); } }
+    }
+    if let Some(parent) = path.parent() { if !parent.as_os_str().is_empty() { let _ = std::fs::create_dir_all(parent); } }
+    std::fs::write(path, text.as_bytes())?;
+    local_version(path)
+}
+
+/// `report (2).tar.gz`, `notes (2).txt`, `dir (2)`.
+pub fn alt_name(name: &str, n: u32) -> String {
+    const COMPOUND: &[&str] = &[".tar.gz", ".tar.xz", ".tar.bz2", ".tar.bz"];
+    let lower = name.to_lowercase();
+    if let Some(ext) = COMPOUND.iter().copied().find(|e| lower.ends_with(e)) {
+        return format!("{} ({n}){ext}", &name[..name.len() - ext.len()]);
+    }
+    match name.rfind('.') {
+        Some(i) if i > 0 => format!("{} ({n}){}", &name[..i], &name[i..]),
+        _ => format!("{name} ({n})"),
+    }
+}
+
+/// Recursive local copy. Errors when `to` is inside `from`. Returns the number of files copied.
+pub fn copy_tree(from: &Path, to: &Path) -> std::io::Result<usize> {
+    if from.is_dir() {
+        if to.starts_with(from) { return Err(std::io::Error::other("cannot copy a folder into itself")); }
+        std::fs::create_dir_all(to)?;
+        let mut n = 0;
+        for e in std::fs::read_dir(from)?.flatten() { n += copy_tree(&e.path(), &to.join(e.file_name()))?; }
+        Ok(n)
+    } else { std::fs::copy(from, to).map(|_| 1) }
 }
 
 pub fn mode_string(m: u32) -> String {
@@ -316,6 +369,12 @@ impl Queue {
     pub fn pause(&self, id: u64) { if let Some(j) = self.jobs.lock().unwrap().iter().find(|j| j.id == id) { j.cancel.store(true, Ordering::Release); if j.state() == JobState::Queued { j.set(JobState::Paused); } } }
     pub fn resume(&self, id: u64) { if let Some(j) = self.jobs.lock().unwrap().iter().find(|j| j.id == id) { if matches!(j.state(), JobState::Paused | JobState::Failed) { *j.error.lock().unwrap() = None; j.set(JobState::Queued); self.wake.notify_one(); } } }
     pub fn clear_done(&self) { self.jobs.lock().unwrap().retain(|j| j.state() != JobState::Done); }
+    /// Joined errors of jobs that did not finish. `None` when every job is done.
+    pub fn failure_summary(&self) -> Option<String> {
+        let v: Vec<String> = self.jobs.lock().unwrap().iter().filter(|j| j.state() != JobState::Done)
+            .map(|j| j.error.lock().unwrap().clone().unwrap_or_else(|| j.name())).collect();
+        (!v.is_empty()).then(|| v.join("; "))
+    }
     fn next_job(&self) -> Option<Arc<Job>> { self.jobs.lock().unwrap().iter().find(|j| j.state() == JobState::Queued).cloned() }
     /// Run until all queued jobs are done (for tests / one-shot use).
     pub async fn drain(&self, s: &SftpSession) { while let Some(j) = self.next_job() { let _ = run_job(s, &j).await; } }
@@ -346,6 +405,24 @@ mod tests {
         assert_eq!(mode_string(0o754), "rwxr-xr--");
         assert_eq!(parse_mode("644"), Some(0o644));
         assert_eq!(parse_mode("9"), None);
+        assert_eq!(alt_name("notes.txt", 2), "notes (2).txt");
+        assert_eq!(alt_name("报告.tar.gz", 3), "报告 (3).tar.gz");
+        assert_eq!(alt_name("dir", 2), "dir (2)");
+    }
+    #[test]
+    fn local_copy_and_text() {
+        let d = std::env::temp_dir().join(format!("stp-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("a/b")).unwrap();
+        std::fs::write(d.join("a/b/f.txt"), "hi").unwrap();
+        assert_eq!(copy_tree(&d.join("a"), &d.join("c")).unwrap(), 1);
+        assert!(copy_tree(&d.join("a"), &d.join("a/b/inner")).is_err());
+        let (text, ver) = read_text_local(&d.join("a/b/f.txt")).unwrap();
+        assert_eq!(text, "hi");
+        assert!(write_text_local(&d.join("a/b/f.txt"), "yo", Some(ver)).is_ok());
+        std::fs::write(d.join("a/b/bin"), [0u8, 1]).unwrap();
+        assert!(read_text_local(&d.join("a/b/bin")).is_err());
+        let _ = std::fs::remove_dir_all(&d);
     }
     #[test]
     fn local_list_sorted() {

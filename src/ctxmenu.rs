@@ -505,12 +505,20 @@ impl B<'_> {
     fn sep(&mut self) { if self.items.last().is_some_and(|i| i.group == self.group) { self.group += 1; } }
 }
 
-fn archive_items(b: &mut B, a: ArcKind, path: &str) {
+/// Shell commands for one archive. `extract_to` unpacks into a sibling folder named after the stem.
+pub struct ArchiveCmds {
+    pub extract_here: String,
+    pub extract_to: String,
+    pub list: String,
+    pub tools: &'static [&'static str],
+}
+
+pub fn archive_commands(kind: ArcKind, path: &str) -> ArchiveCmds {
     let name = file_name(path);
     let dir = parent_dir(path);
     let to = join(&dir, &stem_of(name));
     let (q, qd, qt) = (quote_path(path), quote_path(&dir), quote_path(&to));
-    let (here, todir, list, tools): (String, String, String, &[&str]) = match a {
+    let (extract_here, extract_to, list, tools): (String, String, String, &'static [&'static str]) = match kind {
         ArcKind::Zip => (format!("unzip -o {q} -d {qd}"), format!("mkdir -p {qt} && unzip -o {q} -d {qt}"), format!("unzip -l {q}"), &["unzip"]),
         ArcKind::Tar => (format!("tar -xf {q} -C {qd}"), format!("mkdir -p {qt} && tar -xf {q} -C {qt}"), format!("tar -tvf {q}"), &["tar"]),
         ArcKind::TarGz => (format!("tar -xzf {q} -C {qd}"), format!("mkdir -p {qt} && tar -xzf {q} -C {qt}"), format!("tar -tzvf {q}"), &["tar", "gzip"]),
@@ -520,9 +528,29 @@ fn archive_items(b: &mut B, a: ArcKind, path: &str) {
         ArcKind::Rar => (format!("unrar x -o+ {q} {}", quote_path(&format!("{}/", dir.trim_end_matches('/')))), format!("mkdir -p {qt} && unrar x -o+ {q} {}", quote_path(&format!("{to}/"))), format!("unrar l {q}"), &["unrar"]),
         ArcKind::Gz => (format!("gunzip -k {q}"), format!("mkdir -p {qt} && gunzip -c {q} > {}", quote_path(&join(&to, &stem_of(name)))), format!("gzip -l {q}"), &["gzip"]),
     };
-    b.ins("extract_here", t("cm.extract_here"), here, tools);
-    b.ins("extract_to", &tf("cm.extract_to", &[("dir", &format!("{}/", stem_of(name)))]), todir, tools);
-    b.ins("list", t("cm.list"), list, tools);
+    ArchiveCmds { extract_here, extract_to, list, tools }
+}
+
+/// `cd <parent> && zip -qr <name>.zip <name>` — works for a file or a directory.
+pub fn zip_command(path: &str) -> String {
+    let name = file_name(path);
+    let parent = parent_dir(path);
+    format!("cd {} && zip -qr {} {}", quote_path(&parent), quote(&format!("{name}.zip")), quote(name))
+}
+
+/// `tar -czf <parent>/<name>.tar.gz -C <parent> <name>`.
+pub fn targz_command(path: &str) -> String {
+    let name = file_name(path);
+    let parent = parent_dir(path);
+    format!("tar -czf {} -C {} {}", quote_path(&join(&parent, &format!("{name}.tar.gz"))), quote_path(&parent), quote(name))
+}
+
+fn archive_items(b: &mut B, a: ArcKind, path: &str) {
+    let c = archive_commands(a, path);
+    let dir_label = format!("{}/", stem_of(file_name(path)));
+    b.ins("extract_here", t("cm.extract_here"), c.extract_here, c.tools);
+    b.ins("extract_to", &tf("cm.extract_to", &[("dir", &dir_label)]), c.extract_to, c.tools);
+    b.ins("list", t("cm.list"), c.list, c.tools);
 }
 
 /// Build the menu for a target: built-in items by object type, then matching custom items.
@@ -543,10 +571,8 @@ pub fn build(target: &Target, ctx: &Ctx) -> Menu {
                     match *k {
                         Kind::Archive(a) => { archive_items(&mut b, a, &f.path); b.sep(); }
                         Kind::Dir => {
-                            let parent = parent_dir(&f.path);
-                            let (qp, qn) = (quote_path(&parent), quote(&name));
-                            b.ins("zip_dir", t("cm.zip_dir"), format!("cd {qp} && zip -qr {} {qn}", quote(&format!("{name}.zip"))), &["zip"]);
-                            b.ins("targz_dir", t("cm.targz_dir"), format!("tar -czf {} -C {qp} {qn}", quote_path(&join(&parent, &format!("{name}.tar.gz")))), &["tar", "gzip"]);
+                            b.ins("zip_dir", t("cm.zip_dir"), zip_command(&f.path), &["zip"]);
+                            b.ins("targz_dir", t("cm.targz_dir"), targz_command(&f.path), &["tar", "gzip"]);
                             b.push("cd_tab", t("cm.cd_tab").into(), Act::CdNewTab(f.path.clone()), &[]);
                             b.ins("du", t("cm.du"), format!("du -sh -- {q}"), &["du"]);
                             b.sep();

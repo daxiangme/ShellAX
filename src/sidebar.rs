@@ -604,7 +604,8 @@ impl Root {
     }
 
     // ------------------------------------------------------------ context menu
-    pub(crate) fn sb_menu_el(&self, m: SbMenu, cx: &mut Context<Self>) -> AnyElement {
+    /// `enter` 为真时播放出现动画。关闭后的淡出副本必须传假，否则会从透明和位移再出现一次，看起来闪一下。
+    pub(crate) fn sb_menu_el(&self, m: SbMenu, enter: bool, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
         let s = config::get();
         let close = |this: &mut Root| this.sb_menu = None;
@@ -719,7 +720,8 @@ impl Root {
                 .child(item!(Some(IconName::SquarePlus), t("sb.new_connection"), move |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.open_host_dialog(None, (!g2.is_empty()).then(|| g2.clone()), w, cx)))
                 .child(item!(Some(IconName::FolderPlus), t("place.add"), move |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.add_place(g3.clone(), w, cx)));
         }
-        gpui::deferred(gpui::anchored().position(m.pos).snap_to_window_with_margin(px(ui::EDGE_MARGIN)).child(chrome::pop_in("sb-menu-pop", list))).with_priority(3).into_any_element()
+        let popup = if enter { chrome::pop_in("sb-menu-pop", list) } else { list.into_any_element() };
+        gpui::deferred(gpui::anchored().position(m.pos).snap_to_window_with_margin(px(ui::EDGE_MARGIN)).child(popup)).with_priority(3).into_any_element()
     }
 
     // ------------------------------------------------------------------ modals

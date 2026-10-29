@@ -224,7 +224,8 @@ impl Root {
         gpui::deferred(gpui::anchored().position(pos).snap_to_window_with_margin(px(ui::EDGE_MARGIN)).child(chrome::pop_in("new-menu-pop", pop))).with_priority(3).into_any_element()
     }
 
-    pub(crate) fn tab_menu_el(&self, i: usize, pos: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) -> AnyElement {
+    /// `enter` 为真时播放出现动画。关闭后的淡出副本传假，避免退出时再闪一次出现动画。
+    pub(crate) fn tab_menu_el(&self, i: usize, pos: gpui::Point<gpui::Pixels>, enter: bool, cx: &mut Context<Self>) -> AnyElement {
         let n = self.tabs.len();
         let mut list = ui::popover().id("tab-menu").occlude().min_w(px(220.)).p(px(5.)).flex().flex_col()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
@@ -249,7 +250,8 @@ impl Root {
             .child(item!(IconName::X, t("tab.close_right"), i + 1 < n, move |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.close_right(i, w, cx)))
             .child(ui::menu_sep())
             .child(item!(IconName::RotateCcw, t("tab.reopen"), !self.closed_tabs.is_empty(), |this: &mut Root, w: &mut Window, cx: &mut Context<Root>| this.reopen_closed(w, cx)));
-        gpui::deferred(gpui::anchored().position(pos).snap_to_window_with_margin(px(ui::EDGE_MARGIN)).child(chrome::pop_in("tab-menu-pop", list))).with_priority(3).into_any_element()
+        let popup = if enter { chrome::pop_in("tab-menu-pop", list) } else { list.into_any_element() };
+        gpui::deferred(gpui::anchored().position(pos).snap_to_window_with_margin(px(ui::EDGE_MARGIN)).child(popup)).with_priority(3).into_any_element()
     }
 
     /// Small header at the top-right of a pane, visible while the pointer is over the pane:

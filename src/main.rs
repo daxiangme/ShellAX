@@ -2231,7 +2231,7 @@ impl Render for Root {
             if self.sb_menu.is_some() { self.menu_last.0 = self.sb_menu.clone(); }
             if self.tab_menu.is_some() { self.menu_last.1 = self.tab_menu; }
         }
-        let host_menu = self.sb_menu.clone().map(|m| self.sb_menu_el(m, cx));
+        let host_menu = self.sb_menu.clone().map(|m| self.sb_menu_el(m, true, cx));
         let overlay: Option<AnyElement> = match &self.overlay {
             Overlay::None => None,
             Overlay::Palette(p) => Some(div().absolute().top_0().left_0().size_full().child(p.clone()).into_any_element()),
@@ -2354,11 +2354,11 @@ impl Render for Root {
         }
         if let Some(m) = self.modal.clone() { root = root.child(self.render_modal(m, cx)); }
         if let Some(m) = self.sb_modal.clone() { root = root.child(self.sb_modal_el(m, cx)); }
-        if let Some((i, pos)) = self.tab_menu { root = root.child(self.tab_menu_el(i, pos, cx)); }
+        if let Some((i, pos)) = self.tab_menu { root = root.child(self.tab_menu_el(i, pos, true, cx)); }
         if let Some(pos) = self.new_menu { root = root.child(self.new_menu_el(pos, cx)); }
         if let Some((gs, gt, seq)) = self.menu_ghost.clone() {
-            if self.sb_menu.is_none() { if let Some(m) = gs { let el = self.sb_menu_el(m, cx); root = root.child(chrome::pop_out(("menu-out-sb", seq as usize), div().absolute().top_0().left_0().size_full().child(el))); } }
-            if self.tab_menu.is_none() { if let Some((i, pos)) = gt { if i < self.tabs.len() { let el = self.tab_menu_el(i, pos, cx); root = root.child(chrome::pop_out(("menu-out-tab", seq as usize), div().absolute().top_0().left_0().size_full().child(el))); } } }
+            if self.sb_menu.is_none() { if let Some(m) = gs { let el = self.sb_menu_el(m, false, cx); root = root.child(chrome::pop_out(("menu-out-sb", seq as usize), div().absolute().top_0().left_0().size_full().child(el))); } }
+            if self.tab_menu.is_none() { if let Some((i, pos)) = gt { if i < self.tabs.len() { let el = self.tab_menu_el(i, pos, false, cx); root = root.child(chrome::pop_out(("menu-out-tab", seq as usize), div().absolute().top_0().left_0().size_full().child(el))); } } }
         }
         if let (Some(m), None) = (update_ui::offered(), update_ui::prompt()) {
             root = root.child(self.update_offer_el(m, window, cx));
