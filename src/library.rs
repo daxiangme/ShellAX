@@ -85,14 +85,15 @@ impl Root {
             let all = ssh_term_proto::snippets::load();
             body = body.child(self.snippet_groups(&all, &group, cx));
             if let Some(ed) = editor {
-                body = body.child(self.snippet_editor(&ed, cx));
+                body = body.child(self.snippet_editor(&ed, &all, cx));
             } else if let Some(v) = vars {
                 body = body.child(self.var_form(&v, cx));
             } else if let Some(cfn) = confirm {
                 body = body.child(self.confirm_form(&cfn, cx));
             } else {
                 actions.push(ui::icon_button("lib-new", IconName::Plus, ui::IconBtn::Md, t("lib.new")).on_click(cx.listener(|this, _, w, cx| {
-                    this.open_lib_editor(None, String::new(), String::new(), String::new(), String::new(), w, cx);
+                    let group = draft_group(&this.lib_group);
+                    this.open_lib_editor(None, String::new(), group, String::new(), String::new(), w, cx);
                 })).into_any_element());
                 body = body.child(self.snippet_list(&all, &q, &group, cx));
             }
@@ -124,9 +125,7 @@ impl Root {
     }
 
     fn snippet_groups(&mut self, all: &[Snippet], group: &str, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
-        let mut names: Vec<String> = all.iter().map(|s| s.group.clone()).filter(|g| !g.is_empty()).collect();
-        names.sort();
-        names.dedup();
+        let names = group_names(all);
         let ungrouped = all.iter().any(|s| s.group.is_empty());
         // 单行不换行，超出横向滚动
         let mut row = div().id("lib-groups").w_full().flex_shrink_0().px(px(ui::LIST_INSET)).pb(px(ui::SP_2)).flex().flex_nowrap().gap(px(ui::SP_1)).overflow_x_scroll()
@@ -148,7 +147,8 @@ impl Root {
         if all.is_empty() {
             return ui::empty_state(IconName::Code, t("lib.empty_snippets_title"), Some(t("lib.empty_snippets_desc").into()), vec![
                 ui::button("lib-new-empty", t("lib.new"), 1).on_click(cx.listener(|this, _, w, cx| {
-                    this.open_lib_editor(None, String::new(), String::new(), String::new(), String::new(), w, cx);
+                    let group = draft_group(&this.lib_group);
+                    this.open_lib_editor(None, String::new(), group, String::new(), String::new(), w, cx);
                 })).into_any_element(),
                 ui::button("lib-starters", t("lib.add_examples"), 0).on_click(cx.listener(move |this, _, _w, cx| this.add_starters(cx))).into_any_element(),
             ], false).into_any_element();
@@ -181,13 +181,30 @@ impl Root {
         list.into_any_element()
     }
 
-    fn snippet_editor(&mut self, ed: &LibEditor, cx: &mut Context<Self>) -> AnyElement {
+    fn snippet_editor(&mut self, ed: &LibEditor, all: &[Snippet], cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
         let label = |s: &'static str| div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(t(s));
         let field = |name: &'static str, input: &Entity<InputState>| div().flex().flex_col().gap(px(ui::SP_1)).child(label(name)).child(ui::text_field(input, false));
+        let typed = ed.group.read(cx).value();
+        let choices = matching_groups(&group_names(all), &typed);
+        let selected = typed.trim().to_lowercase();
+        let mut chips = div().flex().flex_wrap().gap(px(ui::SP_1));
+        for (i, name) in choices.iter().enumerate() {
+            let pick = name.clone();
+            let on = !selected.is_empty() && name.to_lowercase() == selected;
+            let input = ed.group.clone();
+            chips = chips.child(ui::chip(("lib-eg", i), name.clone(), on).on_click(cx.listener(move |_this, _, w, cx| {
+                input.update(cx, |s, cx| s.set_value(pick.clone(), w, cx));
+                cx.notify();
+            })));
+        }
+        let group = div().flex().flex_col().gap(px(ui::SP_1))
+            .child(label("lib.group"))
+            .child(ui::text_field(&ed.group, false))
+            .when(!choices.is_empty(), |d| d.child(chips));
         div().id("lib-editor").flex_1().min_h_0().overflow_y_scroll().px(px(ui::PANEL_PX)).py(px(ui::SP_3)).flex().flex_col().gap(px(ui::SP_3))
             .child(field("lib.name", &ed.name))
-            .child(field("lib.group", &ed.group))
+            .child(group)
             .child(field("lib.note", &ed.note))
             .child(div().flex().flex_col().gap(px(ui::SP_1))
                 .child(label("lib.body"))
@@ -390,7 +407,7 @@ impl Root {
             module: String::new(),
             id: ed.id.clone().unwrap_or_else(ssh_term_proto::snippets::new_id),
             name,
-            group: ed.group.read(cx).value().trim().to_string(),
+            group: canonical_group(&ed.group.read(cx).value(), &group_names(&ssh_term_proto::snippets::load())),
             note: ed.note.read(cx).value().trim().to_string(),
             body,
         };
@@ -530,7 +547,8 @@ impl Root {
         self.dock_snip = true;
         self.open_dock_exclusive("snip-dock");
         let name: String = cmd.trim().chars().take(40).collect();
-        self.open_lib_editor(None, name, String::new(), String::new(), cmd, window, cx);
+        let group = draft_group(&self.lib_group);
+        self.open_lib_editor(None, name, group, String::new(), cmd, window, cx);
     }
 
     fn forget_history(&mut self, key: &str, cmd: &str, cx: &mut Context<Self>) {
@@ -561,9 +579,64 @@ impl Root {
     }
 }
 
+/// 新建时带上当前筛选。全部、未分组没有可写入的分组名。
+fn draft_group(filter: &str) -> String {
+    if filter.is_empty() || filter == UNGROUPED { String::new() } else { filter.to_string() }
+}
+
+/// 已有命令里的非空分组，排序后去重。
+fn group_names(all: &[Snippet]) -> Vec<String> {
+    let mut names: Vec<String> = all.iter().map(|s| s.group.clone()).filter(|g| !g.is_empty()).collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// 输入内容能对上的已有分组。空白输入列出全部。
+fn matching_groups(names: &[String], typed: &str) -> Vec<String> {
+    let q = typed.trim().to_lowercase();
+    names.iter().filter(|n| q.is_empty() || n.to_lowercase().contains(&q)).cloned().collect()
+}
+
+/// 与已有分组只是大小写不同时，采用原来的写法。
+fn canonical_group(raw: &str, existing: &[String]) -> String {
+    let raw = raw.trim();
+    if raw.is_empty() { return String::new(); }
+    let key = raw.to_lowercase();
+    existing.iter().find(|g| g.to_lowercase() == key).cloned().unwrap_or_else(|| raw.to_string())
+}
+
 fn snip_visible(s: &Snippet, q: &str, group: &str) -> bool {
     if group == UNGROUPED && !s.group.is_empty() { return false; }
     if !group.is_empty() && group != UNGROUPED && s.group != group { return false; }
     if q.is_empty() { return true; }
     format!("{} {} {} {}", s.name, s.group, s.note, s.body).to_lowercase().contains(q)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn draft_group_skips_all_and_ungrouped() {
+        assert_eq!(draft_group(""), "");
+        assert_eq!(draft_group(UNGROUPED), "");
+        assert_eq!(draft_group("VPS"), "VPS");
+    }
+
+    #[test]
+    fn canonical_group_keeps_existing_spelling() {
+        let existing = vec!["VPS".into(), "民航2所".into()];
+        assert_eq!(canonical_group("  vps ", &existing), "VPS");
+        assert_eq!(canonical_group("新组", &existing), "新组");
+        assert_eq!(canonical_group("  ", &existing), "");
+    }
+
+    #[test]
+    fn matching_groups_filters_by_typed_text() {
+        let names = vec!["VPS".into(), "民航2所".into()];
+        assert_eq!(matching_groups(&names, ""), names);
+        assert_eq!(matching_groups(&names, "航"), vec!["民航2所".to_string()]);
+        assert!(matching_groups(&names, "nope").is_empty());
+    }
 }

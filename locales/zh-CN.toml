@@ -1192,7 +1192,7 @@
 "cm.settings_tools_cleared" = "工具缓存已清空"
 "cm.settings_help" = "占位符：{path} {name} {dir} {stem} {ext} {host}；匹配：extensions / glob / types / hosts；tools 为所需命令。"
 "cm.denied" = "右键菜单命令被拒绝：{cmd} —— {why}（点击关闭）"
-"cm.confirm" = "确认执行？{cmd}（{why}）"
+"cm.confirm" = "确认执行？（{why}）"
 "cm.run_now" = "执行"
 "chat.explain_selection" = "请解释这段终端内容 / 命令：\n```\n{text}\n```"
 "sftp.open_popup" = "在弹窗中打开 SFTP"

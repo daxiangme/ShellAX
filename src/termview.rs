@@ -2358,14 +2358,18 @@ impl Render for TermView {
                     .on_click(cx.listener(|v, _, _w, cx| v.pty_answer(false, cx)))));
         }
         if let Some((cmd, why)) = self.ctx_confirm.clone() {
+            let cmd = cmd.replace(['\n', '\r'], " ");
             body = body.child(div().absolute().bottom(px(12.)).left(px(12.)).right(px(12.)).p_2().rounded(px(ui::R_LG)).bg(c(th.base).opacity(0.97)).border_1().border_color(crate::theme::divider()).shadow(crate::chrome::soft_shadow(true))
-                .flex().flex_wrap().items_center().gap_2().text_size(px(ui::fs_small())).text_color(c(th.text))
-                .child(crate::ui::icon(crate::ui::IconName::TriangleAlert, ui::IC_SM, c(th.warning)))
-                .child(tf("cm.confirm", &[("cmd", &cmd), ("why", &why)]))
-                .child(ui::button_sm("cm-run", t("cm.run_now"), 1)
-                    .on_click(cx.listener(|v, _, _w, cx| { if let Some((cmd, _)) = v.ctx_confirm.clone() { cx.emit(TermEvent::Audit("ctxmenu.approval", format!("approved command={:?}", ssh_term_proto::ai::redact(&cmd).0))); } v.ctx_submit(cx); })))
-                .child(ui::button_sm("cm-cancel", t("ui.cancel"), 0)
-                    .on_click(cx.listener(|v, _, _w, cx| { cx.emit(TermEvent::Audit("ctxmenu.approval", "rejected".into())); v.ctx_confirm = None; cx.notify(); }))));
+                .flex().flex_col().gap(px(ui::SP_1)).text_size(px(ui::fs_small())).text_color(c(th.text))
+                .child(div().flex().items_center().gap(px(ui::SP_2))
+                    .child(crate::ui::icon(crate::ui::IconName::TriangleAlert, ui::IC_SM, c(th.warning)))
+                    .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(tf("cm.confirm", &[("why", &why)])))
+                    .child(div().flex_shrink_0().flex().items_center().gap(px(ui::SP_2))
+                        .child(ui::button_sm("cm-run", t("cm.run_now"), 1)
+                            .on_click(cx.listener(|v, _, _w, cx| { if let Some((cmd, _)) = v.ctx_confirm.clone() { cx.emit(TermEvent::Audit("ctxmenu.approval", format!("approved command={:?}", ssh_term_proto::ai::redact(&cmd).0))); } v.ctx_submit(cx); })))
+                        .child(ui::button_sm("cm-cancel", t("ui.cancel"), 0)
+                            .on_click(cx.listener(|v, _, _w, cx| { cx.emit(TermEvent::Audit("ctxmenu.approval", "rejected".into())); v.ctx_confirm = None; cx.notify(); })))))
+                .child(div().w_full().min_w_0().pl(px(ui::IC_SM + ui::SP_2)).whitespace_normal().line_height(px(ui::lh(ui::fs_small()))).child(cmd)));
         }
         if let Some(msg) = self.ctx_denied.clone() {
             body = body.child(div().id("cm-denied").absolute().bottom(px(12.)).left(px(12.)).right(px(12.)).p_2().rounded(px(ui::R_LG)).bg(c(th.base).opacity(0.97)).border_1().border_color(crate::theme::divider()).shadow(crate::chrome::soft_shadow(true))
