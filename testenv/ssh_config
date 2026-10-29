@@ -1,0 +1,13 @@
+# Test ssh_config for the prototype (SHELLAX_SSH_CONFIG points here)
+Host sshtest-local
+  HostName 127.0.0.1
+  Port 2222
+  User sshtest
+  IdentityFile @REPO@/testenv/client_ed25519
+
+Host prod-web
+  HostName prod-web.example.com
+  User deploy
+
+Host *.internal
+  User ops

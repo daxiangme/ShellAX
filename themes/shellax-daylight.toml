@@ -1,0 +1,30 @@
+# ShellAX Daylight — original theme by the ShellAX project (proprietary, ships with the product)
+name = "ShellAX Daylight"
+appearance = "light"
+
+[ui]
+crust = "#e9ecf1"
+mantle = "#f1f3f6"
+base = "#fbfcfd"
+surface0 = "#dde2e9"
+surface1 = "#cbd2dc"
+surface2 = "#b4bdca"
+overlay0 = "#8994a5"
+overlay1 = "#768295"
+text = "#1f2733"
+subtext = "#4f5b6d"
+accent = "#0a6cff"
+success = "#1a8f4c"
+error = "#d1293d"
+warning = "#c26a00"
+info = "#0a6cff"
+
+[terminal]
+foreground = "#1f2733"
+background = "#fbfcfd"
+cursor = "#0a6cff"
+cursor_text = "#ffffff"
+selection = "#c9dcff"
+suggestion = "#9aa3b2"
+ansi = ["#1f2733","#c4213a","#1a7f43","#9a6700","#0a5fd6","#8a3ffc","#0b7d86","#8b95a5",
+        "#4f5b6d","#e0364f","#22a057","#b88000","#2f7bff","#a066ff","#0f9aa5","#c3cad5"]

@@ -1,0 +1,142 @@
+[package]
+name = "ssh-term-proto"
+version = "1.0.0"
+edition = "2021"
+publish = false
+license = "AGPL-3.0-only"
+default-run = "shellax"
+
+[[bin]]
+name = "shellax"
+path = "src/main.rs"
+
+[[bin]]
+name = "shellax-cli"
+path = "src/bin/shellax-cli.rs"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = "0.3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# GUI-subsystem exe has no console: send stderr to a log file (MIT/Apache-2.0)
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Registry", "Win32_System_DataExchange", "Win32_UI_Shell"] }
+# `link!` lives here; windows-sys re-exports it only inside its own crate.
+windows-link = "0.2"
+
+[dependencies]
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "ansi"] }
+# Local host overview / processes on Windows and macOS (MIT; already a transitive dependency)
+sysinfo = { version = "0.31", default-features = false, features = ["system", "disk", "network"] }
+# GPUI: gpui-pre (Apache-2.0), same pin as gpui-component 0.7.3
+gpui = { package = "gpui-pre", version = "=0.3.9" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+alacritty_terminal = "0.26.0"
+portable-pty = "0.9.0"
+russh = { version = "0.64.1", default-features = false, features = ["aws-lc-rs", "flate2", "rsa"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net", "fs"] }
+anyhow = "1"
+lsp-types = { version = "0.97", features = ["proposed"] }
+flume = "0.11"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+toml_edit = "0.22"
+regex = "1"
+# UI components (Apache-2.0): inputs, switches, selects for the settings view
+gpui-component = "=0.7.3"
+gpui-kit-assets = "=0.7.3"
+sha2 = "0.10"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+serde_json = "1"
+# AI: API keys in the OS keychain (Secret Service on Linux via zbus, pure Rust), encrypted-file fallback, HTTP client
+keyring = { version = "3.6", features = ["async-secret-service", "tokio", "crypto-rust", "apple-native", "windows-native"] }
+chacha20poly1305 = "0.10"
+rand = "0.8"
+ureq = { version = "2", default-features = false, features = ["tls", "json", "socks-proxy"] }
+libc = "0.2"
+tree-sitter = "0.25"
+tree-sitter-bash = "0.25"
+notify-rust = "4"
+russh-sftp = "3"
+getrandom = { version = "0.4", features = ["sys_rng"] }
+serde_yaml = "0.9"
+# Inline graphics: decode Kitty PNG payloads and build frames for gpui (MIT/Apache-2.0; already a gpui dependency)
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Database connections (MIT OR Apache-2.0): MySQL/MariaDB, PostgreSQL, SQLite (bundled)
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+libsqlite3-sys = { version = "0.37", default-features = false }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "mysql", "postgres", "sqlite-bundled", "chrono", "json"] }
+# Redis (BSD-3-Clause): async, TLS via rustls, cluster and sentinel
+redis = { version = "1.8", default-features = false, features = ["tokio-comp", "tokio-rustls-comp", "cluster-async", "sentinel"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+# Docker Engine API (Apache-2.0): local socket / named pipe, or HTTP through an SSH tunnel
+bollard = { version = "0.21", default-features = false, features = ["http", "pipe"] }
+# SQL Server TDS (MIT OR Apache-2.0)
+tiberius = { version = "0.13", default-features = false, features = ["tds73", "rustls", "chrono"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+# MongoDB (Apache-2.0)
+mongodb = { version = "3", default-features = false, features = ["compat-3-0-0", "rustls-tls", "dns-resolver"] }
+# DM8 async client and pool (Apache-2.0). Pin the revision; both crates come from one repo.
+dm-rust = { git = "https://github.com/daxiangme/dm-rust", rev = "215156fca076efe7dad631a16a2c1d1f17d5efbe", features = ["pool"] }
+# DuckDB (MIT), optional: the bundled engine is a large C++ build
+duckdb = { version = "1", optional = true, features = ["bundled"] }
+md-5 = "0.10"
+sha1 = "0.10"
+hmac = "0.12"
+aes = "0.8"
+des = "0.8"
+rabbit = "0.4"
+cbc = "0.1"
+ecb = "0.1"
+ctr = "0.9"
+cfb-mode = "0.8"
+ofb = "0.6"
+cipher = "0.4"
+base64 = "0.22"
+percent-encoding = "2"
+hex = "0.4"
+croner = "4.0.2"
+sqlformat = "0.5.0"
+uuid = { version = "1", features = ["v4"] }
+pulldown-cmark = { version = "0.13.5", default-features = false, features = ["html"] }
+digest = "0.10"
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
+wasmi = { version = "1", default-features = false, features = ["std"] }
+sqlparser = { version = "0.63.0", features = ["visitor"] }
+
+# Distribution build (installer payload): `cargo build --profile dist`.
+# Kept separate from `release` so day-to-day release builds/tests stay fast.
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+panic = "abort"
+strip = "symbols"
+debug = false
+
+[features]
+duckdb = ["dep:duckdb"]
+
+[dev-dependencies]
+wat = "1"
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+
+# Windows cross-build: GPUI's DirectX backend precompiles HLSL only on a Windows host.
+# Vendored copy (Apache-2.0, see THIRD_PARTY_NOTICES.md) adds prebuilt fxc output.
+# macOS clipboard: the published gpui-pre-macos writes pasteboard text as raw UTF-8
+# bytes, which other apps read as MacRoman. Vendored copy uses setString:forType:.
+[patch.crates-io]
+gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
+gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
+
+# Smaller/faster debug builds: line tables only for our crate, no debuginfo for deps
+# (full debuginfo made target/debug/shellax.exe ~900 MB on Windows).
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+opt-level = 1

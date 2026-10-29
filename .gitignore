@@ -1,0 +1,17 @@
+target/
+testenv/sshd.log
+testenv/*.log
+testenv/*.pid
+target-dist/
+dist/
+dist-win/
+*.exe
+*.zip
+SHA256SUMS
+.env.local
+*.local.toml
+*.log
+SHA256SUMS.txt
+testenv/*_ed25519
+testenv/*_ed25519.pub
+extensions/target/

@@ -1,0 +1,30 @@
+# ShellAX Midnight — original theme by the ShellAX project (proprietary, ships with the product)
+name = "ShellAX Midnight"
+appearance = "dark"
+
+[ui]
+crust = "#0b0e14"
+mantle = "#10141c"
+base = "#141922"
+surface0 = "#1f2632"
+surface1 = "#2a3342"
+surface2 = "#3a4558"
+overlay0 = "#5c6b82"
+overlay1 = "#71819b"
+text = "#d7dfeb"
+subtext = "#9aa7ba"
+accent = "#4fb8ff"
+success = "#5fd38d"
+error = "#ff6b7a"
+warning = "#ffb454"
+info = "#6cb6ff"
+
+[terminal]
+foreground = "#d7dfeb"
+background = "#141922"
+cursor = "#4fb8ff"
+cursor_text = "#0b0e14"
+selection = "#2f4a6b"
+suggestion = "#56637a"
+ansi = ["#232a36","#ff6b7a","#5fd38d","#ffcf5c","#4fb8ff","#c792ff","#4fd6c8","#c3ccd9",
+        "#4a5568","#ff8a96","#7ee2a6","#ffdc85","#7ccaff","#d6adff","#7be3d8","#eef2f8"]
