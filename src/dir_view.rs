@@ -520,10 +520,24 @@ impl DirView {
             .when(back_ok, |d| d.on_click(cx.listener(|v, _, window, cx| { v.go_back(window, cx); cx.notify(); })));
         let refresh = ui::icon_button("dir-refresh", IconName::RefreshCw, ui::IconBtn::Md, t("sftp.refresh"))
             .on_click(cx.listener(|v, _, window, cx| v.refresh(window, cx)));
+        let path_ok = !self.path_in.read(cx).value().trim().is_empty() || !self.dir.is_empty();
+        let copy = ui::icon_button("dir-copy-path", IconName::Copy, ui::IconBtn::Md, t("cm.copy_path"))
+            .when(!path_ok, |d| d.opacity(0.4))
+            .when(path_ok, |d| d.on_click(cx.listener(|v, _, _, cx| v.copy_cwd(cx))));
         ui::toolbar()
             .child(back)
             .child(refresh)
             .child(div().flex_1().min_w_0().child(ui::text_field(&self.path_in, false)))
+            .child(copy)
+    }
+
+    fn copy_cwd(&mut self, cx: &mut Context<Self>) {
+        let typed = self.path_in.read(cx).value().trim().to_string();
+        let path = if typed.is_empty() { self.dir.clone() } else { typed };
+        if path.is_empty() { return; }
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(path));
+        self.note(t("dir.copied_path").into(), false);
+        cx.notify();
     }
 
     fn sort_head(&self, cx: &mut Context<Self>) -> AnyElement {
