@@ -37,6 +37,7 @@ mod dir_view;
 mod port_view;
 mod host_tools_view;
 mod hoststats_view;
+mod ai_mention;
 mod chat_view;
 mod library;
 mod mcp_backend;
@@ -371,6 +372,70 @@ fn env_target(known_hosts: &std::path::Path) -> Option<SshTarget> {
 pub(crate) fn ai_consent_ack() {
     let _ = config::update(|s| s.ai.first_send_ack = true);
     let _ = audit_log().append("ai.consent", "user", "first-send notice acknowledged");
+}
+
+/// Post one desktop notification. Failures stay on stderr; a missing daemon must not surface in the UI.
+fn show_desktop_notification(body: &str) {
+    // mac-notification-sys 0.6 runs `get id of application "use_default"` unless
+    // set_application has already run. On macOS 26 that AppleScript opens the
+    // Choose Application dialog ("Where is use_default?"). Pin the bundle once,
+    // on this same thread, before show().
+    #[cfg(target_os = "macos")]
+    pin_macos_notification_bundle();
+    if let Err(e) = notify_rust::Notification::new().appname("ShellAX").summary("ShellAX").body(body).show() {
+        eprintln!("notification: {e}");
+    }
+}
+
+/// `set_application` sticks on the first call (success or failure). Do it once.
+#[cfg(target_os = "macos")]
+fn pin_macos_notification_bundle() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let id = macos_notification_bundle_id();
+        if let Err(e) = notify_rust::set_application(&id) {
+            eprintln!("notification: set_application {id}: {e}");
+        }
+    });
+}
+
+/// This .app's Info.plist when the binary lives in `Contents/MacOS`, otherwise the id
+/// `tools/package_mac.sh` writes. Launch Services must already know the id.
+#[cfg(target_os = "macos")]
+fn macos_notification_bundle_id() -> String {
+    std::env::current_exe().ok()
+        .and_then(|exe| exe.parent().and_then(|macos| macos.parent()).map(|contents| contents.join("Info.plist")))
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| bundle_id_from_plist(&text))
+        .unwrap_or_else(|| "com.daxiangme.shellax".to_string())
+}
+
+/// `<key>CFBundleIdentifier</key>` followed by `<string>…</string>`.
+#[cfg(any(target_os = "macos", test))]
+fn bundle_id_from_plist(text: &str) -> Option<String> {
+    let key = "<key>CFBundleIdentifier</key>";
+    let rest = text.get(text.find(key)? + key.len()..)?;
+    let open = "<string>";
+    let start = rest.find(open)? + open.len();
+    let end = rest.get(start..)?.find("</string>")? + start;
+    let id = rest[start..end].trim();
+    if id.is_empty() || id.contains('<') { None } else { Some(id.to_string()) }
+}
+
+#[cfg(test)]
+mod notify_bundle_tests {
+    use super::bundle_id_from_plist;
+
+    #[test]
+    fn reads_bundle_id_after_the_key() {
+        let xml = r#"<key>CFBundleName</key><string>ShellAX</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.daxiangme.shellax</string>"#;
+        assert_eq!(bundle_id_from_plist(xml).as_deref(), Some("com.daxiangme.shellax"));
+        assert_eq!(bundle_id_from_plist("<plist></plist>"), None);
+        assert_eq!(bundle_id_from_plist("<key>CFBundleIdentifier</key><string>  </string>"), None);
+    }
 }
 
 impl Root {
@@ -807,7 +872,8 @@ impl Root {
         let v = match &self.chat_view {
             Some(v) => v.clone(),
             None => {
-                let v = cx.new(|cx| chat_view::ChatView::new(window, cx));
+                let backend = self.mcp.backend.clone();
+                let v = cx.new(|cx| chat_view::ChatView::new(backend, window, cx));
                 self._subs.push(cx.subscribe_in(&v, window, |this, _, ev: &chat_view::ChatEvent, w, cx| match ev {
                     chat_view::ChatEvent::Close => this.close_dock("ai-dock", w, cx),
                     chat_view::ChatEvent::Insert(cmd) => {
@@ -1506,9 +1572,7 @@ impl Root {
         if !n.desktop || (blocked && !n.agent_blocked) { return; }
         self.log("notify", body);
         let body = body.to_string();
-        std::thread::spawn(move || {
-            if let Err(e) = notify_rust::Notification::new().appname("ShellAX").summary("ShellAX").body(&body).show() { eprintln!("notification: {e}"); }
-        });
+        std::thread::spawn(move || show_desktop_notification(&body));
     }
 
     fn answer_approval(&mut self, ans: ssh_term_proto::policy_server::Answer, cx: &mut Context<Self>) {

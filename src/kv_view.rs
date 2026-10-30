@@ -125,7 +125,7 @@ impl KvView {
             let _ = this.update(cx, |v, cx| {
                 match r {
                     Ok(kv) => { log_push(&v.log, "redis", &format!("connect {}", v.conn.address()), true, kv.version.clone()); v.kv = Some(kv); v.rescan(cx); if let Some(k) = select.clone() { v.select(k, cx); } }
-                    Err(e) => { log_push(&v.log, "redis", &format!("connect {}", v.conn.address()), false, format!("{e:#}")); v.conn_err = Some(format!("{e:#}")); }
+                    Err(e) => { let m = ssh_term_proto::kv::conn_failure(&e); log_push(&v.log, "redis", &format!("connect {}", v.conn.address()), false, m.clone()); v.conn_err = Some(m); }
                 }
                 cx.notify();
             });
@@ -134,6 +134,19 @@ impl KvView {
     }
 
     pub fn save(&self) -> ssh_term_proto::session_store::PaneSave { ssh_term_proto::session_store::PaneSave::Redis { conn: self.conn.id.clone(), key: self.selected.clone() } }
+    /// Text after the name. The address is omitted when the name already is that address.
+    fn headline(&self) -> String {
+        let addr = self.conn.address();
+        let mut bits = Vec::new();
+        if self.conn.name.trim() != addr { bits.push(addr); }
+        bits.push(format!("db{}", self.conn.db));
+        if let Some(k) = &self.kv {
+            let extra = format!("{} {}", k.mode, k.version);
+            let extra = extra.trim();
+            if !extra.is_empty() { bits.push(extra.to_string()); }
+        }
+        bits.join(" · ")
+    }
     pub fn crumbs(&self) -> String {
         let mut s = format!("{} › db{}", self.conn.name, self.conn.db);
         if let Some(k) = &self.selected { s.push_str(" › "); s.push_str(k); }
@@ -657,8 +670,8 @@ impl Render for KvView {
         if let Some(s) = self.pending_value.take() { self.value_ed.update(cx, |e, cx| e.set_value(s, window, cx)); }
         let mut head = ui::toolbar()
             .child(icon(IconName::Database, ui::IC_SM, c(th.overlay1)))
-            .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(self.conn.name.clone()))
-            .child(small(format!("{} · db{}{}", self.conn.address(), self.conn.db, self.kv.as_ref().map(|k| format!(" · {} {}", k.mode, k.version)).unwrap_or_default())));
+            .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_size(px(ui::fs_body())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(self.conn.name.clone()))
+            .child(small(self.headline()).whitespace_nowrap());
         if self.production { head = head.child(ui::tag(t("tag.production"), c(th.error))); }
         if self.conn.read_only { head = head.child(ui::tag(t("db.read_only"), c(th.warning))); }
         head = head.child(div().flex_1());

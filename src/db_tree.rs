@@ -143,6 +143,14 @@ impl Root {
         cx.notify();
     }
 
+    /// Replace one group's members and the table remarks that belong to it.
+    fn db_store_members(&mut self, gk: &str, names: Vec<String>, notes: Vec<(String, String)>) {
+        let pre = format!("{gk}\u{1d}");
+        self.dbp.notes.retain(|k, _| !k.starts_with(&pre));
+        for (name, note) in notes { self.dbp.notes.insert(format!("{pre}{name}"), note); }
+        self.dbp.members.insert(gk.into(), Kids::Ready(names));
+    }
+
     /// Load the catalog members of one object group.
     fn db_load_group(&mut self, gk: &str, cx: &mut Context<Self>) {
         let Some((node, g)) = split_group(gk) else { return };
@@ -166,11 +174,18 @@ impl Root {
         let gk = gk.to_string();
         let h = self.rt.spawn(async move {
             let rs = live.driver.execute(&db, &sql, true).await?;
-            Ok::<_, anyhow::Error>(rs.first().map(|r| (0..r.rows.len()).filter_map(|i| r.cell(i, 0).map(str::to_string)).collect()).unwrap_or_default())
+            let rows = rs.first().map(|r| r.rows.clone()).unwrap_or_default();
+            Ok::<_, anyhow::Error>(objtree::names_and_notes(&rows))
         });
         cx.spawn(async move |this, cx| {
             let r = h.await.map_err(anyhow::Error::from).and_then(|r| r);
-            let _ = this.update(cx, |this, cx| { this.dbp.members.insert(gk, match r { Ok(v) => Kids::Ready(v), Err(e) => Kids::Failed(format!("{e:#}")) }); cx.notify(); });
+            let _ = this.update(cx, |this, cx| {
+                match r {
+                    Ok((names, notes)) => this.db_store_members(&gk, names, notes),
+                    Err(e) => { this.dbp.members.insert(gk, Kids::Failed(format!("{e:#}"))); }
+                }
+                cx.notify();
+            });
         }).detach();
     }
 
@@ -202,6 +217,7 @@ impl Root {
         self.dbp.opened.retain(|k| !under(k));
         self.dbp.open.retain(|k| !under(k));
         self.dbp.members.retain(|k, _| !under(k));
+        self.dbp.notes.retain(|k, _| !under(k));
         self.dbp.kids.retain(|k, _| !(k.starts_with(&pre) || (k == key && key_parts(key).1.is_some())));
         cx.notify();
     }
@@ -548,6 +564,7 @@ impl Root {
         for name in shown {
             if let Some((old, st)) = &renaming { if *old == name { list = list.child(div().pl(indent(depth + 1)).pr_2().py_1().child(ui::text_field(st, false))); continue; } }
             let mk = format!("{gk}\u{1d}{name}");
+            let note = (g == Group::Tables).then(|| self.dbp.notes.get(&mk).cloned()).flatten().filter(|s| !s.is_empty());
             let sel = self.dbp.selected.as_deref() == Some(mk.as_str());
             let (k1, k2, gk1, n1, node1) = (mk.clone(), mk.clone(), gk.clone(), name.clone(), node.to_string());
             list = list.child(row(SharedString::from(format!("dbo:{mk}")), depth + 1, sel)
@@ -562,7 +579,8 @@ impl Root {
                 .on_mouse_down(MouseButton::Right, cx.listener(move |this, e: &MouseDownEvent, _w, cx| { this.dbp.selected = Some(k2.clone()); this.dbp.arm = None; this.dbp.menu = Some((k2.clone(), e.position)); cx.notify(); }))
                 .child(chev(false, false))
                 .child(icon(group_icon(g), ui::IC_MD, c(match g { Group::Views | Group::MatViews => th.warning, Group::Queries => th.info, _ => th.accent })))
-                .child(hl_label(&name, find, c(th.text))));
+                .child(hl_label(&name, find, c(th.text)))
+                .when_some(note, |d, n| d.tooltip(ui::tip(n))));
         }
         list
     }

@@ -108,6 +108,26 @@ impl Root {
         true
     }
 
+    /// Drop one shortcut from the empty state. A tool is also removed from the recent list.
+    fn dismiss_empty(&mut self, key: String, cx: &mut Context<Self>) { self.dismiss_empty_many(vec![key], false, cx); }
+
+    /// Drop the shortcuts currently shown. `wipe_recent` clears the whole tool recent list.
+    fn dismiss_empty_many(&mut self, keys: Vec<String>, wipe_recent: bool, cx: &mut Context<Self>) {
+        let _ = config::update(|s| {
+            if wipe_recent { s.sidebar.tools_recent.clear(); }
+            for key in &keys {
+                if let Some(id) = key.strip_prefix("tool:") {
+                    s.sidebar.tools_recent.retain(|x| x != id);
+                    // A favorite would stay in this list; hide only that pin. A recent item just leaves the record.
+                    if s.sidebar.tools_fav.iter().any(|x| x == id) && !s.sidebar.empty_hide.iter().any(|k| k == key) { s.sidebar.empty_hide.push(key.clone()); }
+                    continue;
+                }
+                if !s.sidebar.empty_hide.iter().any(|k| k == key) { s.sidebar.empty_hide.push(key.clone()); }
+            }
+        });
+        cx.notify();
+    }
+
     /// Next / previous tab inside the current module.
     pub(crate) fn cycle_ws_tab(&mut self, forward: bool, cx: &App) {
         let mine = self.ws_tabs(cx);
@@ -123,10 +143,18 @@ impl Root {
         let th = cur();
         let tool = self.tool.workspace();
         let s = config::get();
-        let row = |id: SharedString, ic: IconName, main: String, sub: String| ui::list_row(id, 0, false).mx_0().w(px(360.)).h(px(ui::H_LARGE + 4.)).pl(px(ui::SP_3)).pr(px(ui::SP_3)).rounded(px(ui::R_SUB)).bg(crate::theme::sub_bg())
-            .child(icon(ic, ui::IC_MD, c(th.overlay1)))
-            .child(ui::row_title(main).flex_1())
-            .child(ui::row_meta(sub).flex_shrink_0());
+        let hidden = s.sidebar.empty_hide.clone();
+        let shown = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let row = |id: SharedString, ic: IconName, main: String, sub: String, hide: String, cx: &mut Context<Self>| {
+            shown.borrow_mut().push(hide.clone());
+            let hide2 = hide.clone();
+            ui::list_row(id, 0, false).mx_0().w(px(420.)).h(px(ui::H_LARGE + 4.)).pl(px(ui::SP_3)).pr(px(ui::SP_2)).rounded(px(ui::R_SUB)).bg(crate::theme::sub_bg())
+                .child(icon(ic, ui::IC_MD, c(th.overlay1)))
+                .child(ui::row_title(main).flex_1())
+                .child(ui::row_meta(sub).flex_shrink_0())
+                .child(ui::icon_button(SharedString::from(format!("ws-x-{hide}")), IconName::X, ui::IconBtn::Sm, t("ws.dismiss"))
+                    .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.dismiss_empty(hide2.clone(), cx); })))
+        };
         let (title, hint) = match tool {
             Tool::Sftp => (t("ws.sftp_title"), t("ws.sftp_hint")),
             Tool::Database => (t("ws.db_title"), t("ws.db_hint")),
@@ -139,33 +167,37 @@ impl Root {
         let mut buttons = div().flex().gap_2();
         match tool {
             Tool::Sftp => {
-                for (i, h) in s.hosts.iter().take(12).enumerate() {
+                for (i, h) in s.hosts.iter().filter(|h| !hidden.iter().any(|k| k == &format!("sftp:{}", h.name))).take(12).enumerate() {
                     let name = h.name.clone();
-                    list = list.child(row(format!("ws-h-{i}").into(), IconName::Server, h.name.clone(), h.host.clone())
+                    let hide = format!("sftp:{name}");
+                    list = list.child(row(format!("ws-h-{i}").into(), IconName::Server, h.name.clone(), h.host.clone(), hide, cx)
                         .on_click(cx.listener(move |this, _, w, cx| { let tg = this.target_for(&name); this.open_sftp_tab(tg, None, None, w, cx); })));
                 }
                 buttons = buttons.child(ui::button("ws-sftp-new", t("ws.sftp_open"), 1).on_click(cx.listener(|this, _, w, cx| this.open_sftp_tab(None, None, None, w, cx))));
             }
             Tool::Database => {
-                for (i, d) in s.db.iter().take(12).enumerate() {
+                for (i, d) in s.db.iter().filter(|d| !hidden.iter().any(|k| k == &format!("db:{}", d.id))).take(12).enumerate() {
                     let id = d.id.clone();
-                    list = list.child(row(format!("ws-d-{i}").into(), IconName::Database, d.name.clone(), d.kind.ui_name().to_string())
+                    let hide = format!("db:{id}");
+                    list = list.child(row(format!("ws-d-{i}").into(), IconName::Database, d.name.clone(), d.kind.ui_name().to_string(), hide, cx)
                         .on_click(cx.listener(move |this, _, w, cx| this.db_new_query(Some(id.clone()), w, cx))));
                 }
                 buttons = buttons.child(ui::button("ws-db-new", t("db.new_connection"), 1).on_click(cx.listener(|this, _, w, cx| this.run(Action::NewDbConnection, w, cx))));
             }
             Tool::Redis => {
-                for (i, r) in s.redis.iter().take(12).enumerate() {
+                for (i, r) in s.redis.iter().filter(|r| !hidden.iter().any(|k| k == &format!("redis:{}", r.id))).take(12).enumerate() {
                     let id = r.id.clone();
-                    list = list.child(row(format!("ws-r-{i}").into(), IconName::Layers, r.name.clone(), String::new())
+                    let hide = format!("redis:{id}");
+                    list = list.child(row(format!("ws-r-{i}").into(), IconName::Layers, r.name.clone(), String::new(), hide, cx)
                         .on_click(cx.listener(move |this, _, w, cx| this.open_redis_tab(&id, w, cx))));
                 }
                 buttons = buttons.child(ui::button("ws-redis-new", t("ws.redis_new"), 1).on_click(cx.listener(|this, _, w, cx| this.open_asset_dialog(crate::kv_ui::AssetKind::Redis, None, w, cx))));
             }
             Tool::Docker => {
-                for (i, e) in s.docker.iter().take(12).enumerate() {
+                for (i, e) in s.docker.iter().filter(|e| !hidden.iter().any(|k| k == &format!("docker:{}", e.id))).take(12).enumerate() {
                     let id = e.id.clone();
-                    list = list.child(row(format!("ws-k-{i}").into(), IconName::Container, e.name.clone(), String::new())
+                    let hide = format!("docker:{id}");
+                    list = list.child(row(format!("ws-k-{i}").into(), IconName::Container, e.name.clone(), String::new(), hide, cx)
                         .on_click(cx.listener(move |this, _, w, cx| this.open_docker_tab(&id, w, cx))));
                 }
                 buttons = buttons.child(ui::button("ws-docker-new", t("ws.docker_new"), 1).on_click(cx.listener(|this, _, w, cx| this.open_asset_dialog(crate::kv_ui::AssetKind::Docker, None, w, cx))));
@@ -174,11 +206,12 @@ impl Root {
                 let all = crate::tools_ui::all_tools();
                 let mut ids: Vec<String> = s.sidebar.tools_fav.iter().chain(&s.sidebar.tools_recent).cloned().collect();
                 ids.dedup();
-                if ids.is_empty() { ids = ["json", "timestamp", "base64", "url", "uuid", "password"].iter().map(|x| x.to_string()).collect(); }
+                ids.retain(|id| !hidden.iter().any(|k| k == &format!("tool:{id}")));
                 let mut seen = std::collections::HashSet::new();
                 for (i, sp) in ids.iter().filter(|x| seen.insert((*x).clone())).filter_map(|x| all.iter().find(|s| &s.id == x)).take(10).enumerate() {
                     let id = sp.id.clone();
-                    list = list.child(row(format!("ws-t-{i}").into(), IconName::PencilRuler, sp.name.clone(), ssh_term_proto::tools::cat_label(&sp.cat))
+                    let hide = format!("tool:{id}");
+                    list = list.child(row(format!("ws-t-{i}").into(), IconName::PencilRuler, sp.name.clone(), ssh_term_proto::tools::cat_label(&sp.cat), hide, cx)
                         .on_click(cx.listener(move |this, _, w, cx| this.open_tool(&id, None, w, cx))));
                 }
             }
@@ -187,6 +220,12 @@ impl Root {
                     .child(ui::button("empty-palette", t("ui.command_palette"), 0).on_click(cx.listener(|this, _, w, cx| this.open_palette(w, cx))))
                     .when(!self.closed_tabs.is_empty(), |d| d.child(ui::button("empty-reopen", t("tab.reopen"), 0).on_click(cx.listener(|this, _, w, cx| this.reopen_closed(w, cx)))));
             }
+        }
+        let shown = shown.borrow().clone();
+        if !shown.is_empty() {
+            let keys = shown.clone();
+            let wipe_recent = tool == Tool::Tools;
+            buttons = buttons.child(ui::button("ws-clear", t("ws.clear"), 0).on_click(cx.listener(move |this, _, _, cx| this.dismiss_empty_many(keys.clone(), wipe_recent, cx))));
         }
         // 图标 / 标题 / 说明走 empty_state；最近项列表与按钮排在其下方
         div().flex_1().size_full().flex().flex_col().items_center().justify_center().gap(px(ui::SP_3)).bg(c(th.base))

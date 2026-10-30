@@ -38,6 +38,8 @@ pub struct DbPanel {
     pub(crate) opened: HashSet<String>,
     /// Members of an object group, by group key.
     pub(crate) members: HashMap<String, Kids>,
+    /// Table remark by member key (`<group>\x1d<name>`), shown when the pointer rests on the row.
+    pub(crate) notes: HashMap<String, String>,
     /// Name filter per group key.
     pub(crate) filters: HashMap<String, String>,
     /// Latest connect attempt. An older attempt must not overwrite a newer one.

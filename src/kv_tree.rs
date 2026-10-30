@@ -64,7 +64,7 @@ impl Root {
                 Err(e) => Err(e),
             };
             let _ = this.update(cx, |this, cx| {
-                this.kvp.live.insert(id.clone(), match r { Ok((kv, dbs, ks)) => KvLive::Ready { kv, dbs, counts: ks.into_iter().collect() }, Err(e) => KvLive::Failed(format!("{e:#}")) });
+                this.kvp.live.insert(id.clone(), match r { Ok((kv, dbs, ks)) => KvLive::Ready { kv, dbs, counts: ks.into_iter().collect() }, Err(e) => KvLive::Failed(ssh_term_proto::kv::conn_failure(&e)) });
                 cx.notify();
             });
         }).detach();
@@ -106,7 +106,7 @@ impl Root {
                 }
                 Err(e) => Err(e),
             };
-            let _ = this.update(cx, |this, cx| { this.kvp.dbs.insert(k, r.unwrap_or_else(|e| KvDb::Failed(format!("{e:#}")))); cx.notify(); });
+            let _ = this.update(cx, |this, cx| { this.kvp.dbs.insert(k, r.unwrap_or_else(|e| KvDb::Failed(ssh_term_proto::kv::conn_failure(&e)))); cx.notify(); });
         }).detach();
         cx.notify();
     }
@@ -197,13 +197,15 @@ impl Root {
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, e: &MouseDownEvent, _w, cx| this.kv_menu_to(k2.clone(), e, cx)))
             .child(chev(open && ready, true))
             .child(crate::file_icon::db_glyph("redis", ui::IC_MD, if ready { crate::file_icon::db_tint("redis") } else { c(th.overlay0) }))
-            .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_color(if ready { c(th.text) } else { c(th.subtext) }).child(conn.name.clone()))
-            .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).whitespace_nowrap().child(conn.address()));
+            .child(div().flex_1().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().text_color(if ready { c(th.text) } else { c(th.subtext) }).child(conn.name.clone()));
+        let addr = conn.address();
+        if conn.name.trim() != addr { r = r.child(div().max_w(px(140.)).min_w_0().flex_shrink(1.).overflow_hidden().text_ellipsis().whitespace_nowrap().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(addr)); }
         if prod { r = r.child(div().size(px(7.)).rounded_full().bg(c(th.error))); }
         if conn.read_only { r = r.child(icon(IconName::Lock, ui::IC_XS, c(th.warning))); }
         if let Some(col) = dot { r = r.child(div().size(px(7.)).rounded_full().bg(col)); }
         list = list.child(r);
-        let note = |s: String, depth: usize, err: bool| div().min_h(px(ui::H_COMPACT)).pl(px(ui::ROW_PX + (depth + 1) as f32 * ui::INDENT)).pr_2().flex().items_center().text_size(px(ui::fs_small())).text_color(if err { c(cur().error) } else { c(cur().subtext) }).child(s);
+        // Wrap: a nowrap line is clipped at the sidebar edge (`Connection ref`).
+        let note = |s: String, depth: usize, err: bool| div().w_full().min_w_0().pl(px(ui::ROW_PX + (depth + 1) as f32 * ui::INDENT)).pr_2().py_1().text_size(px(ui::fs_small())).whitespace_normal().text_color(if err { c(cur().error) } else { c(cur().subtext) }).child(s);
         match state {
             Some(KvLive::Connecting) => return list.child(note(t("db.connecting").to_string(), 1, false)),
             Some(KvLive::Failed(e)) => { let e = e.chars().take(300).collect(); return if open { list.child(note(e, 1, true)) } else { list }; }

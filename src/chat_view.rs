@@ -1,17 +1,53 @@
 //! Built-in AI chat panel: streamed multi-turn conversation; each user turn can carry the
 //! focused terminal's context (scope/redaction per AI settings). "Explain failure" starts here too.
-use gpui::{div, prelude::*, px, relative, Animation, AnimationExt, Context, Entity, FontWeight, ScrollHandle, SharedString, WeakEntity, Window};
-use gpui_component::input::{InputEvent, Textarea, TextareaState};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use gpui::{div, prelude::*, px, relative, Animation, AnimationExt, Context, Entity, FontWeight, KeyDownEvent, ScrollHandle, SharedString, WeakEntity, Window};
+use gpui_component::input::{InlineToken, InputEvent, Textarea, TextareaState};
 use gpui_component::text::{SelectionFormat, TextView};
+use ssh_term_proto::db_mcp::Backend;
 use ssh_term_proto::i18n::{t, tf};
 use ssh_term_proto::policy::Effect;
 
+use crate::ai_mention::{self, MentionMenu};
 use crate::config;
+use crate::mcp_backend::McpBackend;
 use crate::termview::{StepOutput, TermView};
 use crate::theme::{c, cur, divider, selected_bg, sub_bg};
 use crate::ui::{self, icon, IconName};
 
 pub enum ChatEvent { Close, Insert(String) }
+
+fn mention_list(menu: MentionMenu, cx: &mut Context<ChatView>) -> impl IntoElement {
+    let th = cur();
+    let mut list = div().id("mention-list").mx(px(ui::SP_2)).mt(px(ui::SP_2)).max_h(px(220.)).overflow_y_scroll().rounded(px(ui::R_MD)).border_1().border_color(divider()).bg(c(th.base)).flex().flex_col();
+    if menu.loading {
+        return list.child(div().px(px(ui::SP_3)).py(px(ui::SP_2)).text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(t("chat.mention_loading")));
+    }
+    if menu.items.is_empty() {
+        return list.child(div().px(px(ui::SP_3)).py(px(ui::SP_2)).text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(t("chat.mention_empty")));
+    }
+    for (i, pick) in menu.items.into_iter().enumerate() {
+        let (name, meta) = match pick {
+            ai_mention::MentionPick::Conn(c) => {
+                let db = if c.database.is_empty() { "—".into() } else { c.database.clone() };
+                (if c.name.trim().is_empty() { c.id.clone() } else { c.name.clone() }, format!("{} · {db}", c.kind))
+            }
+            ai_mention::MentionPick::Db { name, database, .. } => (database, name),
+            ai_mention::MentionPick::Table { table, database, .. } => (table, database),
+        };
+        list = list.child(ui::list_row(("mention", i), 0, i == menu.sel)
+            .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |v, _, w, cx| {
+                if let Some(m) = v.mention.as_mut() { m.sel = i; }
+                v.accept_mention(w, cx);
+                cx.stop_propagation();
+            }))
+            .child(div().flex_1().min_w_0().child(ui::row_title(name)))
+            .child(ui::row_meta(meta)));
+    }
+    list
+}
 
 static DOCK_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub fn set_dock_open(open: bool) { DOCK_OPEN.store(open, std::sync::atomic::Ordering::Relaxed); }
@@ -158,7 +194,7 @@ pub fn split_command_fences(src: &str, streaming: bool) -> String {
 
 /// A request held back until the user acknowledges the first-send notice.
 #[derive(Clone)]
-enum Pending { Ask(String), Explain(String, i32, String, String) }
+enum Pending { Ask(String, Vec<(String, String)>), Explain(String, i32, String, String) }
 
 pub struct ChatView {
     pub msgs: Vec<Msg>,
@@ -175,28 +211,126 @@ pub struct ChatView {
     turn: u64,
     scroll: ScrollHandle,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    backend: Arc<McpBackend>,
+    /// `@` completion open at the caret.
+    mention: Option<MentionMenu>,
+    mention_dbs: HashMap<String, Vec<String>>,
+    mention_tables: HashMap<String, Vec<String>>,
+    mention_loading: HashSet<String>,
     _subs: Vec<gpui::Subscription>,
 }
 
 impl ChatView {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(backend: Arc<McpBackend>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| TextareaState::new(window, cx).placeholder(t("chat.placeholder")).auto_grow(1, 6).submit_on_enter(true));
         let subs = vec![cx.subscribe_in(&input, window, |v, _, ev: &InputEvent, w, cx| match ev {
-            InputEvent::PressEnter { shift: false, .. } => v.send(w, cx),
-            InputEvent::Change => cx.notify(),
+            InputEvent::PressEnter { shift: false, .. } => {
+                if v.accept_mention(w, cx) { return; }
+                v.send(w, cx);
+            }
+            InputEvent::Change => { v.sync_mention(cx); cx.notify(); }
             _ => {}
         })];
-        Self { msgs: vec![], pending: None, input, source: None, with_context: true, target: Default::default(), docked: false, busy: false, turn: 0, scroll: ScrollHandle::new(), stop: Default::default(), _subs: subs }
+        Self { msgs: vec![], pending: None, input, source: None, with_context: true, target: Default::default(), docked: false, busy: false, turn: 0, scroll: ScrollHandle::new(), stop: Default::default(), backend, mention: None, mention_dbs: HashMap::new(), mention_tables: HashMap::new(), mention_loading: HashSet::new(), _subs: subs }
     }
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) { self.input.update(cx, |s, cx| s.focus(window, cx)); }
     /// Attach later questions to this terminal. Turns context on if it was off.
     pub fn use_terminal(&mut self, src: WeakEntity<TermView>) { self.source = Some(src); self.with_context = true; }
 
+    fn mentions_in(&self, cx: &gpui::App) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for span in self.input.read(cx).tokens() {
+            let id = span.token().id().to_string();
+            if out.iter().any(|(have, _)| have == &id) { continue; }
+            out.push((id, span.token().label().to_string()));
+        }
+        out
+    }
+    fn sync_mention(&mut self, cx: &mut Context<Self>) {
+        let st = self.input.read(cx);
+        let text = st.value().to_string();
+        let cursor = st.selected_range().end;
+        let ranges: Vec<_> = st.tokens().iter().map(|s| s.range()).collect();
+        let Some((at, query)) = ai_mention::mention_at(&text, cursor, &ranges) else { self.mention = None; return; };
+        let conns = Backend::connections(self.backend.as_ref());
+        match ai_mention::mention_plan(&conns, &query, &self.mention_dbs, &self.mention_tables) {
+            ai_mention::MentionPlan::Ready(items) => {
+                let sel = self.mention.as_ref().map(|m| m.sel).unwrap_or(0);
+                let sel = if items.is_empty() { 0 } else { sel.min(items.len() - 1) };
+                self.mention = Some(MentionMenu { at, query, items, sel, loading: false });
+            }
+            ai_mention::MentionPlan::NeedDbs(id) => {
+                self.mention = Some(MentionMenu { at, query, items: vec![], sel: 0, loading: true });
+                self.load_dbs(id, cx);
+            }
+            ai_mention::MentionPlan::NeedTables(id, db) => {
+                self.mention = Some(MentionMenu { at, query, items: vec![], sel: 0, loading: true });
+                self.load_tables(id, db, cx);
+            }
+        }
+    }
+    fn load_dbs(&mut self, id: String, cx: &mut Context<Self>) {
+        let key = format!("d:{id}");
+        if !self.mention_loading.insert(key.clone()) { return; }
+        let backend = self.backend.clone();
+        let id2 = id.clone();
+        cx.spawn(async move |this, cx| {
+            let rows = cx.background_executor().spawn(async move {
+                let Ok(view) = backend.prepare(&id2) else { return Vec::new(); };
+                backend.databases(&view.id).unwrap_or_default().into_iter().filter(|d| ssh_term_proto::db_mcp::resolve(&view.policy, d, "").0 > ssh_term_proto::db_mcp::Level::Hidden).collect()
+            }).await;
+            let _ = this.update(cx, |v, cx| {
+                v.mention_loading.remove(&key);
+                v.mention_dbs.insert(id, rows);
+                v.sync_mention(cx);
+                cx.notify();
+            });
+        }).detach();
+    }
+    fn load_tables(&mut self, id: String, db: String, cx: &mut Context<Self>) {
+        let key = format!("t:{id}\u{1f}{db}");
+        if !self.mention_loading.insert(key.clone()) { return; }
+        let backend = self.backend.clone();
+        let (id2, db2) = (id.clone(), db.clone());
+        cx.spawn(async move |this, cx| {
+            let rows = cx.background_executor().spawn(async move {
+                let Ok(view) = backend.prepare(&id2) else { return Vec::new(); };
+                if ssh_term_proto::db_mcp::resolve(&view.policy, &db2, "").0 <= ssh_term_proto::db_mcp::Level::Hidden { return Vec::new(); }
+                backend.tables(&view.id, &db2).unwrap_or_default().into_iter().filter(|t| ssh_term_proto::db_mcp::resolve(&view.policy, &db2, t).0 > ssh_term_proto::db_mcp::Level::Hidden).collect()
+            }).await;
+            let _ = this.update(cx, |v, cx| {
+                v.mention_loading.remove(&key);
+                v.mention_tables.insert(format!("{id}\u{1f}{db}"), rows);
+                v.sync_mention(cx);
+                cx.notify();
+            });
+        }).detach();
+    }
+    fn move_mention(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(menu) = self.mention.as_mut() else { return; };
+        if menu.items.is_empty() { return; }
+        let n = menu.items.len() as isize;
+        menu.sel = (menu.sel as isize + delta).rem_euclid(n) as usize;
+        cx.notify();
+    }
+    /// Replace the unfinished `@query` with a connection token. True when the menu took the key.
+    fn accept_mention(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(menu) = self.mention.clone() else { return false; };
+        let Some(pick) = menu.items.get(menu.sel).cloned() else { return false; };
+        let (id, label) = ai_mention::pick_label(&pick);
+        let token = InlineToken::new(id, format!("@{label}")).with_label(label);
+        let end = self.input.read(cx).selected_range().end;
+        let ok = self.input.update(cx, |s, cx| s.replace_range_with_token(menu.at..end, token, window, cx)).is_ok();
+        if ok { self.mention = None; cx.notify(); }
+        ok
+    }
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let q = self.input.read(cx).value().trim().to_string();
+        let mentions = self.mentions_in(cx);
         if q.is_empty() || self.busy { return; }
         self.input.update(cx, |s, cx| s.set_value("", window, cx));
-        self.send_text(q, cx);
+        self.mention = None;
+        self.dispatch(q, mentions, false, cx);
     }
     /// Follow the active module; a different target starts from its own context.
     pub fn set_target(&mut self, t: crate::ai_ctx::Target, cx: &mut Context<Self>) {
@@ -208,7 +342,7 @@ impl ChatView {
         let Some(job) = self.with_context.then(|| self.target.gather(deep, cx)).flatten() else {
             let content = if cfg.ai.redact { ssh_term_proto::ai::redact(&q).0 } else { q.clone() };
             self.msgs.push(Msg { role: "user", text: q, note: None, plan: None });
-            self.run(crate::ai_ctx::full_prompt(self.target.system_prompt()), content, cx);
+            self.run(crate::ai_ctx::full_prompt(self.target.system_prompt()), content, 0, cx);
             return;
         };
         let label = self.target.label(cx).unwrap_or_default();
@@ -225,16 +359,20 @@ impl ChatView {
                 let (q_sent, n2) = if cfg.ai.redact { ssh_term_proto::ai::redact(&q) } else { (q.clone(), 0) };
                 if let Some(m) = v.msgs.last_mut() { m.note = Some(tf("chat.ctx_note", &[("host", &label), ("n", &ctx.chars().count()), ("r", &(n1 + n2))])); }
                 let content = format!("Context of {label} (redacted):\n```\n{ctx}\n```\n\n{q_sent}");
-                v.run(system, content, cx);
+                v.run(system, content, 0, cx);
             });
         }).detach();
     }
     fn send_text(&mut self, q: String, cx: &mut Context<Self>) {
-        self.send_deep(q, false, cx)
+        self.dispatch(q, Vec::new(), false, cx)
     }
     pub fn send_deep(&mut self, q: String, deep: bool, cx: &mut Context<Self>) {
+        self.dispatch(q, Vec::new(), deep, cx)
+    }
+    fn dispatch(&mut self, q: String, mentions: Vec<(String, String)>, deep: bool, cx: &mut Context<Self>) {
         let cfg = config::get();
-        if cfg.ai.enabled && !cfg.ai.first_send_ack { self.pending = Some(Pending::Ask(q)); cx.notify(); return; }
+        if cfg.ai.enabled && !cfg.ai.first_send_ack { self.pending = Some(Pending::Ask(q, mentions)); cx.notify(); return; }
+        if !mentions.is_empty() { return self.send_with_refs(q, mentions, deep, cx); }
         if !self.target.is_terminal() { return self.ask_module(q, deep, cx); }
         let (ctx, n_red, host) = match (self.with_context, self.source.as_ref().and_then(|w| w.upgrade())) {
             (true, Some(tv)) => { let (t, n, h, _) = tv.read(cx).chat_context(); (t, n, h) }
@@ -244,7 +382,48 @@ impl ChatView {
         let content = if ctx.is_empty() { q_sent.clone() } else { format!("Terminal context from {host} (redacted):\n```\n{ctx}\n```\n\n{q_sent}") };
         let note = (!ctx.is_empty()).then(|| tf("chat.ctx_note", &[("host", &host), ("n", &ctx.chars().count()), ("r", &(n_red + n2))]));
         self.msgs.push(Msg { role: "user", text: q, note, plan: None });
-        self.run(ssh_term_proto::ai::CHAT_SYSTEM_PROMPT.to_string(), content, cx);
+        self.run(ssh_term_proto::ai::CHAT_SYSTEM_PROMPT.to_string(), content, 0, cx);
+    }
+    /// Attach read-only schemas for the `@` connections, plus the current view when that chip is on.
+    fn send_with_refs(&mut self, q: String, mentions: Vec<(String, String)>, deep: bool, cx: &mut Context<Self>) {
+        let labels = mentions.iter().map(|(_, n)| n.clone()).collect::<Vec<_>>().join("、");
+        let ids: Vec<String> = mentions.iter().map(|(id, _)| id.clone()).collect();
+        let names: Vec<String> = mentions.iter().map(|(_, n)| n.clone()).collect();
+        let backend = self.backend.clone();
+        let module = self.with_context.then(|| self.target.gather(deep, cx)).flatten();
+        let (term_ctx, term_host) = if self.target.is_terminal() && self.with_context {
+            match self.source.as_ref().and_then(|w| w.upgrade()) {
+                Some(tv) => { let (t, _, h, _) = tv.read(cx).chat_context(); (t, h) }
+                None => (String::new(), String::new()),
+            }
+        } else { (String::new(), String::new()) };
+        let system = if self.target.is_terminal() { ssh_term_proto::ai::CHAT_SYSTEM_PROMPT.to_string() } else { crate::ai_ctx::full_prompt(self.target.system_prompt()) };
+        self.msgs.push(Msg { role: "user", text: q.clone(), note: Some(tf("aictx.collecting", &[("t", &labels)])), plan: None });
+        self.busy = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let snaps = cx.background_executor().spawn(async move {
+                ids.iter().zip(names.iter()).map(|(id, name)| match ai_mention::schema_snapshot(backend.as_ref(), id) {
+                    Ok(s) => s,
+                    Err(()) => tf("net.mention_hidden", &[("name", name)]),
+                }).collect::<Vec<_>>().join("\n")
+            }).await;
+            let module_ctx = if let Some(job) = module { job.await.unwrap_or_default() } else { String::new() };
+            let _ = this.update(cx, |v, cx| {
+                v.busy = false;
+                let cfg = config::get();
+                let snaps = if cfg.ai.redact { ssh_term_proto::ai::redact(&snaps).0 } else { snaps };
+                let module_ctx = if cfg.ai.redact { ssh_term_proto::ai::redact(&module_ctx).0 } else { module_ctx };
+                let term_ctx = if cfg.ai.redact { ssh_term_proto::ai::redact(&term_ctx).0 } else { term_ctx };
+                let q_sent = if cfg.ai.redact { ssh_term_proto::ai::redact(&q).0 } else { q };
+                if let Some(m) = v.msgs.last_mut() { m.note = Some(tf("chat.refs_note", &[("t", &labels)])); }
+                let mut content = String::new();
+                if !term_ctx.is_empty() { content.push_str(&format!("Terminal context from {term_host} (redacted):\n```\n{term_ctx}\n```\n\n")); }
+                if !module_ctx.is_empty() { content.push_str(&format!("Context of the current view (redacted):\n```\n{module_ctx}\n```\n\n")); }
+                content.push_str(&format!("Referenced databases (schema only; nothing was executed yet):\n```\n{snaps}\n```\n\nUse only these tables and columns. The Id line is the connection id. To read rows, end your reply with one fenced block tagged read, containing JSON {{\"connection\",\"database\",\"sql\"}}. sql must be a single SELECT. At most one block. SQL you want the user to run stays in ```sql fences, not in ```read.\n\n{q_sent}"));
+                v.run(system, content, 3, cx);
+            });
+        }).detach();
     }
     /// Explain selected terminal text (context menu "Explain with AI"); redaction / first-send notice apply.
     pub fn explain_text(&mut self, text: String, cx: &mut Context<Self>) {
@@ -258,7 +437,7 @@ impl ChatView {
         if cfg.ai.enabled && !cfg.ai.first_send_ack { self.pending = Some(Pending::Explain(cmd, code, out, host)); cx.notify(); return; }
         self.msgs.push(Msg { role: "user", text: tf("chat.explain_q", &[("cmd", &cmd), ("code", &code)]), note: Some(tf("chat.ctx_note", &[("host", &host), ("n", &out.chars().count()), ("r", &"✓")])), plan: None });
         let prompt = ssh_term_proto::ai::build_explain_prompt(&cmd, code, &host, &out);
-        self.run(ssh_term_proto::ai::EXPLAIN_SYSTEM_PROMPT.to_string(), prompt, cx);
+        self.run(ssh_term_proto::ai::EXPLAIN_SYSTEM_PROMPT.to_string(), prompt, 0, cx);
     }
 
     /// Start step-by-step execution of the commands in message `i` (in the source terminal).
@@ -311,10 +490,29 @@ impl ChatView {
         if self.busy || !config::get().ai.feed_back_results { return; }
         let _ = crate::audit_log().append("ai.exec.feedback", "user", &format!("chars={}", report.chars().count()));
         self.msgs.push(Msg { role: "user", text: report.clone(), note: Some(t("chat.feedback_note").to_string()), plan: None });
-        self.run(ssh_term_proto::ai::CHAT_SYSTEM_PROMPT.to_string(), report, cx);
+        self.run(ssh_term_proto::ai::CHAT_SYSTEM_PROMPT.to_string(), report, 0, cx);
     }
 
-    fn run(&mut self, system: String, last_content: String, cx: &mut Context<Self>) {
+    fn continue_read(&mut self, system: String, req: ai_mention::ReadReq, reads_left: u8, cx: &mut Context<Self>) {
+        let backend = self.backend.clone();
+        let sql = req.sql.clone();
+        self.msgs.push(Msg { role: "user", text: t("chat.read_running").into(), note: Some(sql.clone()), plan: None });
+        self.busy = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { ai_mention::run_read(backend.as_ref(), &req) }).await;
+            let _ = this.update(cx, |v, cx| {
+                let (text, note) = match &result {
+                    Ok(table) => (format!("Read result:\n```\n{table}\n```\n\nSQL:\n{sql}"), t("chat.read_note").into()),
+                    Err(e) => (tf("chat.read_fail", &[("e", e)]), t("chat.read_note").into()),
+                };
+                if let Some(m) = v.msgs.last_mut() { m.text = text.clone(); m.note = Some(note); }
+                v.run(system, text, reads_left, cx);
+            });
+        }).detach();
+    }
+    /// `reads_left` is how many more read-only SELECTs this turn may still run. Zero skips that path.
+    fn run(&mut self, system: String, last_content: String, reads_left: u8, cx: &mut Context<Self>) {
         let cfg = config::get();
         let Some(provider) = cfg.ai.default_provider().cloned().filter(|_| cfg.ai.enabled) else {
             self.msgs.push(Msg { role: "assistant", text: t(if cfg.ai.enabled { "ai.no_provider" } else { "ai.disabled" }).into(), note: None, plan: None });
@@ -332,6 +530,7 @@ impl ChatView {
         self.stop.store(false, std::sync::atomic::Ordering::Relaxed);
         self.scroll.scroll_to_bottom();
         let stop = self.stop.clone();
+        let system_follow = system.clone();
         let (tx, rx) = flume::unbounded::<Result<String, String>>();
         std::thread::spawn(move || {
             let r = ssh_term_proto::ai::chat_stream(&provider, &key, &system, &hist, |d| { let _ = tx.send(Ok(d.to_string())); !stop.load(std::sync::atomic::Ordering::Relaxed) });
@@ -402,6 +601,16 @@ impl ChatView {
             }
             let _ = this.update(cx, |v, cx| {
                 if v.turn == turn {
+                    let reply = v.msgs.last().map(|m| m.text.clone()).unwrap_or_default();
+                    let stopped = v.stop.load(std::sync::atomic::Ordering::Relaxed);
+                    if reads_left > 0 && !stopped {
+                        if let Some((shown, req)) = ai_mention::take_read_block(&reply) {
+                            if let Some(last) = v.msgs.last_mut() { last.text = shown; }
+                            v.continue_read(system_follow, req, reads_left - 1, cx);
+                            cx.notify();
+                            return;
+                        }
+                    }
                     v.busy = false;
                     v.scroll.scroll_to_bottom();
                     let _ = crate::audit_log().append("ai.chat.response", "ai", &format!("chars={}", v.msgs.last().map(|m| m.text.chars().count()).unwrap_or(0)));
@@ -550,7 +759,7 @@ impl Render for ChatView {
                     .child(ui::button("chat-consent-no", t("ui.cancel"), 0).on_click(cx.listener(|v, _, _, cx| { v.pending = None; cx.notify() })))
                     .child(ui::button("chat-consent-ok", t("ai.consent_ok"), 1).on_click(cx.listener(|v, _, _, cx| {
                         crate::ai_consent_ack();
-                        match v.pending.take() { Some(Pending::Ask(q)) => v.send_text(q, cx), Some(Pending::Explain(a, b, c2, d)) => v.explain(a, b, c2, d, cx), None => {} }
+                        match v.pending.take() { Some(Pending::Ask(q, mentions)) => v.dispatch(q, mentions, false, cx), Some(Pending::Explain(a, b, c2, d)) => v.explain(a, b, c2, d, cx), None => {} }
                     }))))
         });
         let ctx_on = self.with_context;
@@ -571,13 +780,28 @@ impl Render for ChatView {
         let can_send = has_text && !self.busy;
         let send_bg = if self.busy || can_send { c(th.accent) } else { crate::theme::hover_bg() };
         let send_fg = if self.busy || can_send { gpui::white() } else { c(th.overlay0) };
+        let mention = self.mention.clone();
         let composer = div().mx(px(ui::SP_3)).mb(px(ui::SP_3)).rounded(px(ui::R_XL)).border_1().border_color(divider()).bg(sub_bg()).flex().flex_col()
+            .capture_key_down(cx.listener(|v, ev: &KeyDownEvent, w, cx| {
+                if v.mention.is_none() { return; }
+                match ev.keystroke.key.as_str() {
+                    "up" => { v.move_mention(-1, cx); cx.stop_propagation(); }
+                    "down" => { v.move_mention(1, cx); cx.stop_propagation(); }
+                    "escape" => { v.mention = None; cx.stop_propagation(); cx.notify(); }
+                    "tab" => { if v.accept_mention(w, cx) { cx.stop_propagation(); } }
+                    _ => {}
+                }
+            }))
+            .when_some(mention, |d, menu| d.child(mention_list(menu, cx)))
             .child(div().px(px(ui::SP_3)).pt(px(ui::SP_2)).flex().items_center().gap(px(ui::SP_2)).min_w_0()
                 .child(ui::chip("chat-ctx", ctx_label, ctx_on).max_w(px(240.)).overflow_hidden().text_ellipsis()
                     .on_click(cx.listener(|v, _, _, cx| { v.with_context = !v.with_context; cx.notify(); })))
                 .child(div().flex_1())
                 .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).whitespace_nowrap().child(if config::get().ai.redact { t("chat.redact_on") } else { t("chat.redact_off") })))
-            .child(Textarea::new(&self.input).appearance(false).bordered(false))
+            .child(Textarea::new(&self.input).appearance(false).bordered(false).token(|ctx, _, _| {
+                let th = cur();
+                div().px(px(ui::SP_1)).rounded(px(ui::R_SM)).bg(c(th.accent).opacity(0.16)).text_size(px(ui::fs_small())).text_color(c(th.accent)).child(format!("@{}", ctx.token().label()))
+            }))
             .child(div().px(px(ui::SP_2)).pb(px(ui::SP_2)).flex().items_center().gap(px(ui::SP_2))
                 .when(!self.msgs.is_empty(), |d| d.child(ui::chip("chat-clear", t("chat.clear"), false)
                     .on_click(cx.listener(|v, _, _, cx| { if !v.busy { v.msgs.clear(); } cx.notify(); }))))

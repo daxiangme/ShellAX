@@ -52,6 +52,36 @@ pub fn tf(key: &str, args: &[(&str, &dyn std::fmt::Display)]) -> String {
     s
 }
 
+/// A connection failure in the current language. Known IO and auth errors become
+/// a sentence; anything else is left as written (it may already be translated).
+pub fn describe_io(raw: &str) -> String { describe_io_in(raw, current()) }
+
+fn describe_io_in(raw: &str, lang: Lang) -> String {
+    let Some(key) = io_key(raw) else { return raw.to_string() };
+    table(lang).get(key).cloned().or_else(|| table(Lang::En).get(key).cloned()).unwrap_or_else(|| raw.to_string())
+}
+
+fn io_key(raw: &str) -> Option<&'static str> {
+    let l = raw.to_ascii_lowercase();
+    if l.contains("connection refused") || l.contains("actively refused") || l.contains("os error 61") || l.contains("os error 111") || l.contains("os error 10061") {
+        Some("net.refused")
+    } else if l.contains("timed out") || l.contains("timeout") || l.contains("deadline has elapsed") || l.contains("os error 60") || l.contains("os error 10060") {
+        Some("net.timeout")
+    } else if l.contains("no route to host") || l.contains("network is unreachable") || l.contains("host is unreachable") || l.contains("os error 65") || l.contains("os error 51") {
+        Some("net.unreachable")
+    } else if l.contains("nodename nor servname") || l.contains("name or service not known") || l.contains("failed to lookup") || l.contains("no such host") || l.contains("temporary failure in name resolution") {
+        Some("net.dns")
+    } else if l.contains("wrongpass") || l.contains("invalid username-password") || l.contains("invalid password") || l.contains("noauth") || l.contains("authentication required") {
+        Some("net.auth")
+    } else if l.contains("connection reset") || l.contains("os error 54") || l.contains("os error 104") {
+        Some("net.reset")
+    } else if l.contains("certificate") || l.contains("unknown issuer") || l.contains("tls") || l.contains("handshake") {
+        Some("net.tls")
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,6 +118,16 @@ mod tests {
             }
         }
         assert!(missing.is_empty(), "keys used in code but absent from en.toml:\n{}", missing.join("\n"));
+    }
+    #[test]
+    fn connection_failures_follow_the_language() {
+        let refused = "Connection refused (os error 61)";
+        assert_eq!(describe_io_in(refused, Lang::ZhCn), "连接被拒绝。这个地址和端口上没有服务在听。");
+        assert_eq!(describe_io_in(refused, Lang::En), "Connection refused. Nothing is listening on that address and port.");
+        assert_eq!(describe_io_in("timeout: deadline has elapsed", Lang::ZhCn), "连接超时。服务器没有在时限内响应。");
+        assert_eq!(describe_io_in("WRONGPASS invalid username-password pair", Lang::ZhCn), "认证失败。请检查用户名和密码。");
+        assert_eq!(io_key("哨兵模式需要填写主节点名称"), None);
+        assert_eq!(describe_io_in("哨兵模式需要填写主节点名称", Lang::ZhCn), "哨兵模式需要填写主节点名称");
     }
     #[test]
     fn fallback_to_english_then_key() {

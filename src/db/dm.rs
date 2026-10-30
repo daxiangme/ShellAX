@@ -48,7 +48,7 @@ pub fn set_schema_sql(schema: &str) -> String {
 
 pub fn tables_sql(owner: &str) -> String {
     format!(
-        "select TABLE_NAME from ALL_TABLES where OWNER = {} order by TABLE_NAME",
+        "select t.TABLE_NAME, c.COMMENTS from ALL_TABLES t left join ALL_TAB_COMMENTS c on c.OWNER = t.OWNER and c.TABLE_NAME = t.TABLE_NAME where t.OWNER = {} order by t.TABLE_NAME",
         quote_lit(owner)
     )
 }

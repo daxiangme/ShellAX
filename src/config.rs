@@ -329,6 +329,9 @@ pub struct Sidebar {
     pub tools_fav: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools_recent: Vec<String>,
+    /// Shortcuts dismissed from a module's empty state (`tool:`, `db:`, `redis:`, `docker:`, `sftp:`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub empty_hide: Vec<String>,
     /// 右侧栏：允许多张卡片同时展开（默认）；关闭后同一时间只保留一张。
     pub dock_multi: bool,
     /// 右侧栏已打开的卡片 id（`host-dock` / `ai-dock` / `snip-dock` / `hist-dock` / `dir-dock`），按打开先后排列，最后一个最近打开。
@@ -342,7 +345,7 @@ pub struct Sidebar {
     /// 工具箱里输入与输出两个大文本区的分配比例（输入占的份额，0.2–0.8），所有工具共用一个值。
     pub tools_split: f32,
 }
-impl Default for Sidebar { fn default() -> Self { Self { collapsed: vec![], width: SIDEBAR_W, ai_width: AI_DOCK_W, tool: "hosts".into(), bottom_open: false, bottom_height: BOTTOM_H, bottom_tab: "transfers".into(), panel_hidden: false, tools_fav: vec![], tools_recent: vec![], dock_multi: true, dock_open: vec![], dock_min: vec![], dock_split: 0.5, tools_split: 0.5 } } }
+impl Default for Sidebar { fn default() -> Self { Self { collapsed: vec![], width: SIDEBAR_W, ai_width: AI_DOCK_W, tool: "hosts".into(), bottom_open: false, bottom_height: BOTTOM_H, bottom_tab: "transfers".into(), panel_hidden: false, tools_fav: vec![], tools_recent: vec![], empty_hide: vec![], dock_multi: true, dock_open: vec![], dock_min: vec![], dock_split: 0.5, tools_split: 0.5 } } }
 impl Sidebar { /** left tool window starts collapsed */ pub fn collapsed_panel(&self) -> bool { self.panel_hidden } }
 /// Default bottom tool window height.
 pub const BOTTOM_H: f32 = 220.0;

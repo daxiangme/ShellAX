@@ -443,6 +443,23 @@ pub fn pretty_json(s: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(s).ok().and_then(|v| serde_json::to_string_pretty(&v).ok())
 }
 
+/// One line for the UI. `{:#}` repeats a cause whose text is already the message:
+/// a Redis IO error shows as `Connection refused (os error 61): Connection refused (os error 61)`.
+pub fn err_line(err: &anyhow::Error) -> String {
+    let mut parts = vec![err.to_string()];
+    let mut src = err.source();
+    while let Some(s) = src {
+        let t = s.to_string();
+        if parts.last().is_none_or(|p| p != &t) { parts.push(t); }
+        src = s.source();
+    }
+    parts.retain(|p| !p.is_empty());
+    if parts.is_empty() { err.to_string() } else { parts.join(": ") }
+}
+
+/// Connection failure shown in the UI, in the language chosen in settings.
+pub fn conn_failure(err: &anyhow::Error) -> String { crate::i18n::describe_io(&err_line(err)) }
+
 /// Hex dump: offset, 16 bytes, ASCII.
 pub fn hex_dump(b: &[u8]) -> String {
     b.chunks(16).enumerate().map(|(i, c)| {
@@ -470,6 +487,23 @@ mod tests {
         assert_eq!(pretty_json("{\"a\":1}").unwrap(), "{\n  \"a\": 1\n}");
         assert!(pretty_json("12").is_none());
         assert_eq!(hex_dump(b"AB\x00"), "00000000  41 42 00                                         AB.");
+    }
+    #[test]
+    fn err_line_drops_a_repeated_cause() {
+        #[derive(Debug)]
+        struct Wrap(std::io::Error);
+        impl std::fmt::Display for Wrap {
+            fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { self.0.fmt(f) }
+        }
+        impl std::error::Error for Wrap {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(&self.0) }
+        }
+        let e = anyhow::Error::from(Wrap(std::io::Error::from_raw_os_error(61)));
+        let once = e.to_string();
+        assert_eq!(err_line(&e), once);
+        assert_ne!(format!("{e:#}"), once);
+        let timed = e.context("timeout");
+        assert_eq!(err_line(&timed), format!("timeout: {once}"));
     }
     #[test]
     fn seeds() {
