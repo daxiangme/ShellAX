@@ -8812,7 +8812,7 @@ dependencies = [
 
 [[package]]
 name = "ssh-term-proto"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "aes 0.8.4",
  "alacritty_terminal",
