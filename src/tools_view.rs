@@ -36,6 +36,7 @@ pub struct ToolView {
     output: Output,
     error: Option<String>,
     notice: Option<String>,
+    notice_seq: u64,
     busy: bool,
     seq: u64,
     pending_out: Option<String>,
@@ -48,6 +49,8 @@ pub struct ToolView {
     tab: &'static str,
     /// 文件结果的图片预览（从内存加载，不落盘）。
     preview: Option<Arc<gpui::Image>>,
+    /// PDF 还没有预览图时的说明：正在生成、未安装渲染扩展，或渲染失败。
+    pdf_note: Option<String>,
     /// 最近一次保存的路径（保存后才能“在文件夹中显示”）。
     saved: Option<PathBuf>,
     ws: Option<WsState>,
@@ -99,7 +102,7 @@ impl ToolView {
                     subs.push(cx.subscribe_in(&st, window, |this: &mut Self, _, ev: &InputEvent, _w, cx| if matches!(ev, InputEvent::Change) && this.spec.live { this.run(cx) }));
                     areas.insert(f.id.clone(), st);
                 }
-                FieldKind::Select | FieldKind::Toggle => { picks.insert(f.id.clone(), f.default.clone()); }
+                FieldKind::Select | FieldKind::Toggle | FieldKind::Color => { picks.insert(f.id.clone(), f.default.clone()); }
                 FieldKind::File | FieldKind::Files => {}
             }
         }
@@ -114,7 +117,7 @@ impl ToolView {
         }
         let title = spec.name.clone();
         let spec_id = spec.id.clone();
-        let mut me = Self { spec, title, texts, areas, tareas, picks, files: HashMap::new(), out_ed, output: Output::default(), error: None, notice: None, busy: false, seq: 0, pending_out: None, hist, copied: None, copy_seq: 0, tab: if spec_id == "md_html" { "preview" } else { "match" }, preview: None, saved: None, ws, split: lay::clamp_split(crate::config::get().sidebar.tools_split), dragging: false, side: false, has_opts: false, body_w: Rc::new(Cell::new(0.)), opts_h: Rc::new(Cell::new(0.)), rt, _subs: subs };
+        let mut me = Self { spec, title, texts, areas, tareas, picks, files: HashMap::new(), out_ed, output: Output::default(), error: None, notice: None, notice_seq: 0, busy: false, seq: 0, pending_out: None, hist, copied: None, copy_seq: 0, tab: if spec_id == "md_html" { "preview" } else { "match" }, preview: None, pdf_note: None, saved: None, ws, split: lay::clamp_split(crate::config::get().sidebar.tools_split), dragging: false, side: false, has_opts: false, body_w: Rc::new(Cell::new(0.)), opts_h: Rc::new(Cell::new(0.)), rt, _subs: subs };
         if me.spec.live && !me.spec.interactive && !me.spec.heavy { me.run(cx); }
         me
     }
@@ -150,6 +153,8 @@ impl ToolView {
         self.seq += 1;
         let seq = self.seq;
         self.notice = None;
+        self.preview = None;
+        self.pdf_note = None;
         if self.spec.heavy {
             if args.files.values().all(|v| v.is_empty()) && self.spec.inputs.iter().any(|f| matches!(f.kind, FieldKind::File | FieldKind::Files)) { return; }
             self.busy = true;
@@ -158,16 +163,16 @@ impl ToolView {
             let task = cx.background_executor().spawn(async move { if pack.is_empty() { tools::run(&id, &args) } else { ssh_term_proto::ext::run_installed(&pack, &id, &args) } });
             cx.spawn(async move |this, cx| {
                 let r = task.await;
-                let _ = this.update(cx, |v, cx| if v.seq == seq { v.busy = false; v.apply(r); cx.notify(); });
+                let _ = this.update(cx, |v, cx| if v.seq == seq { v.busy = false; v.apply(r, cx); cx.notify(); });
             }).detach();
         } else {
             let r = tools::run(&id, &args);
-            self.apply(r);
+            self.apply(r, cx);
             cx.notify();
         }
     }
 
-    fn apply(&mut self, r: anyhow::Result<Output>) {
+    fn apply(&mut self, r: anyhow::Result<Output>, cx: &mut Context<Self>) {
         match r {
             Ok(o) => {
                 self.error = None;
@@ -182,11 +187,52 @@ impl ToolView {
                     let f = match fmt { tools::fileinfo::PreviewFmt::Png => gpui::ImageFormat::Png, tools::fileinfo::PreviewFmt::Jpeg => gpui::ImageFormat::Jpeg };
                     Arc::new(gpui::Image::from_bytes(f, bytes.clone()))
                 });
+                self.pdf_note = None;
                 self.saved = None;
                 self.output = o;
+                self.start_pdf_preview(cx);
             }
-            Err(e) => { self.error = Some(e.to_string()); }
+            Err(e) => { self.error = Some(e.to_string()); self.preview = None; self.pdf_note = None; }
         }
+    }
+
+    /// PDF 结果没有自带预览图。已安装「PDF 渲染」时在后台画第一页，否则在输出区说明原因。
+    fn start_pdf_preview(&mut self, cx: &mut Context<Self>) {
+        let pdf = self.output.info.as_ref().is_some_and(|i| i.kind == tools::fileinfo::FileKind::Pdf);
+        let Some((_, data)) = pdf.then(|| self.output.file.clone()).flatten() else { return };
+        if !ssh_term_proto::ext::installed().iter().any(|i| i.manifest.id == "pdf-render") {
+            self.pdf_note = Some(t("tools.pdf_preview_need").into());
+            return;
+        }
+        self.pdf_note = Some(t("tools.pdf_previewing").into());
+        let seq = self.seq;
+        cx.spawn(async move |this, cx| {
+            let png = cx.background_executor().spawn(async move {
+                let path = std::env::temp_dir().join(format!("shellax-pdf-preview-{}-{seq}.pdf", std::process::id()));
+                std::fs::write(&path, &data).map_err(|e| e.to_string())?;
+                let mut a = tools::Args::default();
+                a.set("pages", "1");
+                a.set("dpi", "96");
+                a.files.insert("file".into(), vec![path.clone()]);
+                let r = ssh_term_proto::ext::run_installed("pdf-render", "pdf_to_img", &a).map_err(|e| e.to_string());
+                let _ = std::fs::remove_file(&path);
+                r.and_then(|o| o.file.map(|(_, b)| b).ok_or_else(|| "empty".into()))
+            }).await;
+            let _ = this.update(cx, |v, cx| {
+                if v.seq != seq { return; }
+                match png {
+                    Ok(bytes) => {
+                        if let Some((w, h)) = image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format().ok().and_then(|r| r.into_dimensions().ok()) {
+                            if let Some(info) = v.output.info.as_mut() { info.preview_dims = Some((w, h)); }
+                        }
+                        v.preview = Some(Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, bytes)));
+                        v.pdf_note = None;
+                    }
+                    Err(e) => v.pdf_note = Some(tf("tools.pdf_preview_failed", &[("e", &e)])),
+                }
+                cx.notify();
+            });
+        }).detach();
     }
 
     /// 清空输入框与文件（选项保持不变）；生成类的历史不动。
@@ -199,6 +245,8 @@ impl ToolView {
         if !tools::has_history(&self.spec.id) {
             self.output = Output::default();
             self.out_ed.update(cx, |e, cx| e.set_value("", window, cx));
+            self.preview = None;
+            self.pdf_note = None;
         }
         self.error = None;
         self.notice = None;
@@ -218,6 +266,8 @@ impl ToolView {
     fn clear_history(&mut self, cx: &mut Context<Self>) {
         self.hist.borrow_mut().clear();
         self.output = Output::default();
+        self.preview = None;
+        self.pdf_note = None;
         self.error = None;
         self.notice = None;
         cx.notify();
@@ -237,15 +287,25 @@ impl ToolView {
 
     fn copy_text(&mut self, key: String, text: String, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(text));
-        self.notice = Some(t("tools.ui_copied").into());
         self.copied = Some(key);
         self.copy_seq += 1;
         let seq = self.copy_seq;
+        self.flash_notice(t("tools.ui_copied").into(), cx);
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(1200)).await;
-            let _ = this.update(cx, |v, cx| if v.copy_seq == seq { v.copied = None; v.notice = None; cx.notify(); });
+            let _ = this.update(cx, |v, cx| if v.copy_seq == seq { v.copied = None; cx.notify(); });
         }).detach();
         cx.notify();
+    }
+
+    /// 成功确认。两秒后收起；失败或新提示会换掉序号。
+    fn flash_notice(&mut self, msg: String, cx: &mut Context<Self>) {
+        self.notice_seq = self.notice_seq.wrapping_add(1);
+        let seq = self.notice_seq;
+        self.notice = Some(msg.clone());
+        ui::flash_after(cx, seq, |v| v.notice_seq, move |v| {
+            if v.notice.as_deref() == Some(msg.as_str()) { v.notice = None; }
+        });
     }
 
     fn copy(&mut self, cx: &mut Context<Self>) {
@@ -264,8 +324,13 @@ impl ToolView {
             let Ok(Ok(Some(path))) = rx.await else { return };
             let r = std::fs::write(&path, bytes);
             let _ = this.update(cx, |v, cx| {
-                if r.is_ok() { v.saved = Some(path.clone()); }
-                v.notice = Some(match r { Ok(()) => tf("tools.ui_saved", &[("path", &path.display())]), Err(e) => tf("tools.ui_save_failed", &[("e", &e)]) });
+                if r.is_ok() {
+                    v.saved = Some(path.clone());
+                    v.flash_notice(tf("tools.ui_saved", &[("path", &path.display())]), cx);
+                } else {
+                    v.notice_seq = v.notice_seq.wrapping_add(1);
+                    v.notice = Some(tf("tools.ui_save_failed", &[("e", &r.unwrap_err())]));
+                }
                 cx.notify();
             });
         }).detach();
@@ -464,6 +529,12 @@ impl ToolView {
         if !self.output.text.is_empty() && self.output.rows.is_empty() {
             col = col.child(div().mx(px(SUB_PAD)).mt(px(ui::SP_2)).whitespace_normal().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(self.output.text.clone()));
         }
+        if info.kind == FileKind::Pdf && self.preview.is_none() {
+            let msg = self.pdf_note.clone().unwrap_or_default();
+            col = col.child(div().mx(px(SUB_PAD)).mt(px(ui::SP_3)).flex_1().min_h(px(lay::PREVIEW_MIN_H)).rounded(px(ui::R_MD)).border_1().border_color(crate::theme::divider()).bg(crate::theme::hover_bg())
+                .flex().items_center().justify_center().p(px(ui::SP_3))
+                .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).whitespace_normal().child(msg)));
+        }
         if let Some(img) = &self.preview {
             // 预览框占满剩余空间；图片在框内等比缩放（Contain），框的宽高再以原始像素为上限，所以小图不会被放大
             let (w, h) = info.preview_dims.map(|(w, h)| (w as f32, h as f32)).unwrap_or((320., 240.));
@@ -522,7 +593,11 @@ impl ToolView {
     fn out_fill(&self) -> bool {
         if tools::has_history(&self.spec.id) { return true; }
         let fit = tools::out_fit(&self.spec.id);
-        if self.output.file.is_some() { return self.preview.is_some(); }
+        if self.output.file.is_some() {
+            if self.preview.is_some() { return true; }
+            // PDF 即使还没有预览图也撑开，用来放「正在生成」或未安装说明。
+            return self.output.info.as_ref().is_some_and(|i| i.kind == tools::fileinfo::FileKind::Pdf);
+        }
         if !self.has_result() { return !fit; }
         match self.output.kind {
             OutKind::Kv => self.output.source.is_some() || !fit,
@@ -547,9 +622,57 @@ impl ToolView {
     fn field_label(s: &str) -> impl IntoElement {
         div().text_size(px(ui::fs_small())).text_color(c(cur().overlay1)).child(s.to_string())
     }
+
+    /// 选项多、下拉很长或带颜色时逐行排，避免和「运行」挤在同一行。
+    fn opts_stacked(spec: &ToolSpec) -> bool {
+        spec.options.len() >= 4 || spec.options.iter().any(|f| f.kind == FieldKind::Color || (f.kind == FieldKind::Select && f.choices.len() > 3))
+    }
+
+    /// 平铺间距只在位置选了平铺时出现。两个水印工具的字段都叫 `gap` / `pos`。
+    fn option_shown(&self, f: &tools::Field) -> bool {
+        if f.id == "gap" { return self.picks.get("pos").map(|s| s.as_str()) == Some("tile"); }
+        true
+    }
+
+    fn option_el(&self, f: &tools::Field, me: &gpui::WeakEntity<Self>, cx: &mut Context<Self>) -> AnyElement {
+        let cur_v = self.picks.get(&f.id).cloned().unwrap_or_default();
+        match f.kind {
+            FieldKind::Select => {
+                let (id, me) = (f.id.clone(), me.clone());
+                div().w_full().flex().flex_col().gap_1().child(Self::field_label(&f.label))
+                    .child(ui::segmented(intern(&format!("opt-{}", f.id)), &f.choices, &cur_v, move |v, _w, cx| { let _ = me.update(cx, |this, cx| this.set_pick(id.clone(), v, cx)); }))
+                    .into_any_element()
+            }
+            FieldKind::Toggle => {
+                let id = f.id.clone();
+                gpui_component::switch::Switch::new(SharedString::from(format!("tg-{}", f.id))).checked(cur_v == "true").label(f.label.clone()).small()
+                    .on_click(cx.listener(move |this, on: &bool, _, cx| this.set_pick(id.clone(), on.to_string(), cx))).into_any_element()
+            }
+            FieldKind::Text | FieldKind::Number => div().w(px(140.)).flex().flex_col().gap_1().child(Self::field_label(&f.label)).child(ui::text_field(&self.texts[&f.id], false)).into_any_element(),
+            FieldKind::Color => {
+                let (id, me) = (f.id.clone(), me.clone());
+                div().w_full().flex().flex_col().gap_1().child(Self::field_label(&f.label))
+                    .child(ui::swatch_row("mark-color", &mark_colors(), Some(cur_v.as_str()), move |v, _w, cx| {
+                        let _ = me.update(cx, |this, cx| this.set_pick(id.clone(), v, cx));
+                    }))
+                    .into_any_element()
+            }
+            _ => div().into_any_element(),
+        }
+    }
 }
 
 /// 选项控件需要 `&'static str` 作为元素 id 前缀：按字段 id 驻留一次（数量有限）。
+/// 水印等选项用的预设色。id 与提示都是 `#rrggbb`，扩展包按这个字符串解析。
+fn mark_colors() -> Vec<(String, gpui::Hsla, String)> {
+    const HEX: &[&str] = &["#ffffff", "#000000", "#ff0000", "#ff9500", "#ffcc00", "#34c759", "#00c7be", "#007aff", "#af52de", "#8e8e93"];
+    HEX.iter().map(|hex| {
+        let n = u32::from_str_radix(hex.trim_start_matches('#'), 16).unwrap_or(0);
+        let col = gpui::Rgba { r: ((n >> 16) & 255) as f32 / 255., g: ((n >> 8) & 255) as f32 / 255., b: (n & 255) as f32 / 255., a: 1. };
+        ((*hex).to_string(), col.into(), (*hex).to_string())
+    }).collect()
+}
+
 fn intern(s: &str) -> &'static str {
     use std::sync::{Mutex, OnceLock};
     static SET: OnceLock<Mutex<std::collections::HashSet<&'static str>>> = OnceLock::new();
@@ -633,32 +756,21 @@ impl Render for ToolView {
             let base = input.min_h(px(lay::in_min_h(&sizes))).min_w(px(if side { lay::SIDE_PANE_MIN_W } else { 0. }));
             if both { base.flex_basis(px(0.)).flex_grow(grow(self.split)).flex_shrink(1.) } else { base.flex_1() }
         } else { input.flex_shrink_0() };
-        // 选项
-        let mut opts = div().flex().flex_wrap().items_end().gap_3();
-        for f in self.spec.options.clone() {
-            let cur_v = self.picks.get(&f.id).cloned().unwrap_or_default();
-            let el: AnyElement = match f.kind {
-                FieldKind::Select => {
-                    let (id, me) = (f.id.clone(), me.clone());
-                    div().flex().flex_col().gap_1().child(Self::field_label(&f.label))
-                        .child(div().child(ui::segmented(intern(&format!("opt-{}", f.id)), &f.choices, &cur_v, move |v, _w, cx| { let _ = me.update(cx, |this, cx| this.set_pick(id.clone(), v, cx)); })))
-                        .into_any_element()
-                }
-                FieldKind::Toggle => {
-                    let id = f.id.clone();
-                    gpui_component::switch::Switch::new(SharedString::from(format!("tg-{}", f.id))).checked(cur_v == "true").label(f.label.clone()).small()
-                        .on_click(cx.listener(move |this, on: &bool, _, cx| this.set_pick(id.clone(), on.to_string(), cx))).into_any_element()
-                }
-                FieldKind::Text | FieldKind::Number => div().w(px(140.)).flex().flex_col().gap_1().child(Self::field_label(&f.label)).child(ui::text_field(&self.texts[&f.id], false)).into_any_element(),
-                _ => div().into_any_element(),
-            };
-            opts = opts.child(el);
-        }
+        // 选项：多的时候逐行排，少的时候仍横排。平铺间距只在位置是平铺时出现。
+        let stack = Self::opts_stacked(&self.spec);
+        let shown: Vec<_> = self.spec.options.clone().into_iter().filter(|f| self.option_shown(f)).collect();
+        let mut opts = if stack { div().w_full().flex().flex_col().gap_3() } else { div().flex().flex_wrap().items_end().gap_3() };
+        for f in &shown { opts = opts.child(self.option_el(f, &me, cx)); }
         let run_btn = ui::button("tool-run", if self.spec.live { t("tools.ui_refresh") } else { t("tools.ui_run") }, 1).on_click(cx.listener(|this, _, _w, cx| this.run(cx)));
         let opts_h = self.opts_h.clone();
-        let opts_card = sub_card().relative().p(px(SUB_PAD)).flex().items_end().gap_3().flex_shrink_0()
-            .child(div().flex_1().min_w_0().child(opts)).child(run_btn)
-            .child(gpui::canvas(move |b, _, _| opts_h.set(f32::from(b.size.height)), |_, _, _, _| {}).absolute().size_full());
+        let opts_card = if stack {
+            sub_card().w_full().relative().p(px(SUB_PAD)).flex().flex_col().gap_3().flex_shrink_0()
+                .child(opts)
+                .child(div().w_full().flex().justify_end().child(run_btn))
+        } else {
+            sub_card().relative().p(px(SUB_PAD)).flex().items_end().gap_3().flex_shrink_0()
+                .child(div().flex_1().min_w_0().child(opts)).child(run_btn)
+        }.child(gpui::canvas(move |b, _, _| opts_h.set(f32::from(b.size.height)), |_, _, _, _| {}).absolute().size_full());
         // 输出卡片
         let mut out = sub_card().flex().flex_col().child(self.out_head(true, cx));
         if let Some(e) = &self.error { out = out.child(ui::notice(ui::Notice::Error, e.clone()).mx(px(SUB_PAD)).my(px(ui::SP_2))); }

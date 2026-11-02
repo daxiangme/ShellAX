@@ -152,6 +152,7 @@ pub struct DirView {
     busy: bool,
     status: String,
     status_err: bool,
+    status_seq: u64,
 }
 
 impl gpui::EventEmitter<DirEvent> for DirView {}
@@ -173,7 +174,7 @@ impl DirView {
             dir: String::new(), entries: vec![], loading: false, error: None, path_err: None,
             gen: 0, token: 0, sort: Sort::default(), back: vec![], sel: None, browsed: std::collections::HashMap::new(),
             follow: Follow::new(true), home: String::new(), sess: None, conn: None, connecting: false, menu: None,
-            ops: None, sheet: None, open: None, clip: None, busy: false, status: String::new(), status_err: false,
+            ops: None, sheet: None, open: None, clip: None, busy: false, status: String::new(), status_err: false, status_seq: 0,
         }
     }
 
@@ -536,8 +537,7 @@ impl DirView {
         let path = if typed.is_empty() { self.dir.clone() } else { typed };
         if path.is_empty() { return; }
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(path));
-        self.note(t("dir.copied_path").into(), false);
-        cx.notify();
+        self.flash(t("dir.copied_path").into(), cx);
     }
 
     fn sort_head(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -643,7 +643,21 @@ impl DirView {
     fn audit(&self, kind: &str, detail: &str) {
         let _ = crate::audit_log().append(kind, "user", &format!("host={} {detail}", self.host_id()));
     }
-    fn note(&mut self, msg: String, err: bool) { self.status = msg; self.status_err = err; }
+    fn note(&mut self, msg: String, err: bool) {
+        self.status_seq = self.status_seq.wrapping_add(1);
+        self.status = msg;
+        self.status_err = err;
+    }
+
+    /// 成功确认。两秒后收起；报错或新状态会换掉序号，这条计时不再清它。
+    fn flash(&mut self, msg: String, cx: &mut Context<Self>) {
+        self.note(msg.clone(), false);
+        let seq = self.status_seq;
+        ui::flash_after(cx, seq, |v| v.status_seq, move |v| {
+            if v.status == msg { v.status.clear(); v.status_err = false; }
+        });
+        cx.notify();
+    }
 
     fn begin_name(&mut self, kind: NameKind, initial: String, window: &mut Window, cx: &mut Context<Self>) {
         self.ops = None;
@@ -725,7 +739,7 @@ impl DirView {
                         let st = cx.new(|cx| EditorState::new(window, cx).line_number(true).default_value(text));
                         if !readonly { v.audit("dir.edit.open", &format!("path={path:?} bytes={}", ver.0)); }
                         v.open = Some(OpenDoc { path: path.clone(), ver, text: st, readonly, force: false });
-                        v.note(tf("sftp.edit_opened", &[("p", &path)]), false);
+                        v.flash(tf("sftp.edit_opened", &[("p", &path)]), cx);
                     }
                     Err(e) => v.note(format!("{e:#}"), true),
                 }
@@ -765,7 +779,7 @@ impl DirView {
                     Ok(nv) => {
                         if let Some(o) = v.open.as_mut() { if o.path == path { o.ver = nv; o.force = false; } }
                         v.audit("dir.edit.save", &format!("path={path:?} bytes={n} overwrite={force}"));
-                        v.note(tf("sftp.edit_saved", &[("p", &path), ("n", &n)]), false);
+                        v.flash(tf("sftp.edit_saved", &[("p", &path), ("n", &n)]), cx);
                         v.list(cx);
                     }
                     Err(e) => {
@@ -784,7 +798,7 @@ impl DirView {
         let name = e.name.clone();
         self.clip = Some(Clip { remote: self.remote, host_key: self.host_key.clone(), ssh: self.ssh.clone(), path: self.path_of(&e.name), name: e.name, is_dir: e.is_dir });
         self.ops = None;
-        self.note(tf("dir.copied", &[("name", &name)]), false);
+        self.flash(tf("dir.copied", &[("name", &name)]), cx);
         cx.notify();
     }
 
@@ -792,8 +806,7 @@ impl DirView {
         let Some(e) = self.entries.get(i) else { return };
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(self.path_of(&e.name)));
         self.ops = None;
-        self.note(t("dir.copied_path").into(), false);
-        cx.notify();
+        self.flash(t("dir.copied_path").into(), cx);
     }
 
     fn ask_cmd(&mut self, title: String, cmd: String, cx: &mut Context<Self>) {
@@ -817,7 +830,7 @@ impl DirView {
             let _ = this.update(cx, |v, cx| {
                 v.busy = false;
                 match r {
-                    Ok(out) => { v.note(if out.is_empty() { t("dir.cmd_ok").into() } else { out }, false); v.list(cx); }
+                    Ok(out) => { if out.is_empty() { v.flash(t("dir.cmd_ok").into(), cx); } else { v.note(out, false); } v.list(cx); }
                     Err(e) => v.note(format!("{e:#}"), true),
                 }
                 cx.notify();
@@ -885,7 +898,7 @@ impl DirView {
             let _ = this.update(cx, |v, cx| {
                 v.busy = false;
                 match r {
-                    Ok(()) => { v.note(ok, false); v.list(cx); }
+                    Ok(()) => { v.flash(ok, cx); v.list(cx); }
                     Err(e) => v.note(format!("{e:#}"), true),
                 }
                 cx.notify();
@@ -904,7 +917,7 @@ impl DirView {
             let _ = this.update(cx, |v, cx| {
                 v.busy = false;
                 match r {
-                    Ok(()) => { v.note(ok, false); v.list(cx); }
+                    Ok(()) => { v.flash(ok, cx); v.list(cx); }
                     Err(e) => v.note(format!("{e:#}"), true),
                 }
                 cx.notify();

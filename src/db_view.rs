@@ -233,6 +233,7 @@ pub struct DbView {
     design_err: Option<String>,
     ask: Option<Ask>,
     status: String,
+    status_seq: u64,
     error: Option<String>,
     busy: bool,
     /// Bumped per request; late answers of an older request are dropped.
@@ -283,7 +284,7 @@ impl DbView {
         let mut me = Self { title: String::new(), target, conn_name, read_only, production, live: None, conn_err: None, rt, log, grid, where_in, applied_where: String::new(), total: None,
             sub: Sub::Data, table_cols: None, ddl: None, ddl_ed, pending_ddl: None, cell_in, sel: None, edit_note: None,
             editor, editor_h: EDITOR_RATIO, comp, hist: history::Store::load(), hist_in, save_in, results: vec![], result_ix: 0, pop: None, pop_closed: None, pending_sql: None, design: None, design_src: None, design_err: None, ask: None, saved_file: None, pending_design: false,
-            status: String::new(), error: None, busy: false, gen: 0, slot: None, inflight: vec![], _subs: subs };
+            status: String::new(), status_seq: 0, error: None, busy: false, gen: 0, slot: None, inflight: vec![], _subs: subs };
         me.title = me.make_title();
         me
     }
@@ -838,7 +839,10 @@ impl DbView {
     fn save_file(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(p) = self.saved_file.clone() else { return false };
         let text = self.editor.read(cx).value().to_string();
-        self.status = match std::fs::write(&p, text) { Ok(()) => tf("dbt.saved_file", &[("name", &p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default())]), Err(e) => tf("db.export_failed", &[("e", &e)]) };
+        match std::fs::write(&p, text) {
+            Ok(()) => self.flash_status(tf("dbt.saved_file", &[("name", &p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default())]), cx),
+            Err(e) => { self.status_seq = self.status_seq.wrapping_add(1); self.status = tf("db.export_failed", &[("e", &e)]); }
+        }
         cx.notify();
         true
     }
@@ -973,6 +977,17 @@ impl DbView {
         self.hist = s;
     }
 
+    /// 成功确认。两秒后从状态栏收起；之后写入的状态会换掉序号。
+    fn flash_status(&mut self, msg: String, cx: &mut Context<Self>) {
+        self.status_seq = self.status_seq.wrapping_add(1);
+        let seq = self.status_seq;
+        self.status = msg.clone();
+        ui::flash_after(cx, seq, |v| v.status_seq, move |v| {
+            if v.status == msg { v.status.clear(); }
+        });
+        cx.notify();
+    }
+
     fn save_query(&mut self, w: &mut Window, cx: &mut Context<Self>) {
         let name = self.save_in.read(cx).value().trim().to_string();
         let sql = self.editor.read(cx).value().to_string();
@@ -982,8 +997,7 @@ impl DbView {
         let _ = s.save();
         self.hist = s;
         self.save_in.update(cx, |s, cx| s.set_value("", w, cx));
-        self.status = t("db.saved_ok").into();
-        cx.notify();
+        self.flash_status(t("db.saved_ok").into(), cx);
     }
 
     fn delete_saved(&mut self, name: &str, cx: &mut Context<Self>) {
@@ -1063,7 +1077,7 @@ impl DbView {
                 }
                 if self.sub == Sub::Ddl {
                     row = row.child(Self::toolbar_btn("dbv-ddl-copy", IconName::Copy, Some(t("db.copy").into()), "").on_click(cx.listener(|v, _, _w, cx| {
-                        if let Some(Ok(s)) = &v.ddl { cx.write_to_clipboard(gpui::ClipboardItem::new_string(s.clone())); v.status = t("db.copied").into(); cx.notify(); }
+                        if let Some(Ok(s)) = &v.ddl { cx.write_to_clipboard(gpui::ClipboardItem::new_string(s.clone())); v.flash_status(t("db.copied").into(), cx); }
                     })));
                 }
             }

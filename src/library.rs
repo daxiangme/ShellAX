@@ -314,8 +314,7 @@ impl Root {
                 })))
                 .child(ui::menu_item("lib-m-dup", Some(IconName::CopyPlus), t("lib.duplicate"), true, false).on_click(cx.listener(move |this, _, _, cx| {
                     close(this);
-                    match ssh_term_proto::snippets::duplicate(&dup) { Ok(_) => this.lib_notice = t("lib.saved").into(), Err(e) => this.lib_notice = e }
-                    cx.notify();
+                    match ssh_term_proto::snippets::duplicate(&dup) { Ok(_) => this.lib_ok(t("lib.saved").into(), cx), Err(e) => { this.lib_notice = e; cx.notify(); } }
                 })))
                 .child(ui::menu_sep())
                 .child(ui::menu_item("lib-m-del", Some(IconName::Trash), t("lib.delete"), true, true).on_click(cx.listener(move |this, _, _, cx| {
@@ -412,10 +411,9 @@ impl Root {
             body,
         };
         match ssh_term_proto::snippets::upsert(item) {
-            Ok(()) => { self.lib_editor = None; self.lib_notice = t("lib.saved").into(); }
-            Err(e) => self.lib_notice = e,
+            Ok(()) => { self.lib_editor = None; self.lib_ok(t("lib.saved").into(), cx); }
+            Err(e) => { self.lib_notice = e; cx.notify(); }
         }
-        cx.notify();
     }
 
     fn start_snippet(&mut self, body: String, exec: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -477,8 +475,7 @@ impl Root {
             if p.read(cx).ready() { return false; }
         }
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(body.to_string()));
-        self.lib_notice = t("lib.copied_no_target").into();
-        cx.notify();
+        self.lib_ok(t("lib.copied_no_target").into(), cx);
         true
     }
 
@@ -539,7 +536,18 @@ impl Root {
 
     fn copy_lib(&mut self, text: String, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(text));
-        self.lib_notice = t("lib.copied").into();
+        self.lib_ok(t("lib.copied").into(), cx);
+    }
+
+    /// 成功确认。两秒后收起；期间若换成别的提示，这条计时不再清它。
+    fn lib_ok(&mut self, msg: String, cx: &mut Context<Self>) {
+        self.lib_notice_seq = self.lib_notice_seq.wrapping_add(1);
+        let seq = self.lib_notice_seq;
+        let expect = msg.clone();
+        self.lib_notice = msg;
+        ui::flash_after(cx, seq, |r| r.lib_notice_seq, move |r| {
+            if r.lib_notice == expect { r.lib_notice.clear(); }
+        });
         cx.notify();
     }
 

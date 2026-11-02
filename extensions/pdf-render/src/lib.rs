@@ -55,7 +55,7 @@ mod tests {
     fn renders_cjk_watermark() {
         let base = minimal();
         let mut d = ext_pdf::load(&base, true).unwrap();
-        ext_pdf::watermark(&mut d, &ext_pdf::Mark { text: "机密", size: 40., rgb: [1., 0., 0.], opacity: 1., pos: "center", angle: 0. }, true).unwrap();
+        ext_pdf::watermark(&mut d, &ext_pdf::Mark { text: "机密", size: 40., rgb: [1., 0., 0.], opacity: 1., pos: "center", angle: 0., gap: 80. }, true).unwrap();
         let pdf = ext_pdf::save(&mut d).unwrap();
         let r = super::render_pages(pdf, "", 72.0, "t", true).unwrap();
         let img = image_png_red_pixels(&r[0].1);

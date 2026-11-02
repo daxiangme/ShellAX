@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/brand/shellax-icon.svg" alt="ShellAX" width="128" />
+</p>
+
 # ShellAX
 
 [English](README.en.md)

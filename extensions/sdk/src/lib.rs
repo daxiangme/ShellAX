@@ -132,6 +132,8 @@ pub fn multiline(id: &str, label: &str) -> Value { field(id, "multiline", label,
 pub fn file(id: &str, label: &str) -> Value { field(id, "file", label, "") }
 pub fn files(id: &str, label: &str) -> Value { field(id, "files", label, "") }
 pub fn number(id: &str, label: &str, default: &str) -> Value { field(id, "number", label, default) }
+/// 颜色。值是 `#rrggbb`，界面画成一排色点。
+pub fn color(id: &str, label: &str, default: &str) -> Value { field(id, "color", label, default) }
 pub fn toggle(id: &str, label: &str, on: bool) -> Value { field(id, "toggle", label, if on { "true" } else { "false" }) }
 pub fn select(id: &str, label: &str, choices: &[(&str, &str)]) -> Value {
     let mut f = field(id, "select", label, choices.first().map(|c| c.0).unwrap_or(""));

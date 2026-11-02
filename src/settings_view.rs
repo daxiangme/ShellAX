@@ -88,6 +88,7 @@ pub struct SettingsView {
     new_effect: Effect,
     tester: Entity<InputState>,
     notice: Option<String>,
+    notice_seq: u64,
     /// Newer release found by "Check now".
     update_found: Option<ssh_term_proto::update::Manifest>,
     update_err_open: bool,
@@ -167,7 +168,7 @@ impl SettingsView {
         let proxy_port = mk("7890", &saved.as_ref().map(|p| p.port.to_string()).unwrap_or_default(), window, cx);
         let proxy_user = mk(t("proxy.user"), &saved.as_ref().and_then(|p| p.user.as_ref()).map(|u| u.0.as_str()).unwrap_or(""), window, cx);
         let proxy_pass = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder(t("proxy.pass")).default_value(saved.as_ref().and_then(|p| p.user.as_ref()).map(|u| u.1.clone()).unwrap_or_default()));
-        let mut me = Self { cm_editor: None, cm_note: None, key_pass, key_import, theme_import, cat, search, inputs: HashMap::new(), errors: HashMap::new(), theme_swatch: crate::theme::load_all().iter().map(|t| (t.name.clone(), [t.base, t.crust, t.text, t.accent])).collect(), theme_names, scheme_names, new_rule, new_effect: Effect::Allow, tester, notice: None, update_found: None, update_err_open: false,
+        let mut me = Self { cm_editor: None, cm_note: None, key_pass, key_import, theme_import, cat, search, inputs: HashMap::new(), errors: HashMap::new(), theme_swatch: crate::theme::load_all().iter().map(|t| (t.name.clone(), [t.base, t.crust, t.text, t.accent])).collect(), theme_names, scheme_names, new_rule, new_effect: Effect::Allow, tester, notice: None, notice_seq: 0, update_found: None, update_err_open: false,
             ai_sel: config::get().ai.default_provider().map(|p| p.id.clone()), ai_key, ai_keys: HashMap::new(), ai_note: None, ai_test: HashMap::new(), ai_testing: None, lang_seen: ssh_term_proto::i18n::current() as u8,
             ai_models: HashMap::new(), ai_dropdown: None, ai_model_search, ai_url_gen: 0,
             proxy_http, proxy_auth, proxy_host, proxy_port, proxy_user, proxy_pass, proxy_candidates: Vec::new(), proxy_bypass_suggest: String::new(), proxy_detecting: false, proxy_started: false, proxy_note: None,
@@ -812,6 +813,17 @@ impl SettingsView {
         cx.notify();
     }
 
+    /// 成功确认。两秒后收起；失败或新提示会换掉序号。
+    fn flash_notice(&mut self, msg: String, cx: &mut Context<Self>) {
+        self.notice_seq = self.notice_seq.wrapping_add(1);
+        let seq = self.notice_seq;
+        self.notice = Some(msg.clone());
+        ui::flash_after(cx, seq, |v| v.notice_seq, move |v| {
+            if v.notice.as_deref() == Some(msg.as_str()) { v.notice = None; }
+        });
+        cx.notify();
+    }
+
     fn credentials_extra(&self, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
         let mut list = div().flex().flex_col().rounded(px(ui::R_SUB)).border_1().border_color(crate::theme::divider());
@@ -826,15 +838,16 @@ impl SettingsView {
                 .child(ui::button(("key-copy", i), t("settings.copy_pubkey"), 0).on_click(cx.listener(move |this, _, _, cx| {
                     let stem = copy_name.rsplit(['/', '\\']).next().unwrap_or(copy_name.as_str()).to_string();
                     let path = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".ssh").join(format!("{stem}.pub"));
-                    this.notice = Some(match std::fs::read_to_string(&path) {
+                    let msg = match std::fs::read_to_string(&path) {
                         Ok(text) => {
                             let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").to_string();
                             if line.is_empty() { t("settings.pubkey_empty").into() }
                             else { cx.write_to_clipboard(gpui::ClipboardItem::new_string(line)); t("settings.pubkey_copied").into() }
                         }
                         Err(e) => tf("settings.key_failed", &[("e", &e)]),
-                    });
-                    cx.notify();
+                    };
+                    if msg == t("settings.pubkey_copied") { this.flash_notice(msg, cx); }
+                    else { this.notice_seq = this.notice_seq.wrapping_add(1); this.notice = Some(msg); cx.notify(); }
                 })))
                 .child(ui::tag(kind.clone(), c(th.info))));
         }
@@ -1085,22 +1098,23 @@ impl SettingsView {
                 .child(div().flex_1().child(ui::text_field(&self.theme_import, false)))
                 .child(ui::button("theme-import", t("ui.import"), 0).on_click(cx.listener(move |this, _, window, cx| {
                     let src = ssh_term_proto::hosts::expand_tilde(this.theme_import.read(cx).value().trim());
-                    this.notice = Some(match crate::theme::import_file(&src) {
+                    let (msg, fade) = match crate::theme::import_file(&src) {
                         Ok(crate::theme::Imported::Theme { dest, name, dark }) => {
                             let _ = crate::audit_log().append("theme.import", "user", &format!("{} -> {}", src.display(), dest.display()));
                             if !this.theme_names.iter().any(|n| n.0 == name) { this.theme_names.push((name.clone(), dark)); }
                             cx.emit(SettingsEvent::ThemesChanged);
-                            tf("settings.theme_imported", &[("name", &name), ("path", &dest.display())])
+                            (tf("settings.theme_imported", &[("name", &name), ("path", &dest.display())]), true)
                         }
                         Ok(crate::theme::Imported::Scheme { dest, name, dark }) => {
                             let _ = crate::audit_log().append("scheme.import", "user", &format!("{} -> {}", src.display(), dest.display()));
                             if let Some(n) = this.scheme_names.iter_mut().find(|n| n.0.eq_ignore_ascii_case(&name)) { n.1 = dark; }
                             else { this.scheme_names.push((name.clone(), dark)); }
                             cx.emit(SettingsEvent::ThemesChanged);
-                            tf("settings.scheme_imported", &[("name", &name), ("path", &dest.display())])
+                            (tf("settings.scheme_imported", &[("name", &name), ("path", &dest.display())]), true)
                         }
-                        Err(e) => tf("settings.theme_import_failed", &[("e", &format!("{e:#}"))]),
-                    });
+                        Err(e) => (tf("settings.theme_import_failed", &[("e", &format!("{e:#}"))]), false),
+                    };
+                    if fade { this.flash_notice(msg, cx); } else { this.notice_seq = this.notice_seq.wrapping_add(1); this.notice = Some(msg); }
                     this.theme_import.update(cx, |i, cx| i.set_value("", window, cx));
                     cx.notify();
                 }))))
@@ -1126,9 +1140,8 @@ impl SettingsView {
                 .child(ui::button("clear-hist", t("ui.clear_command_history"), 2).on_click(cx.listener(|this, _, _w, cx| {
                     let dir = crate::data_dir().join("history");
                     let n = std::fs::read_dir(&dir).map(|d| d.filter_map(Result::ok).filter(|e| std::fs::write(e.path(), "").is_ok()).count()).unwrap_or(0);
-                    this.notice = Some(tf("settings.cleared_files", &[("n", &n)]));
+                    this.flash_notice(tf("settings.cleared_files", &[("n", &n)]), cx);
                     cx.emit(SettingsEvent::Changed("suggest.clear_history".into()));
-                    cx.notify();
                 })))
                 .child(div().text_size(px(ui::fs_small())).text_color(c(th.overlay1)).child(self.notice.clone().unwrap_or_else(|| t("ui.clears_history_saved_by_this").into()))))
             .into_any_element()

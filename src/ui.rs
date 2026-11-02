@@ -25,6 +25,22 @@ pub fn lh(fs: f32) -> f32 { (fs * 1.4).round() }
 /// 等宽场景统一使用终端字体。
 pub fn mono_family() -> SharedString { SharedString::from(crate::config::get().font.family.clone()) }
 
+/// 成功提示停留这么久后收起。更新的提示会换掉序号，旧计时不再清它。
+pub const FLASH_SECS: u64 = 2;
+
+/// `token_of` 仍等于 `token` 时调用 `clear`。用来收起「已复制」这类确认，又不擦掉后来的报错。
+pub fn flash_after<V: 'static>(cx: &mut gpui::Context<V>, token: u64, token_of: impl Fn(&V) -> u64 + 'static, clear: impl Fn(&mut V) + 'static) {
+    cx.spawn(async move |this, cx| {
+        cx.background_executor().timer(std::time::Duration::from_secs(FLASH_SECS)).await;
+        let _ = this.update(cx, |v, cx| {
+            if token_of(v) == token {
+                clear(v);
+                cx.notify();
+            }
+        });
+    }).detach();
+}
+
 /// 间距（4px 网格）。
 pub const SP_1: f32 = 4.;
 pub const SP_2: f32 = 8.;

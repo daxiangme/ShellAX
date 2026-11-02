@@ -129,6 +129,7 @@ pub struct SftpView {
     /// Pane the toolbar / keyboard acts on (last clicked).
     active: usize,
     pub status: String,
+    status_seq: u64,
     error: bool,
     edit: Option<(Edit, usize, String, Entity<InputState>)>,
     confirm_delete: Option<(usize, String)>,
@@ -170,7 +171,7 @@ impl SftpView {
     /// Left pane local; right pane connects to `target` (or shows the "connect to host" state).
     /// Does not connect yet: set `initial_dir`, then call [`start`].
     pub fn new_deferred(target: Option<SshTarget>, rt: tokio::runtime::Handle, prompts: ssh::Prompts, _w: &mut Window, _cx: &mut Context<Self>) -> Self {
-        let mut me = Self { rt, prompts, panes: [Pane::new(Src::Empty), Pane::new(Src::Empty)], active: 1, status: String::new(), error: false, edit: None, confirm_delete: None, editor: None, ticking: false, _subs: vec![], sync: None, ctx_menu: None, ops_menu: None, pending_edit: None, follow_src: None, follow: Follow::new(false), follow_task: false, next_token: 0 };
+        let mut me = Self { rt, prompts, panes: [Pane::new(Src::Empty), Pane::new(Src::Empty)], active: 1, status: String::new(), status_seq: 0, error: false, edit: None, confirm_delete: None, editor: None, ticking: false, _subs: vec![], sync: None, ctx_menu: None, ops_menu: None, pending_edit: None, follow_src: None, follow: Follow::new(false), follow_task: false, next_token: 0 };
         if let Some(t) = target { me.panes[1].src = Src::Remote(Box::new(me.new_remote(host_name(&t), t))); }
         // 左栏默认是本机文件；主机选择器只在栏头下拉菜单里打开。右栏没有目标主机时仍显示主机列表
         me.panes[0].src = Src::Local;
@@ -257,7 +258,20 @@ impl SftpView {
             panes: vec![self.panes[0].save(), self.panes[1].save()],
         }
     }
-    fn set_status(&mut self, s: String, err: bool) { self.status = s; self.error = err; }
+    fn set_status(&mut self, s: String, err: bool) {
+        self.status_seq = self.status_seq.wrapping_add(1);
+        self.status = s;
+        self.error = err;
+    }
+
+    /// 成功确认。两秒后收起；之后的状态会换掉序号。
+    fn flash_status(&mut self, s: String, cx: &mut Context<Self>) {
+        self.set_status(s.clone(), false);
+        let seq = self.status_seq;
+        ui::flash_after(cx, seq, |v| v.status_seq, move |v| {
+            if v.status == s { v.status.clear(); v.error = false; }
+        });
+    }
 
     // ---- sources
     fn connect(&mut self, pi: usize, cx: &mut Context<Self>) {
@@ -525,7 +539,7 @@ impl SftpView {
         }).detach();
     }
     fn after_change(&mut self, msg: String, cx: &mut Context<Self>) {
-        self.set_status(msg, false);
+        self.flash_status(msg, cx);
         self.refresh_all(cx);
     }
     /// Copy `items` (path, name) from pane `from` into the current directory of pane `to`.

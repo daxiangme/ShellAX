@@ -164,15 +164,62 @@ pub fn parse_color(s: &str) -> [u8; 3] {
     [255, 255, 255]
 }
 
-pub fn watermark(img: &DynamicImage, text: &str, pen: &Pen, pos: &str, rgb: [u8; 3], opacity: f32) -> DynamicImage {
+fn blit(dst: &mut RgbaImage, src: &RgbaImage, x0: i64, y0: i64, opacity: f32) {
+    for (x, y, p) in src.enumerate_pixels() {
+        let a = p[3] as f32 / 255. * opacity;
+        if a <= 0. { continue; }
+        blend(dst, x0 + x as i64, y0 + y as i64, [p[0], p[1], p[2]], a);
+    }
+}
+
+/// 绕中心转 45°。采样用最近邻，水印不需要平滑边缘。
+fn rotate45(src: &RgbaImage) -> RgbaImage {
+    let (w, h) = (src.width() as f32, src.height() as f32);
+    let (s, c) = (std::f32::consts::FRAC_1_SQRT_2, std::f32::consts::FRAC_1_SQRT_2);
+    let rw = (w * c + h * s).ceil() as u32 + 2;
+    let rh = (w * s + h * c).ceil() as u32 + 2;
+    let mut out = RgbaImage::new(rw.max(1), rh.max(1));
+    let (cx, cy) = (rw as f32 / 2., rh as f32 / 2.);
+    let (ox, oy) = (w / 2., h / 2.);
+    for y in 0..rh {
+        for x in 0..rw {
+            let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
+            let (u, v) = (dx * c + dy * s + ox, -dx * s + dy * c + oy);
+            let (ix, iy) = (u.floor() as i32, v.floor() as i32);
+            if ix < 0 || iy < 0 || ix >= src.width() as i32 || iy >= src.height() as i32 { continue; }
+            *out.get_pixel_mut(x, y) = *src.get_pixel(ix as u32, iy as u32);
+        }
+    }
+    out
+}
+
+fn stamp_size(pen: &Pen, text: &str, angle: f32) -> (i64, i64) {
+    let (tw, th) = pen.measure(text);
+    if angle.abs() < 1. || tw == 0 || th == 0 { return (tw as i64, th as i64); }
+    let (w, h) = (tw as f32, th as f32);
+    let k = std::f32::consts::FRAC_1_SQRT_2;
+    ((w * k + h * k).ceil() as i64 + 2, (w * k + h * k).ceil() as i64 + 2)
+}
+
+fn stamp(dst: &mut RgbaImage, text: &str, pen: &Pen, x: i64, y: i64, angle: f32, rgb: [u8; 3], opacity: f32) {
+    if angle.abs() < 1. { pen.draw(dst, text, x, y, rgb, opacity); return; }
+    let (tw, th) = pen.measure(text);
+    if tw == 0 || th == 0 { return; }
+    let mut buf = RgbaImage::from_pixel(tw, th, Rgba([0, 0, 0, 0]));
+    pen.draw(&mut buf, text, 0, 0, rgb, 1.);
+    let rot = rotate45(&buf);
+    blit(dst, &rot, x, y, opacity);
+}
+
+pub fn watermark(img: &DynamicImage, text: &str, pen: &Pen, pos: &str, angle: f32, gap: i64, rgb: [u8; 3], opacity: f32) -> DynamicImage {
     let mut out = img.to_rgba8();
     let (w, h) = out.dimensions();
-    let (tw, th) = pen.measure(text);
+    let (bw, bh) = stamp_size(pen, text, angle);
     let m = (w.min(h) / 40).max(8) as i64;
-    let place = |x: i64, y: i64, o: &mut RgbaImage| pen.draw(o, text, x, y, rgb, opacity);
+    let place = |x: i64, y: i64, o: &mut RgbaImage| stamp(o, text, pen, x, y, angle, rgb, opacity);
     match pos {
         "tile" => {
-            let (sx, sy) = ((tw as i64 + m * 6).max(1), (th as i64 + m * 6).max(1));
+            let (sx, sy) = ((bw + gap).max(1), (bh + gap).max(1));
             let mut row = 0;
             let mut y = m;
             while y < h as i64 {
@@ -182,11 +229,11 @@ pub fn watermark(img: &DynamicImage, text: &str, pen: &Pen, pos: &str, rgb: [u8;
                 row += 1;
             }
         }
-        "center" => place((w as i64 - tw as i64) / 2, (h as i64 - th as i64) / 2, &mut out),
+        "center" => place((w as i64 - bw) / 2, (h as i64 - bh) / 2, &mut out),
         "tl" => place(m, m, &mut out),
-        "tr" => place(w as i64 - tw as i64 - m, m, &mut out),
-        "bl" => place(m, h as i64 - th as i64 - m, &mut out),
-        _ => place(w as i64 - tw as i64 - m, h as i64 - th as i64 - m, &mut out),
+        "tr" => place(w as i64 - bw - m, m, &mut out),
+        "bl" => place(m, h as i64 - bh - m, &mut out),
+        _ => place(w as i64 - bw - m, h as i64 - bh - m, &mut out),
     }
     DynamicImage::ImageRgba8(out)
 }
@@ -232,7 +279,10 @@ fn manifest(q: &Request) -> Value {
             vec![sdk::select("format", tr("输出格式", "Output format"), &[("jpeg", "JPEG"), ("png", "PNG")]), sdk::number("quality", tr("JPEG 质量", "JPEG quality"), "80"), sdk::number("max", tr("最长边（像素，0 为不缩放）", "Longest side (px, 0 = keep)"), "1920")]),
         sdk::tool("img_watermark", "image", tr("图片水印", "Image Watermark"), tr("给图片加文字水印", "Add a text watermark to an image"), "image watermark text",
             vec![sdk::file("file", tr("图片", "Image")), sdk::text("text", tr("水印文字", "Watermark text"), ""), sdk::file("font", tr("字体文件（可选）", "Font file (optional)"))],
-            vec![sdk::select("pos", tr("位置", "Position"), &pos), sdk::number("size", tr("字号（像素）", "Size (px)"), "32"), sdk::text("color", tr("颜色", "Color"), "#ffffff"), sdk::number("opacity", tr("不透明度 %", "Opacity %"), "50")]),
+            vec![sdk::select("pos", tr("位置", "Position"), &pos),
+                 sdk::select("dir", tr("方向", "Direction"), &[("0", tr("水平", "Horizontal")), ("45", tr("斜向", "Diagonal"))]),
+                 sdk::number("gap", tr("平铺间距", "Tile spacing"), "80"),
+                 sdk::number("size", tr("字号（像素）", "Size (px)"), "32"), sdk::color("color", tr("颜色", "Color"), "#ffffff"), sdk::number("opacity", tr("不透明度 %", "Opacity %"), "50")]),
     ])
 }
 
@@ -277,7 +327,9 @@ fn run(q: &Request) -> Result<Reply> {
                 None => cjk_pen(text, size as f32, zh)?,
             };
             let img = load(&f.data, zh)?;
-            let out = watermark(&img, text, &pen, q.get("pos"), parse_color(q.get("color")), (q.num("opacity", 50.) / 100.).clamp(0.02, 1.) as f32);
+            let angle = if q.get("dir") == "45" { 45. } else { 0. };
+            let gap = q.num("gap", 80.).clamp(0., 4000.) as i64;
+            let out = watermark(&img, text, &pen, q.get("pos"), angle, gap, parse_color(q.get("color")), (q.num("opacity", 50.) / 100.).clamp(0.02, 1.) as f32);
             let is_jpg = f.name.to_lowercase().ends_with(".jpg") || f.name.to_lowercase().ends_with(".jpeg");
             let data = if is_jpg { compress(&out, 0, "jpeg", 92)?.0 } else { png(&out)? };
             Ok(Reply::File { name: format!("{}-watermark.{}", sdk::stem(&f.name), if is_jpg { "jpg" } else { "png" }), data, text: format!("{}×{}", out.width(), out.height()) })
@@ -315,10 +367,15 @@ mod tests {
         assert_eq!(ext, "jpg");
         let back = image::load_from_memory(&j).unwrap();
         assert_eq!((back.width(), back.height()), (200, 150));
-        let marked = watermark(&img, "Hi", &Pen::Bitmap(2), "br", [255, 255, 255], 1.0);
+        let marked = watermark(&img, "Hi", &Pen::Bitmap(2), "br", 0., 80, [255, 255, 255], 1.0);
         assert_ne!(marked.to_rgba8(), img.to_rgba8());
-        let tiled = watermark(&img, "A", &Pen::Bitmap(1), "tile", [0, 0, 0], 0.5);
-        assert_ne!(tiled.to_rgba8(), img.to_rgba8());
+        let base = img.to_rgba8();
+        let changed = |im: &DynamicImage| im.to_rgba8().pixels().zip(base.pixels()).filter(|(a, b)| a.0 != b.0).count();
+        let tight = watermark(&img, "A", &Pen::Bitmap(1), "tile", 0., 8, [0, 0, 0], 1.0);
+        let wide = watermark(&img, "A", &Pen::Bitmap(1), "tile", 0., 200, [0, 0, 0], 1.0);
+        let slant = watermark(&img, "A", &Pen::Bitmap(1), "tile", 45., 80, [0, 0, 0], 1.0);
+        assert!(changed(&tight) > changed(&wide) && changed(&wide) > 0, "wider spacing should stamp fewer glyphs");
+        assert_ne!(slant.to_rgba8(), tight.to_rgba8());
         assert_eq!(parse_color("#f00"), [255, 0, 0]);
     }
 
@@ -328,7 +385,7 @@ mod tests {
         let pen = cjk_pen("内部资料", 40., true).unwrap();
         let (w, _) = pen.measure("内部资料");
         assert!(w > 80, "width {w}");
-        let out = watermark(&img, "内部资料", &pen, "center", [255, 0, 0], 1.0).to_rgba8();
+        let out = watermark(&img, "内部资料", &pen, "center", 0., 80, [255, 0, 0], 1.0).to_rgba8();
         let red = out.pixels().filter(|p| p[0] > 200 && p[1] < 100).count();
         assert!(red > 300, "red pixels {red}");
         assert!(cjk_pen("𠀀", 40., true).err().unwrap().contains("𠀀"));

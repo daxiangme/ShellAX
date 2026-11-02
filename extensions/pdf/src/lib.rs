@@ -180,40 +180,49 @@ impl TextPen {
     }
 }
 
-pub struct Mark<'a> { pub text: &'a str, pub size: f32, pub rgb: [f32; 3], pub opacity: f32, pub pos: &'a str, pub angle: f32 }
+pub struct Mark<'a> { pub text: &'a str, pub size: f32, pub rgb: [f32; 3], pub opacity: f32, pub pos: &'a str, pub angle: f32, pub gap: f32 }
+
+/// 平铺步长：旋转后的文字外框，再在两个方向加上同一间距。
+pub fn tile_step(text_w: f32, text_h: f32, angle: f32, gap: f32) -> (f32, f32) {
+    let (s, c) = angle.to_radians().sin_cos();
+    let bw = text_w * c.abs() + text_h * s.abs();
+    let bh = text_w * s.abs() + text_h * c.abs();
+    ((bw + gap).max(1.), (bh + gap).max(1.))
+}
 
 pub fn watermark(doc: &mut Document, m: &Mark, zh: bool) -> Result<()> {
     materialize(doc);
     let (pen, font) = TextPen::new(doc, &[m.text], true, zh)?;
     let gs = doc.add_object(dictionary! { "Type" => "ExtGState", "ca" => Object::Real(m.opacity), "CA" => Object::Real(m.opacity) });
     let (lit, w) = pen.enc(m.text, m.size);
+    let angle = if m.angle.abs() >= 20. { 45_f32 } else { 0. };
     for page in page_ids(doc) {
         let (fname, gname) = add_resources(doc, page, font, gs)?;
         let b = media_box(doc, page);
         let (pw, ph) = (b[2] - b[0], b[3] - b[1]);
         let [r, g, bl] = m.rgb;
         let mut ops = format!("/{gname} gs {r} {g} {bl} rg BT /{fname} {} Tf\n", m.size);
-        let place = |x: f32, y: f32, a: f32| {
-            let (s, c) = a.to_radians().sin_cos();
+        let place = |x: f32, y: f32| {
+            let (s, c) = angle.to_radians().sin_cos();
             // 以文字中心为旋转中心
             let (dx, dy) = (-w / 2. * c + m.size * 0.35 * s, -w / 2. * s - m.size * 0.35 * c);
             format!("{c:.4} {s:.4} {:.4} {c:.4} {:.2} {:.2} Tm {lit} Tj\n", -s, x + dx, y + dy)
         };
         match m.pos {
             "tile" => {
-                let (sx, sy) = (w + m.size * 4., m.size * 6.);
+                let (sx, sy) = tile_step(w, m.size, angle, m.gap.max(0.));
                 let mut y = b[1] + sy / 2.;
                 let mut row = 0;
                 while y < b[3] + sy {
                     let mut x = b[0] + if row % 2 == 0 { 0. } else { sx / 2. };
-                    while x < b[2] + sx { ops += &place(x, y, m.angle); x += sx; }
+                    while x < b[2] + sx { ops += &place(x, y); x += sx; }
                     y += sy;
                     row += 1;
                 }
             }
-            "br" => ops += &place(b[2] - w / 2. - 24., b[1] + m.size + 12., 0.),
-            "top" => ops += &place(b[0] + pw / 2., b[3] - m.size - 12., 0.),
-            _ => ops += &place(b[0] + pw / 2., b[1] + ph / 2., m.angle),
+            "br" => ops += &place(b[2] - w / 2. - 24., b[1] + m.size + 12.),
+            "top" => ops += &place(b[0] + pw / 2., b[3] - m.size - 12.),
+            _ => ops += &place(b[0] + pw / 2., b[1] + ph / 2.),
         }
         ops += "ET";
         overlay(doc, page, ops)?;
@@ -336,8 +345,10 @@ fn manifest(q: &Request) -> Value {
             vec![pdf(), sdk::with_placeholder(sdk::text("order", tr("新顺序", "New order"), ""), tr("例如 3,1,2,4-；“reverse” 为倒序", "e.g. 3,1,2,4-; “reverse” to reverse"))], vec![]),
         sdk::tool("pdf_watermark", "pdf", tr("PDF 水印", "PDF Watermark"), tr("在每一页加文字水印", "Add a text watermark to every page"), "pdf watermark stamp",
             vec![pdf(), sdk::text("text", tr("水印文字", "Watermark text"), tr("机密", "CONFIDENTIAL"))],
-            vec![sdk::select("pos", tr("位置", "Position"), &[("center", tr("居中斜放", "Diagonal center")), ("tile", tr("平铺", "Tiled")), ("top", tr("顶部", "Top")), ("br", tr("右下角", "Bottom right"))]),
-                 sdk::number("size", tr("字号", "Size"), "48"), sdk::text("color", tr("颜色", "Color"), "#ff0000"), sdk::number("opacity", tr("不透明度 %", "Opacity %"), "20")]),
+            vec![sdk::select("pos", tr("位置", "Position"), &[("center", tr("居中", "Center")), ("tile", tr("平铺", "Tiled")), ("top", tr("顶部", "Top")), ("br", tr("右下角", "Bottom right"))]),
+                 sdk::select("dir", tr("方向", "Direction"), &[("0", tr("水平", "Horizontal")), ("45", tr("斜向", "Diagonal"))]),
+                 sdk::number("gap", tr("平铺间距", "Tile spacing"), "80"),
+                 sdk::number("size", tr("字号", "Size"), "48"), sdk::color("color", tr("颜色", "Color"), "#ff0000"), sdk::number("opacity", tr("不透明度 %", "Opacity %"), "20")]),
         sdk::tool("pdf_pagenum", "pdf", tr("PDF 页码", "PDF Page Numbers"), tr("在页面底部加页码", "Add page numbers at the bottom of pages"), "pdf page numbers",
             vec![pdf()],
             vec![sdk::select("fmt", tr("格式", "Format"), &[("n", "1"), ("n_of", "1 / N"), ("dash", "- 1 -"), ("page_of", "Page 1 of N"), ("zh", "第 1 页，共 N 页")]),
@@ -416,7 +427,8 @@ fn run(q: &Request) -> Result<Reply> {
             let mut d = load(&f.data, zh)?;
             let t = q.get("text");
             if t.trim().is_empty() { return Err(q.tr("请输入水印文字", "Enter the watermark text").into()); }
-            watermark(&mut d, &Mark { text: t, size: q.num("size", 48.).clamp(4., 400.) as f32, rgb: color(q.get("color")), opacity: (q.num("opacity", 20.) / 100.).clamp(0.02, 1.) as f32, pos: q.get("pos"), angle: 45. }, zh)?;
+            let angle = if q.get("dir") == "45" { 45. } else { 0. };
+            watermark(&mut d, &Mark { text: t, size: q.num("size", 48.).clamp(4., 400.) as f32, rgb: color(q.get("color")), opacity: (q.num("opacity", 20.) / 100.).clamp(0.02, 1.) as f32, pos: q.get("pos"), angle, gap: q.num("gap", 80.).clamp(0., 4000.) as f32 }, zh)?;
             out(format!("{}-watermark.pdf", sdk::stem(&f.name)), d, String::new())
         }
         "pdf_pagenum" => {

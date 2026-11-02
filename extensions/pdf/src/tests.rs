@@ -51,14 +51,14 @@ fn rotate_mark_number_clean() {
     assert_eq!(rot, [0, 0, 90]);
 
     let mut d = load(&a, false).unwrap();
-    watermark(&mut d, &Mark { text: "DRAFT (x)", size: 40., rgb: [1., 0., 0.], opacity: 0.3, pos: "tile", angle: 45. }, false).unwrap();
+    watermark(&mut d, &Mark { text: "DRAFT (x)", size: 40., rgb: [1., 0., 0.], opacity: 0.3, pos: "tile", angle: 45., gap: 80. }, false).unwrap();
     page_numbers(&mut d, "n_of", "center", 10., 1, false).unwrap();
     let w = roundtrip(d);
     let t = texts(&w);
     assert!(t[0].contains("A page 1") && t[0].contains("DRAFT") && t[0].contains("1 / 3"), "{t:?}");
     assert!(t[2].contains("3 / 3"));
     let mut d = load(&a, false).unwrap();
-    assert!(watermark(&mut d, &Mark { text: "机密", size: 40., rgb: [0.; 3], opacity: 0.3, pos: "center", angle: 45. }, true).is_ok());
+    assert!(watermark(&mut d, &Mark { text: "机密", size: 40., rgb: [0.; 3], opacity: 0.3, pos: "center", angle: 45., gap: 80. }, true).is_ok());
 
     let mut d = load(&a, false).unwrap();
     let removed = clean(&mut d);
@@ -93,7 +93,7 @@ fn via_abi() {
 #[test]
 fn cjk_watermark_and_page_numbers() {
     let mut d = load(&sample(2, "Doc"), true).unwrap();
-    watermark(&mut d, &Mark { text: "内部资料 机密", size: 40., rgb: [1., 0., 0.], opacity: 0.3, pos: "center", angle: 45. }, true).unwrap();
+    watermark(&mut d, &Mark { text: "内部资料 机密", size: 40., rgb: [1., 0., 0.], opacity: 0.3, pos: "center", angle: 45., gap: 80. }, true).unwrap();
     page_numbers(&mut d, "zh", "center", 10., 1, true).unwrap();
     let out = roundtrip(d);
     // 子集化后整个文件应远小于内置字体本身。
@@ -106,8 +106,20 @@ fn cjk_watermark_and_page_numbers() {
 }
 
 #[test]
+fn tile_spacing_is_shared_by_both_directions() {
+    let (hx, hy) = tile_step(100., 40., 0., 80.);
+    assert!((hx - 180.).abs() < 0.1 && (hy - 120.).abs() < 0.1, "{hx} {hy}");
+    let (dx, dy) = tile_step(100., 40., 45., 80.);
+    assert!(dy > hy, "diagonal rows need more room: {dy} vs {hy}");
+    let mut flat = load(&sample(1, "Doc"), false).unwrap();
+    watermark(&mut flat, &Mark { text: "DRAFT", size: 40., rgb: [1., 0., 0.], opacity: 0.4, pos: "tile", angle: 0., gap: 80. }, false).unwrap();
+    let flat = roundtrip(flat);
+    assert!(texts(&flat)[0].contains("DRAFT"));
+}
+
+#[test]
 fn cjk_missing_glyph_reported() {
     let mut d = load(&sample(1, "Doc"), true).unwrap();
-    let e = watermark(&mut d, &Mark { text: "𠀀", size: 40., rgb: [0.; 3], opacity: 0.3, pos: "center", angle: 0. }, true).unwrap_err();
+    let e = watermark(&mut d, &Mark { text: "𠀀", size: 40., rgb: [0.; 3], opacity: 0.3, pos: "center", angle: 0., gap: 80. }, true).unwrap_err();
     assert!(e.contains("𠀀"));
 }

@@ -22,7 +22,7 @@ pub mod ws;
 /// 字段类型：输入与选项共用。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum FieldKind { Text, Multiline, File, Files, Select, Toggle, Number }
+pub enum FieldKind { Text, Multiline, File, Files, Select, Toggle, Number, Color }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Field {
