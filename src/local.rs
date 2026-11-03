@@ -241,7 +241,14 @@ pub fn spawn_local_in(size: Size, shell: Option<&str>, cwd: Option<&std::path::P
         while let Ok(msg) = from_ui.recv() {
             match msg {
                 BackendMsg::Close => break,
-                BackendMsg::Input(b) => { let _ = writer.write_all(&b); let _ = writer.flush(); }
+                BackendMsg::Input(b) => {
+                    // ConPTY 以 win32-input-mode 启动。裸 0x03 不会变成 CTRL_C_EVENT，
+                    // 前台程序（如 ktctl）就收不到中断。改发 Ctrl+C 的按键记录。
+                    #[cfg(windows)]
+                    let b = conpty_input(b);
+                    let _ = writer.write_all(&b);
+                    let _ = writer.flush();
+                }
                 BackendMsg::Resize { cols, rows } => {
                     let _ = master.lock().unwrap().resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
                 }
@@ -252,6 +259,17 @@ pub fn spawn_local_in(size: Size, shell: Option<&str>, cwd: Option<&std::path::P
     Ok(session)
 }
 
+/// Ctrl+C 的 win32-input-mode 记录：按下再松开。
+/// VK_C=67，扫描码=46，Unicode=ETX(3)，LEFT_CTRL_PRESSED=8。
+#[cfg(windows)]
+fn conpty_input(bytes: Vec<u8>) -> Vec<u8> {
+    if bytes == [0x03] {
+        b"\x1b[67;46;3;1;8;1u\x1b[67;46;3;0;8;1u".to_vec()
+    } else {
+        bytes
+    }
+}
+
 #[cfg(test)]
 mod cwd_tests {
     use super::*;
@@ -260,6 +278,13 @@ mod cwd_tests {
         assert_eq!(cmd_prompt(None), "$E]9;9;$P$E\\$P$G");
         assert_eq!(cmd_prompt(Some("$T$G")), "$E]9;9;$P$E\\$T$G");
         assert_eq!(cmd_prompt(Some("")), "$E]9;9;$P$E\\$P$G");
+    }
+    #[cfg(windows)]
+    #[test]
+    fn ctrl_c_is_a_win32_key_record() {
+        let encoded = super::conpty_input(vec![0x03]);
+        assert_eq!(encoded, b"\x1b[67;46;3;1;8;1u\x1b[67;46;3;0;8;1u");
+        assert_eq!(super::conpty_input(b"ls\r".to_vec()), b"ls\r");
     }
     #[test]
     fn pwsh_script_has_no_double_quotes() {
