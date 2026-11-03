@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use gpui::{anchored, deferred, div, prelude::*, px, AnyElement, ClickEvent, Context, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Window};
 use gpui_component::input::{InputEvent, InputState};
-use ssh_term_proto::assets::{DbConn, DbKind};
+use ssh_term_proto::assets::{DbConn, DbKind, Family};
 use ssh_term_proto::db::{dialect, objtree::{self, Group}, saved};
 use ssh_term_proto::i18n::{t, tf};
 
@@ -315,6 +315,53 @@ impl Root {
         if let Some(v) = self.db_views(cx).into_iter().last() { v.update(cx, |v, _| { v.saved_file = Some(file); v.title = name.to_string(); }); }
     }
 
+    fn mysql_writable(id: &str) -> bool {
+        Self::db_conn(id).is_some_and(|c| c.kind.family() == Family::Mysql && !c.read_only)
+    }
+
+    /// Open an empty table designer. CREATE TABLE runs when the user applies it.
+    fn db_new_table(&mut self, node: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let (id, db, schema) = key_parts(node);
+        let target = Target { conn: id, database: db.unwrap_or_default(), schema, table: None };
+        let gk = group_key(node, Group::Tables);
+        self.open_db_tab(target, String::new(), window, cx);
+        if let Some(v) = self.tabs.get(self.active).and_then(|t| t.focused.read(cx).db.clone()) {
+            v.update(cx, |v, cx| v.begin_create(gk, window, cx));
+        }
+    }
+
+    fn db_new_database(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let st = cx.new(|cx| InputState::new(window, cx).placeholder(t("dbt.new_database")));
+        let id_owned = id.to_string();
+        self._subs.push(cx.subscribe_in(&st, window, move |this, st, ev: &InputEvent, _w, cx| {
+            if !matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) { return; }
+            let Some((cid, field)) = this.dbp.new_db.take() else { return };
+            if cid != id_owned { this.dbp.new_db = Some((cid, field)); return; }
+            let name = st.read(cx).value().trim().to_string();
+            if !name.is_empty() { this.db_create_database(&cid, &name, cx); }
+            cx.notify();
+        }));
+        st.update(cx, |s, cx| s.focus(window, cx));
+        self.dbp.new_db = Some((id.to_string(), st));
+        cx.notify();
+    }
+
+    fn db_create_database(&mut self, id: &str, name: &str, cx: &mut Context<Self>) {
+        let (Some(live), Some(conn)) = (self.db_ready(id), Self::db_conn(id)) else { return };
+        let sql = ssh_term_proto::db::alter::create_database(name);
+        let (log, cname, id) = (self.exec_log.clone(), conn.name.clone(), id.to_string());
+        let h = self.rt.spawn(async move { live.driver.execute("", &sql, conn.read_only).await.map(|_| sql) });
+        cx.spawn(async move |this, cx| {
+            let r = h.await.map_err(anyhow::Error::from).and_then(|r| r);
+            let _ = this.update(cx, |this, cx| {
+                match r {
+                    Ok(sql) => { crate::activity::log_push(&log, &cname, &sql, true, String::new()); this.db_refresh(&id, cx); }
+                    Err(e) => this.toast(tf("dbt.failed", &[("e", &format!("{e:#}"))]), cx),
+                }
+            });
+        }).detach();
+    }
+
     fn db_new_saved(&mut self, node: &str, window: &mut Window, cx: &mut Context<Self>) {
         let (id, ..) = key_parts(node);
         let dir = saved_dir(node);
@@ -461,6 +508,7 @@ impl Root {
         if d.read_only { r = r.child(icon(IconName::Lock, ui::IC_XS, c(th.warning))); }
         if let Some(col) = dot { r = r.child(div().size(px(7.)).rounded_full().bg(col)); }
         list = list.child(r);
+        if let Some((eid, st)) = self.dbp.new_db.clone() { if eid == id { list = list.child(div().pl(indent(depth + 1)).pr_2().py_1().child(ui::text_field(&st, false))); } }
         if let Some(e) = fail { if self.dbp.open.contains(&id) { list = list.child(err_row(&e, depth + 1)); } }
         else if mark == 1 { list = list.child(note_row(&t("db.connecting"), depth + 1)); }
         else if open {
@@ -639,6 +687,11 @@ impl Root {
             { let nm = name.clone(); item!("dbm-copyname", IconName::Copy, t("dbt.copy_name"), false, |_this, _w, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(nm.clone()))); }
         } else if let Some((node, g)) = split_group(&key) {
             let node = node.to_string();
+            let (id, ..) = key_parts(&node);
+            if g == Group::Tables && Self::mysql_writable(&id) {
+                let n = node.clone();
+                item!("dbm-tnew", IconName::Table, t("dbt.new_table"), false, |this, w, cx| this.db_new_table(&n, w, cx));
+            }
             if g == Group::Queries { let n = node.clone(); item!("dbm-qnew", IconName::FilePlus, t("dbt.new_saved"), false, |this, w, cx| this.db_new_saved(&n, w, cx)); }
             if g != Group::Backups {
                 { let k = key.clone(); item!("dbm-grefresh", IconName::RefreshCw, t("db.refresh"), false, |this, _w, cx| this.db_refresh(&k, cx)); }
@@ -663,7 +716,14 @@ impl Root {
             { let k = key.clone(); item!("dbm-query", IconName::SquareTerminal, t("db.new_query"), false, |this, w, cx| this.db_new_query(Some(k.clone()), w, cx)); }
             { let k = key.clone(); item!("dbm-qnew2", IconName::FilePlus, t("dbt.new_saved"), false, |this, w, cx| this.db_new_saved(&k, w, cx)); }
             if self.db_up(&id) { let k = key.clone(); item!("dbm-refresh", IconName::RefreshCw, t("db.refresh"), false, |this, _w, cx| this.db_refresh(&k, cx)); }
-            if db.is_none() { let i2 = id.clone(); item!("dbm-edit", IconName::Pencil, t("db.edit"), false, |this, w, cx| this.open_db_dialog(Some(i2.clone()), w, cx)); }
+            if db.is_none() {
+                if self.db_up(&id) && Self::mysql_writable(&id) {
+                    let i2 = id.clone();
+                    item!("dbm-newdb", IconName::Database, t("dbt.new_database"), false, |this, w, cx| this.db_new_database(&i2, w, cx));
+                }
+                let i2 = id.clone();
+                item!("dbm-edit", IconName::Pencil, t("db.edit"), false, |this, w, cx| this.open_db_dialog(Some(i2.clone()), w, cx));
+            }
         }
         deferred(anchored().position(pos).snap_to_window_with_margin(gpui::px(crate::ui::EDGE_MARGIN)).child(m.occlude().on_mouse_down_out(cx.listener(|this, _, _w, cx| { this.dbp.menu = None; this.dbp.arm = None; cx.notify(); })))).with_priority(2).into_any_element()
     }

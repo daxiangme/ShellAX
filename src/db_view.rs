@@ -247,7 +247,18 @@ pub struct DbView {
     pub saved_file: Option<std::path::PathBuf>,
     /// Open the structure designer once the columns have loaded.
     pending_design: bool,
+    /// New MySQL table: the designer builds CREATE TABLE instead of ALTER.
+    creating: bool,
+    create_name: Option<Entity<InputState>>,
+    /// Table name to adopt, and the tree group to refresh, after CREATE succeeds.
+    pending_table: Option<String>,
+    refresh_key: Option<String>,
 }
+
+/// Ask the connection tree to reload a node or group.
+#[derive(Clone)]
+pub enum DbEvent { Refresh(String) }
+impl gpui::EventEmitter<DbEvent> for DbView {}
 
 /// What the tree asked for when it opened a table tab.
 #[derive(Clone, Copy, PartialEq)]
@@ -284,6 +295,7 @@ impl DbView {
         let mut me = Self { title: String::new(), target, conn_name, read_only, production, live: None, conn_err: None, rt, log, grid, where_in, applied_where: String::new(), total: None,
             sub: Sub::Data, table_cols: None, ddl: None, ddl_ed, pending_ddl: None, cell_in, sel: None, edit_note: None,
             editor, editor_h: EDITOR_RATIO, comp, hist: history::Store::load(), hist_in, save_in, results: vec![], result_ix: 0, pop: None, pop_closed: None, pending_sql: None, design: None, design_src: None, design_err: None, ask: None, saved_file: None, pending_design: false,
+            creating: false, create_name: None, pending_table: None, refresh_key: None,
             status: String::new(), status_seq: 0, error: None, busy: false, gen: 0, slot: None, inflight: vec![], _subs: subs };
         me.title = me.make_title();
         me
@@ -353,7 +365,9 @@ impl DbView {
                     cc.asked.clear();
                     cc.cache = Default::default();
                 }
-                if self.table_mode() { self.table_cols = None; self.ddl = None; self.load_meta(cx); self.load_page(true, cx); } else { self.load_tables(cx); }
+                if self.creating {
+                    // the table does not exist yet; stay in the designer
+                } else if self.table_mode() { self.table_cols = None; self.ddl = None; self.load_meta(cx); self.load_page(true, cx); } else { self.load_tables(cx); }
             }
             Err(e) => { self.quiet(cx); self.conn_err = Some(e); }
         }
@@ -577,6 +591,7 @@ impl DbView {
     }
 
     fn set_sub(&mut self, sub: Sub, cx: &mut Context<Self>) {
+        if self.creating { self.sub = Sub::Structure; cx.notify(); return; }
         self.sub = sub;
         if sub == Sub::Ddl && self.ddl.as_ref().is_none_or(|d| d.is_err()) { self.load_ddl(cx); }
         if sub == Sub::Structure && self.table_cols.as_ref().is_none_or(|d| d.is_err()) { self.load_meta(cx); }
@@ -847,6 +862,20 @@ impl DbView {
         true
     }
 
+    /// Empty designer for a table that does not exist yet. `group` is refreshed after CREATE.
+    pub fn begin_create(&mut self, group: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only { self.design_err = Some(t("db.edit_read_only").into()); self.sub = Sub::Structure; cx.notify(); return; }
+        self.creating = true;
+        self.refresh_key = Some(group);
+        self.sub = Sub::Structure;
+        self.table_cols = Some(Ok(vec![]));
+        self.title = t("dbt.new_table").into();
+        self.create_name = Some(input(window, cx, "", &t("db.ph_table")));
+        self.design_err = None;
+        self.design_src = Some((vec![], vec![], vec![]));
+        cx.notify();
+    }
+
     // ---- structure designer
     fn start_design(&mut self, cx: &mut Context<Self>) {
         let (Some(live), Some(table), Some(Ok(cols))) = (self.live.clone(), self.target.table.clone(), self.table_cols.clone()) else { return };
@@ -927,9 +956,21 @@ impl DbView {
     fn preview_design(&mut self, cx: &mut Context<Self>) {
         let Some(live) = &self.live else { return };
         let f = live.driver.family();
-        let q = dialect::qualified(f, &self.target.database, self.target.schema.as_deref(), self.target.table.as_deref().unwrap_or_default());
-        let r = self.design_ops(cx).and_then(|ops| if ops.is_empty() { Err(t("db.alter_none").to_string()) } else { alter::statements(f, &q, self.target.schema.as_deref(), &ops).map_err(|e| format!("{e:#}")) });
-        match r { Ok(stmts) => { self.design_err = None; self.ask = Some(Ask::Alter(stmts)); } Err(e) => self.design_err = Some(e) }
+        let name = if self.creating {
+            let n = self.create_name.as_ref().map(|i| val(i, cx)).unwrap_or_default();
+            if n.is_empty() { self.design_err = Some(t("db.create_need_name").into()); cx.notify(); return; }
+            n
+        } else {
+            self.target.table.clone().unwrap_or_default()
+        };
+        let q = dialect::qualified(f, &self.target.database, self.target.schema.as_deref(), &name);
+        let r = if self.creating {
+            self.pending_table = Some(name);
+            self.design_ops(cx).and_then(|ops| alter::create_table(f, &q, &ops).map(|s| vec![s]).map_err(|e| format!("{e:#}")))
+        } else {
+            self.design_ops(cx).and_then(|ops| if ops.is_empty() { Err(t("db.alter_none").to_string()) } else { alter::statements(f, &q, self.target.schema.as_deref(), &ops).map_err(|e| format!("{e:#}")) })
+        };
+        match r { Ok(stmts) => { self.design_err = None; self.ask = Some(Ask::Alter(stmts)); } Err(e) => { self.pending_table = None; self.design_err = Some(e); } }
         cx.notify();
     }
 
@@ -953,6 +994,13 @@ impl DbView {
                         v.design = None;
                         v.table_cols = None;
                         v.ddl = None;
+                        if let Some(name) = v.pending_table.take() {
+                            v.creating = false;
+                            v.create_name = None;
+                            v.target.table = Some(name);
+                            v.title = v.make_title();
+                            if let Some(k) = v.refresh_key.clone() { cx.emit(DbEvent::Refresh(k)); }
+                        }
                         v.load_meta(cx);
                         v.reset_completion(cx);
                         v.load_page(true, cx);
@@ -1040,14 +1088,14 @@ impl DbView {
         if self.read_only { row = row.child(ui::tag(t("db.read_only"), c(th.warning))); }
         if self.production { row = row.child(ui::tag(t("tag.production"), c(th.error))); }
         row = row.child(div().w(px(8.)));
-        if self.table_mode() {
+        if self.table_mode() || self.creating {
             let me = cx.entity().downgrade();
             let subs = [("data".to_string(), t("db.sub_data").to_string()), ("structure".to_string(), t("db.sub_structure").to_string()), ("ddl".to_string(), "DDL".to_string())];
             let cur_sub = match self.sub { Sub::Data => "data", Sub::Structure => "structure", Sub::Ddl => "ddl" };
-            row = row.child(div().flex_shrink_0().child(ui::segmented("dbv-sub", &subs, cur_sub, move |v, _w, cx| {
+            row = row.when(!self.creating, |row| row.child(div().flex_shrink_0().child(ui::segmented("dbv-sub", &subs, cur_sub, move |v, _w, cx| {
                 let sub = match v.as_str() { "structure" => Sub::Structure, "ddl" => Sub::Ddl, _ => Sub::Data };
                 let _ = me.update(cx, |this, cx| this.set_sub(sub, cx));
-            })));
+            }))));
             row = row.child(div().w(px(6.)));
             if self.sub == Sub::Data {
                 row = row.child(Self::toolbar_btn("dbv-refresh", IconName::RefreshCw, None, "").on_click(cx.listener(|v, _, _w, cx| v.guarded(Next::Reload, cx))))
@@ -1064,11 +1112,15 @@ impl DbView {
                     .child(Self::toolbar_btn("dbv-import", IconName::ArrowUpFromLine, Some(t("db.import").into()), "").on_click(cx.listener(|v, _, _w, cx| v.import(cx))));
                 if self.busy && self.slot.is_some() { row = row.child(Self::toolbar_btn("dbv-tstop", IconName::Square, Some(t("db.stop").into()), "").on_click(cx.listener(|v, _, _w, cx| v.cancel(cx)))); }
             } else {
-                row = row.child(div().flex_1()).child(Self::toolbar_btn("dbv-meta-refresh", IconName::RefreshCw, None, "").on_click(cx.listener(|v, _, _w, cx| { if v.sub == Sub::Ddl { v.load_ddl(cx) } else { v.table_cols = None; v.load_meta(cx) } cx.notify(); })));
+                row = row.child(div().flex_1()).when(!self.creating, |row| row.child(Self::toolbar_btn("dbv-meta-refresh", IconName::RefreshCw, None, "").on_click(cx.listener(|v, _, _w, cx| { if v.sub == Sub::Ddl { v.load_ddl(cx) } else { v.table_cols = None; v.load_meta(cx) } cx.notify(); }))));
                 if self.sub == Sub::Structure && !self.read_only {
                     row = row.child(if self.design.is_some() {
                         div().flex().gap_1()
-                            .child(ui::button("dbv-design-cancel", t("ui.cancel"), 0).on_click(cx.listener(|v, _, _w, cx| { v.design = None; v.design_err = None; cx.notify(); })))
+                            .child(ui::button("dbv-design-cancel", t("ui.cancel"), 0).on_click(cx.listener(|v, _, _w, cx| {
+                                if v.creating { v.design_err = None; v.design_src = Some((vec![], vec![], vec![])); }
+                                else { v.design = None; v.design_err = None; }
+                                cx.notify();
+                            })))
                             .child(ui::button("dbv-design-apply", t("db.preview_apply"), 1).on_click(cx.listener(|v, _, _w, cx| v.preview_design(cx))))
                             .into_any_element()
                     } else {
@@ -1166,6 +1218,11 @@ impl DbView {
         let row = |dropped: bool, new: bool| div().py_1().flex().items_center().gap_1().when(dropped, |d| d.opacity(0.45)).when(new, |d| d.bg(c(th.success).opacity(0.08)));
         let mut list = div().id("dbv-design").flex_1().min_h_0().overflow_y_scroll().px_3().pb_3().flex().flex_col().text_size(px(ui::fs_body()));
         if let Some(e) = &self.design_err { list = list.child(ui::notice(ui::Notice::Error, e.clone()).mt(px(ui::SP_2))); }
+        if let Some(name) = &self.create_name {
+            list = list.child(div().pt_2().flex().items_center().gap_2()
+                .child(div().w(px(72.)).flex_shrink_0().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(t("db.ph_table")))
+                .child(div().w(px(240.)).child(ui::text_field(name, false))));
+        }
         if f == ssh_term_proto::assets::Family::Sqlite { list = list.child(div().pt_2().text_size(px(ui::fs_small())).text_color(c(th.overlay0)).child(t("db.design_sqlite_note"))); }
         list = list.child(section(t("db.design_cols").into()));
         for (i, col) in d.cols.iter().enumerate() {
@@ -1443,7 +1500,7 @@ impl Render for DbView {
             }))
             .size_full().relative().flex().flex_col().bg(c(th.base)).text_color(c(th.text));
         root = root.child(self.header(cx));
-        if self.table_mode() {
+        if self.table_mode() || self.creating {
             let body: gpui::AnyElement = match self.sub {
                 Sub::Structure if self.design.is_some() => self.design_el(cx),
                 Sub::Structure => match &self.design_err { Some(e) => div().flex_1().flex().flex_col().child(ui::notice(ui::Notice::Error, e.clone()).mt(px(ui::SP_2))).child(self.structure_el()).into_any_element(), None => self.structure_el() },

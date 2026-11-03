@@ -603,7 +603,7 @@ pub struct SearchBar { pub query: String, pub cur: Option<(BPoint, BPoint)>, pub
 #[derive(Clone, Debug, PartialEq)]
 pub struct StepOutput { pub cmd: String, pub exit: Option<i32>, pub output: String, pub withheld: bool }
 
-pub enum TermEvent { Keyword(String, String), Explain, Agent(String, AgentState), LongDone(String, u64, i32), Audit(&'static str, String), CtxEditor(String), CtxCdTab(String), CtxAiExplain(String), CtxOpenTool(String, String), CtxUseAi, Copied, Toast(String), RetryConnect, EditHost }
+pub enum TermEvent { Keyword(String, String), Explain, Agent(String, AgentState), LongDone(String, u64, i32), Audit(&'static str, String), CtxEditor(String), CtxCdTab(String), CtxAiExplain(String), CtxOpenTool(String, String), CtxUseAi, Copied, Toast(String), RetryConnect, EditHost, RefreshDb(String) }
 
 /// IME support (PRD 3.3: IME must work for agents too). Committed text goes to the PTY like typing;
 /// composition text is only drawn (never sent) until the IME commits it.
@@ -624,6 +624,7 @@ impl TermView {
         let mut me = Self::new(&title, Spec::Local, Err(anyhow::anyhow!("db")), history, manifests, window, cx);
         me.error = None;
         me._subs.push(cx.observe(&v, |me: &mut Self, v, cx| { let t = v.read(cx).title.clone(); if me.title.as_ref() != t.as_str() { me.title = t.into(); } cx.notify(); }));
+        me._subs.push(cx.subscribe(&v, |_, _, ev: &crate::db_view::DbEvent, cx| { let crate::db_view::DbEvent::Refresh(k) = ev; cx.emit(TermEvent::RefreshDb(k.clone())); }));
         me.db = Some(v);
         me
     }

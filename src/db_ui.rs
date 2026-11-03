@@ -46,6 +46,8 @@ pub struct DbPanel {
     conn_try: HashMap<String, u64>,
     /// Inline editor: (group key, member being renamed or empty for a filter, input).
     pub(crate) edit: Option<(String, Option<String>, Entity<InputState>)>,
+    /// Connection id and the name field for CREATE DATABASE.
+    pub(crate) new_db: Option<(String, Entity<InputState>)>,
     /// Destructive menu entry waiting for a second click.
     pub(crate) arm: Option<String>,
     collapsed_groups: Vec<String>,

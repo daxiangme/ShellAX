@@ -784,6 +784,7 @@ impl Root {
                     return;
                 }
                 termview::TermEvent::Explain => {}
+                termview::TermEvent::RefreshDb(k) => { this.db_refresh(k, cx); }
             }
             let fc = pane.update(cx, |p, cx| { let f = p.failure_context(); p.failed = None; cx.notify(); f });
             if let Some((cmd, code, out, host)) = fc {

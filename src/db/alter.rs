@@ -107,6 +107,35 @@ fn check(c: &ColDef) -> Result<()> {
     Ok(())
 }
 
+/// `CREATE TABLE` for a new MySQL table. `ops` are the designer's adds (columns, indexes, foreign keys).
+pub fn create_table(f: Family, table: &str, ops: &[Op]) -> Result<String> {
+    if f != Family::Mysql { bail!(crate::i18n::t("db.create_mysql_only").to_string()); }
+    let mut cols = vec![];
+    let mut rest = vec![];
+    for op in ops {
+        match op {
+            Op::AddColumn(c) => { check(c)?; cols.push(col_sql(f, c)); }
+            Op::AddIndex(i) => {
+                if i.name.trim().is_empty() || i.columns.is_empty() { bail!(crate::i18n::t("db.alter_err_index").to_string()); }
+                rest.push(format!("{}KEY {} ({})", if i.unique { "UNIQUE " } else { "" }, quote_ident(f, &i.name), index_keys(f, &i.columns)));
+            }
+            Op::AddFk(k) => {
+                if k.name.trim().is_empty() || k.columns.is_empty() || k.columns.len() != k.ref_columns.len() || k.ref_table.trim().is_empty() { bail!(crate::i18n::t("db.alter_err_fk").to_string()); }
+                rest.push(fk_sql(f, k));
+            }
+            _ => {}
+        }
+    }
+    if cols.is_empty() { bail!(crate::i18n::t("db.create_need_col").to_string()); }
+    cols.extend(rest);
+    Ok(format!("CREATE TABLE {table} (\n  {}\n)", cols.join(",\n  ")))
+}
+
+/// `CREATE DATABASE` with a quoted identifier.
+pub fn create_database(name: &str) -> String {
+    format!("CREATE DATABASE {}", quote_ident(Family::Mysql, name))
+}
+
 /// Statements for `ops` on `table` (qualified and quoted). `schema` qualifies PostgreSQL
 /// index names on DROP INDEX.
 pub fn statements(f: Family, table: &str, schema: Option<&str>, ops: &[Op]) -> Result<Vec<String>> {
@@ -297,5 +326,14 @@ mod tests {
         assert!(statements(Family::Postgres, "t", None, &[Op::AddColumn(col("", "int"))]).is_err());
         assert_eq!(index_keys(Family::Postgres, &["a".into(), "lower(b)".into()]), "\"a\", lower(b)");
         assert_eq!(parse_names(" a, ,b "), vec!["a", "b"]);
+        let sql = create_table(Family::Mysql, "`app`.`t`", &[
+            Op::AddColumn(ColDef { nullable: false, comment: "id".into(), ..col("id", "int") }),
+            Op::AddIndex(IndexDef { name: "ix".into(), columns: vec!["id".into()], unique: true, constraint: false }),
+        ]).unwrap();
+        assert!(sql.starts_with("CREATE TABLE `app`.`t` ("));
+        assert!(sql.contains("`id` int NOT NULL COMMENT 'id'"));
+        assert!(sql.contains("UNIQUE KEY `ix` (`id`)"));
+        assert!(create_table(Family::Mysql, "`t`", &[]).is_err());
+        assert_eq!(create_database("a`b"), "CREATE DATABASE `a``b`");
     }
 }
