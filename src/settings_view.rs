@@ -957,45 +957,35 @@ impl SettingsView {
         let channel = if g.update_channel == "beta" { t("update.channel_beta") } else { t("update.channel_stable") };
         let checked = crate::update_ui::last_checked().map(crate::update_ui::when).map_or_else(|| t("update.never_checked").to_string(), |w| tf("update.last_checked", &[("t", &w)]));
         let source = if g.custom_update_url().is_some() { g.update_source() } else { "GitHub Releases".into() };
-        // 版本卡片
-        let version_card = card()
-            .child(div().flex().items_center().gap_2()
-                .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(tf("update.current", &[("v", &ssh_term_proto::update::CURRENT)])))
-                .child(div().px_2().py(px(1.)).rounded_full().bg(c(th.surface0)).text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(channel))
-                .child(div().flex_1())
-                .child(ui::button("check-update", t("ui.check_now"), 0).on_click(cx.listener(|this, _, _w, cx| {
-                    this.notice = Some(t("settings.update_checking").into());
-                    this.update_found = None;
-                    let g = config::get().general.clone();
-                    cx.spawn(async move |this, cx| {
-                        let r = cx.background_executor().spawn(async move { g.check_update() }).await;
-                        crate::update_ui::mark_checked();
-                        let _ = this.update(cx, |v, cx| {
-                            match r {
-                                Ok(Some(m)) => { v.notice = None; v.update_found = Some(m); }
-                                Ok(None) => v.notice = Some(tf("settings.update_latest", &[("v", &ssh_term_proto::update::CURRENT)])),
-                                Err(e) => v.notice = Some(tf("settings.update_failed", &[("e", &crate::update_ui::friendly(&format!("{e:#}")))])),
-                            }
-                            cx.notify();
-                        });
-                    }).detach();
-                    cx.notify();
-                }))))
-            .child(muted(checked))
-            .child(muted(tf("update.source", &[("s", &source)])))
-            .children(self.notice.clone().map(|n| div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).whitespace_normal().child(n)));
-
-        // 新版本卡片
         let phase = crate::update_ui::phase();
         let found = self.update_found.clone().or_else(|| crate::update_ui::offered()).or_else(|| match &phase {
             Phase::Downloading { .. } | Phase::Failed { .. } => crate::update_ui::last(), _ => None });
-        let new_card = found.map(|m| {
+        let check_now = ui::button("check-update", t("ui.check_now"), 0).on_click(cx.listener(|this, _, _w, cx| {
+            this.notice = Some(t("settings.update_checking").into());
+            this.update_found = None;
+            let g = config::get().general.clone();
+            cx.spawn(async move |this, cx| {
+                let r = cx.background_executor().spawn(async move { g.check_update() }).await;
+                crate::update_ui::mark_checked();
+                let _ = this.update(cx, |v, cx| {
+                    match r {
+                        Ok(Some(m)) => { v.notice = None; v.update_found = Some(m); }
+                        Ok(None) => v.notice = Some(tf("settings.update_latest", &[("v", &ssh_term_proto::update::CURRENT)])),
+                        Err(e) => v.notice = Some(tf("settings.update_failed", &[("e", &crate::update_ui::friendly(&format!("{e:#}")))])),
+                    }
+                    cx.notify();
+                });
+            }).detach();
+            cx.notify();
+        }));
+        // 发现新版本时，结果就写在这张卡片上，不再另起一块放到页面底部。
+        let version_card = if let Some(m) = found.clone() {
             let notes_url = format!("https://github.com/{}/releases/tag/v{}", ssh_term_proto::update::REPO, m.version.trim_start_matches('v'));
             let browser_url = if m.url.is_empty() { notes_url.clone() } else { m.url.clone() };
             let mut body = card()
                 .child(div().flex().items_center().gap_2()
                     .child(ui::icon(ui::IconName::Download, ui::IC_MD, c(th.accent)))
-                    .child(div().px_2().py(px(1.)).rounded_full().bg(crate::theme::selected_bg()).text_size(px(ui::fs_body())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.accent)).child(tf("update.new_badge", &[("v", &m.version)])))
+                    .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(tf("main.update_available", &[("v", &m.version)])))
                     .child(div().flex_1())
                     .child(div().id("upd-notes").text_size(px(ui::fs_body())).text_color(c(th.accent)).cursor_pointer().hover(|s| s.underline()).child(t("update.view_notes")).on_click(move |_, _w, cx| cx.open_url(&notes_url))));
             let ready = crate::update_ui::ready_for(&m.version);
@@ -1041,8 +1031,22 @@ impl SettingsView {
             }
             action = action.child(div().id("upd-browser").text_size(px(ui::fs_small())).text_color(c(th.subtext)).cursor_pointer().hover(|s| s.underline().text_color(c(th.accent)))
                 .child(t("update.open_in_browser")).on_click(move |_, _w, cx| cx.open_url(&browser_url)));
-            body.child(action)
-        });
+            body.child(muted(tf("update.current", &[("v", &ssh_term_proto::update::CURRENT)])))
+                .child(muted(checked))
+                .child(muted(tf("update.source", &[("s", &source)])))
+                .children(self.notice.clone().map(|n| div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).whitespace_normal().child(n)))
+                .child(action)
+        } else {
+            card()
+                .child(div().flex().items_center().gap_2()
+                    .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(tf("update.current", &[("v", &ssh_term_proto::update::CURRENT)])))
+                    .child(div().px_2().py(px(1.)).rounded_full().bg(c(th.surface0)).text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(channel))
+                    .child(div().flex_1())
+                    .child(check_now))
+                .child(muted(checked))
+                .child(muted(tf("update.source", &[("s", &source)])))
+                .children(self.notice.clone().map(|n| div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).whitespace_normal().child(n)))
+        };
 
         // 已下载的安装包
         let history = match &phase {
@@ -1071,7 +1075,6 @@ impl SettingsView {
         div().flex().flex_col().gap_3().child(Self::section_title(t("ui.updates")))
             .child(version_card)
             .child(github_card)
-            .children(new_card)
             .children(history)
             .into_any_element()
     }

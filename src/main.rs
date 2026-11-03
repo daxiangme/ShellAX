@@ -1486,12 +1486,43 @@ impl Root {
             .child(div().flex().items_center().gap_2()
                 .child(icon(IconName::Download, ui::IC_MD, c(th.accent)))
                 .child(div().flex_1().text_size(px(ui::fs_body())).font_weight(FontWeight::SEMIBOLD).text_color(c(th.text)).child(tf("main.update_available", &[("v", &m.version)])))
+                .child(div().id("upd-offer-min").p_1().rounded(px(ui::R_MD)).cursor_pointer().hover(|s| s.bg(c(th.surface0)))
+                    .tooltip(ui::tip(t("update.minimize")))
+                    .child(icon(IconName::ChevronDown, ui::IC_SM, c(th.overlay1)))
+                    .on_click(cx.listener(|_, _, _w, cx| { update_ui::minimize_offer(); cx.notify(); })))
                 .child(div().id("upd-offer-x").p_1().rounded(px(ui::R_MD)).cursor_pointer().hover(|s| s.bg(c(th.surface0)))
                     .child(icon(IconName::X, ui::IC_SM, c(th.overlay1)))
                     .on_click(cx.listener(|_, _, _w, cx| { update_ui::dismiss_offer(true); cx.notify(); }))))
             .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(tf("update.offer_body", &[("cur", &ssh_term_proto::update::CURRENT), ("v", &m.version)])))
             .children(status.map(|(msg, err)| div().text_size(px(ui::fs_small())).text_color(c(if err { th.error } else { th.overlay1 })).child(msg)))
             .child(actions)
+    }
+
+    /// 更新浮层收起后，在状态栏显示进度。点一下再展开。
+    fn update_status_chip(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if !update_ui::offer_minimized() || update_ui::prompt().is_some() { return None; }
+        let m = update_ui::offered()?;
+        use ssh_term_proto::updater::Phase;
+        let th = theme::cur();
+        let failed = matches!(update_ui::phase(), Phase::Failed { ref version, .. } if version == &m.version);
+        let label = match update_ui::phase() {
+            Phase::Downloading { version, progress } if version == m.version => {
+                let done = progress.done.load(Ordering::Relaxed);
+                let total = progress.total.load(Ordering::Relaxed);
+                let p = if total > 0 { format!("{}%", done * 100 / total) } else { "…".into() };
+                tf("update.minimized", &[("v", &m.version), ("p", &p)])
+            }
+            Phase::Failed { version, .. } if version == m.version => t("update.minimized_fail").into(),
+            _ => tf("main.update_available", &[("v", &m.version)]),
+        };
+        let col = if failed { c(th.error) } else { c(th.accent) };
+        Some(div().id("upd-status").px_2().h(px(22.)).rounded(px(ui::R_MD)).flex().items_center().gap_1().cursor_pointer()
+            .hover(|s| s.bg(crate::theme::hover_bg()))
+            .text_color(col)
+            .on_click(cx.listener(|_, _, _w, cx| { update_ui::expand_offer(); cx.notify(); }))
+            .child(icon(IconName::Download, ui::IC_XS, col))
+            .child(label)
+            .into_any_element())
     }
 
     pub(crate) fn apply_update(&mut self, rec: &ssh_term_proto::updater::Record, w: &mut Window, cx: &mut Context<Self>) {
@@ -2160,6 +2191,7 @@ impl Render for Root {
             .child(div().flex().items_center().gap_2().child(div().size(px(7.)).rounded_full().bg(scolor)).child(status))
             .child(title)
             .child(div().flex_1())
+            .children(self.update_status_chip(cx))
             .child(hist)
             .child(dims)
             .child("UTF-8")
@@ -2427,7 +2459,7 @@ impl Render for Root {
             if self.tab_menu.is_none() { if let Some((i, pos)) = gt { if i < self.tabs.len() { let el = self.tab_menu_el(i, pos, false, cx); root = root.child(chrome::pop_out(("menu-out-tab", seq as usize), div().absolute().top_0().left_0().size_full().child(el))); } } }
         }
         if let (Some(m), None) = (update_ui::offered(), update_ui::prompt()) {
-            root = root.child(self.update_offer_el(m, window, cx));
+            if !update_ui::offer_minimized() { root = root.child(self.update_offer_el(m, window, cx)); }
         }
         if let Some((msg, seq)) = &self.toast {
             // info toast: neutral text + info icon, 3px semantic bar on the left

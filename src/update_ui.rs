@@ -1,6 +1,6 @@
 //! 应用内更新的界面状态：下载进度、失败原因、已下载的安装包，以及“下载完成”提示。
 //! 下载在后台线程进行；主窗口定时刷新，设置页和提示框都从这里读取。
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use ssh_term_proto::update::Manifest;
@@ -29,12 +29,20 @@ static OFFER: Mutex<Option<Manifest>> = Mutex::new(None);
 static SNOOZED: Mutex<Option<String>> = Mutex::new(None);
 pub fn offer(m: Manifest) {
     if SNOOZED.lock().unwrap().as_deref() == Some(m.version.as_str()) { return; }
-    *OFFER.lock().unwrap() = Some(m); bump();
+    *OFFER.lock().unwrap() = Some(m);
+    MINIMIZED.store(false, Ordering::Relaxed);
+    bump();
 }
 pub fn offered() -> Option<Manifest> { OFFER.lock().unwrap().clone() }
+/// 浮层收起后，进度留在状态栏。不取消下载，也不记成「稍后」。
+static MINIMIZED: AtomicBool = AtomicBool::new(false);
+pub fn offer_minimized() -> bool { MINIMIZED.load(Ordering::Relaxed) }
+pub fn minimize_offer() { MINIMIZED.store(true, Ordering::Relaxed); bump(); }
+pub fn expand_offer() { MINIMIZED.store(false, Ordering::Relaxed); bump(); }
 /// 关闭通知；`later` 为 true 时本次运行不再为该版本弹出。
 pub fn dismiss_offer(later: bool) {
     if let Some(m) = OFFER.lock().unwrap().take() { if later { *SNOOZED.lock().unwrap() = Some(m.version); } }
+    MINIMIZED.store(false, Ordering::Relaxed);
     bump();
 }
 /// 已下载好的同版本安装包。
