@@ -10,6 +10,20 @@ ShellAX 是用 Rust + GPUI 编写的跨平台终端 / SSH 客户端。除终端�
 
 支持平台：Windows x64、Mac（Apple Silicon）。Linux 暂无发布包，可从源码构建。
 
+## 界面
+
+<img src="docs/screenshots/terminal.png" alt="主机与终端" width="100%" />
+
+主机树、本地终端，以及底部的路径和本机状态。
+
+<img src="docs/screenshots/homebrew.png" alt="Homebrew" width="100%" />
+
+macOS 上的 Homebrew：左侧是服务和入口，标签按软件或列表分开，中间是详情和命令输出。
+
+<img src="docs/screenshots/database.png" alt="数据库" width="100%" />
+
+数据库模块还没有打开查询时，可以从最近的连接进入。
+
 ## 功能概览
 
 ### 左侧模块
@@ -22,6 +36,7 @@ ShellAX 是用 Rust + GPUI 编写的跨平台终端 / SSH 客户端。除终端�
 | **数据库** | 连接管理、表浏览与 SQL 编辑器，另有文档型数据库浏览 |
 | **Redis** | 键树、按类型查看与编辑、控制台 |
 | **Docker** | 本机或经 SSH 访问的容器引擎 |
+| **Homebrew** | 仅 macOS。管理本机已安装的配方、应用和服务，可升级、卸载，也可搜索后安装 |
 | **端口** | 端口转发管理 |
 | **工具** | 44 个内置小工具与可下载的扩展包 |
 

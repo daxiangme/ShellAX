@@ -10,6 +10,20 @@ ShellAX is a cross-platform terminal and SSH client written in Rust and GPUI. Be
 
 Platforms: Windows x64 and Mac (Apple Silicon). There is no Linux release build yet; build it from source.
 
+## Interface
+
+<img src="docs/screenshots/terminal.png" alt="Hosts and terminal" width="100%" />
+
+The host tree, a local terminal, and the path and machine status along the bottom.
+
+<img src="docs/screenshots/homebrew.png" alt="Homebrew" width="100%" />
+
+Homebrew on macOS: services and entries on the left, one tab per package or list, and details with command output in the center.
+
+<img src="docs/screenshots/database.png" alt="Database" width="100%" />
+
+When the database module has no query open, a recent connection is the way in.
+
 ## Features
 
 ### Modules on the left
@@ -22,6 +36,7 @@ The activity bar switches modules. Each module has its own tabs, and the last ta
 | **Database** | Connections, table browsing, and a SQL editor, plus a document browser |
 | **Redis** | Key tree, typed viewers and editors, and a console |
 | **Docker** | The local engine, or an engine reached through SSH |
+| **Homebrew** | macOS only. Manage installed formulae, casks, and services; upgrade, uninstall, or search and install |
 | **Ports** | Port forwarding |
 | **Tools** | 44 built-in utilities, plus downloadable extension packs |
 
