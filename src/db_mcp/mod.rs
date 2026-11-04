@@ -9,7 +9,10 @@ mod server;
 mod sql;
 
 pub use auth::{authorize, exposed, policy_for, resolve, ConnPolicy, Decision, Deny, Grant, Level};
-pub use server::{start, AuditEvent, Backend, ColumnOut, ConfirmReq, ConnView, Limits, PublicConn, RunOut, Running, SetOut};
+pub use server::{
+    start, AuditEvent, Backend, ColumnOut, ConfirmReq, ConnView, Limits, PublicConn, RunOut,
+    Running, SetOut,
+};
 pub use sql::{analyze, count_sql, Analysis, Engine, Kind, SqlError, TableUse};
 
 use std::io::Write;
@@ -26,14 +29,21 @@ pub const CONFIRM_WAIT: Duration = Duration::from_secs(180);
 /// `auto` keeps the first free port until the user refreshes it. `manual` uses the typed port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum PortMode { Auto, Manual }
+pub enum PortMode {
+    Auto,
+    Manual,
+}
 
 impl Default for PortMode {
-    fn default() -> Self { Self::Auto }
+    fn default() -> Self {
+        Self::Auto
+    }
 }
 
 impl PortMode {
-    pub fn is_auto(self) -> bool { self == Self::Auto }
+    pub fn is_auto(self) -> bool {
+        self == Self::Auto
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -53,40 +63,87 @@ pub struct McpConfig {
     pub grants: Vec<Grant>,
 }
 
-fn is_false(v: &bool) -> bool { !*v }
+fn is_false(v: &bool) -> bool {
+    !*v
+}
 
 impl Default for McpConfig {
-    fn default() -> Self { Self { enabled: false, port: 0, port_mode: PortMode::Auto, max_rows: 500, timeout_secs: 30, phase_dismissed: false, grants: vec![] } }
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: 0,
+            port_mode: PortMode::Auto,
+            max_rows: 500,
+            timeout_secs: 30,
+            phase_dismissed: false,
+            grants: vec![],
+        }
+    }
 }
 
 impl McpConfig {
-    pub fn is_default(&self) -> bool { self == &Self::default() }
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
 
     pub fn upsert(&mut self, conn: &str, database: &str, table: &str, level: Level) {
         if let Some(g) = self.find_mut(conn, database, table) {
             g.level = level;
-            if table.is_empty() { g.auto = false; }
+            if table.is_empty() {
+                g.auto = false;
+            }
         } else {
-            self.grants.push(Grant { conn: conn.into(), database: database.into(), schema: String::new(), table: table.into(), level, auto: false });
+            self.grants.push(Grant {
+                conn: conn.into(),
+                database: database.into(),
+                schema: String::new(),
+                table: table.into(),
+                level,
+                auto: false,
+            });
         }
     }
 
     pub fn set_auto(&mut self, conn: &str, database: &str, table: &str, auto: bool) {
-        if table.is_empty() { return; }
-        if let Some(g) = self.find_mut(conn, database, table) { g.auto = auto; }
-        else { self.grants.push(Grant { conn: conn.into(), database: database.into(), schema: String::new(), table: table.into(), level: Level::Read, auto }); }
+        if table.is_empty() {
+            return;
+        }
+        if let Some(g) = self.find_mut(conn, database, table) {
+            g.auto = auto;
+        } else {
+            self.grants.push(Grant {
+                conn: conn.into(),
+                database: database.into(),
+                schema: String::new(),
+                table: table.into(),
+                level: Level::Read,
+                auto,
+            });
+        }
     }
 
     pub fn clear(&mut self, conn: &str, database: &str, table: &str) {
-        self.grants.retain(|g| !(g.conn == conn && g.schema.is_empty() && g.database.eq_ignore_ascii_case(database) && g.table.eq_ignore_ascii_case(table)));
+        self.grants.retain(|g| {
+            !(g.conn == conn
+                && g.schema.is_empty()
+                && g.database.eq_ignore_ascii_case(database)
+                && g.table.eq_ignore_ascii_case(table))
+        });
     }
 
     fn find_mut(&mut self, conn: &str, database: &str, table: &str) -> Option<&mut Grant> {
-        self.grants.iter_mut().find(|g| g.conn == conn && g.schema.is_empty() && g.database.eq_ignore_ascii_case(database) && g.table.eq_ignore_ascii_case(table))
+        self.grants.iter_mut().find(|g| {
+            g.conn == conn
+                && g.schema.is_empty()
+                && g.database.eq_ignore_ascii_case(database)
+                && g.table.eq_ignore_ascii_case(table)
+        })
     }
 }
 
-pub fn supported(kind: DbKind) -> bool { matches!(kind.family(), Family::Mysql | Family::Dameng) }
+pub fn supported(kind: DbKind) -> bool {
+    matches!(kind.family(), Family::Mysql | Family::Dameng)
+}
 
 pub fn engine_of(kind: DbKind) -> Option<Engine> {
     match kind.family() {
@@ -96,7 +153,9 @@ pub fn engine_of(kind: DbKind) -> Option<Engine> {
     }
 }
 
-pub fn token_path(data_dir: &Path) -> PathBuf { data_dir.join("db-mcp-token") }
+pub fn token_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("db-mcp-token")
+}
 
 pub fn new_token() -> String {
     use rand::RngCore;
@@ -109,7 +168,9 @@ pub fn load_or_create_token(data_dir: &Path) -> anyhow::Result<String> {
     let p = token_path(data_dir);
     if let Ok(s) = std::fs::read_to_string(&p) {
         let s = s.trim().to_string();
-        if !s.is_empty() { return Ok(s); }
+        if !s.is_empty() {
+            return Ok(s);
+        }
     }
     let t = new_token();
     store_token(data_dir, &t)?;
@@ -117,7 +178,9 @@ pub fn load_or_create_token(data_dir: &Path) -> anyhow::Result<String> {
 }
 
 pub fn store_token(data_dir: &Path, token: &str) -> anyhow::Result<()> {
-    if let Some(d) = token_path(data_dir).parent() { std::fs::create_dir_all(d)?; }
+    if let Some(d) = token_path(data_dir).parent() {
+        std::fs::create_dir_all(d)?;
+    }
     write_private(&token_path(data_dir), token.trim())?;
     Ok(())
 }
@@ -127,11 +190,18 @@ fn write_private(p: &Path, text: &str) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)?;
         f.write_all(text.as_bytes())?;
     }
     #[cfg(not(unix))]
-    { std::fs::write(&tmp, text)?; }
+    {
+        std::fs::write(&tmp, text)?;
+    }
     std::fs::rename(tmp, p)?;
     Ok(())
 }
@@ -140,10 +210,13 @@ fn write_private(p: &Path, text: &str) -> anyhow::Result<()> {
 pub fn scrub(s: &str) -> String {
     let url = regex::Regex::new(r"(?i)(://[^:/\s]+:)[^@\s]+@").unwrap();
     let kv = regex::Regex::new(r"(?i)\b(password|passwd|pwd)\b(\s*[:=]\s*)\S+").unwrap();
-    kv.replace_all(&url.replace_all(s, "$1***@"), "$1$2***").into_owned()
+    kv.replace_all(&url.replace_all(s, "$1***@"), "$1$2***")
+        .into_owned()
 }
 
-pub fn endpoint(port: u16) -> String { format!("http://127.0.0.1:{port}/mcp") }
+pub fn endpoint(port: u16) -> String {
+    format!("http://127.0.0.1:{port}/mcp")
+}
 
 /// Generic MCP client JSON. No database credentials.
 pub fn mcp_json(port: u16, token: &str) -> String {
@@ -200,12 +273,20 @@ mod tests {
         assert!(prompt.contains("http://127.0.0.1:9/mcp"));
         assert!(prompt.contains(token));
         assert!(prompt.contains("list_connections") && prompt.contains("execute"));
-        assert!(prompt.contains("Claude Code") && prompt.contains("Cursor") && prompt.contains("Codex"));
+        assert!(
+            prompt.contains("Claude Code") && prompt.contains("Cursor") && prompt.contains("Codex")
+        );
         assert!(json.contains(token) && json.contains("mcpServers"));
         let low = prompt.to_lowercase();
         assert!(!low.contains("password") && !json.to_lowercase().contains("password"));
-        assert_eq!(scrub("connect password=s3cret failed"), "connect password=*** failed");
-        assert_eq!(scrub("mysql://root:s3cret@127.0.0.1/db"), "mysql://root:***@127.0.0.1/db");
+        assert_eq!(
+            scrub("connect password=s3cret failed"),
+            "connect password=*** failed"
+        );
+        assert_eq!(
+            scrub("mysql://root:s3cret@127.0.0.1/db"),
+            "mysql://root:***@127.0.0.1/db"
+        );
     }
 
     #[test]

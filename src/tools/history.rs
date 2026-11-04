@@ -21,53 +21,105 @@ pub struct Batch {
 
 impl Batch {
     /// 整批的文本：每行一条，有标签时为“标签: 内容”。
-    pub fn text(&self) -> String { super::rows_text(&self.rows, super::RowFmt::Colon) }
-    pub fn has_secret(&self) -> bool { self.rows.iter().any(|r| r.secret) }
+    pub fn text(&self) -> String {
+        super::rows_text(&self.rows, super::RowFmt::Colon)
+    }
+    pub fn has_secret(&self) -> bool {
+        self.rows.iter().any(|r| r.secret)
+    }
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct History { pub batches: Vec<Batch>, next: u64 }
+pub struct History {
+    pub batches: Vec<Batch>,
+    next: u64,
+}
 
 impl History {
     /// 放入新批次（最上面）。超过上限时从最旧的批次裁掉；单批超过行数上限时截断该批尾部。
-    pub fn push(&mut self, time: impl Into<String>, meta: impl Into<String>, mut rows: Vec<Row>) -> u64 {
+    pub fn push(
+        &mut self,
+        time: impl Into<String>,
+        meta: impl Into<String>,
+        mut rows: Vec<Row>,
+    ) -> u64 {
         rows.truncate(MAX_ROWS);
         self.next += 1;
         let id = self.next;
-        self.batches.insert(0, Batch { id, time: time.into(), meta: meta.into(), rows, folded: false, masked: false });
+        self.batches.insert(
+            0,
+            Batch {
+                id,
+                time: time.into(),
+                meta: meta.into(),
+                rows,
+                folded: false,
+                masked: false,
+            },
+        );
         self.batches.truncate(MAX_BATCHES);
         // 总行数超出上限时，从最旧的批次尾部开始裁。
         let mut over = self.row_count().saturating_sub(MAX_ROWS);
         while over > 0 {
-            let Some(last) = self.batches.last_mut() else { break };
+            let Some(last) = self.batches.last_mut() else {
+                break;
+            };
             let cut = over.min(last.rows.len());
             last.rows.truncate(last.rows.len() - cut);
             over -= cut;
-            if last.rows.is_empty() { self.batches.pop(); }
+            if last.rows.is_empty() {
+                self.batches.pop();
+            }
         }
         id
     }
 
-    pub fn row_count(&self) -> usize { self.batches.iter().map(|b| b.rows.len()).sum() }
-    pub fn is_empty(&self) -> bool { self.batches.is_empty() }
-    pub fn clear(&mut self) { self.batches.clear(); }
-    pub fn latest(&self) -> Option<&Batch> { self.batches.first() }
-    pub fn batch_mut(&mut self, id: u64) -> Option<&mut Batch> { self.batches.iter_mut().find(|b| b.id == id) }
+    pub fn row_count(&self) -> usize {
+        self.batches.iter().map(|b| b.rows.len()).sum()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.batches.is_empty()
+    }
+    pub fn clear(&mut self) {
+        self.batches.clear();
+    }
+    pub fn latest(&self) -> Option<&Batch> {
+        self.batches.first()
+    }
+    pub fn batch_mut(&mut self, id: u64) -> Option<&mut Batch> {
+        self.batches.iter_mut().find(|b| b.id == id)
+    }
 
     /// 删除一行；批次空了就一并删除。
     pub fn remove_row(&mut self, batch: u64, row: usize) {
-        if let Some(b) = self.batch_mut(batch) { if row < b.rows.len() { b.rows.remove(row); } }
+        if let Some(b) = self.batch_mut(batch) {
+            if row < b.rows.len() {
+                b.rows.remove(row);
+            }
+        }
         self.batches.retain(|b| !b.rows.is_empty());
     }
-    pub fn remove_batch(&mut self, batch: u64) { self.batches.retain(|b| b.id != batch); }
-    pub fn toggle_fold(&mut self, batch: u64) { if let Some(b) = self.batch_mut(batch) { b.folded = !b.folded; } }
-    pub fn toggle_mask(&mut self, batch: u64) { if let Some(b) = self.batch_mut(batch) { b.masked = !b.masked; } }
+    pub fn remove_batch(&mut self, batch: u64) {
+        self.batches.retain(|b| b.id != batch);
+    }
+    pub fn toggle_fold(&mut self, batch: u64) {
+        if let Some(b) = self.batch_mut(batch) {
+            b.folded = !b.folded;
+        }
+    }
+    pub fn toggle_mask(&mut self, batch: u64) {
+        if let Some(b) = self.batch_mut(batch) {
+            b.masked = !b.masked;
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn rows(n: usize) -> Vec<Row> { (0..n).map(|i| Row::item(format!("v{i}"))).collect() }
+    fn rows(n: usize) -> Vec<Row> {
+        (0..n).map(|i| Row::item(format!("v{i}"))).collect()
+    }
 
     #[test]
     fn newest_first_and_kept() {
@@ -83,7 +135,9 @@ mod tests {
     #[test]
     fn batch_limit() {
         let mut h = History::default();
-        for i in 0..30 { h.push("t", format!("{i}"), rows(1)); }
+        for i in 0..30 {
+            h.push("t", format!("{i}"), rows(1));
+        }
         assert_eq!(h.batches.len(), MAX_BATCHES);
         assert_eq!(h.latest().unwrap().meta, "29");
         assert_eq!(h.batches.last().unwrap().meta, "10");

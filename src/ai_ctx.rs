@@ -21,11 +21,20 @@ pub enum Target {
 }
 
 impl Target {
-    pub fn is_terminal(&self) -> bool { matches!(self, Target::Terminal) }
-    pub fn id(&self) -> Option<gpui::EntityId> {
-        match self { Target::Db(w) => Some(w.entity_id()), Target::Redis(w) => Some(w.entity_id()), Target::Docker(w) => Some(w.entity_id()), _ => None }
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Target::Terminal)
     }
-    pub fn same(&self, o: &Target) -> bool { std::mem::discriminant(self) == std::mem::discriminant(o) && self.id() == o.id() }
+    pub fn id(&self) -> Option<gpui::EntityId> {
+        match self {
+            Target::Db(w) => Some(w.entity_id()),
+            Target::Redis(w) => Some(w.entity_id()),
+            Target::Docker(w) => Some(w.entity_id()),
+            _ => None,
+        }
+    }
+    pub fn same(&self, o: &Target) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(o) && self.id() == o.id()
+    }
     pub fn system_prompt(&self) -> &'static str {
         match self {
             Target::Db(_) => DB_SYSTEM_PROMPT,
@@ -55,9 +64,15 @@ impl Target {
     /// Quick actions: (button label key, question key, deep).
     pub fn quick(&self) -> &'static [(&'static str, &'static str, bool)] {
         match self {
-            Target::Db(_) => &[("aictx.db_crud", "aictx.db_crud_q", false), ("aictx.db_perf", "aictx.db_perf_q", true)],
+            Target::Db(_) => &[
+                ("aictx.db_crud", "aictx.db_crud_q", false),
+                ("aictx.db_perf", "aictx.db_perf_q", true),
+            ],
             Target::Redis(_) => &[("aictx.kv_analyze", "aictx.kv_analyze_q", true)],
-            Target::Docker(_) => &[("aictx.dk_diagnose", "aictx.dk_diagnose_q", true), ("aictx.dk_compose", "aictx.dk_compose_q", false)],
+            Target::Docker(_) => &[
+                ("aictx.dk_diagnose", "aictx.dk_diagnose_q", true),
+                ("aictx.dk_compose", "aictx.dk_compose_q", false),
+            ],
             _ => &[],
         }
     }
@@ -76,7 +91,9 @@ pub const DOCKER_SYSTEM_PROMPT: &str = "You are the shellax container assistant.
 diagnosis CPU/memory samples and recent logs of failing or restarting containers. Write docker CLI commands in ```sh fenced blocks and compose files in \
 ```yaml fenced blocks. For diagnosis state the most likely cause from the logs first, then one fix.";
 
-pub fn full_prompt(base: &str) -> String { format!("{base}{RULES}") }
+pub fn full_prompt(base: &str) -> String {
+    format!("{base}{RULES}")
+}
 
 /// Keep a context block within `max` chars (on a char boundary), noting the cut.
 pub fn cap(mut s: String, max: usize) -> String {
@@ -89,10 +106,20 @@ pub fn cap(mut s: String, max: usize) -> String {
 
 /// Plain-text table of a result set (first `rows` rows).
 pub fn table_text(rs: &ssh_term_proto::db::ResultSet, rows: usize) -> String {
-    let mut out = rs.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(" | ");
+    let mut out = rs
+        .columns
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect::<Vec<_>>()
+        .join(" | ");
     for r in rs.rows.iter().take(rows) {
         out.push('\n');
-        out.push_str(&r.iter().map(|v| v.as_deref().unwrap_or("NULL").replace('\n', " ")).collect::<Vec<_>>().join(" | "));
+        out.push_str(
+            &r.iter()
+                .map(|v| v.as_deref().unwrap_or("NULL").replace('\n', " "))
+                .collect::<Vec<_>>()
+                .join(" | "),
+        );
     }
     out
 }
@@ -104,7 +131,9 @@ mod tests {
     fn cap_and_prompts() {
         assert_eq!(cap("abcdef".into(), 10), "abcdef");
         assert!(cap("é".repeat(20), 5).starts_with("ééééé\n…"));
-        assert!(full_prompt(DB_SYSTEM_PROMPT).contains("Nothing you write is executed automatically"));
+        assert!(
+            full_prompt(DB_SYSTEM_PROMPT).contains("Nothing you write is executed automatically")
+        );
         assert!(Target::Terminal.is_terminal() && Target::Other.quick().is_empty());
     }
 }

@@ -3,7 +3,13 @@ use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum WsEvent { Open, Text(String), Binary(usize), Closed(String), Error(String) }
+pub enum WsEvent {
+    Open,
+    Text(String),
+    Binary(usize),
+    Closed(String),
+    Error(String),
+}
 
 /// 发送端：`Some(文本)` 发送一条消息，`None` 关闭连接。
 pub type WsSender = flume::Sender<Option<String>>;
@@ -43,7 +49,10 @@ pub fn connect(rt: &tokio::runtime::Handle, url: String) -> (WsSender, flume::Re
 mod tests {
     #[test]
     fn bad_url_reports_error() {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let (_tx, rx) = super::connect(rt.handle(), "not a url".into());
         let ev = rt.block_on(async { rx.recv_async().await.unwrap() });
         assert!(matches!(ev, super::WsEvent::Error(_)));

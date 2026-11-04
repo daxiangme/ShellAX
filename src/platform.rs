@@ -10,10 +10,14 @@ pub fn init_env() {
     #[cfg(windows)]
     {
         if std::env::var_os("HOME").is_none() {
-            if let Some(p) = std::env::var_os("USERPROFILE") { std::env::set_var("HOME", p); }
+            if let Some(p) = std::env::var_os("USERPROFILE") {
+                std::env::set_var("HOME", p);
+            }
         }
         if std::env::var_os("XDG_DATA_HOME").is_none() {
-            if let Some(p) = std::env::var_os("LOCALAPPDATA") { std::env::set_var("XDG_DATA_HOME", p); }
+            if let Some(p) = std::env::var_os("LOCALAPPDATA") {
+                std::env::set_var("XDG_DATA_HOME", p);
+            }
         }
     }
     // 从 Finder/Dock 启动的应用没有 LANG/LC_*，子进程（shell、pbpaste/pbcopy、Claude CLI 等）会退回
@@ -21,7 +25,14 @@ pub fn init_env() {
     #[cfg(not(windows))]
     {
         let get = |k: &str| std::env::var(k).ok();
-        for (k, v) in utf8_locale_fixes(get("LC_ALL"), get("LC_CTYPE"), get("LANG"), cfg!(target_os = "macos")) { std::env::set_var(k, v); }
+        for (k, v) in utf8_locale_fixes(
+            get("LC_ALL"),
+            get("LC_CTYPE"),
+            get("LANG"),
+            cfg!(target_os = "macos"),
+        ) {
+            std::env::set_var(k, v);
+        }
     }
     migrate_legacy();
 }
@@ -32,22 +43,39 @@ fn is_utf8_locale(v: &str) -> bool {
 }
 
 /// 需要设置的环境变量，使字符类型 locale 为 UTF-8。已是 UTF-8 时返回空。
-pub fn utf8_locale_fixes(lc_all: Option<String>, lc_ctype: Option<String>, lang: Option<String>, macos: bool) -> Vec<(&'static str, String)> {
+pub fn utf8_locale_fixes(
+    lc_all: Option<String>,
+    lc_ctype: Option<String>,
+    lang: Option<String>,
+    macos: bool,
+) -> Vec<(&'static str, String)> {
     let nonempty = |v: Option<String>| v.filter(|s| !s.trim().is_empty());
     let (lc_all, lc_ctype, lang) = (nonempty(lc_all), nonempty(lc_ctype), nonempty(lang));
     // POSIX 优先级：LC_ALL > LC_CTYPE > LANG
     let effective = lc_all.clone().or(lc_ctype.clone()).or(lang.clone());
-    if effective.as_deref().is_some_and(is_utf8_locale) { return vec![]; }
+    if effective.as_deref().is_some_and(is_utf8_locale) {
+        return vec![];
+    }
     let fallback = if macos { "en_US.UTF-8" } else { "C.UTF-8" };
     let mut out = vec![];
     if lang.as_deref().is_none_or(|l| !is_utf8_locale(l)) {
         // 保留语言部分，例如 zh_CN → zh_CN.UTF-8
-        let base = lang.as_deref().map(|l| l.split(['.', '@']).next().unwrap_or("")).filter(|b| b.contains('_')).map(|b| format!("{b}.UTF-8"));
+        let base = lang
+            .as_deref()
+            .map(|l| l.split(['.', '@']).next().unwrap_or(""))
+            .filter(|b| b.contains('_'))
+            .map(|b| format!("{b}.UTF-8"));
         out.push(("LANG", base.unwrap_or_else(|| fallback.to_string())));
     }
-    let target = out.first().map(|x| x.1.clone()).or(lang).unwrap_or_else(|| fallback.to_string());
+    let target = out
+        .first()
+        .map(|x| x.1.clone())
+        .or(lang)
+        .unwrap_or_else(|| fallback.to_string());
     out.push(("LC_CTYPE", target));
-    if lc_all.is_some() { out.push(("LC_ALL", out[0].1.clone())); }
+    if lc_all.is_some() {
+        out.push(("LC_ALL", out[0].1.clone()));
+    }
     out
 }
 
@@ -56,9 +84,14 @@ pub fn utf8_locale_fixes(lc_all: Option<String>, lc_ctype: Option<String>, lang:
 /// left alone. Errors are ignored (the app then simply starts with fresh settings).
 pub fn migrate_legacy() {
     let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
-    let data = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".local/share"));
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".local/share"));
     // newest name first: coossh, then AgentShell; the first one found is moved, later ones are kept
-    let mut pairs = vec![(data.join("coossh"), data.join("shellax")), (data.join("agentshell"), data.join("shellax"))];
+    let mut pairs = vec![
+        (data.join("coossh"), data.join("shellax")),
+        (data.join("agentshell"), data.join("shellax")),
+    ];
     if std::env::var_os("SHELLAX_CONFIG").is_none() {
         #[cfg(windows)]
         if let Some(p) = std::env::var_os("APPDATA") {
@@ -67,18 +100,24 @@ pub fn migrate_legacy() {
             pairs.push((p.join("AgentShell"), p.join("ShellAX")));
         }
         pairs.push((home.join(".config/coossh"), home.join(".config/shellax")));
-        pairs.push((home.join(".config/agentshell"), home.join(".config/shellax")));
+        pairs.push((
+            home.join(".config/agentshell"),
+            home.join(".config/shellax"),
+        ));
     }
-    for (old, new) in pairs { migrate_dir(&old, &new); }
+    for (old, new) in pairs {
+        migrate_dir(&old, &new);
+    }
 }
 
 /// Rename `old` to `new` unless `new` already exists. Returns true when moved.
 pub fn migrate_dir(old: &std::path::Path, new: &std::path::Path) -> bool {
-    if new.exists() || !old.is_dir() { return false; }
+    if new.exists() || !old.is_dir() {
+        return false;
+    }
     // different names, so a plain rename also works on case-insensitive file systems
     std::fs::rename(old, new).is_ok()
 }
-
 
 /// Windows GUI builds have no console: point stderr (eprintln!, panics) at
 /// `<data_dir>/logs/shellax.log` (previous run kept as shellax.old.log).
@@ -87,7 +126,9 @@ pub fn init_log_file(data_dir: &std::path::Path) -> Option<PathBuf> {
     #[cfg(windows)]
     {
         use std::os::windows::io::IntoRawHandle;
-        if std::env::var_os("SHELLAX_NO_LOGFILE").is_some() { return None; }
+        if std::env::var_os("SHELLAX_NO_LOGFILE").is_some() {
+            return None;
+        }
         let dir = data_dir.join("logs");
         std::fs::create_dir_all(&dir).ok()?;
         let p = dir.join("shellax.log");
@@ -95,18 +136,32 @@ pub fn init_log_file(data_dir: &std::path::Path) -> Option<PathBuf> {
         let f = std::fs::File::create(&p).ok()?;
         let h = f.into_raw_handle();
         // SAFETY: h is a valid, owned file handle that we intentionally leak for the process lifetime.
-        unsafe { windows_sys::Win32::System::Console::SetStdHandle(windows_sys::Win32::System::Console::STD_ERROR_HANDLE, h as _); }
-        eprintln!("ShellAX {} started {}", env!("CARGO_PKG_VERSION"), chrono::Local::now().format("%Y-%m-%d %H:%M:%S %z"));
+        unsafe {
+            windows_sys::Win32::System::Console::SetStdHandle(
+                windows_sys::Win32::System::Console::STD_ERROR_HANDLE,
+                h as _,
+            );
+        }
+        eprintln!(
+            "ShellAX {} started {}",
+            env!("CARGO_PKG_VERSION"),
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S %z")
+        );
         Some(p)
     }
     #[cfg(not(windows))]
-    { let _ = data_dir; None }
+    {
+        let _ = data_dir;
+        None
+    }
 }
 
 /// Directory holding config.toml, themes/ and context_menu.toml.
 pub fn config_dir() -> PathBuf {
     #[cfg(windows)]
-    if let Some(p) = std::env::var_os("APPDATA") { return PathBuf::from(p).join("ShellAX"); }
+    if let Some(p) = std::env::var_os("APPDATA") {
+        return PathBuf::from(p).join("ShellAX");
+    }
     PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/shellax")
 }
 
@@ -121,7 +176,9 @@ pub struct DetectedTerminalFont {
 /// Supports Nerd Font aliases (e.g. "JetBrainsMono Nerd Font Mono" -> "JetBrainsMono NFM").
 pub fn match_installed_font(target: &str, installed: &[String]) -> Option<String> {
     let target = target.trim();
-    if target.is_empty() { return None; }
+    if target.is_empty() {
+        return None;
+    }
     if let Some(f) = installed.iter().find(|i| i.eq_ignore_ascii_case(target)) {
         return Some(f.clone());
     }
@@ -143,7 +200,12 @@ pub fn match_installed_font(target: &str, installed: &[String]) -> Option<String
             return Some(f.clone());
         }
     }
-    let clean = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect::<String>();
+    let clean = |s: &str| {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect::<String>()
+    };
     let clean_target = clean(target);
     if !clean_target.is_empty() {
         if let Some(f) = installed.iter().find(|i| clean(i) == clean_target) {
@@ -163,7 +225,9 @@ fn strip_json_comments(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for line in s.lines() {
         let trimmed = line.trim_start();
-        if trimmed.starts_with("//") { continue; }
+        if trimmed.starts_with("//") {
+            continue;
+        }
         out.push_str(line);
         out.push('\n');
     }
@@ -197,27 +261,55 @@ fn detect_windows_terminal_font(installed: &[String]) -> Option<DetectedTerminal
     let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)?;
     let candidates = [
         local.join(r"Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json"),
-        local.join(r"Packages\Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe\LocalState\settings.json"),
+        local.join(
+            r"Packages\Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe\LocalState\settings.json",
+        ),
         local.join(r"Microsoft\Windows Terminal\settings.json"),
     ];
     for p in candidates {
-        if !p.exists() { continue; }
-        let Ok(text) = std::fs::read_to_string(&p) else { continue; };
+        if !p.exists() {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&p) else {
+            continue;
+        };
         let stripped = strip_json_comments(&text);
-        let Ok(json): Result<serde_json::Value, _> = serde_json::from_str(&stripped) else { continue; };
+        let Ok(json): Result<serde_json::Value, _> = serde_json::from_str(&stripped) else {
+            continue;
+        };
 
         let mut found_face = None;
         let mut found_size = None;
-        if let Some(list) = json.get("profiles").and_then(|pr| pr.get("list")).and_then(|l| l.as_array()) {
+        if let Some(list) = json
+            .get("profiles")
+            .and_then(|pr| pr.get("list"))
+            .and_then(|l| l.as_array())
+        {
             for prof in list {
-                let name = prof.get("name").and_then(|n| n.as_str()).unwrap_or_default().to_lowercase();
-                if name.contains("powershell") || name.contains("pwsh") || name.contains("cmd") || name.contains("命令提示符") {
-                    if let Some(face) = prof.get("font").and_then(|f| f.get("face")).and_then(|f| f.as_str())
-                        .or_else(|| prof.get("fontFace").and_then(|f| f.as_str())) {
+                let name = prof
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or_default()
+                    .to_lowercase();
+                if name.contains("powershell")
+                    || name.contains("pwsh")
+                    || name.contains("cmd")
+                    || name.contains("命令提示符")
+                {
+                    if let Some(face) = prof
+                        .get("font")
+                        .and_then(|f| f.get("face"))
+                        .and_then(|f| f.as_str())
+                        .or_else(|| prof.get("fontFace").and_then(|f| f.as_str()))
+                    {
                         if !face.trim().is_empty() {
                             found_face = Some(face.trim().to_string());
-                            found_size = prof.get("font").and_then(|f| f.get("size")).and_then(|s| s.as_f64())
-                                .or_else(|| prof.get("fontSize").and_then(|s| s.as_f64())).map(|s| s as f32);
+                            found_size = prof
+                                .get("font")
+                                .and_then(|f| f.get("size"))
+                                .and_then(|s| s.as_f64())
+                                .or_else(|| prof.get("fontSize").and_then(|s| s.as_f64()))
+                                .map(|s| s as f32);
                             break;
                         }
                     }
@@ -227,12 +319,20 @@ fn detect_windows_terminal_font(installed: &[String]) -> Option<DetectedTerminal
 
         if found_face.is_none() {
             if let Some(defaults) = json.get("profiles").and_then(|pr| pr.get("defaults")) {
-                if let Some(face) = defaults.get("font").and_then(|f| f.get("face")).and_then(|f| f.as_str())
-                    .or_else(|| defaults.get("fontFace").and_then(|f| f.as_str())) {
+                if let Some(face) = defaults
+                    .get("font")
+                    .and_then(|f| f.get("face"))
+                    .and_then(|f| f.as_str())
+                    .or_else(|| defaults.get("fontFace").and_then(|f| f.as_str()))
+                {
                     if !face.trim().is_empty() {
                         found_face = Some(face.trim().to_string());
-                        found_size = defaults.get("font").and_then(|f| f.get("size")).and_then(|s| s.as_f64())
-                            .or_else(|| defaults.get("fontSize").and_then(|s| s.as_f64())).map(|s| s as f32);
+                        found_size = defaults
+                            .get("font")
+                            .and_then(|f| f.get("size"))
+                            .and_then(|s| s.as_f64())
+                            .or_else(|| defaults.get("fontSize").and_then(|s| s.as_f64()))
+                            .map(|s| s as f32);
                     }
                 }
             }
@@ -259,14 +359,23 @@ fn detect_windows_terminal_font(installed: &[String]) -> Option<DetectedTerminal
 fn detect_vscode_terminal_font(installed: &[String]) -> Option<DetectedTerminalFont> {
     let appdata = std::env::var_os("APPDATA").map(PathBuf::from)?;
     let p = appdata.join(r"Code\User\settings.json");
-    if !p.exists() { return None; }
+    if !p.exists() {
+        return None;
+    }
     let text = std::fs::read_to_string(&p).ok()?;
     let stripped = strip_json_comments(&text);
     let json: serde_json::Value = serde_json::from_str(&stripped).ok()?;
-    let face = json.get("terminal.integrated.fontFamily").and_then(|f| f.as_str())?;
+    let face = json
+        .get("terminal.integrated.fontFamily")
+        .and_then(|f| f.as_str())?;
     let face = face.trim().trim_matches('\'').trim_matches('"');
-    if face.is_empty() { return None; }
-    let size = json.get("terminal.integrated.fontSize").and_then(|s| s.as_f64()).map(|s| s as f32);
+    if face.is_empty() {
+        return None;
+    }
+    let size = json
+        .get("terminal.integrated.fontSize")
+        .and_then(|s| s.as_f64())
+        .map(|s| s as f32);
     // Same rule as the Windows Terminal probe: an uninstalled face is not a detection result.
     let matched = match_installed_font(face, installed)?;
     Some(DetectedTerminalFont {
@@ -291,7 +400,10 @@ pub fn detect_installed_nerd_font(installed: &[String]) -> Option<DetectedTermin
         "UbuntuMono Nerd Font",
     ];
     for pref in PREFERRED {
-        if let Some(f) = installed.iter().find(|i| i.eq_ignore_ascii_case(pref) && !icon_only_font(i)) {
+        if let Some(f) = installed
+            .iter()
+            .find(|i| i.eq_ignore_ascii_case(pref) && !icon_only_font(i))
+        {
             return Some(DetectedTerminalFont {
                 family: f.clone(),
                 size: None,
@@ -301,7 +413,9 @@ pub fn detect_installed_nerd_font(installed: &[String]) -> Option<DetectedTermin
     }
     for f in installed {
         let l = f.to_lowercase();
-        if icon_only_font(f) { continue; }
+        if icon_only_font(f) {
+            continue;
+        }
         if l.contains("nerd font") || l.ends_with(" nfm") || l.ends_with(" nf") {
             return Some(DetectedTerminalFont {
                 family: f.clone(),
@@ -321,10 +435,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("agentshell")).unwrap();
         std::fs::write(d.join("agentshell/config.toml"), "x").unwrap();
-        assert!(super::migrate_dir(&d.join("agentshell"), &d.join("shellax")));
-        assert_eq!(std::fs::read_to_string(d.join("shellax/config.toml")).unwrap(), "x");
+        assert!(super::migrate_dir(
+            &d.join("agentshell"),
+            &d.join("shellax")
+        ));
+        assert_eq!(
+            std::fs::read_to_string(d.join("shellax/config.toml")).unwrap(),
+            "x"
+        );
         std::fs::create_dir_all(d.join("agentshell")).unwrap();
-        assert!(!super::migrate_dir(&d.join("agentshell"), &d.join("shellax")), "new dir exists: keep it");
+        assert!(
+            !super::migrate_dir(&d.join("agentshell"), &d.join("shellax")),
+            "new dir exists: keep it"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -336,9 +459,18 @@ mod tests {
             "JetBrainsMono NFM".into(),
             "JetBrainsMono NF".into(),
         ];
-        assert_eq!(super::match_installed_font("JetBrainsMono Nerd Font Mono", &installed), Some("JetBrainsMono NFM".into()));
-        assert_eq!(super::match_installed_font("JetBrainsMono Nerd Font", &installed), Some("JetBrainsMono NF".into()));
-        assert_eq!(super::match_installed_font("cascadia mono", &installed), Some("Cascadia Mono".into()));
+        assert_eq!(
+            super::match_installed_font("JetBrainsMono Nerd Font Mono", &installed),
+            Some("JetBrainsMono NFM".into())
+        );
+        assert_eq!(
+            super::match_installed_font("JetBrainsMono Nerd Font", &installed),
+            Some("JetBrainsMono NF".into())
+        );
+        assert_eq!(
+            super::match_installed_font("cascadia mono", &installed),
+            Some("Cascadia Mono".into())
+        );
         assert_eq!(super::match_installed_font("NonExistent", &installed), None);
     }
 
@@ -358,7 +490,11 @@ mod tests {
     fn skips_the_bundled_icon_font() {
         // Symbols Nerd Font Mono is registered by the app itself and contains no letters, so a
         // machine whose Windows Terminal and VS Code name no font must not be offered it.
-        let installed = vec!["Segoe UI".into(), "Symbols Nerd Font Mono".into(), "Consolas".into()];
+        let installed = vec![
+            "Segoe UI".into(),
+            "Symbols Nerd Font Mono".into(),
+            "Consolas".into(),
+        ];
         assert_eq!(super::detect_installed_nerd_font(&installed), None);
         assert_eq!(super::detect_system_terminal_font(&installed), None);
     }
@@ -379,9 +515,24 @@ mod locale_tests {
     #[test]
     fn locale() {
         assert!(f(None, None, Some("zh_CN.UTF-8".into()), true).is_empty());
-        assert_eq!(f(None, None, None, true), vec![("LANG", "en_US.UTF-8".to_string()), ("LC_CTYPE", "en_US.UTF-8".to_string())]);
-        assert_eq!(f(None, None, Some("zh_CN".into()), true)[0].1, "zh_CN.UTF-8");
-        assert_eq!(f(Some("C".into()), None, Some("en_US.UTF-8".into()), true), vec![("LC_CTYPE", "en_US.UTF-8".to_string()), ("LC_ALL", "en_US.UTF-8".to_string())]);
+        assert_eq!(
+            f(None, None, None, true),
+            vec![
+                ("LANG", "en_US.UTF-8".to_string()),
+                ("LC_CTYPE", "en_US.UTF-8".to_string())
+            ]
+        );
+        assert_eq!(
+            f(None, None, Some("zh_CN".into()), true)[0].1,
+            "zh_CN.UTF-8"
+        );
+        assert_eq!(
+            f(Some("C".into()), None, Some("en_US.UTF-8".into()), true),
+            vec![
+                ("LC_CTYPE", "en_US.UTF-8".to_string()),
+                ("LC_ALL", "en_US.UTF-8".to_string())
+            ]
+        );
         assert_eq!(f(None, None, None, false)[0].1, "C.UTF-8");
     }
 }

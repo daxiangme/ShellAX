@@ -12,21 +12,44 @@ pub fn quote_ident(f: Family, s: &str) -> String {
 
 pub fn quote_lit(f: Family, s: &str) -> String {
     let mut v = s.replace('\'', "''");
-    if matches!(f, Family::Mysql | Family::Clickhouse) { v = v.replace('\\', "\\\\"); }
-    if f == Family::Mssql { return format!("N'{v}'"); }
+    if matches!(f, Family::Mysql | Family::Clickhouse) {
+        v = v.replace('\\', "\\\\");
+    }
+    if f == Family::Mssql {
+        return format!("N'{v}'");
+    }
     format!("'{v}'")
 }
 
 /// `db.table` (MySQL), `schema.table` (PostgreSQL), `table` (SQLite).
 pub fn qualified(f: Family, db: &str, schema: Option<&str>, table: &str) -> String {
     match f {
-        Family::Mysql | Family::Clickhouse if !db.is_empty() => format!("{}.{}", quote_ident(f, db), quote_ident(f, table)),
-        Family::Mssql => format!("{}.{}", quote_ident(f, schema.filter(|s| !s.is_empty()).unwrap_or("dbo")), quote_ident(f, table)),
-        Family::Duckdb => match schema { Some(s) if !s.is_empty() => format!("{}.{}", quote_ident(f, s), quote_ident(f, table)), _ => quote_ident(f, table) },
-        Family::Postgres => match schema { Some(s) if !s.is_empty() => format!("{}.{}", quote_ident(f, s), quote_ident(f, table)), _ => quote_ident(f, table) },
+        Family::Mysql | Family::Clickhouse if !db.is_empty() => {
+            format!("{}.{}", quote_ident(f, db), quote_ident(f, table))
+        }
+        Family::Mssql => format!(
+            "{}.{}",
+            quote_ident(f, schema.filter(|s| !s.is_empty()).unwrap_or("dbo")),
+            quote_ident(f, table)
+        ),
+        Family::Duckdb => match schema {
+            Some(s) if !s.is_empty() => format!("{}.{}", quote_ident(f, s), quote_ident(f, table)),
+            _ => quote_ident(f, table),
+        },
+        Family::Postgres => match schema {
+            Some(s) if !s.is_empty() => format!("{}.{}", quote_ident(f, s), quote_ident(f, table)),
+            _ => quote_ident(f, table),
+        },
         Family::Dameng => {
-            let s = if !db.is_empty() { Some(db) } else { schema.filter(|s| !s.is_empty()) };
-            match s { Some(s) => format!("{}.{}", quote_ident(f, s), quote_ident(f, table)), None => quote_ident(f, table) }
+            let s = if !db.is_empty() {
+                Some(db)
+            } else {
+                schema.filter(|s| !s.is_empty())
+            };
+            match s {
+                Some(s) => format!("{}.{}", quote_ident(f, s), quote_ident(f, table)),
+                None => quote_ident(f, table),
+            }
         }
         _ => quote_ident(f, table),
     }
@@ -113,14 +136,34 @@ pub fn list_columns(f: Family, db: &str, schema: Option<&str>, table: &str) -> S
 
 /// One page of a table, optionally filtered (`where_` is a raw SQL condition typed by the
 /// user) and ordered.
-pub fn select_page(f: Family, table: &str, where_: &str, order: Option<(&str, bool)>, limit: usize, offset: usize) -> String {
+pub fn select_page(
+    f: Family,
+    table: &str,
+    where_: &str,
+    order: Option<(&str, bool)>,
+    limit: usize,
+    offset: usize,
+) -> String {
     let mut s = format!("SELECT * FROM {table}");
-    if !where_.trim().is_empty() { s.push_str(" WHERE "); s.push_str(where_.trim()); }
-    if let Some((col, desc)) = order { s.push_str(&format!(" ORDER BY {}{}", quote_ident(f, col), if desc { " DESC" } else { "" })); }
+    if !where_.trim().is_empty() {
+        s.push_str(" WHERE ");
+        s.push_str(where_.trim());
+    }
+    if let Some((col, desc)) = order {
+        s.push_str(&format!(
+            " ORDER BY {}{}",
+            quote_ident(f, col),
+            if desc { " DESC" } else { "" }
+        ));
+    }
     if f == Family::Mssql {
         // OFFSET/FETCH needs an ORDER BY
-        if order.is_none() { s.push_str(" ORDER BY (SELECT NULL)"); }
-        s.push_str(&format!(" OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY"));
+        if order.is_none() {
+            s.push_str(" ORDER BY (SELECT NULL)");
+        }
+        s.push_str(&format!(
+            " OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY"
+        ));
         return s;
     }
     s.push_str(&format!(" LIMIT {limit} OFFSET {offset}"));
@@ -128,11 +171,18 @@ pub fn select_page(f: Family, table: &str, where_: &str, order: Option<(&str, bo
 }
 
 pub fn count(table: &str, where_: &str) -> String {
-    if where_.trim().is_empty() { format!("SELECT COUNT(*) FROM {table}") } else { format!("SELECT COUNT(*) FROM {table} WHERE {}", where_.trim()) }
+    if where_.trim().is_empty() {
+        format!("SELECT COUNT(*) FROM {table}")
+    } else {
+        format!("SELECT COUNT(*) FROM {table} WHERE {}", where_.trim())
+    }
 }
 
 /// Statement that switches the session's default database, where the engine has one.
-pub fn use_database(f: Family, db: &str) -> Option<String> { (matches!(f, Family::Mysql | Family::Mssql) && !db.is_empty()).then(|| format!("USE {}", quote_ident(f, db))) }
+pub fn use_database(f: Family, db: &str) -> Option<String> {
+    (matches!(f, Family::Mysql | Family::Mssql) && !db.is_empty())
+        .then(|| format!("USE {}", quote_ident(f, db)))
+}
 
 #[cfg(test)]
 mod tests {
@@ -144,21 +194,43 @@ mod tests {
         assert_eq!(quote_ident(Family::Postgres, "a\"b"), "\"a\"\"b\"");
         assert_eq!(quote_lit(Family::Mysql, "o'r\\"), "'o''r\\\\'");
         assert_eq!(quote_lit(Family::Sqlite, "o'r\\"), "'o''r\\'");
-        assert_eq!(qualified(Family::Mysql, "shop", None, "orders"), "`shop`.`orders`");
-        assert_eq!(qualified(Family::Postgres, "app", Some("public"), "t"), "\"public\".\"t\"");
+        assert_eq!(
+            qualified(Family::Mysql, "shop", None, "orders"),
+            "`shop`.`orders`"
+        );
+        assert_eq!(
+            qualified(Family::Postgres, "app", Some("public"), "t"),
+            "\"public\".\"t\""
+        );
         assert_eq!(qualified(Family::Sqlite, "main", None, "t"), "\"t\"");
     }
 
     #[test]
     fn paging_sql() {
         let t = qualified(Family::Mysql, "d", None, "t");
-        assert_eq!(select_page(Family::Mysql, &t, "", None, 500, 0), "SELECT * FROM `d`.`t` LIMIT 500 OFFSET 0");
-        assert_eq!(select_page(Family::Postgres, "\"t\"", " id > 3 ", Some(("id", true)), 10, 20), "SELECT * FROM \"t\" WHERE id > 3 ORDER BY \"id\" DESC LIMIT 10 OFFSET 20");
+        assert_eq!(
+            select_page(Family::Mysql, &t, "", None, 500, 0),
+            "SELECT * FROM `d`.`t` LIMIT 500 OFFSET 0"
+        );
+        assert_eq!(
+            select_page(
+                Family::Postgres,
+                "\"t\"",
+                " id > 3 ",
+                Some(("id", true)),
+                10,
+                20
+            ),
+            "SELECT * FROM \"t\" WHERE id > 3 ORDER BY \"id\" DESC LIMIT 10 OFFSET 20"
+        );
         assert_eq!(count("\"t\"", ""), "SELECT COUNT(*) FROM \"t\"");
         assert!(list_tables(Family::Mysql, "x'y", None).contains("'x''y'"));
         assert_eq!(use_database(Family::Mysql, "a"), Some("USE `a`".into()));
         assert_eq!(use_database(Family::Postgres, "a"), None);
-        assert_eq!(select_page(Family::Mssql, "[dbo].[t]", "", None, 10, 20), "SELECT * FROM [dbo].[t] ORDER BY (SELECT NULL) OFFSET 20 ROWS FETCH NEXT 10 ROWS ONLY");
+        assert_eq!(
+            select_page(Family::Mssql, "[dbo].[t]", "", None, 10, 20),
+            "SELECT * FROM [dbo].[t] ORDER BY (SELECT NULL) OFFSET 20 ROWS FETCH NEXT 10 ROWS ONLY"
+        );
         assert_eq!(qualified(Family::Mssql, "d", None, "a]b"), "[dbo].[a]]b]");
         assert_eq!(quote_lit(Family::Mssql, "o'k"), "N'o''k'");
         assert_eq!(qualified(Family::Clickhouse, "d", None, "t"), "`d`.`t`");
@@ -167,30 +239,66 @@ mod tests {
 
 /// `CREATE TABLE` text for PostgreSQL, which has no single built-in for it: columns, then
 /// constraint definitions, then the indexes that do not back a constraint.
-pub fn pg_create_table(table: &str, cols: &[super::ColumnInfo], constraints: &[(String, String)], indexes: &[String]) -> String {
+pub fn pg_create_table(
+    table: &str,
+    cols: &[super::ColumnInfo],
+    constraints: &[(String, String)],
+    indexes: &[String],
+) -> String {
     let f = Family::Postgres;
-    let mut lines: Vec<String> = cols.iter().map(|c| {
-        // serial columns: integer + nextval() of their own sequence, which the DDL cannot assume exists
-        let serial = c.default.as_deref().is_some_and(|d| d.starts_with("nextval(")) && matches!(c.type_name.as_str(), "integer" | "bigint" | "smallint");
-        let ty = if serial { match c.type_name.as_str() { "bigint" => "bigserial", "smallint" => "smallserial", _ => "serial" } } else { c.type_name.as_str() };
-        let mut l = format!("  {} {ty}", quote_ident(f, &c.name));
-        match (c.extra.as_str(), &c.default) {
-            ("identity always", _) => l.push_str(" GENERATED ALWAYS AS IDENTITY"),
-            ("identity by default", _) => l.push_str(" GENERATED BY DEFAULT AS IDENTITY"),
-            ("generated stored", Some(d)) => l.push_str(&format!(" GENERATED ALWAYS AS ({d}) STORED")),
-            ("generated virtual", Some(d)) => l.push_str(&format!(" GENERATED ALWAYS AS ({d}) VIRTUAL")),
-            (_, Some(d)) if !serial => l.push_str(&format!(" DEFAULT {d}")),
-            _ => {}
-        }
-        if c.nullable == Some(false) { l.push_str(" NOT NULL"); }
-        l
-    }).collect();
-    lines.extend(constraints.iter().map(|(n, d)| format!("  CONSTRAINT {} {d}", quote_ident(f, n))));
+    let mut lines: Vec<String> = cols
+        .iter()
+        .map(|c| {
+            // serial columns: integer + nextval() of their own sequence, which the DDL cannot assume exists
+            let serial = c
+                .default
+                .as_deref()
+                .is_some_and(|d| d.starts_with("nextval("))
+                && matches!(c.type_name.as_str(), "integer" | "bigint" | "smallint");
+            let ty = if serial {
+                match c.type_name.as_str() {
+                    "bigint" => "bigserial",
+                    "smallint" => "smallserial",
+                    _ => "serial",
+                }
+            } else {
+                c.type_name.as_str()
+            };
+            let mut l = format!("  {} {ty}", quote_ident(f, &c.name));
+            match (c.extra.as_str(), &c.default) {
+                ("identity always", _) => l.push_str(" GENERATED ALWAYS AS IDENTITY"),
+                ("identity by default", _) => l.push_str(" GENERATED BY DEFAULT AS IDENTITY"),
+                ("generated stored", Some(d)) => {
+                    l.push_str(&format!(" GENERATED ALWAYS AS ({d}) STORED"))
+                }
+                ("generated virtual", Some(d)) => {
+                    l.push_str(&format!(" GENERATED ALWAYS AS ({d}) VIRTUAL"))
+                }
+                (_, Some(d)) if !serial => l.push_str(&format!(" DEFAULT {d}")),
+                _ => {}
+            }
+            if c.nullable == Some(false) {
+                l.push_str(" NOT NULL");
+            }
+            l
+        })
+        .collect();
+    lines.extend(
+        constraints
+            .iter()
+            .map(|(n, d)| format!("  CONSTRAINT {} {d}", quote_ident(f, n))),
+    );
     let mut s = format!("CREATE TABLE {table} (\n{}\n);", lines.join(",\n"));
     for c in cols.iter().filter(|c| !c.comment.is_empty()) {
-        s.push_str(&format!("\nCOMMENT ON COLUMN {table}.{} IS {};", quote_ident(f, &c.name), quote_lit(f, &c.comment)));
+        s.push_str(&format!(
+            "\nCOMMENT ON COLUMN {table}.{} IS {};",
+            quote_ident(f, &c.name),
+            quote_lit(f, &c.comment)
+        ));
     }
-    for i in indexes { s.push_str(&format!("\n{i};")); }
+    for i in indexes {
+        s.push_str(&format!("\n{i};"));
+    }
     s
 }
 
@@ -211,11 +319,35 @@ mod ddl_tests {
     #[test]
     fn pg_ddl() {
         let cols = vec![
-            ColumnInfo { name: "id".into(), type_name: "integer".into(), nullable: Some(false), primary: true, default: Some("nextval('t_id_seq'::regclass)".into()), ..Default::default() },
-            ColumnInfo { name: "g".into(), type_name: "integer".into(), default: Some("(id * 2)".into()), extra: "generated stored".into(), ..Default::default() },
-            ColumnInfo { name: "name".into(), type_name: "character varying(20)".into(), nullable: Some(true), comment: "it's".into(), ..Default::default() },
+            ColumnInfo {
+                name: "id".into(),
+                type_name: "integer".into(),
+                nullable: Some(false),
+                primary: true,
+                default: Some("nextval('t_id_seq'::regclass)".into()),
+                ..Default::default()
+            },
+            ColumnInfo {
+                name: "g".into(),
+                type_name: "integer".into(),
+                default: Some("(id * 2)".into()),
+                extra: "generated stored".into(),
+                ..Default::default()
+            },
+            ColumnInfo {
+                name: "name".into(),
+                type_name: "character varying(20)".into(),
+                nullable: Some(true),
+                comment: "it's".into(),
+                ..Default::default()
+            },
         ];
-        let s = pg_create_table("\"public\".\"t\"", &cols, &[("t_pkey".into(), "PRIMARY KEY (id)".into())], &["CREATE INDEX t_name ON public.t USING btree (name)".into()]);
+        let s = pg_create_table(
+            "\"public\".\"t\"",
+            &cols,
+            &[("t_pkey".into(), "PRIMARY KEY (id)".into())],
+            &["CREATE INDEX t_name ON public.t USING btree (name)".into()],
+        );
         assert_eq!(s, "CREATE TABLE \"public\".\"t\" (\n  \"id\" serial NOT NULL,\n  \"g\" integer GENERATED ALWAYS AS ((id * 2)) STORED,\n  \"name\" character varying(20),\n  CONSTRAINT \"t_pkey\" PRIMARY KEY (id)\n);\nCOMMENT ON COLUMN \"public\".\"t\".\"name\" IS 'it''s';\nCREATE INDEX t_name ON public.t USING btree (name);");
     }
 }
@@ -223,14 +355,30 @@ mod ddl_tests {
 /// `CREATE TABLE` text for SQL Server assembled from columns (no built-in DDL for tables).
 pub fn mssql_create_table(q: &str, cols: &[super::ColumnInfo]) -> String {
     let f = Family::Mssql;
-    let mut lines: Vec<String> = cols.iter().map(|c| {
-        let mut l = format!("    {} {}", quote_ident(f, &c.name), c.type_name);
-        if c.extra == "identity" { l.push_str(" IDENTITY(1,1)"); }
-        if c.nullable == Some(false) { l.push_str(" NOT NULL"); }
-        if let Some(d) = &c.default { l.push_str(" DEFAULT "); l.push_str(d); }
-        l
-    }).collect();
-    let pk: Vec<String> = cols.iter().filter(|c| c.primary).map(|c| quote_ident(f, &c.name)).collect();
-    if !pk.is_empty() { lines.push(format!("    PRIMARY KEY ({})", pk.join(", "))); }
+    let mut lines: Vec<String> = cols
+        .iter()
+        .map(|c| {
+            let mut l = format!("    {} {}", quote_ident(f, &c.name), c.type_name);
+            if c.extra == "identity" {
+                l.push_str(" IDENTITY(1,1)");
+            }
+            if c.nullable == Some(false) {
+                l.push_str(" NOT NULL");
+            }
+            if let Some(d) = &c.default {
+                l.push_str(" DEFAULT ");
+                l.push_str(d);
+            }
+            l
+        })
+        .collect();
+    let pk: Vec<String> = cols
+        .iter()
+        .filter(|c| c.primary)
+        .map(|c| quote_ident(f, &c.name))
+        .collect();
+    if !pk.is_empty() {
+        lines.push(format!("    PRIMARY KEY ({})", pk.join(", ")));
+    }
     format!("CREATE TABLE {q} (\n{}\n);", lines.join(",\n"))
 }

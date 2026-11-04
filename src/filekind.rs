@@ -9,7 +9,14 @@ pub struct Glyph {
     pub chip: bool,
 }
 
-pub fn glyph(name: &str, is_dir: bool, mode: u32, ansi: &[u32; 16], dark: bool, muted: u32) -> Glyph {
+pub fn glyph(
+    name: &str,
+    is_dir: bool,
+    mode: u32,
+    ansi: &[u32; 16],
+    dark: bool,
+    muted: u32,
+) -> Glyph {
     let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
     let lower = base.to_ascii_lowercase();
     if is_dir {
@@ -30,41 +37,93 @@ pub fn glyph(name: &str, is_dir: bool, mode: u32, ansi: &[u32; 16], dark: bool, 
         Kind::Exec => (IconName::FileTerminal, 2, true),
         Kind::Plain => (IconName::FileText, 7, false),
     };
-    let color = if kind == Kind::Plain { muted } else { tone(ansi, dark, idx) };
+    let color = if kind == Kind::Plain {
+        muted
+    } else {
+        tone(ansi, dark, idx)
+    };
     Glyph { icon, color, chip }
 }
 
 fn dir_glyph(lower: &str, ansi: &[u32; 16], dark: bool, muted: u32) -> Glyph {
     if lower == ".git" || lower == ".github" || lower == ".svn" || lower == ".hg" {
-        return Glyph { icon: IconName::FolderGit, color: tone(ansi, dark, 4), chip: true };
+        return Glyph {
+            icon: IconName::FolderGit,
+            color: tone(ansi, dark, 4),
+            chip: true,
+        };
     }
-    if matches!(lower, "node_modules" | "target" | "dist" | "build" | "out" | "__pycache__" | ".cache" | "vendor") {
-        return Glyph { icon: IconName::Folder, color: muted, chip: false };
+    if matches!(
+        lower,
+        "node_modules" | "target" | "dist" | "build" | "out" | "__pycache__" | ".cache" | "vendor"
+    ) {
+        return Glyph {
+            icon: IconName::Folder,
+            color: muted,
+            chip: false,
+        };
     }
-    Glyph { icon: IconName::Folder, color: tone(ansi, dark, 3), chip: true }
+    Glyph {
+        icon: IconName::Folder,
+        color: tone(ansi, dark, 3),
+        chip: true,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Kind { Image, Video, Audio, Archive, Code, Data, Sheet, Doc, Config, Secret, Exec, Plain }
+enum Kind {
+    Image,
+    Video,
+    Audio,
+    Archive,
+    Code,
+    Data,
+    Sheet,
+    Doc,
+    Config,
+    Secret,
+    Exec,
+    Plain,
+}
 
 fn file_kind(lower: &str, mode: u32) -> Kind {
-    if is_secret_name(lower) { return Kind::Secret; }
-    if lower.ends_with(".tar.gz") || lower.ends_with(".tar.bz2") || lower.ends_with(".tar.xz") || lower.ends_with(".tar.zst") {
+    if is_secret_name(lower) {
+        return Kind::Secret;
+    }
+    if lower.ends_with(".tar.gz")
+        || lower.ends_with(".tar.bz2")
+        || lower.ends_with(".tar.xz")
+        || lower.ends_with(".tar.zst")
+    {
         return Kind::Archive;
     }
-    if matches!(lower, "dockerfile" | "makefile" | "jenkinsfile" | "vagrantfile" | "gemfile" | "rakefile") {
+    if matches!(
+        lower,
+        "dockerfile" | "makefile" | "jenkinsfile" | "vagrantfile" | "gemfile" | "rakefile"
+    ) {
         return Kind::Code;
     }
-    if matches!(lower, "license" | "readme" | "changelog" | "authors" | "copying") || lower.starts_with("readme.") || lower.starts_with("license.") {
+    if matches!(
+        lower,
+        "license" | "readme" | "changelog" | "authors" | "copying"
+    ) || lower.starts_with("readme.")
+        || lower.starts_with("license.")
+    {
         return Kind::Doc;
     }
-    let ext = lower.rsplit_once('.').and_then(|(stem, ext)| (!stem.is_empty()).then_some(ext)).unwrap_or("");
+    let ext = lower
+        .rsplit_once('.')
+        .and_then(|(stem, ext)| (!stem.is_empty()).then_some(ext))
+        .unwrap_or("");
     match ext {
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "svg" | "avif" | "heic" | "tif" | "tiff" => Kind::Image,
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "svg" | "avif" | "heic"
+        | "tif" | "tiff" => Kind::Image,
         "mp4" | "mkv" | "mov" | "webm" | "avi" | "m4v" => Kind::Video,
         "mp3" | "wav" | "flac" | "ogg" | "aac" | "m4a" => Kind::Audio,
         "zip" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "7z" | "rar" | "zst" => Kind::Archive,
-        "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "go" | "java" | "c" | "h" | "cpp" | "hpp" | "cs" | "rb" | "php" | "swift" | "kt" | "kts" | "lua" | "sql" | "vue" | "css" | "scss" | "html" | "htm" | "xml" | "sh" | "bash" | "zsh" | "ps1" | "bat" | "cmd" => Kind::Code,
+        "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "go" | "java" | "c" | "h" | "cpp" | "hpp"
+        | "cs" | "rb" | "php" | "swift" | "kt" | "kts" | "lua" | "sql" | "vue" | "css" | "scss"
+        | "html" | "htm" | "xml" | "sh" | "bash" | "zsh" | "ps1" | "bat" | "cmd" => Kind::Code,
         "json" | "jsonc" | "yaml" | "yml" => Kind::Data,
         "csv" | "tsv" | "xls" | "xlsx" | "ods" => Kind::Sheet,
         "md" | "txt" | "pdf" | "doc" | "docx" | "rtf" | "rst" => Kind::Doc,
@@ -77,7 +136,11 @@ fn file_kind(lower: &str, mode: u32) -> Kind {
 }
 
 fn is_secret_name(lower: &str) -> bool {
-    lower == ".env" || lower.starts_with(".env.") || lower.starts_with("id_rsa") || lower.starts_with("id_ed25519") || lower.starts_with("id_ecdsa")
+    lower == ".env"
+        || lower.starts_with(".env.")
+        || lower.starts_with("id_rsa")
+        || lower.starts_with("id_ed25519")
+        || lower.starts_with("id_ecdsa")
 }
 
 fn tone(ansi: &[u32; 16], dark: bool, idx: usize) -> u32 {
@@ -90,10 +153,14 @@ mod tests {
 
     fn ansi() -> [u32; 16] {
         let mut a = [0u32; 16];
-        for i in 0..16 { a[i] = i as u32; }
+        for i in 0..16 {
+            a[i] = i as u32;
+        }
         a
     }
-    fn g(name: &str, dir: bool, mode: u32) -> Glyph { glyph(name, dir, mode, &ansi(), true, 99) }
+    fn g(name: &str, dir: bool, mode: u32) -> Glyph {
+        glyph(name, dir, mode, &ansi(), true, 99)
+    }
 
     #[test]
     fn folders_and_types() {

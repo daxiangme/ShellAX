@@ -17,20 +17,36 @@ use crate::db::dialect;
 
 /// Which parser to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Engine { Mysql, Dameng }
+pub enum Engine {
+    Mysql,
+    Dameng,
+}
 
 impl Engine {
     pub fn family(self) -> Family {
-        match self { Engine::Mysql => Family::Mysql, Engine::Dameng => Family::Dameng }
+        match self {
+            Engine::Mysql => Family::Mysql,
+            Engine::Dameng => Family::Dameng,
+        }
     }
 }
 
 /// What the statement is allowed to do. Nested writes raise a `SELECT` to the write they contain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind { Select, Dml, Delete, Ddl }
+pub enum Kind {
+    Select,
+    Dml,
+    Delete,
+    Ddl,
+}
 
 fn rank(k: Kind) -> u8 {
-    match k { Kind::Select => 0, Kind::Dml => 1, Kind::Delete => 2, Kind::Ddl => 3 }
+    match k {
+        Kind::Select => 0,
+        Kind::Dml => 1,
+        Kind::Delete => 2,
+        Kind::Ddl => 3,
+    }
 }
 
 /// A table the statement reads or writes. `qualifier` is the database (MySQL) or schema (DM).
@@ -58,7 +74,12 @@ pub struct Analysis {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SqlError { Empty, Multi, Unparseable, Unsupported }
+pub enum SqlError {
+    Empty,
+    Multi,
+    Unparseable,
+    Unsupported,
+}
 
 impl SqlError {
     pub fn message(&self) -> &'static str {
@@ -73,25 +94,48 @@ impl SqlError {
 
 pub fn analyze(sql: &str, engine: Engine) -> Result<Analysis, SqlError> {
     let sql = sql.trim().trim_end_matches(';').trim();
-    if sql.is_empty() { return Err(SqlError::Empty); }
+    if sql.is_empty() {
+        return Err(SqlError::Empty);
+    }
     let stmts = parse(sql, engine)?;
-    if stmts.is_empty() { return Err(SqlError::Empty); }
-    if stmts.len() != 1 { return Err(SqlError::Multi); }
+    if stmts.is_empty() {
+        return Err(SqlError::Empty);
+    }
+    if stmts.len() != 1 {
+        return Err(SqlError::Multi);
+    }
     let stmt = &stmts[0];
-    let mut scan = Scan { kind: Kind::Select, plain: 0, bad: false, where_ok: true, ctes: vec![], relations: vec![] };
+    let mut scan = Scan {
+        kind: Kind::Select,
+        plain: 0,
+        bad: false,
+        where_ok: true,
+        ctes: vec![],
+        relations: vec![],
+    };
     let _ = stmt.visit(&mut scan);
-    if scan.bad { return Err(SqlError::Unsupported); }
+    if scan.bad {
+        return Err(SqlError::Unsupported);
+    }
     let mut writes = HashSet::new();
     mark_writes(stmt, &mut writes);
-    let is_cte = |qual: &str, name: &str| qual.is_empty() && scan.ctes.iter().any(|c| c.eq_ignore_ascii_case(name));
+    let is_cte = |qual: &str, name: &str| {
+        qual.is_empty() && scan.ctes.iter().any(|c| c.eq_ignore_ascii_case(name))
+    };
     writes.retain(|(q, n)| !is_cte(q, n));
     let mut tables = Vec::new();
     for (q, n) in scan.relations {
-        if is_cte(&q, &n) { continue; }
-        let written = writes.iter().any(|(a, b)| a.eq_ignore_ascii_case(&q) && b.eq_ignore_ascii_case(&n));
+        if is_cte(&q, &n) {
+            continue;
+        }
+        let written = writes
+            .iter()
+            .any(|(a, b)| a.eq_ignore_ascii_case(&q) && b.eq_ignore_ascii_case(&n));
         push_table(&mut tables, q, n, written);
     }
-    for (q, n) in writes { push_table(&mut tables, q, n, true); }
+    for (q, n) in writes {
+        push_table(&mut tables, q, n, true);
+    }
     let (explain, explain_analyze) = match stmt {
         Statement::Explain { analyze, .. } => (true, *analyze),
         _ => (false, false),
@@ -109,12 +153,20 @@ pub fn analyze(sql: &str, engine: Engine) -> Result<Analysis, SqlError> {
 
 /// `SELECT COUNT(*)` for a single-table `UPDATE` / `DELETE` that has a `WHERE` and no joins.
 pub fn count_sql(a: &Analysis, current_db: &str, engine: Engine) -> Option<String> {
-    if a.explain_analyze || !matches!(a.kind, Kind::Dml | Kind::Delete) { return None; }
+    if a.explain_analyze || !matches!(a.kind, Kind::Dml | Kind::Delete) {
+        return None;
+    }
     let written: Vec<_> = a.tables.iter().filter(|t| t.written).collect();
-    if written.len() != 1 || a.tables.iter().any(|t| !t.written) { return None; }
+    if written.len() != 1 || a.tables.iter().any(|t| !t.written) {
+        return None;
+    }
     let pred = a.where_sql.as_deref().filter(|s| !s.is_empty())?;
     let t = written[0];
-    let db = if t.qualifier.is_empty() { current_db } else { t.qualifier.as_str() };
+    let db = if t.qualifier.is_empty() {
+        current_db
+    } else {
+        t.qualifier.as_str()
+    };
     let q = dialect::qualified(engine.family(), db, None, &t.name);
     Some(format!("SELECT COUNT(*) FROM {q} WHERE {pred}"))
 }
@@ -125,7 +177,8 @@ fn parse(sql: &str, engine: Engine) -> Result<Vec<Statement>, SqlError> {
     match engine {
         Engine::Mysql => Parser::parse_sql(&MySqlDialect {} as &dyn Dialect, sql),
         Engine::Dameng => Parser::parse_sql(&GenericDialect {} as &dyn Dialect, sql),
-    }.map_err(|_| SqlError::Unparseable)
+    }
+    .map_err(|_| SqlError::Unparseable)
 }
 
 fn kind_of(stmt: &Statement) -> Option<Kind> {
@@ -133,8 +186,13 @@ fn kind_of(stmt: &Statement) -> Option<Kind> {
         Statement::Query(_) | Statement::ExplainTable { .. } => Kind::Select,
         Statement::Insert(_) | Statement::Update(_) => Kind::Dml,
         Statement::Delete(_) => Kind::Delete,
-        Statement::Truncate(_) | Statement::CreateTable(_) | Statement::CreateIndex(_) | Statement::CreateView(_)
-            | Statement::AlterTable(_) | Statement::Drop { .. } | Statement::RenameTable(_) => Kind::Ddl,
+        Statement::Truncate(_)
+        | Statement::CreateTable(_)
+        | Statement::CreateIndex(_)
+        | Statement::CreateView(_)
+        | Statement::AlterTable(_)
+        | Statement::Drop { .. }
+        | Statement::RenameTable(_) => Kind::Ddl,
         _ => return None,
     })
 }
@@ -156,7 +214,11 @@ impl Visitor for Scan {
         // or trip the missing-WHERE rule. EXPLAIN ANALYZE does execute it.
         if self.plain == 0 {
             match kind_of(stmt) {
-                Some(k) => if rank(k) > rank(self.kind) { self.kind = k; },
+                Some(k) => {
+                    if rank(k) > rank(self.kind) {
+                        self.kind = k;
+                    }
+                }
                 None if matches!(stmt, Statement::Explain { .. }) => {}
                 None => self.bad = true,
             }
@@ -166,107 +228,183 @@ impl Visitor for Scan {
                 _ => {}
             }
         }
-        if matches!(stmt, Statement::Explain { analyze: false, .. }) { self.plain += 1; }
+        if matches!(stmt, Statement::Explain { analyze: false, .. }) {
+            self.plain += 1;
+        }
         ControlFlow::Continue(())
     }
 
     fn post_visit_statement(&mut self, stmt: &Statement) -> ControlFlow<()> {
-        if matches!(stmt, Statement::Explain { analyze: false, .. }) { self.plain = self.plain.saturating_sub(1); }
+        if matches!(stmt, Statement::Explain { analyze: false, .. }) {
+            self.plain = self.plain.saturating_sub(1);
+        }
         ControlFlow::Continue(())
     }
 
     fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<()> {
         if let Some(w) = &query.with {
-            for c in &w.cte_tables { self.ctes.push(c.alias.name.value.clone()); }
+            for c in &w.cte_tables {
+                self.ctes.push(c.alias.name.value.clone());
+            }
         }
         ControlFlow::Continue(())
     }
 
     fn pre_visit_relation(&mut self, relation: &ObjectName) -> ControlFlow<()> {
-        if let Some(p) = split_name(relation) { self.relations.push(p); }
+        if let Some(p) = split_name(relation) {
+            self.relations.push(p);
+        }
         ControlFlow::Continue(())
     }
 }
 
 fn push_table(tables: &mut Vec<TableUse>, qualifier: String, name: String, written: bool) {
-    if let Some(t) = tables.iter_mut().find(|t| t.qualifier.eq_ignore_ascii_case(&qualifier) && t.name.eq_ignore_ascii_case(&name)) {
+    if let Some(t) = tables.iter_mut().find(|t| {
+        t.qualifier.eq_ignore_ascii_case(&qualifier) && t.name.eq_ignore_ascii_case(&name)
+    }) {
         t.written |= written;
         return;
     }
-    tables.push(TableUse { qualifier, name, written });
+    tables.push(TableUse {
+        qualifier,
+        name,
+        written,
+    });
 }
 
 fn split_name(name: &ObjectName) -> Option<(String, String)> {
-    let idents: Vec<&str> = name.0.iter().filter_map(|p| p.as_ident().map(|i| i.value.as_str())).collect();
+    let idents: Vec<&str> = name
+        .0
+        .iter()
+        .filter_map(|p| p.as_ident().map(|i| i.value.as_str()))
+        .collect();
     let table = idents.last()?.to_string();
-    if table.is_empty() { return None; }
-    let qual = if idents.len() >= 2 { idents[idents.len() - 2].to_string() } else { String::new() };
+    if table.is_empty() {
+        return None;
+    }
+    let qual = if idents.len() >= 2 {
+        idents[idents.len() - 2].to_string()
+    } else {
+        String::new()
+    };
     Some((qual, table))
 }
 
 fn mark_writes(stmt: &Statement, writes: &mut HashSet<(String, String)>) {
     match stmt {
-        Statement::Explain { analyze: true, statement, .. } => mark_writes(statement, writes),
+        Statement::Explain {
+            analyze: true,
+            statement,
+            ..
+        } => mark_writes(statement, writes),
         Statement::Explain { .. } => {}
         Statement::Insert(i) => {
-            if let ast::TableObject::TableName(n) = &i.table { add_obj(n, writes); }
-            if let Some(q) = &i.source { walk_query(q, writes); }
+            if let ast::TableObject::TableName(n) = &i.table {
+                add_obj(n, writes);
+            }
+            if let Some(q) = &i.source {
+                walk_query(q, writes);
+            }
         }
         Statement::Update(u) => {
             add_factor(&u.table.relation, writes);
-            for j in &u.table.joins { add_factor(&j.relation, writes); }
+            for j in &u.table.joins {
+                add_factor(&j.relation, writes);
+            }
         }
         Statement::Delete(d) => {
-            let from = match &d.from { ast::FromTable::WithFromKeyword(t) | ast::FromTable::WithoutKeyword(t) => t };
+            let from = match &d.from {
+                ast::FromTable::WithFromKeyword(t) | ast::FromTable::WithoutKeyword(t) => t,
+            };
             for twj in from {
                 add_factor(&twj.relation, writes);
-                for j in &twj.joins { add_factor(&j.relation, writes); }
+                for j in &twj.joins {
+                    add_factor(&j.relation, writes);
+                }
             }
-            for n in &d.tables { add_obj(n, writes); }
+            for n in &d.tables {
+                add_obj(n, writes);
+            }
         }
         Statement::Query(q) => walk_query(q, writes),
         Statement::CreateTable(c) => add_obj(&c.name, writes),
         Statement::CreateIndex(c) => add_obj(&c.table_name, writes),
         Statement::CreateView(c) => add_obj(&c.name, writes),
         Statement::AlterTable(a) => add_obj(&a.name, writes),
-        Statement::Truncate(t) => { for n in &t.table_names { add_obj(&n.name, writes); } }
-        Statement::Drop { object_type, names, table, .. } => {
-            if let Some(t) = table { add_obj(t, writes); }
+        Statement::Truncate(t) => {
+            for n in &t.table_names {
+                add_obj(&n.name, writes);
+            }
+        }
+        Statement::Drop {
+            object_type,
+            names,
+            table,
+            ..
+        } => {
+            if let Some(t) = table {
+                add_obj(t, writes);
+            }
             if matches!(object_type, ast::ObjectType::Table | ast::ObjectType::View) {
-                for n in names { add_obj(n, writes); }
+                for n in names {
+                    add_obj(n, writes);
+                }
             }
         }
         Statement::RenameTable(rs) => {
-            for r in rs { add_obj(&r.old_name, writes); add_obj(&r.new_name, writes); }
+            for r in rs {
+                add_obj(&r.old_name, writes);
+                add_obj(&r.new_name, writes);
+            }
         }
         _ => {}
     }
 }
 
 fn walk_query(q: &Query, writes: &mut HashSet<(String, String)>) {
-    if let Some(w) = &q.with { for c in &w.cte_tables { walk_query(&c.query, writes); } }
+    if let Some(w) = &q.with {
+        for c in &w.cte_tables {
+            walk_query(&c.query, writes);
+        }
+    }
     walk_set(&q.body, writes);
 }
 
 fn walk_set(body: &SetExpr, writes: &mut HashSet<(String, String)>) {
     match body {
         SetExpr::Query(q) => walk_query(q, writes),
-        SetExpr::SetOperation { left, right, .. } => { walk_set(left, writes); walk_set(right, writes); }
-        SetExpr::Insert(s) | SetExpr::Update(s) | SetExpr::Delete(s) | SetExpr::Merge(s) => mark_writes(s, writes),
+        SetExpr::SetOperation { left, right, .. } => {
+            walk_set(left, writes);
+            walk_set(right, writes);
+        }
+        SetExpr::Insert(s) | SetExpr::Update(s) | SetExpr::Delete(s) | SetExpr::Merge(s) => {
+            mark_writes(s, writes)
+        }
         _ => {}
     }
 }
 
 fn add_factor(tf: &TableFactor, writes: &mut HashSet<(String, String)>) {
-    if let TableFactor::Table { name, .. } = tf { add_obj(name, writes); }
+    if let TableFactor::Table { name, .. } = tf {
+        add_obj(name, writes);
+    }
 }
 
 fn add_obj(name: &ObjectName, writes: &mut HashSet<(String, String)>) {
-    if let Some(p) = split_name(name) { writes.insert(p); }
+    if let Some(p) = split_name(name) {
+        writes.insert(p);
+    }
 }
 
 fn executed<'a>(stmt: &'a Statement) -> &'a Statement {
-    match stmt { Statement::Explain { analyze: true, statement, .. } => statement, _ => stmt }
+    match stmt {
+        Statement::Explain {
+            analyze: true,
+            statement,
+            ..
+        } => statement,
+        _ => stmt,
+    }
 }
 
 fn where_sql_of(stmt: &Statement) -> Option<String> {
@@ -278,11 +416,17 @@ fn where_sql_of(stmt: &Statement) -> Option<String> {
 }
 
 fn insert_rows_of(stmt: &Statement) -> Option<u64> {
-    let Statement::Insert(i) = executed(stmt) else { return None };
+    let Statement::Insert(i) = executed(stmt) else {
+        return None;
+    };
     if let Some(q) = &i.source {
-        if let SetExpr::Values(v) = q.body.as_ref() { return Some(v.rows.len() as u64); }
+        if let SetExpr::Values(v) = q.body.as_ref() {
+            return Some(v.rows.len() as u64);
+        }
     }
-    if !i.assignments.is_empty() { return Some(1); }
+    if !i.assignments.is_empty() {
+        return Some(1);
+    }
     None
 }
 
@@ -290,9 +434,17 @@ fn insert_rows_of(stmt: &Statement) -> Option<u64> {
 mod tests {
     use super::*;
 
-    fn ok(sql: &str, engine: Engine) -> Analysis { analyze(sql, engine).unwrap_or_else(|e| panic!("{sql}: {e:?}")) }
-    fn has(a: &Analysis, name: &str) -> bool { a.tables.iter().any(|t| t.name.eq_ignore_ascii_case(name)) }
-    fn written(a: &Analysis, name: &str) -> bool { a.tables.iter().any(|t| t.name.eq_ignore_ascii_case(name) && t.written) }
+    fn ok(sql: &str, engine: Engine) -> Analysis {
+        analyze(sql, engine).unwrap_or_else(|e| panic!("{sql}: {e:?}"))
+    }
+    fn has(a: &Analysis, name: &str) -> bool {
+        a.tables.iter().any(|t| t.name.eq_ignore_ascii_case(name))
+    }
+    fn written(a: &Analysis, name: &str) -> bool {
+        a.tables
+            .iter()
+            .any(|t| t.name.eq_ignore_ascii_case(name) && t.written)
+    }
 
     #[test]
     fn classifies_mysql_and_dm() {
@@ -308,7 +460,10 @@ mod tests {
         assert_eq!(q.tables[0].name.as_str(), "users");
 
         let d = ok("SELECT * FROM \"HR\".\"EMP\"", Engine::Dameng);
-        assert_eq!((d.tables[0].qualifier.as_str(), d.tables[0].name.as_str()), ("HR", "EMP"));
+        assert_eq!(
+            (d.tables[0].qualifier.as_str(), d.tables[0].name.as_str()),
+            ("HR", "EMP")
+        );
         assert_eq!(d.kind, Kind::Select);
     }
 
@@ -340,17 +495,32 @@ mod tests {
         assert_eq!(ddl.kind, Kind::Ddl);
         assert!(written(&ddl, "t"));
         assert_eq!(ok("DROP TABLE t", Engine::Mysql).kind, Kind::Ddl);
-        assert_eq!(ok("CREATE TABLE t (id INT)", Engine::Dameng).kind, Kind::Ddl);
+        assert_eq!(
+            ok("CREATE TABLE t (id INT)", Engine::Dameng).kind,
+            Kind::Ddl
+        );
         assert!(written(&ok("TRUNCATE TABLE t", Engine::Mysql), "t"));
     }
 
     #[test]
     fn rejects_multi_unparseable_and_unknown() {
-        assert_eq!(analyze("SELECT 1; SELECT 2", Engine::Mysql).err(), Some(SqlError::Multi));
-        assert_eq!(analyze("DELETE FROM t; DROP TABLE t", Engine::Dameng).err(), Some(SqlError::Multi));
+        assert_eq!(
+            analyze("SELECT 1; SELECT 2", Engine::Mysql).err(),
+            Some(SqlError::Multi)
+        );
+        assert_eq!(
+            analyze("DELETE FROM t; DROP TABLE t", Engine::Dameng).err(),
+            Some(SqlError::Multi)
+        );
         assert_eq!(analyze("   ", Engine::Mysql).err(), Some(SqlError::Empty));
-        assert_eq!(analyze("@@@", Engine::Mysql).err(), Some(SqlError::Unparseable));
-        assert_eq!(analyze("BEGIN", Engine::Mysql).err(), Some(SqlError::Unsupported));
+        assert_eq!(
+            analyze("@@@", Engine::Mysql).err(),
+            Some(SqlError::Unparseable)
+        );
+        assert_eq!(
+            analyze("BEGIN", Engine::Mysql).err(),
+            Some(SqlError::Unsupported)
+        );
     }
 
     #[test]
@@ -361,7 +531,10 @@ mod tests {
         assert!(plain.where_ok);
         assert!(!written(&plain, "t"));
 
-        let analyzed = ok("EXPLAIN ANALYZE UPDATE t SET a = 1 WHERE id = 1", Engine::Mysql);
+        let analyzed = ok(
+            "EXPLAIN ANALYZE UPDATE t SET a = 1 WHERE id = 1",
+            Engine::Mysql,
+        );
         assert!(analyzed.explain_analyze);
         assert_eq!(analyzed.kind, Kind::Dml);
         assert!(written(&analyzed, "t") && analyzed.where_ok);
@@ -386,7 +559,12 @@ mod tests {
         let u = ok("UPDATE t SET a = 1 WHERE id = 2", Engine::Mysql);
         let q = count_sql(&u, "app", Engine::Mysql).unwrap();
         assert!(q.contains("COUNT(*)") && q.contains("`t`") && q.contains("WHERE"));
-        assert!(count_sql(&ok("UPDATE t SET a = 1", Engine::Mysql), "app", Engine::Mysql).is_none());
+        assert!(count_sql(
+            &ok("UPDATE t SET a = 1", Engine::Mysql),
+            "app",
+            Engine::Mysql
+        )
+        .is_none());
         assert!(count_sql(&ok("SELECT * FROM t", Engine::Mysql), "app", Engine::Mysql).is_none());
     }
 }

@@ -19,7 +19,13 @@ pub const SUB_RADIUS: f32 = crate::ui::R_SUB;
 
 /// 岛：所有面板容器（左工具岛、内容岛、右侧卡片、底部面板）的唯一生成函数：圆角、卡片底色、无边框、纵向排列。
 pub fn island(id: impl Into<gpui::ElementId>) -> gpui::Stateful<Div> {
-    div().id(id).flex().flex_col().rounded(px(CARD_RADIUS)).overflow_hidden().bg(crate::theme::card_bg())
+    div()
+        .id(id)
+        .flex()
+        .flex_col()
+        .rounded(px(CARD_RADIUS))
+        .overflow_hidden()
+        .bg(crate::theme::card_bg())
 }
 
 /// The content card: a plain island without inner padding, so full-width strips (the terminal
@@ -34,7 +40,12 @@ pub const SUB_PAD: f32 = crate::ui::SP_2;
 
 /// A sub-card inside the content card (SQL editor / results …): faint fill + hairline border.
 pub fn sub_card() -> Div {
-    div().rounded(px(SUB_RADIUS)).border_1().border_color(crate::theme::divider()).overflow_hidden().bg(crate::theme::sub_bg())
+    div()
+        .rounded(px(SUB_RADIUS))
+        .border_1()
+        .border_color(crate::theme::divider())
+        .overflow_hidden()
+        .bg(crate::theme::sub_bg())
 }
 
 /// 子卡片内容区：填满剩余空间并带 `SUB_PAD` 内边距，让编辑器等内容与卡片边框之间留出间距。

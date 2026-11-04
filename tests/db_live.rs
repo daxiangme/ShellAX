@@ -10,26 +10,43 @@ use std::time::{Duration, Instant};
 use ssh_term_proto::assets::{parse_uri, DbConn, Family};
 use ssh_term_proto::db::{driver, edit, export, CancelSlot, Driver, ObjKind, RunOpts};
 
-fn env(k: &str) -> Option<String> { std::env::var(k).ok().filter(|v| !v.is_empty()) }
+fn env(k: &str) -> Option<String> {
+    std::env::var(k).ok().filter(|v| !v.is_empty())
+}
 
-fn conn(var: &str) -> Option<(DbConn, Option<String>)> { env(var).and_then(|u| parse_uri(&u)) }
+fn conn(var: &str) -> Option<(DbConn, Option<String>)> {
+    env(var).and_then(|u| parse_uri(&u))
+}
 
-fn rt() -> tokio::runtime::Runtime { tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap() }
+fn rt() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
+}
 
 async fn ok(d: &Driver, db: &str, sql: &str) {
     let r = d.execute(db, sql, false).await.unwrap();
-    if let Some(e) = r.iter().find_map(|r| r.error.clone()) { panic!("{sql}: {e}"); }
+    if let Some(e) = r.iter().find_map(|r| r.error.clone()) {
+        panic!("{sql}: {e}");
+    }
 }
 
 async fn rows(d: &Driver, db: &str, schema: Option<&str>, sql: &str) -> Vec<Vec<Option<String>>> {
-    let opts = RunOpts { schema: schema.map(String::from), ..Default::default() };
+    let opts = RunOpts {
+        schema: schema.map(String::from),
+        ..Default::default()
+    };
     let mut r = d.execute_with(db, sql, false, &opts).await.unwrap();
     let r = r.pop().unwrap();
     assert!(r.error.is_none(), "{sql}: {:?}", r.error);
     r.rows
 }
 
-fn s(v: &str) -> Option<String> { Some(v.to_string()) }
+fn s(v: &str) -> Option<String> {
+    Some(v.to_string())
+}
 
 /// Long query cancelled from another task: must come back fast with the cancelled marker.
 async fn cancel_case(d: &Driver, db: &str, sql: &str) {
@@ -37,12 +54,32 @@ async fn cancel_case(d: &Driver, db: &str, sql: &str) {
     let d2 = d.clone();
     let (db2, sql2, slot2) = (db.to_string(), sql.to_string(), slot.clone());
     let started = Instant::now();
-    let h = tokio::spawn(async move { d2.execute_with(&db2, &sql2, false, &RunOpts { cancel: Some(slot2), ..Default::default() }).await });
+    let h = tokio::spawn(async move {
+        d2.execute_with(
+            &db2,
+            &sql2,
+            false,
+            &RunOpts {
+                cancel: Some(slot2),
+                ..Default::default()
+            },
+        )
+        .await
+    });
     tokio::time::sleep(Duration::from_millis(800)).await;
     assert!(d.cancel(db, &slot).await.unwrap(), "nothing to cancel");
-    let r = tokio::time::timeout(Duration::from_secs(5), h).await.expect("cancel did not stop the query").unwrap().unwrap();
+    let r = tokio::time::timeout(Duration::from_secs(5), h)
+        .await
+        .expect("cancel did not stop the query")
+        .unwrap()
+        .unwrap();
     assert!(started.elapsed() < Duration::from_secs(6));
-    let e = r.last().unwrap().error.clone().expect("cancelled query reported success");
+    let e = r
+        .last()
+        .unwrap()
+        .error
+        .clone()
+        .expect("cancelled query reported success");
     assert!(!e.is_empty());
     // the pool is still usable afterwards
     assert_eq!(rows(d, db, None, "SELECT 1").await, vec![vec![s("1")]]);
@@ -52,21 +89,54 @@ async fn cancel_case(d: &Driver, db: &str, sql: &str) {
 async fn roundtrip(d: &Driver, db: &str, schema: Option<&str>, table: &str, order: &str) {
     let f = d.family();
     let q = ssh_term_proto::db::dialect::qualified(f, db, schema, table);
-    let before = d.execute_with(db, &format!("SELECT * FROM {q} ORDER BY {order}"), false, &RunOpts::default()).await.unwrap().pop().unwrap();
+    let before = d
+        .execute_with(
+            db,
+            &format!("SELECT * FROM {q} ORDER BY {order}"),
+            false,
+            &RunOpts::default(),
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
     assert!(before.error.is_none(), "{:?}", before.error);
     let cols = d.columns(db, schema, table).await.unwrap();
-    for fmt in [export::Format::Csv, export::Format::Json, export::Format::Sql] {
+    for fmt in [
+        export::Format::Csv,
+        export::Format::Json,
+        export::Format::Sql,
+    ] {
         let text = export::export(fmt, f, &q, &before.columns, &before.rows);
         ok(d, db, &format!("DELETE FROM {q}")).await;
         let stmts = match fmt {
-            export::Format::Sql => ssh_term_proto::db::split::split(&text).into_iter().map(|s| s.text).collect(),
+            export::Format::Sql => ssh_term_proto::db::split::split(&text)
+                .into_iter()
+                .map(|s| s.text)
+                .collect(),
             _ => {
-                let (h, r) = if fmt == export::Format::Csv { export::parse_csv(&text).unwrap() } else { export::parse_json(&text).unwrap() };
+                let (h, r) = if fmt == export::Format::Csv {
+                    export::parse_csv(&text).unwrap()
+                } else {
+                    export::parse_json(&text).unwrap()
+                };
                 export::import_statements(f, &q, &cols, &h, &r, 200).unwrap()
             }
         };
-        d.apply(db, schema, stmts).await.unwrap_or_else(|e| panic!("{fmt:?} import: {e}"));
-        let after = d.execute_with(db, &format!("SELECT * FROM {q} ORDER BY {order}"), false, &RunOpts::default()).await.unwrap().pop().unwrap();
+        d.apply(db, schema, stmts)
+            .await
+            .unwrap_or_else(|e| panic!("{fmt:?} import: {e}"));
+        let after = d
+            .execute_with(
+                db,
+                &format!("SELECT * FROM {q} ORDER BY {order}"),
+                false,
+                &RunOpts::default(),
+            )
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
         assert_eq!(after.rows, before.rows, "{fmt:?} round trip");
     }
 }
@@ -74,7 +144,10 @@ async fn roundtrip(d: &Driver, db: &str, schema: Option<&str>, table: &str, orde
 #[test]
 #[ignore]
 fn mysql_end_to_end() {
-    let Some((c, pw)) = conn("SHELLAX_TEST_MYSQL_URL") else { eprintln!("SHELLAX_TEST_MYSQL_URL not set"); return };
+    let Some((c, pw)) = conn("SHELLAX_TEST_MYSQL_URL") else {
+        eprintln!("SHELLAX_TEST_MYSQL_URL not set");
+        return;
+    };
     let db = c.database.clone();
     assert!(!db.is_empty(), "URL needs a database");
     rt().block_on(async {
@@ -148,7 +221,10 @@ fn mysql_end_to_end() {
 #[test]
 #[ignore]
 fn postgres_end_to_end() {
-    let Some((c, pw)) = conn("SHELLAX_TEST_PG_URL") else { eprintln!("SHELLAX_TEST_PG_URL not set"); return };
+    let Some((c, pw)) = conn("SHELLAX_TEST_PG_URL") else {
+        eprintln!("SHELLAX_TEST_PG_URL not set");
+        return;
+    };
     let db = c.database.clone();
     rt().block_on(async {
         let d = driver::connect(&c, pw, None).await.unwrap();
@@ -232,19 +308,56 @@ fn postgres_end_to_end() {
 #[ignore]
 fn ssh_tunnel() {
     use ssh_term_proto::ssh::{self, SshTarget};
-    let (Some(port), Some(user), Some(key)) = (env("TEST_SSH_PORT2"), env("TEST_SSH_USER"), env("TEST_SSH_KEY")) else { eprintln!("TEST_SSH_* not set"); return };
-    let targets: Vec<(DbConn, Option<String>)> = ["SHELLAX_TEST_MYSQL_URL", "SHELLAX_TEST_PG_URL"].iter().filter_map(|v| conn(v)).collect();
+    let (Some(port), Some(user), Some(key)) = (
+        env("TEST_SSH_PORT2"),
+        env("TEST_SSH_USER"),
+        env("TEST_SSH_KEY"),
+    ) else {
+        eprintln!("TEST_SSH_* not set");
+        return;
+    };
+    let targets: Vec<(DbConn, Option<String>)> = ["SHELLAX_TEST_MYSQL_URL", "SHELLAX_TEST_PG_URL"]
+        .iter()
+        .filter_map(|v| conn(v))
+        .collect();
     assert!(!targets.is_empty());
     let (htx, hrx) = flume::unbounded::<ssh::HostKeyPrompt>();
-    std::thread::spawn(move || while let Ok(p) = hrx.recv() { let _ = p.reply.send(ssh::HostKeyDecision::AcceptOnce); });
+    std::thread::spawn(move || {
+        while let Ok(p) = hrx.recv() {
+            let _ = p.reply.send(ssh::HostKeyDecision::AcceptOnce);
+        }
+    });
     let (atx, _arx) = flume::unbounded::<ssh::AuthPrompt>();
     let kh = std::env::temp_dir().join(format!("sx-it-kh-{}", std::process::id()));
     rt().block_on(async {
         for (c, pw) in targets {
-            let t = SshTarget { host: "127.0.0.1".into(), port: port.parse().unwrap(), user: user.clone(), auth: "key".into(), keys: vec![key.clone().into()], known_hosts: kh.clone(), ..Default::default() };
-            let live = ssh_term_proto::db::live::open(&c, pw, Some((t, ssh::Prompts { hostkey: htx.clone(), auth: atx.clone() }))).await.unwrap();
+            let t = SshTarget {
+                host: "127.0.0.1".into(),
+                port: port.parse().unwrap(),
+                user: user.clone(),
+                auth: "key".into(),
+                keys: vec![key.clone().into()],
+                known_hosts: kh.clone(),
+                ..Default::default()
+            };
+            let live = ssh_term_proto::db::live::open(
+                &c,
+                pw,
+                Some((
+                    t,
+                    ssh::Prompts {
+                        hostkey: htx.clone(),
+                        auth: atx.clone(),
+                    },
+                )),
+            )
+            .await
+            .unwrap();
             assert!(live.via.is_some() && !live.version.is_empty());
-            assert_eq!(rows(&live.driver, &c.database, None, "SELECT 1").await, vec![vec![s("1")]]);
+            assert_eq!(
+                rows(&live.driver, &c.database, None, "SELECT 1").await,
+                vec![vec![s("1")]]
+            );
             live.close().await;
         }
     });
@@ -288,7 +401,9 @@ fn ddl_recreates() {
 #[test]
 #[ignore]
 fn export_cancel() {
-    let Some((c, pw)) = conn("SHELLAX_TEST_PG_URL") else { return };
+    let Some((c, pw)) = conn("SHELLAX_TEST_PG_URL") else {
+        return;
+    };
     let db = c.database.clone();
     rt().block_on(async {
         let d = driver::connect(&c, pw, None).await.unwrap();
@@ -312,55 +427,171 @@ async fn alter_case(d: &Driver, db: &str, schema: Option<&str>) {
     let f = d.family();
     let q = |t: &str| ssh_term_proto::db::dialect::qualified(f, db, schema, t);
     let (p, c) = (q("sx_it_p"), q("sx_it_c"));
-    let _ = d.execute(db, &format!("DROP TABLE IF EXISTS {c}; DROP TABLE IF EXISTS {p}"), false).await;
-    let serial = match f { Family::Mysql => "INT AUTO_INCREMENT PRIMARY KEY", Family::Postgres => "serial PRIMARY KEY", _ => "INTEGER PRIMARY KEY" };
+    let _ = d
+        .execute(
+            db,
+            &format!("DROP TABLE IF EXISTS {c}; DROP TABLE IF EXISTS {p}"),
+            false,
+        )
+        .await;
+    let serial = match f {
+        Family::Mysql => "INT AUTO_INCREMENT PRIMARY KEY",
+        Family::Postgres => "serial PRIMARY KEY",
+        _ => "INTEGER PRIMARY KEY",
+    };
     ok(d, db, &format!("CREATE TABLE {p} (id {serial}, code VARCHAR(10)); CREATE TABLE {c} (id {serial}, pid INT, note VARCHAR(20) DEFAULT 'n', old_col INT)")).await;
     let cols = d.columns(db, schema, "sx_it_c").await.unwrap();
     let def = |n: &str| ColDef::from_info(f, cols.iter().find(|c| c.name == n).unwrap());
     let note = def("note");
-    assert_eq!(note.default.as_deref().map(|d| d.split("::").next().unwrap()), Some("'n'"), "{:?}", note);
+    assert_eq!(
+        note.default
+            .as_deref()
+            .map(|d| d.split("::").next().unwrap()),
+        Some("'n'"),
+        "{:?}",
+        note
+    );
     let mut ops = vec![
-        Op::AddColumn(ColDef { name: "added col".into(), type_name: "VARCHAR(5)".into(), nullable: false, default: Some("'z'".into()), comment: "new".into(), extra: String::new() }),
+        Op::AddColumn(ColDef {
+            name: "added col".into(),
+            type_name: "VARCHAR(5)".into(),
+            nullable: false,
+            default: Some("'z'".into()),
+            comment: "new".into(),
+            extra: String::new(),
+        }),
         Op::DropColumn("old_col".into()),
-        Op::AddIndex(IndexDef { name: "ix_c_note".into(), columns: vec!["memo".into(), "added col".into()], unique: true, constraint: false }),
+        Op::AddIndex(IndexDef {
+            name: "ix_c_note".into(),
+            columns: vec!["memo".into(), "added col".into()],
+            unique: true,
+            constraint: false,
+        }),
     ];
     if f != Family::Sqlite {
-        ops.push(Op::ModifyColumn { old: note.clone(), new: ColDef { name: "memo".into(), type_name: "VARCHAR(40)".into(), nullable: false, default: Some("'m'".into()), comment: "memo".into(), ..note.clone() } });
-        ops.push(Op::AddFk(FkDef { name: "fk_c_p".into(), columns: vec!["pid".into()], ref_table: p.clone(), ref_columns: vec!["id".into()], on_delete: "CASCADE".into(), on_update: String::new() }));
+        ops.push(Op::ModifyColumn {
+            old: note.clone(),
+            new: ColDef {
+                name: "memo".into(),
+                type_name: "VARCHAR(40)".into(),
+                nullable: false,
+                default: Some("'m'".into()),
+                comment: "memo".into(),
+                ..note.clone()
+            },
+        });
+        ops.push(Op::AddFk(FkDef {
+            name: "fk_c_p".into(),
+            columns: vec!["pid".into()],
+            ref_table: p.clone(),
+            ref_columns: vec!["id".into()],
+            on_delete: "CASCADE".into(),
+            on_update: String::new(),
+        }));
     } else {
-        ops.push(Op::ModifyColumn { old: note.clone(), new: ColDef { name: "memo".into(), ..note.clone() } });
+        ops.push(Op::ModifyColumn {
+            old: note.clone(),
+            new: ColDef {
+                name: "memo".into(),
+                ..note.clone()
+            },
+        });
     }
     let stmts = alter::statements(f, &c, schema, &ops).unwrap();
-    d.apply(db, schema, stmts.clone()).await.unwrap_or_else(|e| panic!("{e}\n{}", stmts.join(";\n")));
+    d.apply(db, schema, stmts.clone())
+        .await
+        .unwrap_or_else(|e| panic!("{e}\n{}", stmts.join(";\n")));
     let cols = d.columns(db, schema, "sx_it_c").await.unwrap();
     let names: Vec<&str> = cols.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, vec!["id", "pid", "memo", "added col"]);
     let memo = &cols[2];
     if f != Family::Sqlite {
-        assert!(memo.type_name.to_lowercase().contains("40") && memo.nullable == Some(false) && memo.comment == "memo", "{memo:?}");
+        assert!(
+            memo.type_name.to_lowercase().contains("40")
+                && memo.nullable == Some(false)
+                && memo.comment == "memo",
+            "{memo:?}"
+        );
         assert!(memo.default.as_deref().unwrap().contains('m'));
     }
     let ix = d.indexes(db, schema, "sx_it_c").await.unwrap();
-    let ix = ix.iter().find(|i| i.name == "ix_c_note").unwrap_or_else(|| panic!("{ix:?}"));
+    let ix = ix
+        .iter()
+        .find(|i| i.name == "ix_c_note")
+        .unwrap_or_else(|| panic!("{ix:?}"));
     assert!(ix.unique && ix.columns.len() == 2, "{ix:?}");
     if f != Family::Sqlite {
         let fks = d.foreign_keys(db, schema, "sx_it_c").await.unwrap();
         assert_eq!(fks.len(), 1);
-        assert_eq!((fks[0].name.as_str(), fks[0].columns.clone(), fks[0].ref_columns.clone(), fks[0].on_delete.as_str()), ("fk_c_p", vec!["pid".to_string()], vec!["id".to_string()], "CASCADE"));
+        assert_eq!(
+            (
+                fks[0].name.as_str(),
+                fks[0].columns.clone(),
+                fks[0].ref_columns.clone(),
+                fks[0].on_delete.as_str()
+            ),
+            (
+                "fk_c_p",
+                vec!["pid".to_string()],
+                vec!["id".to_string()],
+                "CASCADE"
+            )
+        );
         // read back, drop both, re-add the FK from what was read
-        let st = alter::statements(f, &c, schema, &[Op::DropFk(fks[0].name.clone()), Op::DropIndex(ix.clone())]).unwrap();
+        let st = alter::statements(
+            f,
+            &c,
+            schema,
+            &[Op::DropFk(fks[0].name.clone()), Op::DropIndex(ix.clone())],
+        )
+        .unwrap();
         d.apply(db, schema, st).await.unwrap();
-        assert!(d.foreign_keys(db, schema, "sx_it_c").await.unwrap().is_empty());
-        d.apply(db, schema, alter::statements(f, &c, schema, &[Op::AddFk(fks[0].clone()), Op::AddIndex(ix.clone())]).unwrap()).await.unwrap();
+        assert!(d
+            .foreign_keys(db, schema, "sx_it_c")
+            .await
+            .unwrap()
+            .is_empty());
+        d.apply(
+            db,
+            schema,
+            alter::statements(
+                f,
+                &c,
+                schema,
+                &[Op::AddFk(fks[0].clone()), Op::AddIndex(ix.clone())],
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
         assert_eq!(d.foreign_keys(db, schema, "sx_it_c").await.unwrap(), fks);
         // a failing batch: PostgreSQL rolls back the whole change
-        let bad = alter::statements(f, &c, schema, &[Op::DropColumn("pid".into()), Op::DropColumn("nope".into())]).unwrap();
+        let bad = alter::statements(
+            f,
+            &c,
+            schema,
+            &[Op::DropColumn("pid".into()), Op::DropColumn("nope".into())],
+        )
+        .unwrap();
         assert!(d.apply(db, schema, bad).await.is_err());
-        if f == Family::Postgres { assert!(d.columns(db, schema, "sx_it_c").await.unwrap().iter().any(|c| c.name == "pid")); }
+        if f == Family::Postgres {
+            assert!(d
+                .columns(db, schema, "sx_it_c")
+                .await
+                .unwrap()
+                .iter()
+                .any(|c| c.name == "pid"));
+        }
     } else {
         let fks = d.foreign_keys(db, schema, "sx_it_c").await.unwrap();
         assert!(fks.is_empty());
-        d.apply(db, schema, alter::statements(f, &c, schema, &[Op::DropIndex(ix.clone())]).unwrap()).await.unwrap();
+        d.apply(
+            db,
+            schema,
+            alter::statements(f, &c, schema, &[Op::DropIndex(ix.clone())]).unwrap(),
+        )
+        .await
+        .unwrap();
     }
     ok(d, db, &format!("DROP TABLE {c}; DROP TABLE {p}")).await;
 }
@@ -373,7 +604,11 @@ fn structure_designer() {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("t.db");
         std::fs::write(&file, b"").unwrap();
-        let lite = DbConn { kind: ssh_term_proto::assets::DbKind::Sqlite, file: file.to_string_lossy().into(), ..Default::default() };
+        let lite = DbConn {
+            kind: ssh_term_proto::assets::DbKind::Sqlite,
+            file: file.to_string_lossy().into(),
+            ..Default::default()
+        };
         let d = driver::connect(&lite, None, None).await.unwrap();
         alter_case(&d, "main", None).await;
         d.close().await.unwrap();
@@ -395,7 +630,10 @@ fn structure_designer() {
 #[test]
 #[ignore]
 fn mssql_end_to_end() {
-    let Some((mut c, pw)) = conn("SHELLAX_TEST_MSSQL_URL") else { eprintln!("SHELLAX_TEST_MSSQL_URL not set"); return };
+    let Some((mut c, pw)) = conn("SHELLAX_TEST_MSSQL_URL") else {
+        eprintln!("SHELLAX_TEST_MSSQL_URL not set");
+        return;
+    };
     let db = c.database.clone();
     rt().block_on(async {
         c.database.clear();
@@ -444,7 +682,10 @@ fn mssql_end_to_end() {
 #[test]
 #[ignore]
 fn clickhouse_end_to_end() {
-    let Some((c, pw)) = conn("SHELLAX_TEST_CLICKHOUSE_URL") else { eprintln!("SHELLAX_TEST_CLICKHOUSE_URL not set"); return };
+    let Some((c, pw)) = conn("SHELLAX_TEST_CLICKHOUSE_URL") else {
+        eprintln!("SHELLAX_TEST_CLICKHOUSE_URL not set");
+        return;
+    };
     rt().block_on(async {
         let d = driver::connect(&c, pw, None).await.unwrap();
         assert!(!d.server_version().await.unwrap().is_empty());

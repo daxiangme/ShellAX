@@ -12,31 +12,34 @@
 use gpui::{actions, App, KeyBinding, Menu, MenuItem, SystemMenuType};
 use ssh_term_proto::i18n::t;
 
-actions!(shellax_menu, [
-    QuitApp,
-    OpenSettings,
-    OpenAbout,
-    NewTerminalTab,
-    NewHostDialog,
-    SplitRightPane,
-    SplitDownPane,
-    ClosePane,
-    OpenSftp,
-    CopySelection,
-    PasteClipboard,
-    ToggleSidebar,
-    CycleTheme,
-    OpenPalette,
-    OpenAiPanel,
-    OpenSnippets,
-    OpenHistory,
-    OpenDirectory,
-    OpenMcp,
-    OpenAuditLog,
-    MinimizeWindow,
-    HideApp,
-    HideOthers,
-]);
+actions!(
+    shellax_menu,
+    [
+        QuitApp,
+        OpenSettings,
+        OpenAbout,
+        NewTerminalTab,
+        NewHostDialog,
+        SplitRightPane,
+        SplitDownPane,
+        ClosePane,
+        OpenSftp,
+        CopySelection,
+        PasteClipboard,
+        ToggleSidebar,
+        CycleTheme,
+        OpenPalette,
+        OpenAiPanel,
+        OpenSnippets,
+        OpenHistory,
+        OpenDirectory,
+        OpenMcp,
+        OpenAuditLog,
+        MinimizeWindow,
+        HideApp,
+        HideOthers,
+    ]
+);
 
 /// Install the menu bar and the macOS shortcuts that go with it.
 ///

@@ -53,7 +53,10 @@ pub const PWSH_INTEGRATION: &str = concat!(
 
 /// cmd.exe 集成：`PROMPT` 里用 `$E]9;9;$P$E\` 输出 OSC 9;9，后面保留用户原来的提示符（默认 `$P$G`）。
 pub fn cmd_prompt(existing: Option<&str>) -> String {
-    format!("$E]9;9;$P$E\\{}", existing.filter(|s| !s.is_empty()).unwrap_or("$P$G"))
+    format!(
+        "$E]9;9;$P$E\\{}",
+        existing.filter(|s| !s.is_empty()).unwrap_or("$P$G")
+    )
 }
 
 /// 用 sysinfo 读进程的工作目录（Mac: proc_pidinfo；Windows: 读进程环境块）。
@@ -61,8 +64,14 @@ fn sysinfo_cwd(pid: u32) -> Option<String> {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     let mut sys = System::new();
     let p = Pid::from_u32(pid);
-    sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[p]), ProcessRefreshKind::new().with_cwd(UpdateKind::Always));
-    sys.process(p).and_then(|pr| pr.cwd()).map(|d| d.display().to_string()).filter(|d| !d.is_empty())
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[p]),
+        ProcessRefreshKind::new().with_cwd(UpdateKind::Always),
+    );
+    sys.process(p)
+        .and_then(|pr| pr.cwd())
+        .map(|d| d.display().to_string())
+        .filter(|d| !d.is_empty())
 }
 
 /// 本地 shell 进程的当前工作目录：Linux 读 `/proc`；Mac / Windows 用 sysinfo（libproc / 读进程环境块），
@@ -71,10 +80,16 @@ fn process_cwd_probe(pid: u32) -> crate::term::FgProbe {
     let cache: Mutex<Option<(std::time::Instant, Option<String>)>> = Mutex::new(None);
     Box::new(move || {
         if cfg!(target_os = "linux") {
-            return std::fs::read_link(format!("/proc/{pid}/cwd")).ok().map(|p| p.display().to_string());
+            return std::fs::read_link(format!("/proc/{pid}/cwd"))
+                .ok()
+                .map(|p| p.display().to_string());
         }
         let mut g = cache.lock().ok()?;
-        if let Some((at, v)) = g.as_ref() { if at.elapsed() < std::time::Duration::from_millis(1000) { return v.clone(); } }
+        if let Some((at, v)) = g.as_ref() {
+            if at.elapsed() < std::time::Duration::from_millis(1000) {
+                return v.clone();
+            }
+        }
         let v = sysinfo_cwd(pid);
         *g = Some((std::time::Instant::now(), v.clone()));
         v
@@ -82,7 +97,12 @@ fn process_cwd_probe(pid: u32) -> crate::term::FgProbe {
 }
 
 /// Shell started for a local pane without an explicit shell: $SHELL, else the platform default.
-pub fn default_shell_path() -> String { std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(default_shell) }
+pub fn default_shell_path() -> String {
+    std::env::var("SHELL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(default_shell)
+}
 
 /// Switches this process's console to UTF-8 for the duration of a spawn, then restores it.
 ///
@@ -91,21 +111,35 @@ pub fn default_shell_path() -> String { std::env::var("SHELL").ok().filter(|s| !
 /// Restoring matters: the GUI process keeps using this console afterwards.
 #[cfg(windows)]
 fn utf8_console() -> ConsolePages {
-    use windows_sys::Win32::System::Console::{GetConsoleCP, GetConsoleOutputCP, SetConsoleCP, SetConsoleOutputCP};
-    let saved = ConsolePages { input: unsafe { GetConsoleCP() }, output: unsafe { GetConsoleOutputCP() } };
+    use windows_sys::Win32::System::Console::{
+        GetConsoleCP, GetConsoleOutputCP, SetConsoleCP, SetConsoleOutputCP,
+    };
+    let saved = ConsolePages {
+        input: unsafe { GetConsoleCP() },
+        output: unsafe { GetConsoleOutputCP() },
+    };
     const UTF8: u32 = 65001;
-    unsafe { SetConsoleOutputCP(UTF8); SetConsoleCP(UTF8); }
+    unsafe {
+        SetConsoleOutputCP(UTF8);
+        SetConsoleCP(UTF8);
+    }
     saved
 }
 
 #[cfg(windows)]
-struct ConsolePages { input: u32, output: u32 }
+struct ConsolePages {
+    input: u32,
+    output: u32,
+}
 
 #[cfg(windows)]
 impl Drop for ConsolePages {
     fn drop(&mut self) {
         use windows_sys::Win32::System::Console::{SetConsoleCP, SetConsoleOutputCP};
-        unsafe { SetConsoleOutputCP(self.output); SetConsoleCP(self.input); }
+        unsafe {
+            SetConsoleOutputCP(self.output);
+            SetConsoleCP(self.input);
+        }
     }
 }
 
@@ -114,17 +148,29 @@ impl Drop for ConsolePages {
 fn default_shell() -> String {
     #[cfg(windows)]
     {
-        let on_path = |exe: &str| std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(exe).is_file()));
-        if on_path("pwsh.exe") { return "pwsh.exe".into(); }
-        if on_path("powershell.exe") { return "powershell.exe".into(); }
+        let on_path = |exe: &str| {
+            std::env::var_os("PATH")
+                .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(exe).is_file()))
+        };
+        if on_path("pwsh.exe") {
+            return "pwsh.exe".into();
+        }
+        if on_path("powershell.exe") {
+            return "powershell.exe".into();
+        }
         std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into())
     }
     #[cfg(not(windows))]
-    { "/bin/bash".into() }
+    {
+        "/bin/bash".into()
+    }
 }
 
 fn home() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(std::path::PathBuf::from).filter(|p| p.is_dir())
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_dir())
 }
 
 /// Spawn the user's shell in a local PTY and wire it to a new Session.
@@ -142,14 +188,27 @@ alias fgrep='fgrep --color=auto'
 "#;
 
 /// `shell`: explicit shell path; None = $SHELL (bash/zsh get OSC 133 integration).
-pub fn spawn_local(size: Size, shell: Option<&str>) -> Result<Arc<Session>> { spawn_local_in(size, shell, None) }
+pub fn spawn_local(size: Size, shell: Option<&str>) -> Result<Arc<Session>> {
+    spawn_local_in(size, shell, None)
+}
 
 /// Like `spawn_local`, starting in `cwd` (layout restore) when it exists.
-pub fn spawn_local_in(size: Size, shell: Option<&str>, cwd: Option<&std::path::Path>) -> Result<Arc<Session>> {
+pub fn spawn_local_in(
+    size: Size,
+    shell: Option<&str>,
+    cwd: Option<&std::path::Path>,
+) -> Result<Arc<Session>> {
     let (session, out_tx, from_ui) = Session::new(size);
     let pty = native_pty_system();
-    let pair = pty.openpty(PtySize { rows: size.rows as u16, cols: size.cols as u16, pixel_width: 0, pixel_height: 0 })?;
-    let sh = shell.map(str::to_string).unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| default_shell()));
+    let pair = pty.openpty(PtySize {
+        rows: size.rows as u16,
+        cols: size.cols as u16,
+        pixel_width: 0,
+        pixel_height: 0,
+    })?;
+    let sh = shell
+        .map(str::to_string)
+        .unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| default_shell()));
     let integrate = match INTEGRATE.load(std::sync::atomic::Ordering::Relaxed) {
         0 => false,
         2 => true,
@@ -159,31 +218,65 @@ pub fn spawn_local_in(size: Size, shell: Option<&str>, cwd: Option<&std::path::P
     let mut cmd = CommandBuilder::new(&sh);
     let mut hist_file = ".bash_history";
     if (integrate || style) && sh.ends_with("bash") {
-        let mut body = if integrate { BASH_INTEGRATION.to_string() } else { "[ -f ~/.bashrc ] && . ~/.bashrc\n".into() };
-        if style { body.push_str(COLOR_ALIASES); }
+        let mut body = if integrate {
+            BASH_INTEGRATION.to_string()
+        } else {
+            "[ -f ~/.bashrc ] && . ~/.bashrc\n".into()
+        };
+        if style {
+            body.push_str(COLOR_ALIASES);
+        }
         // one file per variant: sessions starting at the same time must not overwrite each other's rc
-        let rc = std::env::temp_dir().join(format!("shellax-bash-{}{}.sh", if integrate { "i" } else { "n" }, if style { "s" } else { "p" }));
+        let rc = std::env::temp_dir().join(format!(
+            "shellax-bash-{}{}.sh",
+            if integrate { "i" } else { "n" },
+            if style { "s" } else { "p" }
+        ));
         let _ = std::fs::write(&rc, body);
         cmd.args(["--rcfile", rc.to_str().unwrap_or_default()]);
     } else if (integrate || style) && sh.ends_with("zsh") {
-        let dir = std::env::temp_dir().join(format!("shellax-zsh-{}{}", if integrate { "i" } else { "n" }, if style { "s" } else { "p" }));
+        let dir = std::env::temp_dir().join(format!(
+            "shellax-zsh-{}{}",
+            if integrate { "i" } else { "n" },
+            if style { "s" } else { "p" }
+        ));
         let _ = std::fs::create_dir_all(&dir);
-        let zshenv = if integrate { ZSH_ZSHENV.to_string() } else { "[ -f \"$HOME/.zshenv\" ] && . \"$HOME/.zshenv\"\n".into() };
-        let mut zshrc = if integrate { ZSH_ZSHRC.to_string() } else { "[ -f \"$HOME/.zshrc\" ] && . \"$HOME/.zshrc\"\n".into() };
-        if style { zshrc.push_str(COLOR_ALIASES); }
+        let zshenv = if integrate {
+            ZSH_ZSHENV.to_string()
+        } else {
+            "[ -f \"$HOME/.zshenv\" ] && . \"$HOME/.zshenv\"\n".into()
+        };
+        let mut zshrc = if integrate {
+            ZSH_ZSHRC.to_string()
+        } else {
+            "[ -f \"$HOME/.zshrc\" ] && . \"$HOME/.zshrc\"\n".into()
+        };
+        if style {
+            zshrc.push_str(COLOR_ALIASES);
+        }
         let _ = std::fs::write(dir.join(".zshenv"), zshenv);
         let _ = std::fs::write(dir.join(".zshrc"), zshrc);
-        if let Ok(z) = std::env::var("ZDOTDIR") { cmd.env("SHELLAX_ORIG_ZDOTDIR", z); }
+        if let Ok(z) = std::env::var("ZDOTDIR") {
+            cmd.env("SHELLAX_ORIG_ZDOTDIR", z);
+        }
         cmd.env("ZDOTDIR", dir.as_os_str());
         hist_file = ".zsh_history";
     }
-    let stem = std::path::Path::new(&sh).file_stem().map(|s| s.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    let stem = std::path::Path::new(&sh)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
     if integrate && (stem == "pwsh" || stem == "powershell") {
         cmd.args(["-NoLogo", "-NoExit", "-Command", PWSH_INTEGRATION]);
     } else if integrate && stem == "cmd" {
-        cmd.env("PROMPT", cmd_prompt(std::env::var("PROMPT").ok().as_deref()));
+        cmd.env(
+            "PROMPT",
+            cmd_prompt(std::env::var("PROMPT").ok().as_deref()),
+        );
     }
-    if sh.ends_with("zsh") { hist_file = ".zsh_history"; }
+    if sh.ends_with("zsh") {
+        hist_file = ".zsh_history";
+    }
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     // Windows PowerShell 5.1 reads the console code page once, at startup, and then encodes
@@ -194,18 +287,28 @@ pub fn spawn_local_in(size: Size, shell: Option<&str>, cwd: Option<&std::path::P
     // put back, because this also moves the GUI process's own console.
     #[cfg(windows)]
     let _code_page = utf8_console();
-    match cwd.filter(|c| c.is_dir()) { Some(c) => cmd.cwd(c), None => if let Some(h) = home() { cmd.cwd(h); } }
+    match cwd.filter(|c| c.is_dir()) {
+        Some(c) => cmd.cwd(c),
+        None => {
+            if let Some(h) = home() {
+                cmd.cwd(h);
+            }
+        }
+    }
     let mut child = pair.slave.spawn_command(cmd)?;
     if let Some(pid) = child.process_id() {
         *session.cwd_probe.lock().unwrap() = Some(process_cwd_probe(pid));
     }
     if let Some(h) = home() {
         if let Ok(body) = std::fs::read(h.join(hist_file)) {
-            *session.history_seed.lock().unwrap() = Some(String::from_utf8_lossy(&body).into_owned());
+            *session.history_seed.lock().unwrap() =
+                Some(String::from_utf8_lossy(&body).into_owned());
         }
     }
     drop(pair.slave);
-    session.connected.store(true, std::sync::atomic::Ordering::Release);
+    session
+        .connected
+        .store(true, std::sync::atomic::Ordering::Release);
     let mut reader = pair.master.try_clone_reader()?;
     let mut writer = pair.master.take_writer()?;
     let master = Arc::new(Mutex::new(pair.master));
@@ -219,43 +322,61 @@ pub fn spawn_local_in(size: Size, shell: Option<&str>, cwd: Option<&std::path::P
             let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
             let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
             // node-based CLIs show up as "node"; use the script basename from argv then
-            let args: Vec<String> = cmdline.split(|b| *b == 0).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
+            let args: Vec<String> = cmdline
+                .split(|b| *b == 0)
+                .map(|a| String::from_utf8_lossy(a).into_owned())
+                .collect();
             let comm = comm.trim().to_string();
             if matches!(comm.as_str(), "node" | "bun" | "python3" | "python") {
-                if let Some(a) = args.get(1) { return Some(a.rsplit('/').next().unwrap_or(a).to_string()); }
+                if let Some(a) = args.get(1) {
+                    return Some(a.rsplit('/').next().unwrap_or(a).to_string());
+                }
             }
             Some(comm)
         }));
     }
 
-    std::thread::Builder::new().name("pty-reader".into()).spawn(move || {
-        let mut buf = vec![0u8; 64 * 1024];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => { if out_tx.send(buf[..n].to_vec()).is_err() { break; } }
-            }
-        }
-    })?;
-    std::thread::Builder::new().name("pty-writer".into()).spawn(move || {
-        while let Ok(msg) = from_ui.recv() {
-            match msg {
-                BackendMsg::Close => break,
-                BackendMsg::Input(b) => {
-                    // ConPTY 以 win32-input-mode 启动。裸 0x03 不会变成 CTRL_C_EVENT，
-                    // 前台程序（如 ktctl）就收不到中断。改发 Ctrl+C 的按键记录。
-                    #[cfg(windows)]
-                    let b = conpty_input(b);
-                    let _ = writer.write_all(&b);
-                    let _ = writer.flush();
-                }
-                BackendMsg::Resize { cols, rows } => {
-                    let _ = master.lock().unwrap().resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+    std::thread::Builder::new()
+        .name("pty-reader".into())
+        .spawn(move || {
+            let mut buf = vec![0u8; 64 * 1024];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if out_tx.send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
                 }
             }
-        }
-        let _ = child.kill();
-    })?;
+        })?;
+    std::thread::Builder::new()
+        .name("pty-writer".into())
+        .spawn(move || {
+            while let Ok(msg) = from_ui.recv() {
+                match msg {
+                    BackendMsg::Close => break,
+                    BackendMsg::Input(b) => {
+                        // ConPTY 以 win32-input-mode 启动。裸 0x03 不会变成 CTRL_C_EVENT，
+                        // 前台程序（如 ktctl）就收不到中断。改发 Ctrl+C 的按键记录。
+                        #[cfg(windows)]
+                        let b = conpty_input(b);
+                        let _ = writer.write_all(&b);
+                        let _ = writer.flush();
+                    }
+                    BackendMsg::Resize { cols, rows } => {
+                        let _ = master.lock().unwrap().resize(PtySize {
+                            rows,
+                            cols,
+                            pixel_width: 0,
+                            pixel_height: 0,
+                        });
+                    }
+                }
+            }
+            let _ = child.kill();
+        })?;
     Ok(session)
 }
 
@@ -296,6 +417,9 @@ mod cwd_tests {
     fn sysinfo_reports_a_process_cwd() {
         let here = std::env::current_dir().unwrap();
         let got = sysinfo_cwd(std::process::id()).expect("cwd of own process");
-        assert_eq!(std::fs::canonicalize(&got).unwrap(), std::fs::canonicalize(here).unwrap());
+        assert_eq!(
+            std::fs::canonicalize(&got).unwrap(),
+            std::fs::canonicalize(here).unwrap()
+        );
     }
 }

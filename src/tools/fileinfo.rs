@@ -14,7 +14,10 @@ pub enum FileKind {
 
 /// 预览图的格式（界面直接从内存加载）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PreviewFmt { Png, Jpeg }
+pub enum PreviewFmt {
+    Png,
+    Jpeg,
+}
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FileInfo {
@@ -33,24 +36,50 @@ pub struct FileInfo {
     pub preview_dims: Option<(u32, u32)>,
 }
 
-fn ext_of(name: &str) -> String { name.rsplit_once('.').map(|x| x.1.to_ascii_lowercase()).unwrap_or_default() }
+fn ext_of(name: &str) -> String {
+    name.rsplit_once('.')
+        .map(|x| x.1.to_ascii_lowercase())
+        .unwrap_or_default()
+}
 
 /// 分析一个输出文件。
 pub fn inspect(name: &str, data: &[u8]) -> FileInfo {
-    let mut f = FileInfo { name: name.to_string(), size: data.len() as u64, ..Default::default() };
+    let mut f = FileInfo {
+        name: name.to_string(),
+        size: data.len() as u64,
+        ..Default::default()
+    };
     match ext_of(name).as_str() {
         "png" | "jpg" | "jpeg" => {
             f.kind = FileKind::Image;
-            f.dims = image::ImageReader::new(Cursor::new(data)).with_guessed_format().ok().and_then(|r| r.into_dimensions().ok());
+            f.dims = image::ImageReader::new(Cursor::new(data))
+                .with_guessed_format()
+                .ok()
+                .and_then(|r| r.into_dimensions().ok());
             f.preview_dims = f.dims;
-            f.preview = Some((if data.starts_with(&[0x89, b'P', b'N', b'G']) { PreviewFmt::Png } else { PreviewFmt::Jpeg }, data.to_vec()));
+            f.preview = Some((
+                if data.starts_with(&[0x89, b'P', b'N', b'G']) {
+                    PreviewFmt::Png
+                } else {
+                    PreviewFmt::Jpeg
+                },
+                data.to_vec(),
+            ));
         }
-        "pdf" => { f.kind = FileKind::Pdf; f.pages = pdf_pages(data); }
+        "pdf" => {
+            f.kind = FileKind::Pdf;
+            f.pages = pdf_pages(data);
+        }
         "zip" => {
             f.kind = FileKind::Zip;
             f.entries = zip_entries(data);
             f.preview = zip_first_png(data).map(|b| (PreviewFmt::Png, b));
-            f.preview_dims = f.preview.as_ref().and_then(|(_, b)| image::ImageReader::new(Cursor::new(b)).with_guessed_format().ok().and_then(|r| r.into_dimensions().ok()));
+            f.preview_dims = f.preview.as_ref().and_then(|(_, b)| {
+                image::ImageReader::new(Cursor::new(b))
+                    .with_guessed_format()
+                    .ok()
+                    .and_then(|r| r.into_dimensions().ok())
+            });
         }
         _ => {}
     }
@@ -63,16 +92,25 @@ pub fn pdf_pages(data: &[u8]) -> Option<usize> {
     let mut i = 0;
     while let Some(k) = find(data, b"/Type", i) {
         let mut j = k + 5;
-        while j < data.len() && data[j].is_ascii_whitespace() { j += 1; }
-        if data[j..].starts_with(b"/Page") && !data[j + 5..].starts_with(b"s") { n += 1; }
+        while j < data.len() && data[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if data[j..].starts_with(b"/Page") && !data[j + 5..].starts_with(b"s") {
+            n += 1;
+        }
         i = k + 5;
     }
     (n > 0).then_some(n)
 }
 
 fn find(h: &[u8], needle: &[u8], from: usize) -> Option<usize> {
-    if from >= h.len() { return None; }
-    h[from..].windows(needle.len()).position(|w| w == needle).map(|p| p + from)
+    if from >= h.len() {
+        return None;
+    }
+    h[from..]
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .map(|p| p + from)
 }
 
 /// 从末尾的“中央目录结束记录”读文件数。
@@ -91,11 +129,18 @@ pub fn zip_first_png(data: &[u8]) -> Option<Vec<u8>> {
         let h = data.get(i..i + 30)?;
         let method = u16::from_le_bytes([h[8], h[9]]);
         let size = u32::from_le_bytes([h[18], h[19], h[20], h[21]]) as usize;
-        let (nl, el) = (u16::from_le_bytes([h[26], h[27]]) as usize, u16::from_le_bytes([h[28], h[29]]) as usize);
+        let (nl, el) = (
+            u16::from_le_bytes([h[26], h[27]]) as usize,
+            u16::from_le_bytes([h[28], h[29]]) as usize,
+        );
         let name = data.get(i + 30..i + 30 + nl)?;
         let body = i + 30 + nl + el;
-        if method != 0 { return None; }
-        if name.to_ascii_lowercase().ends_with(b".png") { return data.get(body..body + size).map(|b| b.to_vec()); }
+        if method != 0 {
+            return None;
+        }
+        if name.to_ascii_lowercase().ends_with(b".png") {
+            return data.get(body..body + size).map(|b| b.to_vec());
+        }
         i = body + size;
     }
     None
@@ -106,13 +151,24 @@ pub fn human(n: u64) -> String {
     const U: [&str; 4] = ["B", "KB", "MB", "GB"];
     let mut v = n as f64;
     let mut u = 0;
-    while v >= 1024. && u < 3 { v /= 1024.; u += 1; }
-    if u == 0 { format!("{n} B") } else { format!("{v:.1} {}", U[u]) }
+    while v >= 1024. && u < 3 {
+        v /= 1024.;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", U[u])
+    }
 }
 
 /// 相对压缩前的变化百分比：变小为正（节省），变大为负。
 pub fn change_pct(before: u64, after: u64) -> f64 {
-    if before == 0 { 0. } else { (before as f64 - after as f64) / before as f64 * 100. }
+    if before == 0 {
+        0.
+    } else {
+        (before as f64 - after as f64) / before as f64 * 100.
+    }
 }
 
 #[cfg(test)]
@@ -124,7 +180,9 @@ mod tests {
         let mut cd = vec![];
         for (name, data) in files {
             let off = out.len() as u32;
-            out.extend_from_slice(&[0x50, 0x4b, 0x03, 0x04, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            out.extend_from_slice(&[
+                0x50, 0x4b, 0x03, 0x04, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ]);
             out.extend_from_slice(&(data.len() as u32).to_le_bytes());
             out.extend_from_slice(&(data.len() as u32).to_le_bytes());
             out.extend_from_slice(&(name.len() as u16).to_le_bytes());
@@ -148,7 +206,8 @@ mod tests {
     fn png_bytes() -> Vec<u8> {
         let img = image::RgbaImage::from_pixel(7, 5, image::Rgba([1, 2, 3, 255]));
         let mut b = vec![];
-        img.write_to(&mut Cursor::new(&mut b), image::ImageFormat::Png).unwrap();
+        img.write_to(&mut Cursor::new(&mut b), image::ImageFormat::Png)
+            .unwrap();
         b
     }
 

@@ -19,11 +19,12 @@ use std::sync::RwLock;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::tools::{Args, Output, Row, RowFmt, ToolSpec, Tone};
+use crate::tools::{Args, Output, Row, RowFmt, Tone, ToolSpec};
 
 pub const ABI: u32 = 1;
 /// 扩展索引：发布在 ext-index 版本下的 index.json。
-pub const INDEX_URL: &str = "https://github.com/daxiangme/ShellAX/releases/download/ext-index/index.json";
+pub const INDEX_URL: &str =
+    "https://github.com/daxiangme/ShellAX/releases/download/ext-index/index.json";
 const FUEL: u64 = 400_000_000_000;
 const MEMORY_LIMIT: usize = 1 << 30;
 const MAX_REPLY: usize = 512 << 20;
@@ -81,7 +82,14 @@ pub struct ReplyRow {
 }
 
 fn tone_of(s: &str) -> Option<Tone> {
-    match s { "good" => Some(Tone::Good), "warn" => Some(Tone::Warn), "danger" => Some(Tone::Danger), "accent" => Some(Tone::Accent), "muted" => Some(Tone::Muted), _ => None }
+    match s {
+        "good" => Some(Tone::Good),
+        "warn" => Some(Tone::Warn),
+        "danger" => Some(Tone::Danger),
+        "accent" => Some(Tone::Accent),
+        "muted" => Some(Tone::Muted),
+        _ => None,
+    }
 }
 
 impl ReplyRow {
@@ -90,7 +98,9 @@ impl ReplyRow {
         r.primary = self.primary;
         r.hint = self.hint;
         r.tone = tone_of(&self.tone);
-        if !self.tag.is_empty() { r.tag = Some((self.tag, Tone::Muted)); }
+        if !self.tag.is_empty() {
+            r.tag = Some((self.tag, Tone::Muted));
+        }
         r
     }
 }
@@ -98,11 +108,20 @@ impl ReplyRow {
 /// 把回复整理成界面用的结果：有 `rows` 时按键值行显示，文件结果附带描述，其余按文本。
 fn output_of(r: RunReply, rest: &[u8], in_size: u64) -> Output {
     let file = r.file_name.map(|n| (n, rest.to_vec()));
-    let info = file.as_ref().map(|(n, b)| crate::tools::fileinfo::inspect(n, b));
-    let mut o = if r.rows.is_empty() { Output { text: r.text, ..Default::default() } } else {
+    let info = file
+        .as_ref()
+        .map(|(n, b)| crate::tools::fileinfo::inspect(n, b));
+    let mut o = if r.rows.is_empty() {
+        Output {
+            text: r.text,
+            ..Default::default()
+        }
+    } else {
         let rows: Vec<Row> = r.rows.into_iter().map(ReplyRow::into_row).collect();
         let mut o = Output::kv(rows, RowFmt::Colon);
-        if !r.text.is_empty() { o.text = r.text; }
+        if !r.text.is_empty() {
+            o.text = r.text;
+        }
         o
     };
     o.meta = r.meta;
@@ -114,7 +133,11 @@ fn output_of(r: RunReply, rest: &[u8], in_size: u64) -> Output {
 }
 
 #[derive(Serialize)]
-struct FileMeta<'a> { field: &'a str, name: String, len: usize }
+struct FileMeta<'a> {
+    field: &'a str,
+    name: String,
+    len: usize,
+}
 
 /// 打包 `[u32 json_len][json][bytes]`。
 pub fn frame(json: &[u8], bytes: &[u8]) -> Vec<u8> {
@@ -127,41 +150,75 @@ pub fn frame(json: &[u8], bytes: &[u8]) -> Vec<u8> {
 
 /// 拆开 `[u32 json_len][json][bytes]`。
 pub fn unframe(buf: &[u8]) -> Result<(&[u8], &[u8])> {
-    if buf.len() < 4 { bail!("reply too short"); }
+    if buf.len() < 4 {
+        bail!("reply too short");
+    }
     let n = u32::from_le_bytes(buf[..4].try_into().unwrap()) as usize;
-    if 4 + n > buf.len() { bail!("bad reply frame"); }
+    if 4 + n > buf.len() {
+        bail!("bad reply frame");
+    }
     Ok((&buf[4..4 + n], &buf[4 + n..]))
 }
 
-fn lang() -> &'static str { if crate::i18n::current() == crate::i18n::Lang::ZhCn { "zh-CN" } else { "en" } }
+fn lang() -> &'static str {
+    if crate::i18n::current() == crate::i18n::Lang::ZhCn {
+        "zh-CN"
+    } else {
+        "en"
+    }
+}
 
 /// 在全新实例里调用一次 `shellax_run`。每次调用都重新实例化，调用之间不共享状态。
-pub fn call(wasm: &[u8], req: &[u8]) -> Result<Vec<u8>> { call_with(wasm, req, FUEL) }
+pub fn call(wasm: &[u8], req: &[u8]) -> Result<Vec<u8>> {
+    call_with(wasm, req, FUEL)
+}
 
 fn call_with(wasm: &[u8], req: &[u8], fuel: u64) -> Result<Vec<u8>> {
     use wasmi::{Config, Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
     let mut cfg = Config::default();
     cfg.consume_fuel(true);
     let engine = Engine::new(&cfg);
-    let module = Module::new(&engine, wasm).map_err(|e| anyhow!("invalid extension module: {e}"))?;
-    if module.imports().len() > 0 { bail!("extension modules must not import anything"); }
-    let limits = StoreLimitsBuilder::new().memory_size(MEMORY_LIMIT).instances(1).build();
+    let module =
+        Module::new(&engine, wasm).map_err(|e| anyhow!("invalid extension module: {e}"))?;
+    if module.imports().len() > 0 {
+        bail!("extension modules must not import anything");
+    }
+    let limits = StoreLimitsBuilder::new()
+        .memory_size(MEMORY_LIMIT)
+        .instances(1)
+        .build();
     let mut store: Store<StoreLimits> = Store::new(&engine, limits);
     store.limiter(|l| l);
     store.set_fuel(fuel).map_err(|e| anyhow!("{e}"))?;
     let linker = Linker::<StoreLimits>::new(&engine);
-    let inst = linker.instantiate_and_start(&mut store, &module).map_err(|e| anyhow!("instantiate: {e}"))?;
-    let mem = inst.get_memory(&store, "memory").ok_or_else(|| anyhow!("extension does not export memory"))?;
-    let alloc = inst.get_typed_func::<i32, i32>(&store, "shellax_alloc").map_err(|e| anyhow!("shellax_alloc: {e}"))?;
-    let run = inst.get_typed_func::<(i32, i32), i64>(&store, "shellax_run").map_err(|e| anyhow!("shellax_run: {e}"))?;
+    let inst = linker
+        .instantiate_and_start(&mut store, &module)
+        .map_err(|e| anyhow!("instantiate: {e}"))?;
+    let mem = inst
+        .get_memory(&store, "memory")
+        .ok_or_else(|| anyhow!("extension does not export memory"))?;
+    let alloc = inst
+        .get_typed_func::<i32, i32>(&store, "shellax_alloc")
+        .map_err(|e| anyhow!("shellax_alloc: {e}"))?;
+    let run = inst
+        .get_typed_func::<(i32, i32), i64>(&store, "shellax_run")
+        .map_err(|e| anyhow!("shellax_run: {e}"))?;
     let len = i32::try_from(req.len()).context("request too large")?;
-    let ptr = alloc.call(&mut store, len).map_err(|e| anyhow!("shellax_alloc: {e}"))?;
-    mem.write(&mut store, ptr as u32 as usize, req).map_err(|e| anyhow!("write request: {e}"))?;
-    let r = run.call(&mut store, (ptr, len)).map_err(|e| anyhow!("{e}"))? as u64;
+    let ptr = alloc
+        .call(&mut store, len)
+        .map_err(|e| anyhow!("shellax_alloc: {e}"))?;
+    mem.write(&mut store, ptr as u32 as usize, req)
+        .map_err(|e| anyhow!("write request: {e}"))?;
+    let r = run
+        .call(&mut store, (ptr, len))
+        .map_err(|e| anyhow!("{e}"))? as u64;
     let (rp, rl) = ((r >> 32) as usize, (r & 0xffff_ffff) as usize);
-    if rl > MAX_REPLY { bail!("reply too large"); }
+    if rl > MAX_REPLY {
+        bail!("reply too large");
+    }
     let mut out = vec![0u8; rl];
-    mem.read(&store, rp, &mut out).map_err(|e| anyhow!("read reply: {e}"))?;
+    mem.read(&store, rp, &mut out)
+        .map_err(|e| anyhow!("read reply: {e}"))?;
     Ok(out)
 }
 
@@ -171,9 +228,21 @@ pub fn manifest_of(wasm: &[u8]) -> Result<PackManifest> {
     let out = call(wasm, &frame(req.as_bytes(), &[]))?;
     let (j, _) = unframe(&out)?;
     let mut m: PackManifest = serde_json::from_slice(j).context("bad manifest")?;
-    if m.abi != ABI { bail!("unsupported extension ABI {} (expected {ABI})", m.abi); }
-    if m.id.is_empty() || !m.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') { bail!("bad extension id"); }
-    for t in &mut m.tools { t.pack = m.id.clone(); t.heavy = true; }
+    if m.abi != ABI {
+        bail!("unsupported extension ABI {} (expected {ABI})", m.abi);
+    }
+    if m.id.is_empty()
+        || !m
+            .id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        bail!("bad extension id");
+    }
+    for t in &mut m.tools {
+        t.pack = m.id.clone();
+        t.heavy = true;
+    }
     Ok(m)
 }
 
@@ -184,7 +253,14 @@ pub fn run_tool(wasm: &[u8], tool: &str, a: &Args) -> Result<Output> {
     for (field, paths) in &a.files {
         for p in paths {
             let data = std::fs::read(p).with_context(|| p.display().to_string())?;
-            files.push(FileMeta { field, name: p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), len: data.len() });
+            files.push(FileMeta {
+                field,
+                name: p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                len: data.len(),
+            });
             bytes.extend_from_slice(&data);
         }
     }
@@ -196,28 +272,43 @@ pub fn run_tool(wasm: &[u8], tool: &str, a: &Args) -> Result<Output> {
     let out = call(wasm, &frame(req.as_bytes(), &bytes))?;
     let (j, rest) = unframe(&out)?;
     let r: RunReply = serde_json::from_slice(j).context("bad reply")?;
-    if let Some(e) = r.error { bail!(e); }
+    if let Some(e) = r.error {
+        bail!(e);
+    }
     Ok(output_of(r, rest, bytes.len() as u64))
 }
 
 // ---------- 本地安装 ----------
 
-pub fn ext_dir() -> PathBuf { crate::platform::config_dir().join("ext") }
+pub fn ext_dir() -> PathBuf {
+    crate::platform::config_dir().join("ext")
+}
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Installed { pub manifest: PackManifest, pub wasm: PathBuf }
+pub struct Installed {
+    pub manifest: PackManifest,
+    pub wasm: PathBuf,
+}
 
 static INSTALLED: RwLock<Option<Vec<Installed>>> = RwLock::new(None);
 
 fn scan(dir: &Path) -> Vec<Installed> {
     let mut v = vec![];
-    let Ok(rd) = std::fs::read_dir(dir) else { return v };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return v;
+    };
     for e in rd.flatten() {
         let p = e.path();
         let (mf, wasm) = (p.join("manifest.json"), p.join("pack.wasm"));
-        if !wasm.is_file() { continue; }
-        let m = std::fs::read(&mf).ok().and_then(|b| serde_json::from_slice::<PackManifest>(&b).ok());
-        if let Some(m) = m { v.push(Installed { manifest: m, wasm }); }
+        if !wasm.is_file() {
+            continue;
+        }
+        let m = std::fs::read(&mf)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<PackManifest>(&b).ok());
+        if let Some(m) = m {
+            v.push(Installed { manifest: m, wasm });
+        }
     }
     v.sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
     v
@@ -225,7 +316,9 @@ fn scan(dir: &Path) -> Vec<Installed> {
 
 /// 已安装的包（缓存；安装、卸载、切换语言后调用 [`reload`]）。
 pub fn installed() -> Vec<Installed> {
-    if let Some(v) = INSTALLED.read().unwrap().as_ref() { return v.clone(); }
+    if let Some(v) = INSTALLED.read().unwrap().as_ref() {
+        return v.clone();
+    }
     let v = scan(&ext_dir());
     *INSTALLED.write().unwrap() = Some(v.clone());
     v
@@ -236,7 +329,11 @@ pub fn reload() {
     let dir = ext_dir();
     for i in scan(&dir) {
         if let Ok(b) = std::fs::read(&i.wasm) {
-            if let Ok(m) = manifest_of(&b) { if m != i.manifest { let _ = write_manifest(&dir.join(&m.id), &m); } }
+            if let Ok(m) = manifest_of(&b) {
+                if m != i.manifest {
+                    let _ = write_manifest(&dir.join(&m.id), &m);
+                }
+            }
         }
     }
     *INSTALLED.write().unwrap() = Some(scan(&dir));
@@ -248,11 +345,19 @@ fn write_manifest(dir: &Path, m: &PackManifest) -> Result<()> {
 }
 
 /// 已安装包的全部工具。
-pub fn installed_tools() -> Vec<ToolSpec> { installed().into_iter().flat_map(|i| i.manifest.tools).collect() }
+pub fn installed_tools() -> Vec<ToolSpec> {
+    installed()
+        .into_iter()
+        .flat_map(|i| i.manifest.tools)
+        .collect()
+}
 
 /// 运行已安装包里的工具。
 pub fn run_installed(pack: &str, tool: &str, a: &Args) -> Result<Output> {
-    let i = installed().into_iter().find(|i| i.manifest.id == pack).ok_or_else(|| anyhow!(crate::i18n::tf("ext.err_not_installed", &[("id", &pack)])))?;
+    let i = installed()
+        .into_iter()
+        .find(|i| i.manifest.id == pack)
+        .ok_or_else(|| anyhow!(crate::i18n::tf("ext.err_not_installed", &[("id", &pack)])))?;
     let wasm = std::fs::read(&i.wasm)?;
     run_tool(&wasm, tool, a)
 }
@@ -276,18 +381,27 @@ pub fn install(p: &IndexPack, prog: &crate::updater::Progress) -> Result<PackMan
     let dl = dir.join(format!("{}.download", p.id));
     let sha = (!p.sha256.is_empty()).then_some(p.sha256.as_str());
     crate::updater::fetch_to(&p.url, &dl, sha, prog)?;
-    let res = std::fs::read(&dl).map_err(anyhow::Error::from).and_then(|b| install_bytes(&dir, &b));
+    let res = std::fs::read(&dl)
+        .map_err(anyhow::Error::from)
+        .and_then(|b| install_bytes(&dir, &b));
     let _ = std::fs::remove_file(&dl);
     let m = res?;
-    if m.id != p.id { let _ = std::fs::remove_dir_all(dir.join(&m.id)); bail!("pack id mismatch ({} ≠ {})", m.id, p.id); }
+    if m.id != p.id {
+        let _ = std::fs::remove_dir_all(dir.join(&m.id));
+        bail!("pack id mismatch ({} ≠ {})", m.id, p.id);
+    }
     reload();
     Ok(m)
 }
 
 pub fn uninstall(id: &str) -> Result<()> {
-    if id.is_empty() || id.contains(['/', '\\', '.']) { bail!("bad id"); }
+    if id.is_empty() || id.contains(['/', '\\', '.']) {
+        bail!("bad id");
+    }
     let d = ext_dir().join(id);
-    if d.exists() { std::fs::remove_dir_all(&d)?; }
+    if d.exists() {
+        std::fs::remove_dir_all(&d)?;
+    }
     reload();
     Ok(())
 }
@@ -295,7 +409,11 @@ pub fn uninstall(id: &str) -> Result<()> {
 // ---------- 远程索引 ----------
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct IndexTool { pub id: String, #[serde(default)] pub cat: String }
+pub struct IndexTool {
+    pub id: String,
+    #[serde(default)]
+    pub cat: String,
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct IndexPack {
@@ -311,12 +429,21 @@ pub struct IndexPack {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct Index { #[serde(default)] pub packs: Vec<IndexPack> }
+pub struct Index {
+    #[serde(default)]
+    pub packs: Vec<IndexPack>,
+}
 
-fn index_cache() -> PathBuf { ext_dir().join("index.json") }
+fn index_cache() -> PathBuf {
+    ext_dir().join("index.json")
+}
 
 /// 上次成功获取的索引（离线时使用）。
-pub fn cached_index() -> Option<Index> { std::fs::read(index_cache()).ok().and_then(|b| serde_json::from_slice(&b).ok()) }
+pub fn cached_index() -> Option<Index> {
+    std::fs::read(index_cache())
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+}
 
 /// 获取远程索引并缓存。
 pub fn fetch_index() -> Result<Index> {
@@ -332,20 +459,54 @@ pub fn fetch_index() -> Result<Index> {
 pub const KNOWN: &[(&str, &str, &[&str])] = &[
     ("lang-zh", "lang", &["pinyin", "zh_convert"]),
     ("worldtime", "time", &["world_clock", "tz_convert"]),
-    ("image", "image", &["qr_gen", "qr_decode", "barcode", "img_compress", "img_watermark"]),
-    ("pdf", "pdf", &["pdf_merge", "pdf_split", "pdf_rotate", "pdf_delete", "pdf_reorder", "pdf_watermark", "pdf_pagenum", "img_to_pdf", "pdf_text", "pdf_clean"]),
+    (
+        "image",
+        "image",
+        &[
+            "qr_gen",
+            "qr_decode",
+            "barcode",
+            "img_compress",
+            "img_watermark",
+        ],
+    ),
+    (
+        "pdf",
+        "pdf",
+        &[
+            "pdf_merge",
+            "pdf_split",
+            "pdf_rotate",
+            "pdf_delete",
+            "pdf_reorder",
+            "pdf_watermark",
+            "pdf_pagenum",
+            "img_to_pdf",
+            "pdf_text",
+            "pdf_clean",
+        ],
+    ),
     ("pdf-render", "pdf", &["pdf_to_img"]),
 ];
 
 pub fn pack_name(id: &str) -> String {
     let k = format!("ext.{id}");
     let s = crate::i18n::t(&k);
-    if s == k { id.to_string() } else { s.to_string() }
+    if s == k {
+        id.to_string()
+    } else {
+        s.to_string()
+    }
 }
 
 /// 某个包的状态，供界面显示。
 #[derive(Clone, Debug, PartialEq)]
-pub struct PackRow { pub id: String, pub name: String, pub installed: Option<String>, pub latest: Option<IndexPack> }
+pub struct PackRow {
+    pub id: String,
+    pub name: String,
+    pub installed: Option<String>,
+    pub latest: Option<IndexPack>,
+}
 impl PackRow {
     pub fn has_update(&self) -> bool {
         matches!((&self.installed, &self.latest), (Some(a), Some(l)) if crate::update::is_newer(&l.version, a))
@@ -355,29 +516,52 @@ impl PackRow {
 /// 合并已知列表、索引与本地安装，得到扩展管理器的行。
 pub fn rows(index: Option<&Index>, inst: &[Installed]) -> Vec<PackRow> {
     let mut ids: Vec<String> = KNOWN.iter().map(|k| k.0.to_string()).collect();
-    for p in index.map(|i| i.packs.as_slice()).unwrap_or(&[]) { if !ids.contains(&p.id) { ids.push(p.id.clone()); } }
-    for i in inst { if !ids.contains(&i.manifest.id) { ids.push(i.manifest.id.clone()); } }
-    ids.into_iter().map(|id| {
-        let ins = inst.iter().find(|i| i.manifest.id == id);
-        PackRow {
-            name: ins.map(|i| i.manifest.name.clone()).unwrap_or_else(|| pack_name(&id)),
-            installed: ins.map(|i| i.manifest.version.clone()),
-            latest: index.and_then(|x| x.packs.iter().find(|p| p.id == id).cloned()),
-            id,
+    for p in index.map(|i| i.packs.as_slice()).unwrap_or(&[]) {
+        if !ids.contains(&p.id) {
+            ids.push(p.id.clone());
         }
-    }).collect()
+    }
+    for i in inst {
+        if !ids.contains(&i.manifest.id) {
+            ids.push(i.manifest.id.clone());
+        }
+    }
+    ids.into_iter()
+        .map(|id| {
+            let ins = inst.iter().find(|i| i.manifest.id == id);
+            PackRow {
+                name: ins
+                    .map(|i| i.manifest.name.clone())
+                    .unwrap_or_else(|| pack_name(&id)),
+                installed: ins.map(|i| i.manifest.version.clone()),
+                latest: index.and_then(|x| x.packs.iter().find(|p| p.id == id).cloned()),
+                id,
+            }
+        })
+        .collect()
 }
 
 /// 未安装包的工具占位：(包 id, 工具 spec)。spec 只有 id、分类与名称。
 pub fn placeholders(inst: &[Installed]) -> Vec<ToolSpec> {
     let mut v = vec![];
     for (pack, cat, tools) in KNOWN {
-        if inst.iter().any(|i| i.manifest.id == *pack) { continue; }
+        if inst.iter().any(|i| i.manifest.id == *pack) {
+            continue;
+        }
         for t in *tools {
             v.push(ToolSpec {
-                id: t.to_string(), cat: cat.to_string(), name: crate::i18n::t(&format!("tools.{t}")).to_string(),
-                desc: crate::i18n::t(&format!("tools.{t}_desc")).to_string(), keywords: String::new(), inputs: vec![], options: vec![],
-                interactive: false, heavy: true, live: false, pack: pack.to_string(), icon: String::new(),
+                id: t.to_string(),
+                cat: cat.to_string(),
+                name: crate::i18n::t(&format!("tools.{t}")).to_string(),
+                desc: crate::i18n::t(&format!("tools.{t}_desc")).to_string(),
+                keywords: String::new(),
+                inputs: vec![],
+                options: vec![],
+                interactive: false,
+                heavy: true,
+                live: false,
+                pack: pack.to_string(),
+                icon: String::new(),
             });
         }
     }

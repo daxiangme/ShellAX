@@ -31,12 +31,23 @@ fn initial(c: char) -> Option<char> {
     use std::collections::HashMap;
     use std::sync::OnceLock;
     static MAP: OnceLock<HashMap<char, char>> = OnceLock::new();
-    if c.is_ascii_alphanumeric() { return Some(c.to_ascii_lowercase()); }
-    MAP.get_or_init(|| TABLE.iter().flat_map(|(k, s)| s.chars().map(move |c| (c, *k))).collect()).get(&c).copied()
+    if c.is_ascii_alphanumeric() {
+        return Some(c.to_ascii_lowercase());
+    }
+    MAP.get_or_init(|| {
+        TABLE
+            .iter()
+            .flat_map(|(k, s)| s.chars().map(move |c| (c, *k)))
+            .collect()
+    })
+    .get(&c)
+    .copied()
 }
 
 /// 汉字转拼音首字母（ASCII 字母数字原样小写，其他字符跳过）。
-pub fn initials(s: &str) -> String { s.chars().filter_map(initial).collect() }
+pub fn initials(s: &str) -> String {
+    s.chars().filter_map(initial).collect()
+}
 
 #[cfg(test)]
 mod tests {

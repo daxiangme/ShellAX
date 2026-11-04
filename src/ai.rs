@@ -10,11 +10,26 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
-pub enum Kind { #[default] OpenAi, Anthropic }
+pub enum Kind {
+    #[default]
+    OpenAi,
+    Anthropic,
+}
 impl Kind {
     pub const ALL: [Kind; 2] = [Kind::OpenAi, Kind::Anthropic];
-    pub fn id(self) -> &'static str { match self { Kind::OpenAi => "openai", Kind::Anthropic => "anthropic" } }
-    pub fn from_id(s: &str) -> Kind { if s == "anthropic" { Kind::Anthropic } else { Kind::OpenAi } }
+    pub fn id(self) -> &'static str {
+        match self {
+            Kind::OpenAi => "openai",
+            Kind::Anthropic => "anthropic",
+        }
+    }
+    pub fn from_id(s: &str) -> Kind {
+        if s == "anthropic" {
+            Kind::Anthropic
+        } else {
+            Kind::OpenAi
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -35,15 +50,33 @@ pub struct Provider {
 }
 impl Default for Provider {
     fn default() -> Self {
-        Self { id: String::new(), name: String::new(), kind: Kind::OpenAi, base_url: "https://api.openai.com/v1".into(),
-               model: "gpt-4.1-mini".into(), timeout_secs: 30, temperature: 0.2, max_tokens: 512, fast_model: String::new(), preset: "custom".into() }
+        Self {
+            id: String::new(),
+            name: String::new(),
+            kind: Kind::OpenAi,
+            base_url: "https://api.openai.com/v1".into(),
+            model: "gpt-4.1-mini".into(),
+            timeout_secs: 30,
+            temperature: 0.2,
+            max_tokens: 512,
+            fast_model: String::new(),
+            preset: "custom".into(),
+        }
     }
 }
 impl Provider {
     /// Keychain account name for this provider's API key.
-    pub fn secret_name(&self) -> String { format!("ai-provider:{}", self.id) }
+    pub fn secret_name(&self) -> String {
+        format!("ai-provider:{}", self.id)
+    }
     /// Model used for natural-language → command.
-    pub fn command_model(&self) -> &str { if self.fast_model.trim().is_empty() { &self.model } else { self.fast_model.trim() } }
+    pub fn command_model(&self) -> &str {
+        if self.fast_model.trim().is_empty() {
+            &self.model
+        } else {
+            self.fast_model.trim()
+        }
+    }
 }
 
 // ---------- redaction ----------
@@ -78,14 +111,33 @@ pub fn redact(s: &str) -> (String, usize) {
 
 // ---------- context ----------
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Scope { None, Selection, Command, Screen }
+pub enum Scope {
+    None,
+    Selection,
+    Command,
+    Screen,
+}
 impl Scope {
     pub fn from_id(s: &str) -> Scope {
-        match s { "none" => Scope::None, "selection" => Scope::Selection, "command" => Scope::Command, _ => Scope::Screen }
+        match s {
+            "none" => Scope::None,
+            "selection" => Scope::Selection,
+            "command" => Scope::Command,
+            _ => Scope::Screen,
+        }
     }
 }
-pub struct ContextInput<'a> { pub selection: Option<&'a str>, pub last_command: Option<&'a str>, pub screen: &'a [String] }
-pub struct ContextOpts { pub scope: Scope, pub lines: usize, pub send_output: bool, pub redact: bool }
+pub struct ContextInput<'a> {
+    pub selection: Option<&'a str>,
+    pub last_command: Option<&'a str>,
+    pub screen: &'a [String],
+}
+pub struct ContextOpts {
+    pub scope: Scope,
+    pub lines: usize,
+    pub send_output: bool,
+    pub redact: bool,
+}
 
 /// Build the context block that will be sent. With `send_output=false` only command lines
 /// (the last command) may be sent; selection/screen content is treated as output and withheld.
@@ -97,11 +149,19 @@ pub fn build_context(inp: &ContextInput, o: &ContextOpts) -> (String, usize) {
         Scope::Screen if o.send_output => {
             let lines: Vec<&String> = inp.screen.iter().filter(|l| !l.trim().is_empty()).collect();
             let start = lines.len().saturating_sub(o.lines.max(1));
-            lines[start..].iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n")
+            lines[start..]
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
         }
         _ => inp.last_command.unwrap_or("").to_string(),
     };
-    if o.redact { redact(&raw) } else { (raw, 0) }
+    if o.redact {
+        redact(&raw)
+    } else {
+        (raw, 0)
+    }
 }
 
 pub const SYSTEM_PROMPT: &str = "You translate a natural-language request into ONE shell command for the user's terminal. \
@@ -110,7 +170,11 @@ Prefer safe, read-only commands when the request is ambiguous.";
 
 pub fn build_user_prompt(request: &str, shell: &str, host: &str, context: &str) -> String {
     let mut s = format!("Shell: {shell}\nHost: {host}\nRequest: {request}\n");
-    if !context.is_empty() { s.push_str("Terminal context:\n```\n"); s.push_str(context); s.push_str("\n```\n"); }
+    if !context.is_empty() {
+        s.push_str("Terminal context:\n```\n");
+        s.push_str(context);
+        s.push_str("\n```\n");
+    }
     s
 }
 
@@ -121,38 +185,78 @@ pub fn extract_command(reply: &str) -> (String, String) {
     if let Some(j) = json_part {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(j) {
             if let Some(c) = v.get("command").and_then(|c| c.as_str()) {
-                return (c.trim().to_string(), v.get("explanation").and_then(|e| e.as_str()).unwrap_or("").trim().to_string());
+                return (
+                    c.trim().to_string(),
+                    v.get("explanation")
+                        .and_then(|e| e.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string(),
+                );
             }
         }
     }
     if let Some(a) = t.find("```") {
         let rest = &t[a + 3..];
         let rest = rest.split_once('\n').map(|x| x.1).unwrap_or(rest);
-        if let Some(b) = rest.find("```") { return (rest[..b].trim().lines().next().unwrap_or("").to_string(), String::new()); }
+        if let Some(b) = rest.find("```") {
+            return (
+                rest[..b].trim().lines().next().unwrap_or("").to_string(),
+                String::new(),
+            );
+        }
     }
-    (t.lines().next().unwrap_or("").trim().trim_matches('`').to_string(), String::new())
+    (
+        t.lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .trim_matches('`')
+            .to_string(),
+        String::new(),
+    )
 }
 
 // ---------- HTTP ----------
-pub struct Reply { pub text: String, pub latency: Duration, pub model: String }
+pub struct Reply {
+    pub text: String,
+    pub latency: Duration,
+    pub model: String,
+}
 
 fn scrub(s: &str, key: &str) -> String {
     let mut s: String = s.chars().take(300).collect();
-    if key.len() >= 4 { s = s.replace(key, "[key]"); }
+    if key.len() >= 4 {
+        s = s.replace(key, "[key]");
+    }
     s
 }
 
 /// One chat round-trip. `max_tokens` overrides the provider default (used by "test connection").
-pub fn chat(p: &Provider, key: &str, system: &str, user: &str, max_tokens: Option<u32>) -> Result<Reply> {
+pub fn chat(
+    p: &Provider,
+    key: &str,
+    system: &str,
+    user: &str,
+    max_tokens: Option<u32>,
+) -> Result<Reply> {
     let base = crate::models::api_base(p.kind, &p.base_url);
-    let agent = crate::proxy::ureq_builder(&base, ureq::AgentBuilder::new().timeout(Duration::from_secs(p.timeout_secs.max(1))))?.build();
+    let agent = crate::proxy::ureq_builder(
+        &base,
+        ureq::AgentBuilder::new().timeout(Duration::from_secs(p.timeout_secs.max(1))),
+    )?
+    .build();
     let base = base.as_str();
     let mt = max_tokens.unwrap_or(p.max_tokens);
     let t0 = Instant::now();
     let res = match p.kind {
         Kind::OpenAi => {
-            let mut req = agent.post(&format!("{base}/chat/completions")).set("content-type", "application/json");
-            if !key.is_empty() { req = req.set("authorization", &format!("Bearer {key}")); }
+            let mut req = agent
+                .post(&format!("{base}/chat/completions"))
+                .set("content-type", "application/json");
+            if !key.is_empty() {
+                req = req.set("authorization", &format!("Bearer {key}"));
+            }
             req.send_json(serde_json::json!({
                 "model": p.model, "max_tokens": mt, "temperature": p.temperature,
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -178,11 +282,23 @@ pub fn chat(p: &Provider, key: &str, system: &str, user: &str, max_tokens: Optio
     };
     let v: serde_json::Value = resp.into_json().map_err(|e| anyhow!("bad JSON: {e}"))?;
     let text = match p.kind {
-        Kind::OpenAi => v.pointer("/choices/0/message/content").and_then(|x| x.as_str()),
+        Kind::OpenAi => v
+            .pointer("/choices/0/message/content")
+            .and_then(|x| x.as_str()),
         Kind::Anthropic => v.pointer("/content/0/text").and_then(|x| x.as_str()),
-    }.ok_or_else(|| anyhow!("unexpected response: {}", scrub(&v.to_string(), key)))?.to_string();
-    let model = v.get("model").and_then(|m| m.as_str()).unwrap_or(&p.model).to_string();
-    Ok(Reply { text, latency, model })
+    }
+    .ok_or_else(|| anyhow!("unexpected response: {}", scrub(&v.to_string(), key)))?
+    .to_string();
+    let model = v
+        .get("model")
+        .and_then(|m| m.as_str())
+        .unwrap_or(&p.model)
+        .to_string();
+    Ok(Reply {
+        text,
+        latency,
+        model,
+    })
 }
 
 /// System prompt for the free-form assistant panel.
@@ -202,11 +318,26 @@ pub fn build_explain_prompt(cmd: &str, code: i32, host: &str, output_tail: &str)
 
 /// Streaming multi-turn chat. `messages` = (role "user"/"assistant", content). Calls `on_delta`
 /// for each text fragment as it arrives (OpenAI `stream: true` SSE / Anthropic message stream).
-pub fn chat_stream(p: &Provider, key: &str, system: &str, messages: &[(String, String)], mut on_delta: impl FnMut(&str) -> bool) -> Result<Reply> {
+pub fn chat_stream(
+    p: &Provider,
+    key: &str,
+    system: &str,
+    messages: &[(String, String)],
+    mut on_delta: impl FnMut(&str) -> bool,
+) -> Result<Reply> {
     use std::io::BufRead;
     let base = crate::models::api_base(p.kind, &p.base_url);
-    let agent = crate::proxy::ureq_builder(&base, ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(p.timeout_secs.clamp(1, 30))).timeout_read(Duration::from_secs(p.timeout_secs.max(1))))?.build();
-    let msgs: Vec<serde_json::Value> = messages.iter().map(|(r, c)| serde_json::json!({"role": r, "content": c})).collect();
+    let agent = crate::proxy::ureq_builder(
+        &base,
+        ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(p.timeout_secs.clamp(1, 30)))
+            .timeout_read(Duration::from_secs(p.timeout_secs.max(1))),
+    )?
+    .build();
+    let msgs: Vec<serde_json::Value> = messages
+        .iter()
+        .map(|(r, c)| serde_json::json!({"role": r, "content": c}))
+        .collect();
     let t0 = Instant::now();
     let res = match p.kind {
         Kind::OpenAi => {
@@ -221,7 +352,10 @@ pub fn chat_stream(p: &Provider, key: &str, system: &str, messages: &[(String, S
     };
     let resp = match res {
         Ok(r) => r,
-        Err(ureq::Error::Status(code, r)) => { let body = r.into_string().unwrap_or_default(); return Err(anyhow!("HTTP {code}: {}", scrub(&body, key))); }
+        Err(ureq::Error::Status(code, r)) => {
+            let body = r.into_string().unwrap_or_default();
+            return Err(anyhow!("HTTP {code}: {}", scrub(&body, key)));
+        }
         Err(e) => return Err(anyhow!("{}", scrub(&e.to_string(), key))),
     };
     let ctype = resp.header("content-type").unwrap_or("").to_string();
@@ -230,37 +364,77 @@ pub fn chat_stream(p: &Provider, key: &str, system: &str, messages: &[(String, S
     if !ctype.contains("event-stream") {
         // server ignored stream=true: plain JSON body
         let v: serde_json::Value = resp.into_json().map_err(|e| anyhow!("bad JSON: {e}"))?;
-        let t = v.pointer("/choices/0/message/content").or_else(|| v.pointer("/content/0/text")).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+        let t = v
+            .pointer("/choices/0/message/content")
+            .or_else(|| v.pointer("/content/0/text"))
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string();
         on_delta(&t);
-        return Ok(Reply { text: t, latency: t0.elapsed(), model });
+        return Ok(Reply {
+            text: t,
+            latency: t0.elapsed(),
+            model,
+        });
     }
     let rd = std::io::BufReader::new(resp.into_reader());
     for line in rd.lines() {
         let line = line.map_err(|e| anyhow!("stream: {e}"))?;
-        let Some(data) = line.strip_prefix("data:") else { continue };
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
         let data = data.trim();
-        if data == "[DONE]" { break; }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else { continue };
-        if let Some(m) = v.get("model").and_then(|m| m.as_str()) { model = m.to_string(); }
-        let delta = v.pointer("/choices/0/delta/content").or_else(|| v.pointer("/delta/text")).and_then(|x| x.as_str());
-        if let Some(d) = delta { text.push_str(d); if !on_delta(d) { break; } }
-        if v.get("type").and_then(|t| t.as_str()) == Some("message_stop") { break; }
-        if let Some(e) = v.pointer("/error/message").and_then(|x| x.as_str()) { return Err(anyhow!("{}", scrub(e, key))); }
+        if data == "[DONE]" {
+            break;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
+            continue;
+        };
+        if let Some(m) = v.get("model").and_then(|m| m.as_str()) {
+            model = m.to_string();
+        }
+        let delta = v
+            .pointer("/choices/0/delta/content")
+            .or_else(|| v.pointer("/delta/text"))
+            .and_then(|x| x.as_str());
+        if let Some(d) = delta {
+            text.push_str(d);
+            if !on_delta(d) {
+                break;
+            }
+        }
+        if v.get("type").and_then(|t| t.as_str()) == Some("message_stop") {
+            break;
+        }
+        if let Some(e) = v.pointer("/error/message").and_then(|x| x.as_str()) {
+            return Err(anyhow!("{}", scrub(e, key)));
+        }
     }
-    Ok(Reply { text, latency: t0.elapsed(), model })
+    Ok(Reply {
+        text,
+        latency: t0.elapsed(),
+        model,
+    })
 }
 
 /// Inline command completion: returns only the text to append after `prefix` (may be empty).
 pub const COMPLETE_SYSTEM_PROMPT: &str = "Complete the user's partially typed shell command. Reply with the COMPLETE command only, one line, no explanation, no code fence.";
 pub fn completion_suffix(prefix: &str, reply: &str) -> Option<String> {
-    let line = reply.trim().trim_matches('`').lines().map(str::trim).find(|l| !l.is_empty())?;
+    let line = reply
+        .trim()
+        .trim_matches('`')
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())?;
     let line = line.strip_prefix("$ ").unwrap_or(line);
     let suf = line.strip_prefix(prefix)?;
     (!suf.is_empty() && !suf.contains('\n')).then(|| suf.to_string())
 }
 
 /// Minimal real request (max_tokens = 1) to validate URL, key and model.
-pub fn test_connection(p: &Provider, key: &str) -> Result<Reply> { chat(p, key, "ping", "ping", Some(1)) }
+pub fn test_connection(p: &Provider, key: &str) -> Result<Reply> {
+    chat(p, key, "ping", "ping", Some(1))
+}
 
 #[cfg(test)]
 mod tests {
@@ -269,7 +443,14 @@ mod tests {
     fn redacts_common_secrets() {
         let s = "export OPENAI_API_KEY=sk-abcdefghijklmnop\ncurl -H 'Authorization: Bearer abc.def.ghi' https://u:hunter2@h/x\nmysql --password=topsecret\nAKIAABCDEFGHIJKLMNOP\n-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----";
         let (r, n) = redact(s);
-        for leak in ["sk-abcdefghijklmnop", "abc.def.ghi", "hunter2", "topsecret", "AKIAABCDEFGHIJKLMNOP", "AAAA"] {
+        for leak in [
+            "sk-abcdefghijklmnop",
+            "abc.def.ghi",
+            "hunter2",
+            "topsecret",
+            "AKIAABCDEFGHIJKLMNOP",
+            "AAAA",
+        ] {
             assert!(!r.contains(leak), "{leak} leaked: {r}");
         }
         assert!(n >= 6);
@@ -277,12 +458,30 @@ mod tests {
     }
     #[test]
     fn context_scope_and_output_gate() {
-        let screen = vec!["$ cat .env".to_string(), "TOKEN=abc123secret".into(), "$ ls".into(), "a b".into()];
-        let inp = ContextInput { selection: Some("sel"), last_command: Some("ls"), screen: &screen };
-        let o = |scope, send_output| ContextOpts { scope, lines: 3, send_output, redact: true };
+        let screen = vec![
+            "$ cat .env".to_string(),
+            "TOKEN=abc123secret".into(),
+            "$ ls".into(),
+            "a b".into(),
+        ];
+        let inp = ContextInput {
+            selection: Some("sel"),
+            last_command: Some("ls"),
+            screen: &screen,
+        };
+        let o = |scope, send_output| ContextOpts {
+            scope,
+            lines: 3,
+            send_output,
+            redact: true,
+        };
         assert_eq!(build_context(&inp, &o(Scope::None, true)).0, "");
         assert_eq!(build_context(&inp, &o(Scope::Command, true)).0, "ls");
-        assert_eq!(build_context(&inp, &o(Scope::Screen, false)).0, "ls", "output withheld when send_output=false");
+        assert_eq!(
+            build_context(&inp, &o(Scope::Screen, false)).0,
+            "ls",
+            "output withheld when send_output=false"
+        );
         let (c, n) = build_context(&inp, &o(Scope::Screen, true));
         assert_eq!(c.lines().count(), 3);
         assert!(!c.contains("abc123secret") && n == 1, "{c}");
@@ -290,7 +489,10 @@ mod tests {
     }
     #[test]
     fn extracts_command() {
-        assert_eq!(extract_command("{\"command\":\"df -h\",\"explanation\":\"disk\"}").0, "df -h");
+        assert_eq!(
+            extract_command("{\"command\":\"df -h\",\"explanation\":\"disk\"}").0,
+            "df -h"
+        );
         assert_eq!(extract_command("Sure:\n```bash\nls -la\n```").0, "ls -la");
         assert_eq!(extract_command("`uptime`").0, "uptime");
     }
@@ -309,10 +511,21 @@ mod tests {
                 buf.extend_from_slice(&tmp[..n]);
                 let s = String::from_utf8_lossy(&buf).to_string();
                 if let Some(i) = s.find("\r\n\r\n") {
-                    let len = s.lines().find_map(|l| l.to_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap())).unwrap_or(0);
-                    if buf.len() >= i + 4 + len { break; }
+                    let len = s
+                        .lines()
+                        .find_map(|l| {
+                            l.to_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
+                    if buf.len() >= i + 4 + len {
+                        break;
+                    }
                 }
-                if n == 0 { break; }
+                if n == 0 {
+                    break;
+                }
             }
             let resp = format!("HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
             c.write_all(resp.as_bytes()).unwrap();
@@ -322,33 +535,73 @@ mod tests {
     }
     #[test]
     fn openai_request_key_only_in_header_and_redacted_prompt() {
-        let (base, h) = mock(200, r#"{"model":"mock-1","choices":[{"message":{"content":"{\"command\":\"df -h\",\"explanation\":\"disk\"}"}}]}"#);
-        let p = Provider { id: "t".into(), base_url: base, model: "m".into(), ..Default::default() };
+        let (base, h) = mock(
+            200,
+            r#"{"model":"mock-1","choices":[{"message":{"content":"{\"command\":\"df -h\",\"explanation\":\"disk\"}"}}]}"#,
+        );
+        let p = Provider {
+            id: "t".into(),
+            base_url: base,
+            model: "m".into(),
+            ..Default::default()
+        };
         let (ctx, _) = redact("export API_KEY=sk-livesecretvalue123");
-        let r = chat(&p, "sk-TESTKEY-9999", SYSTEM_PROMPT, &build_user_prompt("disk usage", "bash", "local", &ctx), None).unwrap();
+        let r = chat(
+            &p,
+            "sk-TESTKEY-9999",
+            SYSTEM_PROMPT,
+            &build_user_prompt("disk usage", "bash", "local", &ctx),
+            None,
+        )
+        .unwrap();
         assert_eq!(extract_command(&r.text).0, "df -h");
         let req = h.join().unwrap();
         let (head, body) = req.split_once("\r\n\r\n").unwrap();
-        assert!(head.to_lowercase().contains("authorization: bearer sk-testkey-9999"));
+        assert!(head
+            .to_lowercase()
+            .contains("authorization: bearer sk-testkey-9999"));
         assert!(!body.contains("sk-TESTKEY-9999"), "key leaked into body");
-        assert!(!body.contains("sk-livesecretvalue123"), "unredacted context sent");
+        assert!(
+            !body.contains("sk-livesecretvalue123"),
+            "unredacted context sent"
+        );
     }
     #[test]
     fn errors_never_echo_the_key() {
         let (base, h) = mock(401, r#"{"error":"invalid key sk-TESTKEY-9999"}"#);
-        let p = Provider { id: "t".into(), base_url: base, kind: Kind::OpenAi, ..Default::default() };
-        let e = test_connection(&p, "sk-TESTKEY-9999").err().unwrap().to_string();
+        let p = Provider {
+            id: "t".into(),
+            base_url: base,
+            kind: Kind::OpenAi,
+            ..Default::default()
+        };
+        let e = test_connection(&p, "sk-TESTKEY-9999")
+            .err()
+            .unwrap()
+            .to_string();
         h.join().unwrap();
         assert!(e.contains("401") && !e.contains("sk-TESTKEY-9999"), "{e}");
     }
     #[test]
     fn anthropic_headers() {
-        let (base, h) = mock(200, r#"{"model":"claude-x","content":[{"type":"text","text":"ok"}]}"#);
-        let p = Provider { id: "a".into(), kind: Kind::Anthropic, base_url: base, ..Default::default() };
+        let (base, h) = mock(
+            200,
+            r#"{"model":"claude-x","content":[{"type":"text","text":"ok"}]}"#,
+        );
+        let p = Provider {
+            id: "a".into(),
+            kind: Kind::Anthropic,
+            base_url: base,
+            ..Default::default()
+        };
         let r = test_connection(&p, "ak-1234").unwrap();
         assert_eq!(r.text, "ok");
         let req = h.join().unwrap().to_lowercase();
-        assert!(req.starts_with("post /v1/messages") && req.contains("x-api-key: ak-1234") && req.contains("anthropic-version: 2023-06-01"));
+        assert!(
+            req.starts_with("post /v1/messages")
+                && req.contains("x-api-key: ak-1234")
+                && req.contains("anthropic-version: 2023-06-01")
+        );
     }
 }
 
@@ -357,8 +610,14 @@ mod stream_tests {
     use super::*;
     #[test]
     fn completion_suffix_rules() {
-        assert_eq!(completion_suffix("git st", "git status"), Some("atus".into()));
-        assert_eq!(completion_suffix("git st", "`git stash list`"), Some("ash list".into()));
+        assert_eq!(
+            completion_suffix("git st", "git status"),
+            Some("atus".into())
+        );
+        assert_eq!(
+            completion_suffix("git st", "`git stash list`"),
+            Some("ash list".into())
+        );
         assert_eq!(completion_suffix("ls", "rm -rf /"), None);
         assert_eq!(completion_suffix("ls", "ls"), None);
     }
@@ -369,13 +628,27 @@ mod stream_tests {
         let port = l.local_addr().unwrap().port();
         std::thread::spawn(move || {
             let (mut s, _) = l.accept().unwrap();
-            let mut b = [0u8; 4096]; let _ = s.read(&mut b);
+            let mut b = [0u8; 4096];
+            let _ = s.read(&mut b);
             let body = "data: {\"model\":\"m1\",\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\ndata: [DONE]\n\n";
             let _ = write!(s, "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}", body.len());
         });
-        let p = Provider { id: "t".into(), name: "t".into(), kind: Kind::OpenAi, base_url: format!("http://127.0.0.1:{port}/v1"), model: "m0".into(), timeout_secs: 5, max_tokens: 50, ..Default::default() };
+        let p = Provider {
+            id: "t".into(),
+            name: "t".into(),
+            kind: Kind::OpenAi,
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            model: "m0".into(),
+            timeout_secs: 5,
+            max_tokens: 50,
+            ..Default::default()
+        };
         let mut parts = vec![];
-        let r = chat_stream(&p, "", "s", &[("user".into(), "hi".into())], |d| { parts.push(d.to_string()); true }).unwrap();
+        let r = chat_stream(&p, "", "s", &[("user".into(), "hi".into())], |d| {
+            parts.push(d.to_string());
+            true
+        })
+        .unwrap();
         assert_eq!(parts, vec!["Hel", "lo"]);
         assert_eq!(r.text, "Hello");
         assert_eq!(r.model, "m1");

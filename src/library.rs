@@ -1,5 +1,8 @@
 //! Right-hand docks for saved commands and command history. Same card as the AI assistant.
-use gpui::{anchored, deferred, div, prelude::*, px, AnyElement, ClipboardItem, Context, Entity, FontWeight, Pixels, Point, SharedString, Window};
+use gpui::{
+    anchored, deferred, div, prelude::*, px, AnyElement, ClipboardItem, Context, Entity,
+    FontWeight, Pixels, Point, SharedString, Window,
+};
 use gpui_component::input::{InputState, Textarea, TextareaState};
 use ssh_term_proto::i18n::{t, tf};
 use ssh_term_proto::snippets::Snippet;
@@ -38,13 +41,24 @@ pub(crate) struct LibConfirm {
 /// 行内「更多」菜单针对的那一行。
 #[derive(Clone)]
 pub(crate) enum LibMenu {
-    Snippet { id: String, name: String, group: String, note: String, body: String },
-    History { key: String, cmd: String },
+    Snippet {
+        id: String,
+        name: String,
+        group: String,
+        note: String,
+        body: String,
+    },
+    History {
+        key: String,
+        cmd: String,
+    },
 }
 
 impl LibMenu {
     /// 菜单归属：片段卡片为 true，历史卡片为 false。
-    fn owner_is_snippets(&self) -> bool { matches!(self, LibMenu::Snippet { .. }) }
+    fn owner_is_snippets(&self) -> bool {
+        matches!(self, LibMenu::Snippet { .. })
+    }
 }
 
 struct HistRow {
@@ -56,15 +70,28 @@ struct HistRow {
 
 fn fmt_ts(ts: i64) -> String {
     chrono::DateTime::from_timestamp(ts, 0)
-        .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
+        .map(|d| {
+            d.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        })
         .unwrap_or_default()
 }
 
 impl Root {
     /// One card per mode: saved commands (`snippets_mode`) or history. Both can be open; the shared
     /// editor / variable / confirm forms show in the snippets card, or in history when that one is closed.
-    pub(crate) fn library_dock(&mut self, snippets_mode: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let search = if snippets_mode { self.lib_search.clone() } else { self.hist_search.clone() };
+    pub(crate) fn library_dock(
+        &mut self,
+        snippets_mode: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let search = if snippets_mode {
+            self.lib_search.clone()
+        } else {
+            self.hist_search.clone()
+        };
         let owns_forms = snippets_mode || !self.dock_snip;
         let q = search.read(cx).value().trim().to_lowercase();
         let group = self.lib_group.clone();
@@ -72,14 +99,38 @@ impl Root {
         let editor = self.lib_editor.clone().filter(|_| owns_forms);
         let vars = self.lib_vars.clone().filter(|_| owns_forms);
         let confirm = self.lib_confirm.clone().filter(|_| owns_forms);
-        let notice = if owns_forms { self.lib_notice.clone() } else { String::new() };
+        let notice = if owns_forms {
+            self.lib_notice.clone()
+        } else {
+            String::new()
+        };
         // a command can be inserted into the focused SQL editor, Redis console or ready terminal
-        let target = self.active_in_ws(cx) && self.focused_pane(window, cx).is_some_and(|p| { let p = p.read(cx); p.db.is_some() || matches!(p.embed, Some(crate::termview::Embed::Kv(_))) || p.ready() });
+        let target = self.active_in_ws(cx)
+            && self.focused_pane(window, cx).is_some_and(|p| {
+                let p = p.read(cx);
+                p.db.is_some()
+                    || matches!(p.embed, Some(crate::termview::Embed::Kv(_)))
+                    || p.ready()
+            });
         let mut actions: Vec<AnyElement> = vec![];
         let mut body = div().flex_1().min_h_0().flex().flex_col();
-        body = body.child(ui::field_row().pb(px(ui::SP_2)).child(ui::search_field(&search, false)));
+        body = body.child(
+            ui::field_row()
+                .pb(px(ui::SP_2))
+                .child(ui::search_field(&search, false)),
+        );
         if !target {
-            body = body.child(ui::notice(ui::Notice::Info, t(if snippets_mode { "lib.no_target_hint" } else { "lib.need_terminal" })).mb(px(ui::SP_2)));
+            body = body.child(
+                ui::notice(
+                    ui::Notice::Info,
+                    t(if snippets_mode {
+                        "lib.no_target_hint"
+                    } else {
+                        "lib.need_terminal"
+                    }),
+                )
+                .mb(px(ui::SP_2)),
+            );
         }
         if snippets_mode {
             let all = ssh_term_proto::snippets::load();
@@ -91,24 +142,65 @@ impl Root {
             } else if let Some(cfn) = confirm {
                 body = body.child(self.confirm_form(&cfn, cx));
             } else {
-                actions.push(ui::icon_button("lib-new", IconName::Plus, ui::IconBtn::Md, t("lib.new")).on_click(cx.listener(|this, _, w, cx| {
-                    let group = draft_group(&this.lib_group);
-                    this.open_lib_editor(None, String::new(), group, String::new(), String::new(), w, cx);
-                })).into_any_element());
+                actions.push(
+                    ui::icon_button("lib-new", IconName::Plus, ui::IconBtn::Md, t("lib.new"))
+                        .on_click(cx.listener(|this, _, w, cx| {
+                            let group = draft_group(&this.lib_group);
+                            this.open_lib_editor(
+                                None,
+                                String::new(),
+                                group,
+                                String::new(),
+                                String::new(),
+                                w,
+                                cx,
+                            );
+                        }))
+                        .into_any_element(),
+                );
                 body = body.child(self.snippet_list(&all, &q, &group, cx));
             }
         } else {
-            let opts = [("this".to_string(), t("lib.this_host").to_string()), ("all".to_string(), t("lib.all_hosts").to_string())];
+            let opts = [
+                ("this".to_string(), t("lib.this_host").to_string()),
+                ("all".to_string(), t("lib.all_hosts").to_string()),
+            ];
             let me = cx.entity();
-            body = body.child(div().w_full().flex_shrink_0().px(px(ui::LIST_INSET)).pb(px(ui::SP_2))
-                .child(ui::segmented_fill("lib-host", &opts, if hist_all { "all" } else { "this" }, move |v, _w, cx| { me.update(cx, |this, cx| { this.lib_hist_all = v == "all"; cx.notify(); }); })));
+            body = body.child(
+                div()
+                    .w_full()
+                    .flex_shrink_0()
+                    .px(px(ui::LIST_INSET))
+                    .pb(px(ui::SP_2))
+                    .child(ui::segmented_fill(
+                        "lib-host",
+                        &opts,
+                        if hist_all { "all" } else { "this" },
+                        move |v, _w, cx| {
+                            me.update(cx, |this, cx| {
+                                this.lib_hist_all = v == "all";
+                                cx.notify();
+                            });
+                        },
+                    )),
+            );
             if let Some(v) = vars {
                 body = body.child(self.var_form(&v, cx));
             } else if let Some(cfn) = confirm {
                 body = body.child(self.confirm_form(&cfn, cx));
             } else {
-                actions.push(ui::icon_button_state("lib-clear-host", IconName::Trash, ui::IconBtn::Md, t("lib.clear_host"), false, true)
-                    .on_click(cx.listener(|this, _, w, cx| this.clear_current_history(w, cx))).into_any_element());
+                actions.push(
+                    ui::icon_button_state(
+                        "lib-clear-host",
+                        IconName::Trash,
+                        ui::IconBtn::Md,
+                        t("lib.clear_host"),
+                        false,
+                        true,
+                    )
+                    .on_click(cx.listener(|this, _, w, cx| this.clear_current_history(w, cx)))
+                    .into_any_element(),
+                );
                 let rows = self.history_rows(window, cx);
                 body = body.child(self.history_list(&rows, &q, hist_all, cx));
             }
@@ -117,74 +209,237 @@ impl Root {
             body = body.child(ui::notice(ui::Notice::Warn, notice).my(px(ui::SP_2)));
         }
         // 菜单只由发起它的卡片渲染，避免两张卡片同时打开时重复渲染同 ID 的菜单
-        if let Some((target, pos)) = self.lib_menu.clone().filter(|(t, _)| t.owner_is_snippets() == snippets_mode) {
+        if let Some((target, pos)) = self
+            .lib_menu
+            .clone()
+            .filter(|(t, _)| t.owner_is_snippets() == snippets_mode)
+        {
             body = body.child(self.lib_menu_el(target, pos, cx));
         }
-        let (id, title, sub, ic) = if snippets_mode { ("snip-dock", t("lib.snippets"), None, IconName::Code) } else { ("hist-dock", t("lib.history"), None, IconName::Clock) };
+        let (id, title, sub, ic) = if snippets_mode {
+            ("snip-dock", t("lib.snippets"), None, IconName::Code)
+        } else {
+            ("hist-dock", t("lib.history"), None, IconName::Clock)
+        };
         self.dock_frame(id, title.into(), sub, ic, actions, body, cx)
     }
 
-    fn snippet_groups(&mut self, all: &[Snippet], group: &str, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+    fn snippet_groups(
+        &mut self,
+        all: &[Snippet],
+        group: &str,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let names = group_names(all);
         let ungrouped = all.iter().any(|s| s.group.is_empty());
         // 单行不换行，超出横向滚动
-        let mut row = div().id("lib-groups").w_full().flex_shrink_0().px(px(ui::LIST_INSET)).pb(px(ui::SP_2)).flex().flex_nowrap().gap(px(ui::SP_1)).overflow_x_scroll()
-            .child(ui::chip("lib-g-all", t("lib.all_groups"), group.is_empty()).on_click(cx.listener(|this, _, _, cx| { this.lib_group.clear(); cx.notify(); })));
+        let mut row = div()
+            .id("lib-groups")
+            .w_full()
+            .flex_shrink_0()
+            .px(px(ui::LIST_INSET))
+            .pb(px(ui::SP_2))
+            .flex()
+            .flex_nowrap()
+            .gap(px(ui::SP_1))
+            .overflow_x_scroll()
+            .child(
+                ui::chip("lib-g-all", t("lib.all_groups"), group.is_empty()).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.lib_group.clear();
+                        cx.notify();
+                    },
+                )),
+            );
         for (i, name) in names.iter().enumerate() {
             let n = name.clone();
             let on = group == name;
-            row = row.child(ui::chip(("lib-g", i), name.clone(), on).on_click(cx.listener(move |this, _, _, cx| { this.lib_group = n.clone(); cx.notify(); })));
+            row = row.child(
+                ui::chip(("lib-g", i), name.clone(), on).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        this.lib_group = n.clone();
+                        cx.notify();
+                    },
+                )),
+            );
         }
         if ungrouped {
-            row = row.child(ui::chip("lib-g-none", t("lib.ungrouped"), group == UNGROUPED).on_click(cx.listener(|this, _, _, cx| { this.lib_group = UNGROUPED.into(); cx.notify(); })));
+            row = row.child(
+                ui::chip("lib-g-none", t("lib.ungrouped"), group == UNGROUPED).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.lib_group = UNGROUPED.into();
+                        cx.notify();
+                    }),
+                ),
+            );
         }
         row
     }
 
-    fn snippet_list(&mut self, all: &[Snippet], q: &str, group: &str, cx: &mut Context<Self>) -> AnyElement {
+    fn snippet_list(
+        &mut self,
+        all: &[Snippet],
+        q: &str,
+        group: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let th = cur();
-        let shown: Vec<Snippet> = all.iter().filter(|s| snip_visible(s, q, group)).cloned().collect();
+        let shown: Vec<Snippet> = all
+            .iter()
+            .filter(|s| snip_visible(s, q, group))
+            .cloned()
+            .collect();
         if all.is_empty() {
-            return ui::empty_state(IconName::Code, t("lib.empty_snippets_title"), Some(t("lib.empty_snippets_desc").into()), vec![
-                ui::button("lib-new-empty", t("lib.new"), 1).on_click(cx.listener(|this, _, w, cx| {
-                    let group = draft_group(&this.lib_group);
-                    this.open_lib_editor(None, String::new(), group, String::new(), String::new(), w, cx);
-                })).into_any_element(),
-                ui::button("lib-starters", t("lib.add_examples"), 0).on_click(cx.listener(move |this, _, _w, cx| this.add_starters(cx))).into_any_element(),
-            ], false).into_any_element();
+            return ui::empty_state(
+                IconName::Code,
+                t("lib.empty_snippets_title"),
+                Some(t("lib.empty_snippets_desc").into()),
+                vec![
+                    ui::button("lib-new-empty", t("lib.new"), 1)
+                        .on_click(cx.listener(|this, _, w, cx| {
+                            let group = draft_group(&this.lib_group);
+                            this.open_lib_editor(
+                                None,
+                                String::new(),
+                                group,
+                                String::new(),
+                                String::new(),
+                                w,
+                                cx,
+                            );
+                        }))
+                        .into_any_element(),
+                    ui::button("lib-starters", t("lib.add_examples"), 0)
+                        .on_click(cx.listener(move |this, _, _w, cx| this.add_starters(cx)))
+                        .into_any_element(),
+                ],
+                false,
+            )
+            .into_any_element();
         }
         if shown.is_empty() {
-            return ui::empty_state(IconName::Search, t("ui.no_matching_commands"), None, vec![], false).into_any_element();
+            return ui::empty_state(
+                IconName::Search,
+                t("ui.no_matching_commands"),
+                None,
+                vec![],
+                false,
+            )
+            .into_any_element();
         }
-        let mut list = div().id("lib-snip-list").flex_1().min_h_0().overflow_y_scroll().pb(px(ui::SP_2)).flex().flex_col();
+        let mut list = div()
+            .id("lib-snip-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .pb(px(ui::SP_2))
+            .flex()
+            .flex_col();
         for (i, s) in shown.iter().enumerate() {
             let body = s.body.clone();
             let group_name = s.group.clone();
-            let preview: String = s.body.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim().chars().take(80).collect();
+            let preview: String = s
+                .body
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("")
+                .trim()
+                .chars()
+                .take(80)
+                .collect();
             let run_body = body.clone();
             let ins_body = body.clone();
             let copy_body = body.clone();
-            let menu = LibMenu::Snippet { id: s.id.clone(), name: s.name.clone(), group: group_name.clone(), note: s.note.clone(), body };
+            let menu = LibMenu::Snippet {
+                id: s.id.clone(),
+                name: s.name.clone(),
+                group: group_name.clone(),
+                note: s.note.clone(),
+                body,
+            };
             let gid = SharedString::from(format!("lib-sn-{i}"));
-            list = list.child(ui::list_row(("lib-sn", i), 0, false).min_h(px(ui::row2_h())).group(gid.clone())
-                .on_click(cx.listener(move |this, _, w, cx| this.start_snippet(run_body.clone(), true, w, cx)))
-                .child(div().flex_1().min_w_0().flex().flex_col()
-                    .child(div().flex().items_center().gap(px(ui::SP_1))
-                        .child(ui::row_title(s.name.clone()).font_weight(FontWeight::MEDIUM))
-                        .when(!group_name.is_empty(), |d| d.child(div().flex_shrink_0().child(ui::tag(group_name.clone(), c(th.subtext))))))
-                    .child(self.mono_line(preview, c(th.subtext))))
-                .child(ui::row_actions(gid)
-                    .child(self.act_btn(("lib-ins", i), IconName::CornerDownLeft, t("lib.insert")).on_click(cx.listener(move |this, _, w, cx| { cx.stop_propagation(); this.start_snippet(ins_body.clone(), false, w, cx); })))
-                    .child(self.act_btn(("lib-cp", i), IconName::Copy, t("lib.copy")).on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.copy_lib(copy_body.clone(), cx); })))
-                    .child(self.more_btn(("lib-more", i), menu, cx))));
+            list = list.child(
+                ui::list_row(("lib-sn", i), 0, false)
+                    .min_h(px(ui::row2_h()))
+                    .group(gid.clone())
+                    .on_click(cx.listener(move |this, _, w, cx| {
+                        this.start_snippet(run_body.clone(), true, w, cx)
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(ui::SP_1))
+                                    .child(
+                                        ui::row_title(s.name.clone())
+                                            .font_weight(FontWeight::MEDIUM),
+                                    )
+                                    .when(!group_name.is_empty(), |d| {
+                                        d.child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .child(ui::tag(group_name.clone(), c(th.subtext))),
+                                        )
+                                    }),
+                            )
+                            .child(self.mono_line(preview, c(th.subtext))),
+                    )
+                    .child(
+                        ui::row_actions(gid)
+                            .child(
+                                self.act_btn(
+                                    ("lib-ins", i),
+                                    IconName::CornerDownLeft,
+                                    t("lib.insert"),
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, w, cx| {
+                                        cx.stop_propagation();
+                                        this.start_snippet(ins_body.clone(), false, w, cx);
+                                    },
+                                )),
+                            )
+                            .child(
+                                self.act_btn(("lib-cp", i), IconName::Copy, t("lib.copy"))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.copy_lib(copy_body.clone(), cx);
+                                    })),
+                            )
+                            .child(self.more_btn(("lib-more", i), menu, cx)),
+                    ),
+            );
         }
         list.into_any_element()
     }
 
-    fn snippet_editor(&mut self, ed: &LibEditor, all: &[Snippet], cx: &mut Context<Self>) -> AnyElement {
+    fn snippet_editor(
+        &mut self,
+        ed: &LibEditor,
+        all: &[Snippet],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let th = cur();
-        let label = |s: &'static str| div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(t(s));
-        let field = |name: &'static str, input: &Entity<InputState>| div().flex().flex_col().gap(px(ui::SP_1)).child(label(name)).child(ui::text_field(input, false));
+        let label = |s: &'static str| {
+            div()
+                .text_size(px(ui::fs_small()))
+                .text_color(c(th.subtext))
+                .child(t(s))
+        };
+        let field = |name: &'static str, input: &Entity<InputState>| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(ui::SP_1))
+                .child(label(name))
+                .child(ui::text_field(input, false))
+        };
         let typed = ed.group.read(cx).value();
         let choices = matching_groups(&group_names(all), &typed);
         let selected = typed.trim().to_lowercase();
@@ -193,75 +448,235 @@ impl Root {
             let pick = name.clone();
             let on = !selected.is_empty() && name.to_lowercase() == selected;
             let input = ed.group.clone();
-            chips = chips.child(ui::chip(("lib-eg", i), name.clone(), on).on_click(cx.listener(move |_this, _, w, cx| {
-                input.update(cx, |s, cx| s.set_value(pick.clone(), w, cx));
-                cx.notify();
-            })));
+            chips = chips.child(
+                ui::chip(("lib-eg", i), name.clone(), on).on_click(cx.listener(
+                    move |_this, _, w, cx| {
+                        input.update(cx, |s, cx| s.set_value(pick.clone(), w, cx));
+                        cx.notify();
+                    },
+                )),
+            );
         }
-        let group = div().flex().flex_col().gap(px(ui::SP_1))
+        let group = div()
+            .flex()
+            .flex_col()
+            .gap(px(ui::SP_1))
             .child(label("lib.group"))
             .child(ui::text_field(&ed.group, false))
             .when(!choices.is_empty(), |d| d.child(chips));
-        div().id("lib-editor").flex_1().min_h_0().overflow_y_scroll().px(px(ui::PANEL_PX)).py(px(ui::SP_3)).flex().flex_col().gap(px(ui::SP_3))
+        div()
+            .id("lib-editor")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px(px(ui::PANEL_PX))
+            .py(px(ui::SP_3))
+            .flex()
+            .flex_col()
+            .gap(px(ui::SP_3))
             .child(field("lib.name", &ed.name))
             .child(group)
             .child(field("lib.note", &ed.note))
-            .child(div().flex().flex_col().gap(px(ui::SP_1))
-                .child(label("lib.body"))
-                .child(Textarea::new(&ed.body).min_h(px(120.)).font_family(ui::mono_family()).text_size(px(ui::fs_mono()))))
-            .child(div().pt(px(ui::SP_1)).flex().gap(px(ui::SP_2)).justify_end()
-                .child(ui::button("lib-ed-cancel", t("ui.cancel"), 0).on_click(cx.listener(|this, _, _, cx| { this.lib_editor = None; cx.notify(); })))
-                .child(ui::button("lib-ed-save", t("lib.save"), 1).on_click(cx.listener(|this, _, _, cx| this.save_lib_editor(cx)))))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(ui::SP_1))
+                    .child(label("lib.body"))
+                    .child(
+                        Textarea::new(&ed.body)
+                            .min_h(px(120.))
+                            .font_family(ui::mono_family())
+                            .text_size(px(ui::fs_mono())),
+                    ),
+            )
+            .child(
+                div()
+                    .pt(px(ui::SP_1))
+                    .flex()
+                    .gap(px(ui::SP_2))
+                    .justify_end()
+                    .child(
+                        ui::button("lib-ed-cancel", t("ui.cancel"), 0).on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.lib_editor = None;
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(
+                        ui::button("lib-ed-save", t("lib.save"), 1)
+                            .on_click(cx.listener(|this, _, _, cx| this.save_lib_editor(cx))),
+                    ),
+            )
             .into_any_element()
     }
 
     fn var_form(&mut self, v: &LibVars, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
-        let mut col = div().id("lib-vars").flex_1().min_h_0().overflow_y_scroll().px(px(ui::PANEL_PX)).py(px(ui::SP_3)).flex().flex_col().gap(px(ui::SP_3))
-            .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("lib.fill_title")));
+        let mut col = div()
+            .id("lib-vars")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px(px(ui::PANEL_PX))
+            .py(px(ui::SP_3))
+            .flex()
+            .flex_col()
+            .gap(px(ui::SP_3))
+            .child(
+                div()
+                    .text_size(px(ui::fs_body()))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(c(th.text))
+                    .child(t("lib.fill_title")),
+            );
         for (name, inp) in v.names.iter().zip(v.inputs.iter()) {
-            col = col.child(div().flex().flex_col().gap(px(ui::SP_1))
-                .child(div().text_size(px(ui::fs_small())).text_color(c(th.subtext)).child(name.clone()))
-                .child(ui::text_field(inp, false)));
+            col = col.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(ui::SP_1))
+                    .child(
+                        div()
+                            .text_size(px(ui::fs_small()))
+                            .text_color(c(th.subtext))
+                            .child(name.clone()),
+                    )
+                    .child(ui::text_field(inp, false)),
+            );
         }
-        col.child(div().flex().gap(px(ui::SP_2)).justify_end()
-            .child(ui::button("lib-var-cancel", t("ui.cancel"), 0).on_click(cx.listener(|this, _, _, cx| { this.lib_vars = None; cx.notify(); })))
-            .child(ui::button("lib-var-ok", if v.exec { t("lib.run") } else { t("lib.insert") }, 1).on_click(cx.listener(|this, _, w, cx| this.submit_vars(w, cx)))))
-            .into_any_element()
+        col.child(
+            div()
+                .flex()
+                .gap(px(ui::SP_2))
+                .justify_end()
+                .child(
+                    ui::button("lib-var-cancel", t("ui.cancel"), 0).on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.lib_vars = None;
+                            cx.notify();
+                        },
+                    )),
+                )
+                .child(
+                    ui::button(
+                        "lib-var-ok",
+                        if v.exec {
+                            t("lib.run")
+                        } else {
+                            t("lib.insert")
+                        },
+                        1,
+                    )
+                    .on_click(cx.listener(|this, _, w, cx| this.submit_vars(w, cx))),
+                ),
+        )
+        .into_any_element()
     }
 
     fn confirm_form(&mut self, cfn: &LibConfirm, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
-        let mut col = div().id("lib-confirm").flex_1().min_h_0().overflow_y_scroll().px(px(ui::PANEL_PX)).py(px(ui::SP_3)).flex().flex_col().gap(px(ui::SP_3))
-            .child(div().text_size(px(ui::fs_body())).font_weight(FontWeight::MEDIUM).text_color(c(th.text)).child(t("lib.confirm_title")));
+        let mut col = div()
+            .id("lib-confirm")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px(px(ui::PANEL_PX))
+            .py(px(ui::SP_3))
+            .flex()
+            .flex_col()
+            .gap(px(ui::SP_3))
+            .child(
+                div()
+                    .text_size(px(ui::fs_body()))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(c(th.text))
+                    .child(t("lib.confirm_title")),
+            );
         for (i, reason) in cfn.reasons.iter().enumerate() {
-            col = col.child(ui::notice(ui::Notice::Warn, reason.clone()).mx_0().id(("lib-ask", i)));
+            col = col.child(
+                ui::notice(ui::Notice::Warn, reason.clone())
+                    .mx_0()
+                    .id(("lib-ask", i)),
+            );
         }
-        col.child(div().flex().gap(px(ui::SP_2)).justify_end()
-            .child(ui::button("lib-ask-no", t("ui.cancel"), 0).on_click(cx.listener(|this, _, _, cx| { this.lib_confirm = None; cx.notify(); })))
-            .child(ui::button("lib-ask-yes", t("lib.confirm_ok"), 1).on_click(cx.listener(|this, _, w, cx| this.confirm_script(w, cx)))))
-            .into_any_element()
+        col.child(
+            div()
+                .flex()
+                .gap(px(ui::SP_2))
+                .justify_end()
+                .child(
+                    ui::button("lib-ask-no", t("ui.cancel"), 0).on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.lib_confirm = None;
+                            cx.notify();
+                        },
+                    )),
+                )
+                .child(
+                    ui::button("lib-ask-yes", t("lib.confirm_ok"), 1)
+                        .on_click(cx.listener(|this, _, w, cx| this.confirm_script(w, cx))),
+                ),
+        )
+        .into_any_element()
     }
 
-    fn history_list(&mut self, rows: &[HistRow], q: &str, show_host: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn history_list(
+        &mut self,
+        rows: &[HistRow],
+        q: &str,
+        show_host: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let th = cur();
-        let shown: Vec<&HistRow> = rows.iter().filter(|r| {
-            if q.is_empty() { return true; }
-            r.cmd.to_lowercase().contains(q) || r.key.to_lowercase().contains(q)
-        }).take(300).collect();
+        let shown: Vec<&HistRow> = rows
+            .iter()
+            .filter(|r| {
+                if q.is_empty() {
+                    return true;
+                }
+                r.cmd.to_lowercase().contains(q) || r.key.to_lowercase().contains(q)
+            })
+            .take(300)
+            .collect();
         if rows.is_empty() {
-            return ui::empty_state(IconName::Clock, t("lib.empty_history_title"), None, vec![], false).into_any_element();
+            return ui::empty_state(
+                IconName::Clock,
+                t("lib.empty_history_title"),
+                None,
+                vec![],
+                false,
+            )
+            .into_any_element();
         }
         if shown.is_empty() {
-            return ui::empty_state(IconName::Search, t("ui.no_matching_commands"), None, vec![], false).into_any_element();
+            return ui::empty_state(
+                IconName::Search,
+                t("ui.no_matching_commands"),
+                None,
+                vec![],
+                false,
+            )
+            .into_any_element();
         }
-        let mut list = div().id("lib-hist-list").flex_1().min_h_0().overflow_y_scroll().pb(px(ui::SP_2)).flex().flex_col();
+        let mut list = div()
+            .id("lib-hist-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .pb(px(ui::SP_2))
+            .flex()
+            .flex_col();
         for (i, r) in shown.iter().enumerate() {
             let cmd = r.cmd.clone();
             let run = cmd.clone();
             let ins = cmd.clone();
             let copy = cmd.clone();
-            let menu = LibMenu::History { key: r.key.clone(), cmd: cmd.clone() };
+            let menu = LibMenu::History {
+                key: r.key.clone(),
+                cmd: cmd.clone(),
+            };
             let meta = match (show_host, r.ts) {
                 (true, Some(ts)) => format!("{} · {}", r.key, fmt_ts(ts)),
                 (true, None) => r.key.clone(),
@@ -269,83 +684,231 @@ impl Root {
                 (false, None) => String::new(),
             };
             let gid = SharedString::from(format!("lib-h-{i}"));
-            list = list.child(ui::list_row(("lib-h", i), 0, false).min_h(px(ui::row2_h())).group(gid.clone())
-                .on_click(cx.listener(move |this, _, w, cx| this.start_snippet(run.clone(), true, w, cx)))
-                .child(div().flex_1().min_w_0().flex().flex_col()
-                    .child(self.mono_line(cmd, c(th.text)))
-                    .when(!meta.is_empty(), |d| d.child(ui::row_meta(meta))))
-                .child(ui::row_actions(gid)
-                    .child(self.act_btn(("lib-hi", i), IconName::CornerDownLeft, t("lib.insert")).on_click(cx.listener(move |this, _, w, cx| { cx.stop_propagation(); this.start_snippet(ins.clone(), false, w, cx); })))
-                    .child(self.act_btn(("lib-hc", i), IconName::Copy, t("lib.copy")).on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.copy_lib(copy.clone(), cx); })))
-                    .child(self.more_btn(("lib-hm", i), menu, cx))));
+            list = list.child(
+                ui::list_row(("lib-h", i), 0, false)
+                    .min_h(px(ui::row2_h()))
+                    .group(gid.clone())
+                    .on_click(cx.listener(move |this, _, w, cx| {
+                        this.start_snippet(run.clone(), true, w, cx)
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(self.mono_line(cmd, c(th.text)))
+                            .when(!meta.is_empty(), |d| d.child(ui::row_meta(meta))),
+                    )
+                    .child(
+                        ui::row_actions(gid)
+                            .child(
+                                self.act_btn(
+                                    ("lib-hi", i),
+                                    IconName::CornerDownLeft,
+                                    t("lib.insert"),
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, w, cx| {
+                                        cx.stop_propagation();
+                                        this.start_snippet(ins.clone(), false, w, cx);
+                                    },
+                                )),
+                            )
+                            .child(
+                                self.act_btn(("lib-hc", i), IconName::Copy, t("lib.copy"))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.copy_lib(copy.clone(), cx);
+                                    })),
+                            )
+                            .child(self.more_btn(("lib-hm", i), menu, cx)),
+                    ),
+            );
         }
         list.into_any_element()
     }
 
     /// 单行省略的等宽文本（命令预览、历史命令）。
     fn mono_line(&self, text: impl Into<SharedString>, color: gpui::Hsla) -> gpui::Div {
-        div().min_w_0().whitespace_nowrap().overflow_hidden().text_ellipsis().font_family(ui::mono_family()).text_size(px(ui::fs_mono())).line_height(px(ui::lh(ui::fs_mono()))).text_color(color).child(text.into())
+        div()
+            .min_w_0()
+            .whitespace_nowrap()
+            .overflow_hidden()
+            .text_ellipsis()
+            .font_family(ui::mono_family())
+            .text_size(px(ui::fs_mono()))
+            .line_height(px(ui::lh(ui::fs_mono())))
+            .text_color(color)
+            .child(text.into())
     }
 
     /// 行内图标按钮：按下不触发整行点击。
-    fn act_btn(&self, id: impl Into<gpui::ElementId>, ic: IconName, tip: impl Into<SharedString>) -> gpui::Stateful<gpui::Div> {
-        ui::icon_button(id, ic, ui::IconBtn::Sm, tip).on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+    fn act_btn(
+        &self,
+        id: impl Into<gpui::ElementId>,
+        ic: IconName,
+        tip: impl Into<SharedString>,
+    ) -> gpui::Stateful<gpui::Div> {
+        ui::icon_button(id, ic, ui::IconBtn::Sm, tip)
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
     }
 
     /// 「更多」按钮：在按钮下方弹出该行的小菜单。
-    fn more_btn(&self, id: impl Into<gpui::ElementId>, target: LibMenu, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
-        self.act_btn(id, IconName::Ellipsis, t("lib.more")).on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| {
-            cx.stop_propagation();
-            this.lib_menu = Some((target.clone(), e.position() + Point::new(px(-8.), px(14.))));
-            cx.notify();
-        }))
+    fn more_btn(
+        &self,
+        id: impl Into<gpui::ElementId>,
+        target: LibMenu,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        self.act_btn(id, IconName::Ellipsis, t("lib.more"))
+            .on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| {
+                cx.stop_propagation();
+                this.lib_menu = Some((target.clone(), e.position() + Point::new(px(-8.), px(14.))));
+                cx.notify();
+            }))
     }
 
     /// 「更多」菜单：常用命令 = 编辑 / 复制一份 / 删除；历史 = 存为常用命令 / 删除。
-    fn lib_menu_el(&mut self, target: LibMenu, pos: Point<Pixels>, cx: &mut Context<Self>) -> AnyElement {
+    fn lib_menu_el(
+        &mut self,
+        target: LibMenu,
+        pos: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let mut m = ui::popover().py_1().flex().flex_col();
-        let close = |this: &mut Root| { this.lib_menu = None; };
+        let close = |this: &mut Root| {
+            this.lib_menu = None;
+        };
         match target {
-            LibMenu::Snippet { id, name, group, note, body } => {
+            LibMenu::Snippet {
+                id,
+                name,
+                group,
+                note,
+                body,
+            } => {
                 let (dup, del) = (id.clone(), id.clone());
-                m = m.child(ui::menu_item("lib-m-edit", Some(IconName::Pencil), t("lib.edit"), true, false).on_click(cx.listener(move |this, _, w, cx| {
-                    close(this);
-                    this.open_lib_editor(Some(id.clone()), name.clone(), group.clone(), note.clone(), body.clone(), w, cx);
-                })))
-                .child(ui::menu_item("lib-m-dup", Some(IconName::CopyPlus), t("lib.duplicate"), true, false).on_click(cx.listener(move |this, _, _, cx| {
-                    close(this);
-                    match ssh_term_proto::snippets::duplicate(&dup) { Ok(_) => this.lib_ok(t("lib.saved").into(), cx), Err(e) => { this.lib_notice = e; cx.notify(); } }
-                })))
-                .child(ui::menu_sep())
-                .child(ui::menu_item("lib-m-del", Some(IconName::Trash), t("lib.delete"), true, true).on_click(cx.listener(move |this, _, _, cx| {
-                    close(this);
-                    if let Err(e) = ssh_term_proto::snippets::delete(&del) { this.lib_notice = e; } else { this.lib_notice.clear(); }
-                    cx.notify();
-                })));
+                m = m
+                    .child(
+                        ui::menu_item(
+                            "lib-m-edit",
+                            Some(IconName::Pencil),
+                            t("lib.edit"),
+                            true,
+                            false,
+                        )
+                        .on_click(cx.listener(move |this, _, w, cx| {
+                            close(this);
+                            this.open_lib_editor(
+                                Some(id.clone()),
+                                name.clone(),
+                                group.clone(),
+                                note.clone(),
+                                body.clone(),
+                                w,
+                                cx,
+                            );
+                        })),
+                    )
+                    .child(
+                        ui::menu_item(
+                            "lib-m-dup",
+                            Some(IconName::CopyPlus),
+                            t("lib.duplicate"),
+                            true,
+                            false,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            close(this);
+                            match ssh_term_proto::snippets::duplicate(&dup) {
+                                Ok(_) => this.lib_ok(t("lib.saved").into(), cx),
+                                Err(e) => {
+                                    this.lib_notice = e;
+                                    cx.notify();
+                                }
+                            }
+                        })),
+                    )
+                    .child(ui::menu_sep())
+                    .child(
+                        ui::menu_item(
+                            "lib-m-del",
+                            Some(IconName::Trash),
+                            t("lib.delete"),
+                            true,
+                            true,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            close(this);
+                            if let Err(e) = ssh_term_proto::snippets::delete(&del) {
+                                this.lib_notice = e;
+                            } else {
+                                this.lib_notice.clear();
+                            }
+                            cx.notify();
+                        })),
+                    );
             }
             LibMenu::History { key, cmd } => {
                 let save = cmd.clone();
-                m = m.child(ui::menu_item("lib-m-save", Some(IconName::Bookmark), t("lib.save_snippet"), true, false).on_click(cx.listener(move |this, _, w, cx| {
-                    close(this);
-                    this.save_hist_as_snippet(save.clone(), w, cx);
-                })))
-                .child(ui::menu_sep())
-                .child(ui::menu_item("lib-m-forget", Some(IconName::Trash), t("lib.delete"), true, true).on_click(cx.listener(move |this, _, _, cx| {
-                    close(this);
-                    this.forget_history(&key, &cmd, cx);
-                })));
+                m = m
+                    .child(
+                        ui::menu_item(
+                            "lib-m-save",
+                            Some(IconName::Bookmark),
+                            t("lib.save_snippet"),
+                            true,
+                            false,
+                        )
+                        .on_click(cx.listener(move |this, _, w, cx| {
+                            close(this);
+                            this.save_hist_as_snippet(save.clone(), w, cx);
+                        })),
+                    )
+                    .child(ui::menu_sep())
+                    .child(
+                        ui::menu_item(
+                            "lib-m-forget",
+                            Some(IconName::Trash),
+                            t("lib.delete"),
+                            true,
+                            true,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            close(this);
+                            this.forget_history(&key, &cmd, cx);
+                        })),
+                    );
             }
         }
-        deferred(anchored().position(pos).snap_to_window_with_margin(gpui::px(crate::ui::EDGE_MARGIN)).child(m.occlude().on_mouse_down_out(cx.listener(|this, _, _, cx| { this.lib_menu = None; cx.notify(); })))).with_priority(2).into_any_element()
+        deferred(
+            anchored()
+                .position(pos)
+                .snap_to_window_with_margin(gpui::px(crate::ui::EDGE_MARGIN))
+                .child(m.occlude().on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.lib_menu = None;
+                    cx.notify();
+                }))),
+        )
+        .with_priority(2)
+        .into_any_element()
     }
 
     fn history_rows(&self, window: &Window, cx: &gpui::App) -> Vec<HistRow> {
-        let current = self.focused_pane(window, cx).map(|p| (p.read(cx).spec.history_key(), p.read(cx).history.clone()));
+        let current = self
+            .focused_pane(window, cx)
+            .map(|p| (p.read(cx).spec.history_key(), p.read(cx).history.clone()));
         let mut rows = vec![];
         let mut ord = 0u32;
         let push = |key: String, items: &[HistItem], rows: &mut Vec<HistRow>, ord: &mut u32| {
             for it in items {
-                rows.push(HistRow { key: key.clone(), cmd: it.cmd.clone(), ts: it.ts, ord: *ord });
+                rows.push(HistRow {
+                    key: key.clone(),
+                    cmd: it.cmd.clone(),
+                    ts: it.ts,
+                    ord: *ord,
+                });
                 *ord += 1;
             }
         };
@@ -354,20 +917,36 @@ impl Root {
             if let Ok(rd) = std::fs::read_dir(data_dir().join("history")) {
                 for e in rd.flatten() {
                     let path = e.path();
-                    if path.extension().and_then(|x| x.to_str()) != Some("txt") { continue; }
+                    if path.extension().and_then(|x| x.to_str()) != Some("txt") {
+                        continue;
+                    }
                     if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        if !keys.iter().any(|k| k == stem || ssh_term_proto::suggest::history_stem(k) == stem) { keys.push(stem.to_string()); }
+                        if !keys
+                            .iter()
+                            .any(|k| k == stem || ssh_term_proto::suggest::history_stem(k) == stem)
+                        {
+                            keys.push(stem.to_string());
+                        }
                     }
                 }
             }
             for key in keys {
                 if let Some(h) = self.histories.get(&key) {
-                    push(key, &h.lock().unwrap().items().to_vec(), &mut rows, &mut ord);
+                    push(
+                        key,
+                        &h.lock().unwrap().items().to_vec(),
+                        &mut rows,
+                        &mut ord,
+                    );
                 } else if current.as_ref().is_some_and(|(k, _)| k == &key) {
                     let items = current.as_ref().unwrap().1.lock().unwrap().items().to_vec();
                     push(key, &items, &mut rows, &mut ord);
                 } else {
-                    let items = ssh_term_proto::suggest::History::open(ssh_term_proto::suggest::history_path(&data_dir(), &key)).items().to_vec();
+                    let items = ssh_term_proto::suggest::History::open(
+                        ssh_term_proto::suggest::history_path(&data_dir(), &key),
+                    )
+                    .items()
+                    .to_vec();
                     push(key, &items, &mut rows, &mut ord);
                 }
             }
@@ -375,18 +954,53 @@ impl Root {
             let items = h.lock().unwrap().items().to_vec();
             push(key, &items, &mut rows, &mut ord);
         }
-        rows.sort_by(|a, b| b.ts.unwrap_or(0).cmp(&a.ts.unwrap_or(0)).then_with(|| b.ord.cmp(&a.ord)));
+        rows.sort_by(|a, b| {
+            b.ts.unwrap_or(0)
+                .cmp(&a.ts.unwrap_or(0))
+                .then_with(|| b.ord.cmp(&a.ord))
+        });
         rows
     }
 
-    pub(crate) fn open_lib_editor(&mut self, id: Option<String>, name: String, group: String, note: String, body: String, window: &mut Window, cx: &mut Context<Self>) {
-        let name_in = cx.new(|cx| InputState::new(window, cx).placeholder(t("lib.name")).default_value(name));
-        let group_in = cx.new(|cx| InputState::new(window, cx).placeholder(t("lib.group")).default_value(group));
-        let note_in = cx.new(|cx| InputState::new(window, cx).placeholder(t("lib.note")).default_value(note));
-        let body_in = cx.new(|cx| TextareaState::new(window, cx).placeholder(t("lib.body")).auto_grow(3, 8));
+    pub(crate) fn open_lib_editor(
+        &mut self,
+        id: Option<String>,
+        name: String,
+        group: String,
+        note: String,
+        body: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name_in = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(t("lib.name"))
+                .default_value(name)
+        });
+        let group_in = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(t("lib.group"))
+                .default_value(group)
+        });
+        let note_in = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(t("lib.note"))
+                .default_value(note)
+        });
+        let body_in = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .placeholder(t("lib.body"))
+                .auto_grow(3, 8)
+        });
         let text = body.clone();
         body_in.update(cx, |s, cx| s.set_value(text, window, cx));
-        self.lib_editor = Some(LibEditor { id, name: name_in, group: group_in, note: note_in, body: body_in });
+        self.lib_editor = Some(LibEditor {
+            id,
+            name: name_in,
+            group: group_in,
+            note: note_in,
+            body: body_in,
+        });
         self.lib_vars = None;
         self.lib_confirm = None;
         self.lib_notice.clear();
@@ -394,7 +1008,9 @@ impl Root {
     }
 
     fn save_lib_editor(&mut self, cx: &mut Context<Self>) {
-        let Some(ed) = self.lib_editor.clone() else { return };
+        let Some(ed) = self.lib_editor.clone() else {
+            return;
+        };
         let name = ed.name.read(cx).value().trim().to_string();
         let body = ed.body.read(cx).value().to_string();
         if name.is_empty() || body.trim().is_empty() {
@@ -404,26 +1020,52 @@ impl Root {
         }
         let item = Snippet {
             module: String::new(),
-            id: ed.id.clone().unwrap_or_else(ssh_term_proto::snippets::new_id),
+            id: ed
+                .id
+                .clone()
+                .unwrap_or_else(ssh_term_proto::snippets::new_id),
             name,
-            group: canonical_group(&ed.group.read(cx).value(), &group_names(&ssh_term_proto::snippets::load())),
+            group: canonical_group(
+                &ed.group.read(cx).value(),
+                &group_names(&ssh_term_proto::snippets::load()),
+            ),
             note: ed.note.read(cx).value().trim().to_string(),
             body,
         };
         match ssh_term_proto::snippets::upsert(item) {
-            Ok(()) => { self.lib_editor = None; self.lib_ok(t("lib.saved").into(), cx); }
-            Err(e) => { self.lib_notice = e; cx.notify(); }
+            Ok(()) => {
+                self.lib_editor = None;
+                self.lib_ok(t("lib.saved").into(), cx);
+            }
+            Err(e) => {
+                self.lib_notice = e;
+                cx.notify();
+            }
         }
     }
 
-    fn start_snippet(&mut self, body: String, exec: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn start_snippet(
+        &mut self,
+        body: String,
+        exec: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let names = ssh_term_proto::snippets::placeholder_names(&body);
         if !names.is_empty() {
-            let inputs = names.iter().map(|n| {
-                let ph = n.clone();
-                cx.new(|cx| InputState::new(window, cx).placeholder(ph))
-            }).collect();
-            self.lib_vars = Some(LibVars { body, exec, names, inputs });
+            let inputs = names
+                .iter()
+                .map(|n| {
+                    let ph = n.clone();
+                    cx.new(|cx| InputState::new(window, cx).placeholder(ph))
+                })
+                .collect();
+            self.lib_vars = Some(LibVars {
+                body,
+                exec,
+                names,
+                inputs,
+            });
             self.lib_confirm = None;
             self.lib_notice.clear();
             cx.notify();
@@ -433,12 +1075,18 @@ impl Root {
     }
 
     fn submit_vars(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(vars) = self.lib_vars.take() else { return };
+        let Some(vars) = self.lib_vars.take() else {
+            return;
+        };
         let mut pairs = vec![];
         let mut missing = vec![];
         for (name, inp) in vars.names.iter().zip(vars.inputs.iter()) {
             let val = inp.read(cx).value().to_string();
-            if val.trim().is_empty() { missing.push(name.clone()); } else { pairs.push((name.clone(), val)); }
+            if val.trim().is_empty() {
+                missing.push(name.clone());
+            } else {
+                pairs.push((name.clone(), val));
+            }
         }
         if !missing.is_empty() {
             self.lib_notice = tf("lib.fill_empty", &[("name", &missing.join(", "))]);
@@ -459,29 +1107,69 @@ impl Root {
     /// Example snippets (terminal, SQL, Redis, Docker) for an empty list.
     fn add_starters(&mut self, cx: &mut Context<Self>) {
         for (name, group, body) in ssh_term_proto::snippets::starters() {
-            let item = Snippet { id: ssh_term_proto::snippets::new_id(), name: name.to_string(), group: group.to_string(), note: String::new(), body: body.to_string(), module: String::new() };
-            if let Err(e) = ssh_term_proto::snippets::upsert(item) { self.lib_notice = e; break; }
+            let item = Snippet {
+                id: ssh_term_proto::snippets::new_id(),
+                name: name.to_string(),
+                group: group.to_string(),
+                note: String::new(),
+                body: body.to_string(),
+                module: String::new(),
+            };
+            if let Err(e) = ssh_term_proto::snippets::upsert(item) {
+                self.lib_notice = e;
+                break;
+            }
         }
         cx.notify();
     }
 
     /// Insert / run into whatever the focused pane is: SQL editor, Redis console or terminal
     /// (the list is shared by every module). With no target the text is copied.
-    fn apply_module(&mut self, body: &str, exec: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let pane = if self.active_in_ws(cx) { self.focused_pane(window, cx) } else { None };
+    fn apply_module(
+        &mut self,
+        body: &str,
+        exec: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let pane = if self.active_in_ws(cx) {
+            self.focused_pane(window, cx)
+        } else {
+            None
+        };
         if let Some(p) = &pane {
-            if let Some(dv) = p.read(cx).db.clone() { dv.update(cx, |v, cx| v.insert_text(body, window, cx)); self.lib_notice.clear(); cx.notify(); return true; }
-            if let Some(crate::termview::Embed::Kv(kv)) = p.read(cx).embed.clone() { kv.update(cx, |v, cx| v.insert_console(body, exec, window, cx)); self.lib_notice.clear(); cx.notify(); return true; }
-            if p.read(cx).ready() { return false; }
+            if let Some(dv) = p.read(cx).db.clone() {
+                dv.update(cx, |v, cx| v.insert_text(body, window, cx));
+                self.lib_notice.clear();
+                cx.notify();
+                return true;
+            }
+            if let Some(crate::termview::Embed::Kv(kv)) = p.read(cx).embed.clone() {
+                kv.update(cx, |v, cx| v.insert_console(body, exec, window, cx));
+                self.lib_notice.clear();
+                cx.notify();
+                return true;
+            }
+            if p.read(cx).ready() {
+                return false;
+            }
         }
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(body.to_string()));
         self.lib_ok(t("lib.copied_no_target").into(), cx);
         true
     }
 
-    fn apply_filled(&mut self, body: String, exec: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn apply_filled(
+        &mut self,
+        body: String,
+        exec: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.lib_vars = None;
-        if self.apply_module(&body, exec, window, cx) { return; }
+        if self.apply_module(&body, exec, window, cx) {
+            return;
+        }
         let Some(p) = self.focused_pane(window, cx).filter(|p| p.read(cx).ready()) else {
             self.lib_notice = t("lib.need_terminal").into();
             cx.notify();
@@ -508,10 +1196,21 @@ impl Root {
             return;
         }
         let lines = ssh_term_proto::snippets::script_lines(&body);
-        if lines.is_empty() { self.lib_notice = t("lib.need_name").into(); cx.notify(); return; }
+        if lines.is_empty() {
+            self.lib_notice = t("lib.need_name").into();
+            cx.notify();
+            return;
+        }
         match p.read(cx).gate_script(&lines) {
-            crate::termview::ScriptGate::Deny { line, why } => { self.lib_notice = tf("lib.denied", &[("line", &line), ("why", &why)]); cx.notify(); }
-            crate::termview::ScriptGate::Ask(reasons) => { self.lib_confirm = Some(LibConfirm { lines, reasons }); self.lib_notice.clear(); cx.notify(); }
+            crate::termview::ScriptGate::Deny { line, why } => {
+                self.lib_notice = tf("lib.denied", &[("line", &line), ("why", &why)]);
+                cx.notify();
+            }
+            crate::termview::ScriptGate::Ask(reasons) => {
+                self.lib_confirm = Some(LibConfirm { lines, reasons });
+                self.lib_notice.clear();
+                cx.notify();
+            }
             crate::termview::ScriptGate::Allow => {
                 p.update(cx, |v, cx| v.run_script_lines(&lines, cx));
                 self.lib_confirm = None;
@@ -523,7 +1222,9 @@ impl Root {
     }
 
     fn confirm_script(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(pending) = self.lib_confirm.take() else { return };
+        let Some(pending) = self.lib_confirm.take() else {
+            return;
+        };
         let Some(p) = self.focused_pane(window, cx).filter(|p| p.read(cx).ready()) else {
             self.lib_notice = t("lib.need_terminal").into();
             cx.notify();
@@ -545,9 +1246,16 @@ impl Root {
         let seq = self.lib_notice_seq;
         let expect = msg.clone();
         self.lib_notice = msg;
-        ui::flash_after(cx, seq, |r| r.lib_notice_seq, move |r| {
-            if r.lib_notice == expect { r.lib_notice.clear(); }
-        });
+        ui::flash_after(
+            cx,
+            seq,
+            |r| r.lib_notice_seq,
+            move |r| {
+                if r.lib_notice == expect {
+                    r.lib_notice.clear();
+                }
+            },
+        );
         cx.notify();
     }
 
@@ -560,27 +1268,41 @@ impl Root {
     }
 
     fn forget_history(&mut self, key: &str, cmd: &str, cx: &mut Context<Self>) {
-        if let Some(h) = self.histories.get(key) { h.lock().unwrap().remove(cmd); }
-        else {
-            let mut h = ssh_term_proto::suggest::History::open(ssh_term_proto::suggest::history_path(&data_dir(), key));
+        if let Some(h) = self.histories.get(key) {
+            h.lock().unwrap().remove(cmd);
+        } else {
+            let mut h = ssh_term_proto::suggest::History::open(
+                ssh_term_proto::suggest::history_path(&data_dir(), key),
+            );
             h.remove(cmd);
         }
         for p in self.tabs.iter().flat_map(|t| t.layout.leaves()) {
-            if p.read(cx).spec.history_key() == key { p.read(cx).history.lock().unwrap().remove(cmd); }
+            if p.read(cx).spec.history_key() == key {
+                p.read(cx).history.lock().unwrap().remove(cmd);
+            }
         }
         cx.notify();
     }
 
     fn clear_current_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(p) = self.focused_pane(window, cx) else { self.lib_notice = t("lib.no_host").into(); cx.notify(); return; };
+        let Some(p) = self.focused_pane(window, cx) else {
+            self.lib_notice = t("lib.no_host").into();
+            cx.notify();
+            return;
+        };
         let key = p.read(cx).spec.history_key();
-        if let Some(h) = self.histories.get(&key) { h.lock().unwrap().clear(); }
-        else {
-            let mut h = ssh_term_proto::suggest::History::open(ssh_term_proto::suggest::history_path(&data_dir(), &key));
+        if let Some(h) = self.histories.get(&key) {
+            h.lock().unwrap().clear();
+        } else {
+            let mut h = ssh_term_proto::suggest::History::open(
+                ssh_term_proto::suggest::history_path(&data_dir(), &key),
+            );
             h.clear();
         }
         for pane in self.tabs.iter().flat_map(|t| t.layout.leaves()) {
-            if pane.read(cx).spec.history_key() == key { pane.read(cx).history.lock().unwrap().clear(); }
+            if pane.read(cx).spec.history_key() == key {
+                pane.read(cx).history.lock().unwrap().clear();
+            }
         }
         self.lib_notice.clear();
         cx.notify();
@@ -589,12 +1311,20 @@ impl Root {
 
 /// 新建时带上当前筛选。全部、未分组没有可写入的分组名。
 fn draft_group(filter: &str) -> String {
-    if filter.is_empty() || filter == UNGROUPED { String::new() } else { filter.to_string() }
+    if filter.is_empty() || filter == UNGROUPED {
+        String::new()
+    } else {
+        filter.to_string()
+    }
 }
 
 /// 已有命令里的非空分组，排序后去重。
 fn group_names(all: &[Snippet]) -> Vec<String> {
-    let mut names: Vec<String> = all.iter().map(|s| s.group.clone()).filter(|g| !g.is_empty()).collect();
+    let mut names: Vec<String> = all
+        .iter()
+        .map(|s| s.group.clone())
+        .filter(|g| !g.is_empty())
+        .collect();
     names.sort();
     names.dedup();
     names
@@ -603,22 +1333,40 @@ fn group_names(all: &[Snippet]) -> Vec<String> {
 /// 输入内容能对上的已有分组。空白输入列出全部。
 fn matching_groups(names: &[String], typed: &str) -> Vec<String> {
     let q = typed.trim().to_lowercase();
-    names.iter().filter(|n| q.is_empty() || n.to_lowercase().contains(&q)).cloned().collect()
+    names
+        .iter()
+        .filter(|n| q.is_empty() || n.to_lowercase().contains(&q))
+        .cloned()
+        .collect()
 }
 
 /// 与已有分组只是大小写不同时，采用原来的写法。
 fn canonical_group(raw: &str, existing: &[String]) -> String {
     let raw = raw.trim();
-    if raw.is_empty() { return String::new(); }
+    if raw.is_empty() {
+        return String::new();
+    }
     let key = raw.to_lowercase();
-    existing.iter().find(|g| g.to_lowercase() == key).cloned().unwrap_or_else(|| raw.to_string())
+    existing
+        .iter()
+        .find(|g| g.to_lowercase() == key)
+        .cloned()
+        .unwrap_or_else(|| raw.to_string())
 }
 
 fn snip_visible(s: &Snippet, q: &str, group: &str) -> bool {
-    if group == UNGROUPED && !s.group.is_empty() { return false; }
-    if !group.is_empty() && group != UNGROUPED && s.group != group { return false; }
-    if q.is_empty() { return true; }
-    format!("{} {} {} {}", s.name, s.group, s.note, s.body).to_lowercase().contains(q)
+    if group == UNGROUPED && !s.group.is_empty() {
+        return false;
+    }
+    if !group.is_empty() && group != UNGROUPED && s.group != group {
+        return false;
+    }
+    if q.is_empty() {
+        return true;
+    }
+    format!("{} {} {} {}", s.name, s.group, s.note, s.body)
+        .to_lowercase()
+        .contains(q)
 }
 
 #[cfg(test)]

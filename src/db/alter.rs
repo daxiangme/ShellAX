@@ -22,11 +22,27 @@ pub struct ColDef {
 
 impl ColDef {
     pub fn from_info(f: Family, c: &ColumnInfo) -> Self {
-        let default = match f { Family::Mysql => c.default.as_deref().and_then(|d| mysql_default_expr(d, &c.extra)), _ => c.default.clone() };
-        Self { name: c.name.clone(), type_name: c.type_name.clone(), nullable: c.nullable != Some(false), default, comment: c.comment.clone(), extra: c.extra.clone() }
+        let default = match f {
+            Family::Mysql => c
+                .default
+                .as_deref()
+                .and_then(|d| mysql_default_expr(d, &c.extra)),
+            _ => c.default.clone(),
+        };
+        Self {
+            name: c.name.clone(),
+            type_name: c.type_name.clone(),
+            nullable: c.nullable != Some(false),
+            default,
+            comment: c.comment.clone(),
+            extra: c.extra.clone(),
+        }
     }
     /// Generated / identity columns: their definition is not editable here.
-    pub fn generated(&self) -> bool { let e = self.extra.to_ascii_lowercase(); e.contains("generated") || e.contains("identity") }
+    pub fn generated(&self) -> bool {
+        let e = self.extra.to_ascii_lowercase();
+        e.contains("generated") || e.contains("identity")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -62,73 +78,151 @@ pub enum Op {
     DropFk(String),
 }
 
-pub const FK_ACTIONS: [&str; 5] = ["NO ACTION", "RESTRICT", "CASCADE", "SET NULL", "SET DEFAULT"];
+pub const FK_ACTIONS: [&str; 5] = [
+    "NO ACTION",
+    "RESTRICT",
+    "CASCADE",
+    "SET NULL",
+    "SET DEFAULT",
+];
 
 /// MySQL `COLUMN_DEFAULT` as an expression. MariaDB already quotes literals (and says
 /// `NULL`); MySQL 8 gives the bare literal, or an expression when `EXTRA` has
 /// `DEFAULT_GENERATED`.
 pub fn mysql_default_expr(d: &str, extra: &str) -> Option<String> {
-    if d.eq_ignore_ascii_case("NULL") { return None; }
-    let bare_ok = d.starts_with('\'') || d.parse::<f64>().is_ok() || d.contains('(') || d.to_ascii_uppercase().starts_with("CURRENT_TIMESTAMP") || extra.to_ascii_uppercase().contains("DEFAULT_GENERATED");
-    Some(if bare_ok { d.to_string() } else { quote_lit(Family::Mysql, d) })
+    if d.eq_ignore_ascii_case("NULL") {
+        return None;
+    }
+    let bare_ok = d.starts_with('\'')
+        || d.parse::<f64>().is_ok()
+        || d.contains('(')
+        || d.to_ascii_uppercase().starts_with("CURRENT_TIMESTAMP")
+        || extra.to_ascii_uppercase().contains("DEFAULT_GENERATED");
+    Some(if bare_ok {
+        d.to_string()
+    } else {
+        quote_lit(Family::Mysql, d)
+    })
 }
 
-fn idents(f: Family, v: &[String]) -> String { v.iter().map(|c| quote_ident(f, c)).collect::<Vec<_>>().join(", ") }
+fn idents(f: Family, v: &[String]) -> String {
+    v.iter()
+        .map(|c| quote_ident(f, c))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 /// Index key list: plain names are quoted; expressions and already-quoted names (as the
 /// catalog prints them) are kept.
 fn index_keys(f: Family, v: &[String]) -> String {
-    v.iter().map(|c| if c.contains('(') || c.starts_with('"') || c.starts_with('`') { c.clone() } else { quote_ident(f, c) }).collect::<Vec<_>>().join(", ")
+    v.iter()
+        .map(|c| {
+            if c.contains('(') || c.starts_with('"') || c.starts_with('`') {
+                c.clone()
+            } else {
+                quote_ident(f, c)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn col_sql(f: Family, c: &ColDef) -> String {
     let mut s = format!("{} {}", quote_ident(f, &c.name), c.type_name.trim());
-    if !c.nullable { s.push_str(" NOT NULL"); }
-    if let Some(d) = c.default.as_deref().filter(|d| !d.trim().is_empty()) { s.push_str(&format!(" DEFAULT {}", d.trim())); }
+    if !c.nullable {
+        s.push_str(" NOT NULL");
+    }
+    if let Some(d) = c.default.as_deref().filter(|d| !d.trim().is_empty()) {
+        s.push_str(&format!(" DEFAULT {}", d.trim()));
+    }
     if f == Family::Mysql {
         let e = c.extra.to_ascii_lowercase();
-        if e.contains("auto_increment") { s.push_str(" AUTO_INCREMENT"); }
-        if let Some(p) = e.find("on update") { s.push(' '); s.push_str(&c.extra[p..].to_ascii_uppercase()); }
-        if !c.comment.is_empty() { s.push_str(&format!(" COMMENT {}", quote_lit(f, &c.comment))); }
+        if e.contains("auto_increment") {
+            s.push_str(" AUTO_INCREMENT");
+        }
+        if let Some(p) = e.find("on update") {
+            s.push(' ');
+            s.push_str(&c.extra[p..].to_ascii_uppercase());
+        }
+        if !c.comment.is_empty() {
+            s.push_str(&format!(" COMMENT {}", quote_lit(f, &c.comment)));
+        }
     }
     s
 }
 
 fn fk_sql(f: Family, k: &FkDef) -> String {
-    let mut s = format!("CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})", quote_ident(f, &k.name), idents(f, &k.columns), k.ref_table, idents(f, &k.ref_columns));
-    if !k.on_delete.is_empty() { s.push_str(&format!(" ON DELETE {}", k.on_delete)); }
-    if !k.on_update.is_empty() { s.push_str(&format!(" ON UPDATE {}", k.on_update)); }
+    let mut s = format!(
+        "CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
+        quote_ident(f, &k.name),
+        idents(f, &k.columns),
+        k.ref_table,
+        idents(f, &k.ref_columns)
+    );
+    if !k.on_delete.is_empty() {
+        s.push_str(&format!(" ON DELETE {}", k.on_delete));
+    }
+    if !k.on_update.is_empty() {
+        s.push_str(&format!(" ON UPDATE {}", k.on_update));
+    }
     s
 }
 
 fn check(c: &ColDef) -> Result<()> {
-    if c.name.trim().is_empty() { bail!(crate::i18n::t("db.alter_err_name").to_string()); }
-    if c.type_name.trim().is_empty() { bail!(crate::i18n::tf("db.alter_err_type", &[("col", &c.name)])); }
+    if c.name.trim().is_empty() {
+        bail!(crate::i18n::t("db.alter_err_name").to_string());
+    }
+    if c.type_name.trim().is_empty() {
+        bail!(crate::i18n::tf("db.alter_err_type", &[("col", &c.name)]));
+    }
     Ok(())
 }
 
 /// `CREATE TABLE` for a new MySQL table. `ops` are the designer's adds (columns, indexes, foreign keys).
 pub fn create_table(f: Family, table: &str, ops: &[Op]) -> Result<String> {
-    if f != Family::Mysql { bail!(crate::i18n::t("db.create_mysql_only").to_string()); }
+    if f != Family::Mysql {
+        bail!(crate::i18n::t("db.create_mysql_only").to_string());
+    }
     let mut cols = vec![];
     let mut rest = vec![];
     for op in ops {
         match op {
-            Op::AddColumn(c) => { check(c)?; cols.push(col_sql(f, c)); }
+            Op::AddColumn(c) => {
+                check(c)?;
+                cols.push(col_sql(f, c));
+            }
             Op::AddIndex(i) => {
-                if i.name.trim().is_empty() || i.columns.is_empty() { bail!(crate::i18n::t("db.alter_err_index").to_string()); }
-                rest.push(format!("{}KEY {} ({})", if i.unique { "UNIQUE " } else { "" }, quote_ident(f, &i.name), index_keys(f, &i.columns)));
+                if i.name.trim().is_empty() || i.columns.is_empty() {
+                    bail!(crate::i18n::t("db.alter_err_index").to_string());
+                }
+                rest.push(format!(
+                    "{}KEY {} ({})",
+                    if i.unique { "UNIQUE " } else { "" },
+                    quote_ident(f, &i.name),
+                    index_keys(f, &i.columns)
+                ));
             }
             Op::AddFk(k) => {
-                if k.name.trim().is_empty() || k.columns.is_empty() || k.columns.len() != k.ref_columns.len() || k.ref_table.trim().is_empty() { bail!(crate::i18n::t("db.alter_err_fk").to_string()); }
+                if k.name.trim().is_empty()
+                    || k.columns.is_empty()
+                    || k.columns.len() != k.ref_columns.len()
+                    || k.ref_table.trim().is_empty()
+                {
+                    bail!(crate::i18n::t("db.alter_err_fk").to_string());
+                }
                 rest.push(fk_sql(f, k));
             }
             _ => {}
         }
     }
-    if cols.is_empty() { bail!(crate::i18n::t("db.create_need_col").to_string()); }
+    if cols.is_empty() {
+        bail!(crate::i18n::t("db.create_need_col").to_string());
+    }
     cols.extend(rest);
-    Ok(format!("CREATE TABLE {table} (\n  {}\n)", cols.join(",\n  ")))
+    Ok(format!(
+        "CREATE TABLE {table} (\n  {}\n)",
+        cols.join(",\n  ")
+    ))
 }
 
 /// `CREATE DATABASE` with a quoted identifier.
@@ -145,56 +239,155 @@ pub fn statements(f: Family, table: &str, schema: Option<&str>, ops: &[Op]) -> R
         match op {
             Op::AddColumn(c) => {
                 check(c)?;
-                if f == Family::Sqlite && !c.nullable && c.default.is_none() { bail!(crate::i18n::tf("db.alter_err_sqlite_notnull", &[("col", &c.name)])); }
+                if f == Family::Sqlite && !c.nullable && c.default.is_none() {
+                    bail!(crate::i18n::tf(
+                        "db.alter_err_sqlite_notnull",
+                        &[("col", &c.name)]
+                    ));
+                }
                 out.push(at(format!("ADD COLUMN {}", col_sql(f, c))));
-                if f == Family::Postgres && !c.comment.is_empty() { out.push(format!("COMMENT ON COLUMN {table}.{} IS {}", quote_ident(f, &c.name), quote_lit(f, &c.comment))); }
+                if f == Family::Postgres && !c.comment.is_empty() {
+                    out.push(format!(
+                        "COMMENT ON COLUMN {table}.{} IS {}",
+                        quote_ident(f, &c.name),
+                        quote_lit(f, &c.comment)
+                    ));
+                }
             }
             Op::ModifyColumn { old, new } => {
                 check(new)?;
                 match f {
                     Family::Mysql => {
-                        if old != new { out.push(at(format!("CHANGE COLUMN {} {}", quote_ident(f, &old.name), col_sql(f, new)))); }
+                        if old != new {
+                            out.push(at(format!(
+                                "CHANGE COLUMN {} {}",
+                                quote_ident(f, &old.name),
+                                col_sql(f, new)
+                            )));
+                        }
                     }
                     Family::Postgres => {
                         let n = quote_ident(f, &new.name);
-                        if old.name != new.name { out.push(at(format!("RENAME COLUMN {} TO {n}", quote_ident(f, &old.name)))); }
-                        if old.type_name.trim() != new.type_name.trim() { out.push(at(format!("ALTER COLUMN {n} TYPE {} USING {n}::{}", new.type_name.trim(), new.type_name.trim()))); }
-                        if old.default != new.default {
-                            match new.default.as_deref().filter(|d| !d.trim().is_empty()) { Some(d) => out.push(at(format!("ALTER COLUMN {n} SET DEFAULT {}", d.trim()))), None => out.push(at(format!("ALTER COLUMN {n} DROP DEFAULT"))) }
+                        if old.name != new.name {
+                            out.push(at(format!(
+                                "RENAME COLUMN {} TO {n}",
+                                quote_ident(f, &old.name)
+                            )));
                         }
-                        if old.nullable != new.nullable { out.push(at(format!("ALTER COLUMN {n} {} NOT NULL", if new.nullable { "DROP" } else { "SET" }))); }
-                        if old.comment != new.comment { out.push(format!("COMMENT ON COLUMN {table}.{n} IS {}", if new.comment.is_empty() { "NULL".into() } else { quote_lit(f, &new.comment) })); }
+                        if old.type_name.trim() != new.type_name.trim() {
+                            out.push(at(format!(
+                                "ALTER COLUMN {n} TYPE {} USING {n}::{}",
+                                new.type_name.trim(),
+                                new.type_name.trim()
+                            )));
+                        }
+                        if old.default != new.default {
+                            match new.default.as_deref().filter(|d| !d.trim().is_empty()) {
+                                Some(d) => out
+                                    .push(at(format!("ALTER COLUMN {n} SET DEFAULT {}", d.trim()))),
+                                None => out.push(at(format!("ALTER COLUMN {n} DROP DEFAULT"))),
+                            }
+                        }
+                        if old.nullable != new.nullable {
+                            out.push(at(format!(
+                                "ALTER COLUMN {n} {} NOT NULL",
+                                if new.nullable { "DROP" } else { "SET" }
+                            )));
+                        }
+                        if old.comment != new.comment {
+                            out.push(format!(
+                                "COMMENT ON COLUMN {table}.{n} IS {}",
+                                if new.comment.is_empty() {
+                                    "NULL".into()
+                                } else {
+                                    quote_lit(f, &new.comment)
+                                }
+                            ));
+                        }
                     }
                     _ => {
-                        if old.name != new.name { out.push(at(format!("RENAME COLUMN {} TO {}", quote_ident(f, &old.name), quote_ident(f, &new.name)))); }
-                        if (&old.type_name, old.nullable, &old.default) != (&new.type_name, new.nullable, &new.default) { bail!(crate::i18n::tf("db.alter_err_sqlite_modify", &[("col", &new.name)])); }
+                        if old.name != new.name {
+                            out.push(at(format!(
+                                "RENAME COLUMN {} TO {}",
+                                quote_ident(f, &old.name),
+                                quote_ident(f, &new.name)
+                            )));
+                        }
+                        if (&old.type_name, old.nullable, &old.default)
+                            != (&new.type_name, new.nullable, &new.default)
+                        {
+                            bail!(crate::i18n::tf(
+                                "db.alter_err_sqlite_modify",
+                                &[("col", &new.name)]
+                            ));
+                        }
                     }
                 }
             }
             Op::DropColumn(n) => out.push(at(format!("DROP COLUMN {}", quote_ident(f, n)))),
             Op::AddIndex(i) => {
-                if i.name.trim().is_empty() || i.columns.is_empty() { bail!(crate::i18n::t("db.alter_err_index").to_string()); }
-                out.push(format!("CREATE {}INDEX {} ON {table} ({})", if i.unique { "UNIQUE " } else { "" }, quote_ident(f, &i.name), index_keys(f, &i.columns)));
+                if i.name.trim().is_empty() || i.columns.is_empty() {
+                    bail!(crate::i18n::t("db.alter_err_index").to_string());
+                }
+                out.push(format!(
+                    "CREATE {}INDEX {} ON {table} ({})",
+                    if i.unique { "UNIQUE " } else { "" },
+                    quote_ident(f, &i.name),
+                    index_keys(f, &i.columns)
+                ));
             }
             Op::DropIndex(i) => out.push(match f {
                 Family::Mysql => format!("DROP INDEX {} ON {table}", quote_ident(f, &i.name)),
-                Family::Postgres if i.constraint => at(format!("DROP CONSTRAINT {}", quote_ident(f, &i.name))),
-                Family::Postgres => match schema.filter(|s| !s.is_empty()) { Some(s) => format!("DROP INDEX {}.{}", quote_ident(f, s), quote_ident(f, &i.name)), None => format!("DROP INDEX {}", quote_ident(f, &i.name)) },
+                Family::Postgres if i.constraint => {
+                    at(format!("DROP CONSTRAINT {}", quote_ident(f, &i.name)))
+                }
+                Family::Postgres => match schema.filter(|s| !s.is_empty()) {
+                    Some(s) => format!(
+                        "DROP INDEX {}.{}",
+                        quote_ident(f, s),
+                        quote_ident(f, &i.name)
+                    ),
+                    None => format!("DROP INDEX {}", quote_ident(f, &i.name)),
+                },
                 _ => format!("DROP INDEX {}", quote_ident(f, &i.name)),
             }),
             Op::AddFk(k) => {
-                if f == Family::Sqlite { bail!(crate::i18n::t("db.alter_err_sqlite_fk").to_string()); }
-                if k.name.trim().is_empty() || k.columns.is_empty() || k.columns.len() != k.ref_columns.len() || k.ref_table.trim().is_empty() { bail!(crate::i18n::t("db.alter_err_fk").to_string()); }
+                if f == Family::Sqlite {
+                    bail!(crate::i18n::t("db.alter_err_sqlite_fk").to_string());
+                }
+                if k.name.trim().is_empty()
+                    || k.columns.is_empty()
+                    || k.columns.len() != k.ref_columns.len()
+                    || k.ref_table.trim().is_empty()
+                {
+                    bail!(crate::i18n::t("db.alter_err_fk").to_string());
+                }
                 out.push(at(format!("ADD {}", fk_sql(f, k))));
             }
             Op::DropFk(n) => {
-                if f == Family::Sqlite { bail!(crate::i18n::t("db.alter_err_sqlite_fk").to_string()); }
-                out.push(at(match f { Family::Mysql => format!("DROP FOREIGN KEY {}", quote_ident(f, n)), _ => format!("DROP CONSTRAINT {}", quote_ident(f, n)) }));
+                if f == Family::Sqlite {
+                    bail!(crate::i18n::t("db.alter_err_sqlite_fk").to_string());
+                }
+                out.push(at(match f {
+                    Family::Mysql => format!("DROP FOREIGN KEY {}", quote_ident(f, n)),
+                    _ => format!("DROP CONSTRAINT {}", quote_ident(f, n)),
+                }));
             }
         }
     }
     // drops before adds so a dropped name can be reused
-    let rank = |s: &String| if s.contains(" DROP FOREIGN KEY ") || s.contains(" DROP CONSTRAINT ") || s.starts_with("DROP INDEX") { 0 } else if s.starts_with("CREATE ") || s.contains(" ADD CONSTRAINT ") { 2 } else { 1 };
+    let rank = |s: &String| {
+        if s.contains(" DROP FOREIGN KEY ")
+            || s.contains(" DROP CONSTRAINT ")
+            || s.starts_with("DROP INDEX")
+        {
+            0
+        } else if s.starts_with("CREATE ") || s.contains(" ADD CONSTRAINT ") {
+            2
+        } else {
+            1
+        }
+    };
     out.sort_by_key(rank);
     Ok(out)
 }
@@ -265,31 +458,89 @@ pub fn list_fks(f: Family, db: &str, schema: Option<&str>, table: &str) -> Strin
     }
 }
 
-pub fn split_list(s: &str) -> Vec<String> { if s.is_empty() { vec![] } else { s.split('\u{1f}').map(String::from).collect() } }
+pub fn split_list(s: &str) -> Vec<String> {
+    if s.is_empty() {
+        vec![]
+    } else {
+        s.split('\u{1f}').map(String::from).collect()
+    }
+}
 
 /// Comma-separated user input (`a, b`) as names.
-pub fn parse_names(s: &str) -> Vec<String> { s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect() }
+pub fn parse_names(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|x| x.trim().to_string())
+        .filter(|x| !x.is_empty())
+        .collect()
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn col(n: &str, t: &str) -> ColDef { ColDef { name: n.into(), type_name: t.into(), nullable: true, ..Default::default() } }
+    fn col(n: &str, t: &str) -> ColDef {
+        ColDef {
+            name: n.into(),
+            type_name: t.into(),
+            nullable: true,
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn mysql() {
-        let old = ColDef { extra: "auto_increment".into(), nullable: false, ..col("id", "int(11)") };
-        let new = ColDef { name: "uid".into(), type_name: "bigint".into(), ..old.clone() };
-        let s = statements(Family::Mysql, "`d`.`t`", None, &[
-            Op::AddColumn(ColDef { default: Some("'x'".into()), comment: "c'".into(), nullable: false, ..col("a b", "varchar(10)") }),
-            Op::ModifyColumn { old: old.clone(), new },
-            Op::ModifyColumn { old: old.clone(), new: old },
-            Op::DropColumn("z".into()),
-            Op::AddIndex(IndexDef { name: "ix".into(), columns: vec!["a b".into()], unique: true, constraint: false }),
-            Op::DropIndex(IndexDef { name: "ix".into(), ..Default::default() }),
-            Op::AddFk(FkDef { name: "fk".into(), columns: vec!["uid".into()], ref_table: "`p`".into(), ref_columns: vec!["id".into()], on_delete: "CASCADE".into(), on_update: String::new() }),
-            Op::DropFk("fk".into()),
-        ]).unwrap();
+        let old = ColDef {
+            extra: "auto_increment".into(),
+            nullable: false,
+            ..col("id", "int(11)")
+        };
+        let new = ColDef {
+            name: "uid".into(),
+            type_name: "bigint".into(),
+            ..old.clone()
+        };
+        let s = statements(
+            Family::Mysql,
+            "`d`.`t`",
+            None,
+            &[
+                Op::AddColumn(ColDef {
+                    default: Some("'x'".into()),
+                    comment: "c'".into(),
+                    nullable: false,
+                    ..col("a b", "varchar(10)")
+                }),
+                Op::ModifyColumn {
+                    old: old.clone(),
+                    new,
+                },
+                Op::ModifyColumn {
+                    old: old.clone(),
+                    new: old,
+                },
+                Op::DropColumn("z".into()),
+                Op::AddIndex(IndexDef {
+                    name: "ix".into(),
+                    columns: vec!["a b".into()],
+                    unique: true,
+                    constraint: false,
+                }),
+                Op::DropIndex(IndexDef {
+                    name: "ix".into(),
+                    ..Default::default()
+                }),
+                Op::AddFk(FkDef {
+                    name: "fk".into(),
+                    columns: vec!["uid".into()],
+                    ref_table: "`p`".into(),
+                    ref_columns: vec!["id".into()],
+                    on_delete: "CASCADE".into(),
+                    on_update: String::new(),
+                }),
+                Op::DropFk("fk".into()),
+            ],
+        )
+        .unwrap();
         assert_eq!(s, vec![
             "DROP INDEX `ix` ON `d`.`t`",
             "ALTER TABLE `d`.`t` DROP FOREIGN KEY `fk`",
@@ -302,34 +553,117 @@ mod tests {
         assert_eq!(mysql_default_expr("abc", ""), Some("'abc'".into()));
         assert_eq!(mysql_default_expr("'abc'", ""), Some("'abc'".into()));
         assert_eq!(mysql_default_expr("NULL", ""), None);
-        assert_eq!(mysql_default_expr("current_timestamp()", ""), Some("current_timestamp()".into()));
+        assert_eq!(
+            mysql_default_expr("current_timestamp()", ""),
+            Some("current_timestamp()".into())
+        );
         assert_eq!(mysql_default_expr("3", ""), Some("3".into()));
     }
 
     #[test]
     fn postgres_and_sqlite() {
         let old = col("n", "integer");
-        let new = ColDef { name: "m".into(), type_name: "bigint".into(), nullable: false, default: Some("0".into()), comment: "c".into(), ..Default::default() };
-        let s = statements(Family::Postgres, "\"s\".\"t\"", Some("s"), &[Op::ModifyColumn { old, new }, Op::DropIndex(IndexDef { name: "u".into(), constraint: true, ..Default::default() }), Op::DropIndex(IndexDef { name: "i".into(), ..Default::default() })]).unwrap();
-        assert_eq!(s, vec![
-            "ALTER TABLE \"s\".\"t\" DROP CONSTRAINT \"u\"",
-            "DROP INDEX \"s\".\"i\"",
-            "ALTER TABLE \"s\".\"t\" RENAME COLUMN \"n\" TO \"m\"",
-            "ALTER TABLE \"s\".\"t\" ALTER COLUMN \"m\" TYPE bigint USING \"m\"::bigint",
-            "ALTER TABLE \"s\".\"t\" ALTER COLUMN \"m\" SET DEFAULT 0",
-            "ALTER TABLE \"s\".\"t\" ALTER COLUMN \"m\" SET NOT NULL",
-            "COMMENT ON COLUMN \"s\".\"t\".\"m\" IS 'c'",
-        ]);
-        assert!(statements(Family::Sqlite, "\"t\"", None, &[Op::ModifyColumn { old: col("a", "int"), new: col("a", "text") }]).is_err());
-        assert!(statements(Family::Sqlite, "\"t\"", None, &[Op::AddColumn(ColDef { nullable: false, ..col("a", "int") })]).is_err());
-        assert_eq!(statements(Family::Sqlite, "\"t\"", None, &[Op::ModifyColumn { old: col("a", "int"), new: col("b", "int") }]).unwrap(), vec!["ALTER TABLE \"t\" RENAME COLUMN \"a\" TO \"b\""]);
-        assert!(statements(Family::Postgres, "t", None, &[Op::AddColumn(col("", "int"))]).is_err());
-        assert_eq!(index_keys(Family::Postgres, &["a".into(), "lower(b)".into()]), "\"a\", lower(b)");
+        let new = ColDef {
+            name: "m".into(),
+            type_name: "bigint".into(),
+            nullable: false,
+            default: Some("0".into()),
+            comment: "c".into(),
+            ..Default::default()
+        };
+        let s = statements(
+            Family::Postgres,
+            "\"s\".\"t\"",
+            Some("s"),
+            &[
+                Op::ModifyColumn { old, new },
+                Op::DropIndex(IndexDef {
+                    name: "u".into(),
+                    constraint: true,
+                    ..Default::default()
+                }),
+                Op::DropIndex(IndexDef {
+                    name: "i".into(),
+                    ..Default::default()
+                }),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            s,
+            vec![
+                "ALTER TABLE \"s\".\"t\" DROP CONSTRAINT \"u\"",
+                "DROP INDEX \"s\".\"i\"",
+                "ALTER TABLE \"s\".\"t\" RENAME COLUMN \"n\" TO \"m\"",
+                "ALTER TABLE \"s\".\"t\" ALTER COLUMN \"m\" TYPE bigint USING \"m\"::bigint",
+                "ALTER TABLE \"s\".\"t\" ALTER COLUMN \"m\" SET DEFAULT 0",
+                "ALTER TABLE \"s\".\"t\" ALTER COLUMN \"m\" SET NOT NULL",
+                "COMMENT ON COLUMN \"s\".\"t\".\"m\" IS 'c'",
+            ]
+        );
+        assert!(statements(
+            Family::Sqlite,
+            "\"t\"",
+            None,
+            &[Op::ModifyColumn {
+                old: col("a", "int"),
+                new: col("a", "text")
+            }]
+        )
+        .is_err());
+        assert!(statements(
+            Family::Sqlite,
+            "\"t\"",
+            None,
+            &[Op::AddColumn(ColDef {
+                nullable: false,
+                ..col("a", "int")
+            })]
+        )
+        .is_err());
+        assert_eq!(
+            statements(
+                Family::Sqlite,
+                "\"t\"",
+                None,
+                &[Op::ModifyColumn {
+                    old: col("a", "int"),
+                    new: col("b", "int")
+                }]
+            )
+            .unwrap(),
+            vec!["ALTER TABLE \"t\" RENAME COLUMN \"a\" TO \"b\""]
+        );
+        assert!(statements(
+            Family::Postgres,
+            "t",
+            None,
+            &[Op::AddColumn(col("", "int"))]
+        )
+        .is_err());
+        assert_eq!(
+            index_keys(Family::Postgres, &["a".into(), "lower(b)".into()]),
+            "\"a\", lower(b)"
+        );
         assert_eq!(parse_names(" a, ,b "), vec!["a", "b"]);
-        let sql = create_table(Family::Mysql, "`app`.`t`", &[
-            Op::AddColumn(ColDef { nullable: false, comment: "id".into(), ..col("id", "int") }),
-            Op::AddIndex(IndexDef { name: "ix".into(), columns: vec!["id".into()], unique: true, constraint: false }),
-        ]).unwrap();
+        let sql = create_table(
+            Family::Mysql,
+            "`app`.`t`",
+            &[
+                Op::AddColumn(ColDef {
+                    nullable: false,
+                    comment: "id".into(),
+                    ..col("id", "int")
+                }),
+                Op::AddIndex(IndexDef {
+                    name: "ix".into(),
+                    columns: vec!["id".into()],
+                    unique: true,
+                    constraint: false,
+                }),
+            ],
+        )
+        .unwrap();
         assert!(sql.starts_with("CREATE TABLE `app`.`t` ("));
         assert!(sql.contains("`id` int NOT NULL COMMENT 'id'"));
         assert!(sql.contains("UNIQUE KEY `ix` (`id`)"));

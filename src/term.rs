@@ -13,7 +13,10 @@ use alacritty_terminal::vte::ansi::Processor;
 /// Messages from the UI/tests to a backend (PTY or SSH).
 pub enum BackendMsg {
     Input(Vec<u8>),
-    Resize { cols: u16, rows: u16 },
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
     /// Pane closed: end the backend (local: kill shell; ssh: close channel; daemon: detach only).
     Close,
 }
@@ -24,9 +27,15 @@ pub struct Size {
     pub rows: usize,
 }
 impl Dimensions for Size {
-    fn total_lines(&self) -> usize { self.rows }
-    fn screen_lines(&self) -> usize { self.rows }
-    fn columns(&self) -> usize { self.cols }
+    fn total_lines(&self) -> usize {
+        self.rows
+    }
+    fn screen_lines(&self) -> usize {
+        self.rows
+    }
+    fn columns(&self) -> usize {
+        self.cols
+    }
 }
 
 /// Shared, cheaply-cloned bits the terminal listener writes into.
@@ -47,12 +56,22 @@ pub type ClipFormatter = Arc<dyn Fn(&str) -> String + Sync + Send + 'static>;
 /// OSC 52 write policy (`ssh.osc52_write`: allow | ask | deny).
 /// Payloads over [`OSC52_MAX`] are still copied when the user allows them; the UI warns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClipDecision { Allow, Ask, Deny }
+pub enum ClipDecision {
+    Allow,
+    Ask,
+    Deny,
+}
 pub const OSC52_MAX: usize = 1 << 20;
 pub fn osc52_write_decision(mode: &str, _len: usize) -> ClipDecision {
-    match mode { "allow" => ClipDecision::Allow, "deny" | "off" => ClipDecision::Deny, _ => ClipDecision::Ask }
+    match mode {
+        "allow" => ClipDecision::Allow,
+        "deny" | "off" => ClipDecision::Deny,
+        _ => ClipDecision::Ask,
+    }
 }
-pub fn osc52_is_large(len: usize) -> bool { len > OSC52_MAX }
+pub fn osc52_is_large(len: usize) -> bool {
+    len > OSC52_MAX
+}
 
 /// Listener that forwards terminal-generated replies (e.g. DA/DSR answers) back to the backend
 /// and records title changes.
@@ -64,7 +83,9 @@ pub struct Listener {
 impl EventListener for Listener {
     fn send_event(&self, event: Event) {
         match event {
-            Event::PtyWrite(s) => { let _ = self.tx.send(BackendMsg::Input(s.into_bytes())); }
+            Event::PtyWrite(s) => {
+                let _ = self.tx.send(BackendMsg::Input(s.into_bytes()));
+            }
             Event::Title(t) => *self.shared.title.lock().unwrap() = t,
             Event::ResetTitle => self.shared.title.lock().unwrap().clear(),
             Event::Bell => self.shared.bell.store(true, Ordering::Release),
@@ -123,7 +144,14 @@ pub struct Session {
 }
 /// An inline image anchored at `row` = history_size + screen line at decode time.
 #[derive(Clone, Debug)]
-pub struct Placed { pub id: u64, pub row: i64, pub col: usize, pub image: crate::graphics::Image, pub rows: usize, pub cols: usize }
+pub struct Placed {
+    pub id: u64,
+    pub row: i64,
+    pub col: usize,
+    pub image: crate::graphics::Image,
+    pub rows: usize,
+    pub cols: usize,
+}
 
 /// Find the next OSC marker of interest in `b`: 133 (shell integration) or 9;4 (progress).
 /// Returns (start, end, kind, payload).
@@ -132,10 +160,27 @@ fn find_osc(b: &[u8]) -> Option<(usize, usize, u8, &[u8])> {
     while i + 4 < b.len() {
         let p = b[i..].windows(2).position(|w| w == b"\x1b]")? + i;
         let rest = &b[p + 2..];
-        let (kind, skip) = if rest.starts_with(b"133;") { (b'1', 4) } else if rest.starts_with(b"9;4") { (b'9', 2) } else if rest.starts_with(b"7;") { (b'7', 2) } else if rest.starts_with(b"9;9;") { (b'c', 4) } else { i = p + 2; continue };
+        let (kind, skip) = if rest.starts_with(b"133;") {
+            (b'1', 4)
+        } else if rest.starts_with(b"9;4") {
+            (b'9', 2)
+        } else if rest.starts_with(b"7;") {
+            (b'7', 2)
+        } else if rest.starts_with(b"9;9;") {
+            (b'c', 4)
+        } else {
+            i = p + 2;
+            continue;
+        };
         let body = &rest[skip..];
         let end = body.iter().enumerate().find_map(|(j, &c)| {
-            if c == 0x07 { Some((j, j + 1)) } else if c == 0x1b && body.get(j + 1) == Some(&b'\\') { Some((j, j + 2)) } else { None }
+            if c == 0x07 {
+                Some((j, j + 1))
+            } else if c == 0x1b && body.get(j + 1) == Some(&b'\\') {
+                Some((j, j + 2))
+            } else {
+                None
+            }
         })?;
         return Some((p, p + 2 + skip + end.1, kind, &body[..end.0]));
     }
@@ -145,14 +190,31 @@ fn find_osc(b: &[u8]) -> Option<(usize, usize, u8, &[u8])> {
 impl Session {
     /// Create a session. Returns the session, a sender the backend uses to push output
     /// bytes, and the receiver the backend reads input/resize messages from.
-    pub fn new(size: Size) -> (Arc<Self>, flume::Sender<Vec<u8>>, flume::Receiver<BackendMsg>) {
+    pub fn new(
+        size: Size,
+    ) -> (
+        Arc<Self>,
+        flume::Sender<Vec<u8>>,
+        flume::Receiver<BackendMsg>,
+    ) {
         let (to_backend, from_ui) = flume::unbounded();
         let (out_tx, out_rx) = flume::unbounded::<Vec<u8>>();
         let (wake_tx, wake_rx) = flume::bounded::<()>(1);
         let shared = Shared::default();
         // OSC 52 copy and paste both reach the listener; the UI applies terminal.osc52_write / osc52_read
-        let cfg = Config { scrolling_history: SCROLLBACK.load(Ordering::Relaxed), osc52: alacritty_terminal::term::Osc52::CopyPaste, ..Config::default() };
-        let term = Term::new(cfg, &size, Listener { tx: to_backend.clone(), shared: shared.clone() });
+        let cfg = Config {
+            scrolling_history: SCROLLBACK.load(Ordering::Relaxed),
+            osc52: alacritty_terminal::term::Osc52::CopyPaste,
+            ..Config::default()
+        };
+        let term = Term::new(
+            cfg,
+            &size,
+            Listener {
+                tx: to_backend.clone(),
+                shared: shared.clone(),
+            },
+        );
         let s = Arc::new(Self {
             term: Arc::new(Mutex::new(term)),
             exited: Arc::new(AtomicBool::new(false)),
@@ -251,48 +313,101 @@ impl Session {
     }
 
     /// Recorder / notifier taps and graphics extraction on raw output.
-    fn side_effects(&self, b: Vec<u8>, gfx: &mut crate::graphics::Extractor) -> (Vec<u8>, Vec<crate::graphics::Image>) {
-        if let Some(r) = self.recorder.lock().unwrap().as_mut() { let _ = r.output(&b, false); }
+    fn side_effects(
+        &self,
+        b: Vec<u8>,
+        gfx: &mut crate::graphics::Extractor,
+    ) -> (Vec<u8>, Vec<crate::graphics::Image>) {
+        if let Some(r) = self.recorder.lock().unwrap().as_mut() {
+            let _ = r.output(&b, false);
+        }
         if let Some(n) = self.notifier.lock().unwrap().as_mut() {
             let f = n.feed(&b, std::time::Instant::now());
-            if !f.is_empty() { self.notices.lock().unwrap().extend(f); }
+            if !f.is_empty() {
+                self.notices.lock().unwrap().extend(f);
+            }
         }
-        if !b.contains(&0x1b) && !gfx.busy() { return (b, vec![]); }
+        if !b.contains(&0x1b) && !gfx.busy() {
+            return (b, vec![]);
+        }
         // Erase display / scrollback / full reset drops inline images (they belong to the erased text).
-        if b.windows(4).any(|w| w == b"\x1b[2J" || w == b"\x1b[3J") || b.windows(2).any(|w| w == b"\x1bc") { self.images.lock().unwrap().clear(); }
+        if b.windows(4).any(|w| w == b"\x1b[2J" || w == b"\x1b[3J")
+            || b.windows(2).any(|w| w == b"\x1bc")
+        {
+            self.images.lock().unwrap().clear();
+        }
         gfx.feed(&b)
     }
-    pub fn start_recording(&self, path: &std::path::Path, title: &str, redact: bool) -> std::io::Result<()> {
+    pub fn start_recording(
+        &self,
+        path: &std::path::Path,
+        title: &str,
+        redact: bool,
+    ) -> std::io::Result<()> {
         let sz = self.size();
-        *self.recorder.lock().unwrap() = Some(crate::asciicast::Recorder::create(path, sz.cols as u16, sz.rows as u16, title, redact)?);
+        *self.recorder.lock().unwrap() = Some(crate::asciicast::Recorder::create(
+            path,
+            sz.cols as u16,
+            sz.rows as u16,
+            title,
+            redact,
+        )?);
         Ok(())
     }
-    pub fn stop_recording(&self) -> bool { self.recorder.lock().unwrap().take().map(|r| r.finish()).is_some() }
-    pub fn is_recording(&self) -> bool { self.recorder.lock().unwrap().is_some() }
+    pub fn stop_recording(&self) -> bool {
+        self.recorder
+            .lock()
+            .unwrap()
+            .take()
+            .map(|r| r.finish())
+            .is_some()
+    }
+    pub fn is_recording(&self) -> bool {
+        self.recorder.lock().unwrap().is_some()
+    }
     /// Feed bytes straight into the parser (playback); goes through the same path as backend output.
-    pub fn inject(&self, b: Vec<u8>) -> bool { self.inject_tx.send(b).is_ok() }
+    pub fn inject(&self, b: Vec<u8>) -> bool {
+        self.inject_tx.send(b).is_ok()
+    }
 
     /// Wake the UI (e.g. after a backend state change that produced no output).
-    pub fn close(&self) { let _ = self.tx.send(BackendMsg::Close); }
-    pub fn poke(&self) { let _ = self.wake_tx.try_send(()); }
+    pub fn close(&self) {
+        let _ = self.tx.send(BackendMsg::Close);
+    }
+    pub fn poke(&self) {
+        let _ = self.wake_tx.try_send(());
+    }
 
     pub fn write(&self, bytes: impl Into<Vec<u8>>) {
         let _ = self.tx.send(BackendMsg::Input(bytes.into()));
     }
 
-    pub fn size(&self) -> Size { *self.size.lock().unwrap() }
-
-    pub fn resize(&self, size: Size) {
-        if size.cols == 0 || size.rows == 0 { return; }
-        let mut cur = self.size.lock().unwrap();
-        if *cur == size { return; }
-        *cur = size;
-        self.term.lock().unwrap().resize(size);
-        let _ = self.tx.send(BackendMsg::Resize { cols: size.cols as u16, rows: size.rows as u16 });
+    pub fn size(&self) -> Size {
+        *self.size.lock().unwrap()
     }
 
-    pub fn title(&self) -> String { self.shared.title.lock().unwrap().clone() }
-    pub fn foreground_process(&self) -> Option<String> { self.fg_probe.lock().unwrap().as_ref().and_then(|f| f()) }
+    pub fn resize(&self, size: Size) {
+        if size.cols == 0 || size.rows == 0 {
+            return;
+        }
+        let mut cur = self.size.lock().unwrap();
+        if *cur == size {
+            return;
+        }
+        *cur = size;
+        self.term.lock().unwrap().resize(size);
+        let _ = self.tx.send(BackendMsg::Resize {
+            cols: size.cols as u16,
+            rows: size.rows as u16,
+        });
+    }
+
+    pub fn title(&self) -> String {
+        self.shared.title.lock().unwrap().clone()
+    }
+    pub fn foreground_process(&self) -> Option<String> {
+        self.fg_probe.lock().unwrap().as_ref().and_then(|f| f())
+    }
 
     /// Plain-text dump of the visible screen (used by headless tests and agent detection).
     pub fn screen_text(&self) -> String {
@@ -301,7 +416,10 @@ impl Session {
         let mut out = String::new();
         for l in 0..g.screen_lines() {
             let row = &g[Line(l as i32)];
-            let mut line: String = (0..g.columns()).map(|c| row[Column(c)].c).filter(|c| *c != '\0').collect();
+            let mut line: String = (0..g.columns())
+                .map(|c| row[Column(c)].c)
+                .filter(|c| *c != '\0')
+                .collect();
             line.truncate(line.trim_end().len());
             out.push_str(&line);
             out.push('\n');
@@ -311,29 +429,69 @@ impl Session {
 }
 
 /// Smart case (PRD 3.2): a pattern without upper-case letters matches case-insensitively.
-pub fn smart_case(p: &str) -> String { if p.chars().any(|c| c.is_uppercase()) { p.to_string() } else { format!("(?i){p}") } }
+pub fn smart_case(p: &str) -> String {
+    if p.chars().any(|c| c.is_uppercase()) {
+        p.to_string()
+    } else {
+        format!("(?i){p}")
+    }
+}
 
 /// Regex search over screen + scrollback. Returns the match as ((line, col), (line, col)) in grid
 /// coordinates (negative lines = scrollback). `from` is where the previous match started.
-pub fn search<L: alacritty_terminal::event::EventListener>(term: &Term<L>, pattern: &str, from: Option<(i32, usize)>, forward: bool) -> Option<((i32, usize), (i32, usize))> {
+pub fn search<L: alacritty_terminal::event::EventListener>(
+    term: &Term<L>,
+    pattern: &str,
+    from: Option<(i32, usize)>,
+    forward: bool,
+) -> Option<((i32, usize), (i32, usize))> {
     use alacritty_terminal::index::{Direction, Point, Side};
     use alacritty_terminal::term::search::RegexSearch;
-    if pattern.is_empty() { return None; }
+    if pattern.is_empty() {
+        return None;
+    }
     let mut re = RegexSearch::new(&smart_case(pattern)).ok()?;
     let g = term.grid();
     let origin = match from {
         Some((l, c)) => {
             let p = Point::new(Line(l), Column(c));
-            if forward { p.add(g, alacritty_terminal::index::Boundary::None, 1) } else { p.sub(g, alacritty_terminal::index::Boundary::None, 1) }
+            if forward {
+                p.add(g, alacritty_terminal::index::Boundary::None, 1)
+            } else {
+                p.sub(g, alacritty_terminal::index::Boundary::None, 1)
+            }
         }
-        None => if forward { Point::new(g.topmost_line(), Column(0)) } else { Point::new(g.bottommost_line(), Column(g.columns() - 1)) },
+        None => {
+            if forward {
+                Point::new(g.topmost_line(), Column(0))
+            } else {
+                Point::new(g.bottommost_line(), Column(g.columns() - 1))
+            }
+        }
     };
-    let m = term.search_next(&mut re, origin, if forward { Direction::Right } else { Direction::Left }, Side::Left, None)?;
-    Some(((m.start().line.0, m.start().column.0), (m.end().line.0, m.end().column.0)))
+    let m = term.search_next(
+        &mut re,
+        origin,
+        if forward {
+            Direction::Right
+        } else {
+            Direction::Left
+        },
+        Side::Left,
+        None,
+    )?;
+    Some((
+        (m.start().line.0, m.start().column.0),
+        (m.end().line.0, m.end().column.0),
+    ))
 }
 
 /// Selection hit test; `block` = rectangular (Alt+drag) selection.
-pub fn in_selection(sel: Option<((i32, usize), (i32, usize))>, p: (i32, usize), block: bool) -> bool {
+pub fn in_selection(
+    sel: Option<((i32, usize), (i32, usize))>,
+    p: (i32, usize),
+    block: bool,
+) -> bool {
     let Some((a, b)) = sel else { return false };
     if block {
         let (l0, l1) = (a.0.min(b.0), a.0.max(b.0));
@@ -346,7 +504,10 @@ pub fn in_selection(sel: Option<((i32, usize), (i32, usize))>, p: (i32, usize), 
 
 /// Plain-text URL under column `col` of `line` (one char per column). Returns (start, end_exclusive, url).
 pub fn url_at(line: &str, col: usize) -> Option<(usize, usize, String)> {
-    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r#"(?:https?|ftp|file)://[^\s<>"'`|]+|www\.[A-Za-z0-9-]+\.[^\s<>"'`|]+"#).unwrap());
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"(?:https?|ftp|file)://[^\s<>"'`|]+|www\.[A-Za-z0-9-]+\.[^\s<>"'`|]+"#)
+            .unwrap()
+    });
     let chars: Vec<char> = line.chars().collect();
     let s: String = chars.iter().collect();
     for m in RE.find_iter(&s) {
@@ -355,11 +516,17 @@ pub fn url_at(line: &str, col: usize) -> Option<(usize, usize, String)> {
         // trailing punctuation is usually prose, keep balanced closing parens
         while let Some(c) = url.chars().last() {
             let unbalanced = c == ')' && url.matches('(').count() < url.matches(')').count();
-            if ".,;:!?'\"".contains(c) || unbalanced || c == ']' { url.pop(); } else { break }
+            if ".,;:!?'\"".contains(c) || unbalanced || c == ']' {
+                url.pop();
+            } else {
+                break;
+            }
         }
         let b = a + url.chars().count();
         if col >= a && col < b {
-            if url.starts_with("www.") { url = format!("https://{url}"); }
+            if url.starts_with("www.") {
+                url = format!("https://{url}");
+            }
             return Some((a, b, url));
         }
     }
@@ -388,10 +555,16 @@ mod tests {
     fn osc52_store_and_load_reach_listener() {
         let (sess, out, rx) = Session::new(Size { cols: 40, rows: 5 });
         // "hello" = aGVsbG8=
-        out.send(b"\x1b]52;c;aGVsbG8=\x07\x1b]52;c;?\x07".to_vec()).unwrap();
+        out.send(b"\x1b]52;c;aGVsbG8=\x07\x1b]52;c;?\x07".to_vec())
+            .unwrap();
         let t0 = std::time::Instant::now();
-        while sess.shared.clip_load.lock().unwrap().is_empty() && t0.elapsed().as_secs() < 3 { std::thread::sleep(std::time::Duration::from_millis(10)); }
-        assert_eq!(*sess.shared.clip_store.lock().unwrap(), vec!["hello".to_string()]);
+        while sess.shared.clip_load.lock().unwrap().is_empty() && t0.elapsed().as_secs() < 3 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            *sess.shared.clip_store.lock().unwrap(),
+            vec!["hello".to_string()]
+        );
         let f = sess.shared.clip_load.lock().unwrap().pop().unwrap();
         let reply = f("hi");
         assert!(reply.starts_with("\x1b]52;c;aGk="), "{reply:?}");
@@ -404,7 +577,10 @@ mod tests {
         assert_eq!(osc52_write_decision("allow", 10), ClipDecision::Allow);
         assert_eq!(osc52_write_decision("ask", 10), ClipDecision::Ask);
         assert_eq!(osc52_write_decision("deny", 10), ClipDecision::Deny);
-        assert_eq!(osc52_write_decision("allow", OSC52_MAX + 1), ClipDecision::Allow);
+        assert_eq!(
+            osc52_write_decision("allow", OSC52_MAX + 1),
+            ClipDecision::Allow
+        );
         assert!(osc52_is_large(OSC52_MAX + 1));
         assert!(!osc52_is_large(OSC52_MAX));
     }
@@ -417,7 +593,10 @@ mod tests {
         assert_eq!(b, 4 + u.chars().count());
         assert_eq!(url_at(l, 40).unwrap().2, "https://www.rust-lang.org");
         assert!(url_at(l, 0).is_none());
-        assert!(url_at("中文 http://x.cn/路径 尾", 4).unwrap().2.starts_with("http://x.cn/"));
+        assert!(url_at("中文 http://x.cn/路径 尾", 4)
+            .unwrap()
+            .2
+            .starts_with("http://x.cn/"));
     }
 
     #[test]
@@ -432,14 +611,29 @@ mod tests {
     #[test]
     fn regex_search_smart_case_and_direction() {
         let (sess, out, _rx) = Session::new(Size { cols: 30, rows: 4 });
-        out.send(b"alpha Foo\r\nbeta foo\r\ngamma FOO\r\n".to_vec()).unwrap();
+        out.send(b"alpha Foo\r\nbeta foo\r\ngamma FOO\r\n".to_vec())
+            .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(200));
         let t = sess.term.lock().unwrap();
         let a = search(&*t, "foo", None, true).unwrap();
         let b = search(&*t, "foo", Some(a.0), true).unwrap();
         assert!(b.0 > a.0, "{a:?} {b:?}");
         // smart case: "Foo" only matches the exact case
-        let only: Vec<_> = { let mut v = vec![]; let mut at = None; for _ in 0..4 { let Some(m) = search(&*t, "Foo", at, true) else { break }; if v.contains(&m) { break } at = Some(m.0); v.push(m); } v };
+        let only: Vec<_> = {
+            let mut v = vec![];
+            let mut at = None;
+            for _ in 0..4 {
+                let Some(m) = search(&*t, "Foo", at, true) else {
+                    break;
+                };
+                if v.contains(&m) {
+                    break;
+                }
+                at = Some(m.0);
+                v.push(m);
+            }
+            v
+        };
         assert_eq!(only.len(), 1);
         assert_eq!(only[0], ((0, 6), (0, 8)));
         // backwards from the end finds the last one

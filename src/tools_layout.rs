@@ -26,26 +26,39 @@ pub const OUT_EDITOR_MIN_H: f32 = 80.;
 pub const PREVIEW_MIN_H: f32 = 96.;
 
 /// 贴合内容的输出卡片的最小高度：标题行加两行结果，窗口再矮也不会被压没（整个工具区改为滚动）。
-pub fn fit_min_h() -> f32 { ui::H_COMPACT + 2. * ui::row_h() }
+pub fn fit_min_h() -> f32 {
+    ui::H_COMPACT + 2. * ui::row_h()
+}
 
 /// 含大文本框的输入卡片的最小高度：内边距 + 每个字段的标签行与最小高度（单行字段按默认行高，大文本按 `IN_FILL_MIN_H`，其余内容定高的不计）。
 /// 卡片自身裁剪溢出，必须给出明确的下限，否则会被压到只剩一条边。
 pub fn in_min_h(sizes: &[ssh_term_proto::tools::InSize]) -> f32 {
     use ssh_term_proto::tools::InSize;
     let label = ui::lh(ui::fs_small()) + ui::SP_1;
-    let body: f32 = sizes.iter().map(|z| match z {
-        InSize::Fill => IN_FILL_MIN_H,
-        InSize::Line => label + ui::H_DEFAULT,
-        InSize::Auto(min, _) => label + *min as f32 * ui::lh(ui::fs_mono()) + ui::SP_2 * 2.,
-        InSize::Zone => label + FILE_ZONE_MIN_H,
-    }).sum();
+    let body: f32 = sizes
+        .iter()
+        .map(|z| match z {
+            InSize::Fill => IN_FILL_MIN_H,
+            InSize::Line => label + ui::H_DEFAULT,
+            InSize::Auto(min, _) => label + *min as f32 * ui::lh(ui::fs_mono()) + ui::SP_2 * 2.,
+            InSize::Zone => label + FILE_ZONE_MIN_H,
+        })
+        .sum();
     2. * crate::card_layout::SUB_PAD + body + ui::SP_2 * sizes.len().saturating_sub(1) as f32
 }
 
-pub fn clamp_split(r: f32) -> f32 { if r.is_finite() { r.clamp(SPLIT_MIN, SPLIT_MAX) } else { SPLIT_DEFAULT } }
+pub fn clamp_split(r: f32) -> f32 {
+    if r.is_finite() {
+        r.clamp(SPLIT_MIN, SPLIT_MAX)
+    } else {
+        SPLIT_DEFAULT
+    }
+}
 
 /// 面板够宽才并排。
-pub fn side_by_side(width: f32) -> bool { width >= SIDE_MIN_W }
+pub fn side_by_side(width: f32) -> bool {
+    width >= SIDE_MIN_W
+}
 
 /// 由指针位置算输入区占的比例：`pos` 是指针沿拖动方向的坐标，`origin` 是容器起点，`free` 是两个可伸缩区合起来的长度
 /// （容器总长减去选项卡片和间隙）；`gap` 是分隔条自身的厚度（指针落在它的中线）。
@@ -57,19 +70,32 @@ pub fn split_ratio(pos: f32, origin: f32, free: f32, gap: f32) -> f32 {
 #[derive(Clone)]
 pub struct ToolSplit;
 impl gpui::Render for ToolSplit {
-    fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement { div() }
+    fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
 }
 
 /// 输入与输出之间的分隔条：厚度与卡片间隙相同，悬停高亮，横向（上下排列时）或纵向（并排时）拖动。
 pub fn handle(id: impl Into<ElementId>, vertical: bool) -> Stateful<gpui::Div> {
-    let h = div().id(id).flex_shrink_0().hover(|d| d.bg(c(cur().accent).opacity(0.35)))
+    let h = div()
+        .id(id)
+        .flex_shrink_0()
+        .hover(|d| d.bg(c(cur().accent).opacity(0.35)))
         .on_drag(ToolSplit, |d: &ToolSplit, _, _, cx| cx.new(|_| d.clone()));
-    if vertical { h.w(px(CARD_PAD)).h_full().cursor_col_resize() } else { h.h(px(CARD_PAD)).w_full().cursor_row_resize() }
+    if vertical {
+        h.w(px(CARD_PAD)).h_full().cursor_col_resize()
+    } else {
+        h.h(px(CARD_PAD)).w_full().cursor_row_resize()
+    }
 }
 
 /// 普通的卡片间隙（不可拖动）。
 pub fn gap(vertical: bool) -> gpui::Div {
-    if vertical { div().w(px(CARD_PAD)).h_full().flex_shrink_0() } else { div().h(px(CARD_PAD)).w_full().flex_shrink_0() }
+    if vertical {
+        div().w(px(CARD_PAD)).h_full().flex_shrink_0()
+    } else {
+        div().h(px(CARD_PAD)).w_full().flex_shrink_0()
+    }
 }
 
 #[cfg(test)]

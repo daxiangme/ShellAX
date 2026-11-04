@@ -12,7 +12,13 @@ use serde::{Deserialize, Serialize};
 use crate::ssh::{self, Prompts, SshTarget};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct HostInfo { pub name: String, pub user: String, pub host: String, pub port: u16, pub production: bool }
+pub struct HostInfo {
+    pub name: String,
+    pub user: String,
+    pub host: String,
+    pub port: u16,
+    pub production: bool,
+}
 
 /// Operations the policy service may perform after the permission engine allowed them.
 pub trait Ops: Send + Sync {
@@ -27,21 +33,38 @@ pub trait Ops: Send + Sync {
 pub type TargetsFn = Arc<dyn Fn() -> Vec<(String, SshTarget)> + Send + Sync>;
 
 /// SSH-backed [`Ops`] over the shared connection pool.
-pub struct SshOps { pub rt: tokio::runtime::Handle, pub targets: TargetsFn, pub prompts: Prompts }
+pub struct SshOps {
+    pub rt: tokio::runtime::Handle,
+    pub targets: TargetsFn,
+    pub prompts: Prompts,
+}
 
 impl SshOps {
     /// Host name lookup: the configured host name, or the target's host/address.
     pub fn target(&self, name: &str) -> Result<SshTarget> {
         let all = (self.targets)();
-        all.iter().find(|(n, _)| n == name).or_else(|| all.iter().find(|(_, t)| t.host == name || t.label() == name))
-            .map(|(_, t)| t.clone()).ok_or_else(|| anyhow!("unknown host {name:?} (see `shellax-cli hosts`)"))
+        all.iter()
+            .find(|(n, _)| n == name)
+            .or_else(|| {
+                all.iter()
+                    .find(|(_, t)| t.host == name || t.label() == name)
+            })
+            .map(|(_, t)| t.clone())
+            .ok_or_else(|| anyhow!("unknown host {name:?} (see `shellax-cli hosts`)"))
     }
     fn conn(&self, name: &str) -> Result<Arc<ssh::Conn>> {
         let t = self.target(name)?;
         let p = self.prompts.clone();
-        self.rt.block_on(async move { ssh::connect_shared(&t, &p).await.map(|(c, _)| c) })
+        self.rt
+            .block_on(async move { ssh::connect_shared(&t, &p).await.map(|(c, _)| c) })
     }
-    fn transfer(&self, host: &str, dir: crate::sftp::Dir, local: &Path, remote: &str) -> Result<u64> {
+    fn transfer(
+        &self,
+        host: &str,
+        dir: crate::sftp::Dir,
+        local: &Path,
+        remote: &str,
+    ) -> Result<u64> {
         let c = self.conn(host)?;
         let q = crate::sftp::Queue::default();
         let job = q.push(dir, local.to_path_buf(), remote.to_string());
@@ -55,7 +78,16 @@ impl SshOps {
 
 impl Ops for SshOps {
     fn hosts(&self) -> Vec<HostInfo> {
-        (self.targets)().into_iter().map(|(name, t)| HostInfo { name, user: t.user, host: t.host, port: t.port, production: t.production }).collect()
+        (self.targets)()
+            .into_iter()
+            .map(|(name, t)| HostInfo {
+                name,
+                user: t.user,
+                host: t.host,
+                port: t.port,
+                production: t.production,
+            })
+            .collect()
     }
     fn exec(&self, host: &str, command: &str, timeout: Duration) -> Result<(Option<u32>, Vec<u8>)> {
         let c = self.conn(host)?;
@@ -63,8 +95,12 @@ impl Ops for SshOps {
         self.rt.block_on(async move { c.exec(&cmd, timeout).await })
     }
     fn upload(&self, host: &str, local: &Path, remote: &str) -> Result<u64> {
-        if !local.is_file() { return Err(anyhow!("{}: not a file", local.display())); }
+        if !local.is_file() {
+            return Err(anyhow!("{}: not a file", local.display()));
+        }
         self.transfer(host, crate::sftp::Dir::Upload, local, remote)
     }
-    fn download(&self, host: &str, remote: &str, local: &Path) -> Result<u64> { self.transfer(host, crate::sftp::Dir::Download, local, remote) }
+    fn download(&self, host: &str, remote: &str, local: &Path) -> Result<u64> {
+        self.transfer(host, crate::sftp::Dir::Download, local, remote)
+    }
 }

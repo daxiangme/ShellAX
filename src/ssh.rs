@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
 use russh::keys::{load_secret_key, HashAlg, PrivateKeyWithHashAlg};
+use russh::{client, ChannelMsg};
 use std::collections::HashMap;
 use std::sync::Mutex as StdMutex;
-use russh::{client, ChannelMsg};
 
 use crate::term::{BackendMsg, Session, Size};
 
@@ -48,16 +48,23 @@ pub struct SshTarget {
     pub passphrase_override: Option<String>,
 }
 impl SshTarget {
-    pub fn label(&self) -> String { format!("{}@{}:{}", self.user, self.host, self.port) }
+    pub fn label(&self) -> String {
+        format!("{}@{}:{}", self.user, self.host, self.port)
+    }
     /// Pool key: same user/host/port/jump chain → same connection.
     pub fn pool_key(&self) -> String {
         let via = if self.use_proxy { "+proxy" } else { "" };
-        match &self.jump { Some(j) => format!("{}>{}{via}", j.pool_key(), self.label()), None => format!("{}{via}", self.label()) }
+        match &self.jump {
+            Some(j) => format!("{}>{}{via}", j.pool_key(), self.label()),
+            None => format!("{}{via}", self.label()),
+        }
     }
     /// Outermost hop: the TCP connection that leaves this machine.
     pub fn first_hop(&self) -> &SshTarget {
         let mut cur = self;
-        while let Some(j) = cur.jump.as_ref() { cur = j; }
+        while let Some(j) = cur.jump.as_ref() {
+            cur = j;
+        }
         cur
     }
     /// `Some` when this connection asked for a proxy and none is configured (or the URL is invalid).
@@ -69,24 +76,50 @@ impl SshTarget {
             Ok(_) => None,
         }
     }
-    pub fn password_secret(&self) -> String { format!("ssh-password:{}", self.label()) }
+    pub fn password_secret(&self) -> String {
+        format!("ssh-password:{}", self.label())
+    }
 }
-pub fn passphrase_secret(path: &std::path::Path) -> String { format!("ssh-passphrase:{}", path.display()) }
+pub fn passphrase_secret(path: &std::path::Path) -> String {
+    format!("ssh-passphrase:{}", path.display())
+}
 
 /// Asked of the UI when a password or key passphrase is needed. Reply `Some((secret, save))`
 /// or `None` to cancel. The secret stays inside this process (never in config, logs, audit,
 /// or anything an agent can read); with `save` it goes to the OS keychain (or encrypted file).
-pub struct AuthPrompt { pub label: String, pub kind: AuthKind, pub reply: flume::Sender<Option<(String, bool)>> }
+pub struct AuthPrompt {
+    pub label: String,
+    pub kind: AuthKind,
+    pub reply: flume::Sender<Option<(String, bool)>>,
+}
 #[derive(Debug, Clone, PartialEq)]
-pub enum AuthKind { Password, Passphrase(PathBuf), /// keyboard-interactive (2FA / OTP / PAM) prompt; never saved
-    Interactive { instructions: String, prompt: String, echo: bool } }
+pub enum AuthKind {
+    Password,
+    Passphrase(PathBuf),
+    /// keyboard-interactive (2FA / OTP / PAM) prompt; never saved
+    Interactive {
+        instructions: String,
+        prompt: String,
+        echo: bool,
+    },
+}
 
 /// Channels to the UI for interactive questions during connect.
 #[derive(Clone)]
-pub struct Prompts { pub hostkey: flume::Sender<HostKeyPrompt>, pub auth: flume::Sender<AuthPrompt> }
+pub struct Prompts {
+    pub hostkey: flume::Sender<HostKeyPrompt>,
+    pub auth: flume::Sender<AuthPrompt>,
+}
 impl Prompts {
     /// Prompts that auto-reject (headless / tests).
-    pub fn reject_all() -> Self { let (a, _) = flume::unbounded(); let (b, _) = flume::unbounded(); Self { hostkey: a, auth: b } }
+    pub fn reject_all() -> Self {
+        let (a, _) = flume::unbounded();
+        let (b, _) = flume::unbounded();
+        Self {
+            hostkey: a,
+            auth: b,
+        }
+    }
 }
 
 /// Secret store used for saved SSH passwords / passphrases (set once by the app).
@@ -101,14 +134,29 @@ pub struct HostKeyPrompt {
     pub reply: flume::Sender<HostKeyDecision>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HostKeyDecision { AcceptAndSave, AcceptOnce, Reject }
+pub enum HostKeyDecision {
+    AcceptAndSave,
+    AcceptOnce,
+    Reject,
+}
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum KnownHost { Match, Unknown, Changed { line: usize } }
+pub enum KnownHost {
+    Match,
+    Unknown,
+    Changed { line: usize },
+}
 
 /// Check `key` for host:port against a known_hosts file (missing file = unknown).
-pub fn check_known_host(host: &str, port: u16, key: &russh::keys::PublicKey, path: &std::path::Path) -> Result<KnownHost> {
-    if !path.exists() { return Ok(KnownHost::Unknown); }
+pub fn check_known_host(
+    host: &str,
+    port: u16,
+    key: &russh::keys::PublicKey,
+    path: &std::path::Path,
+) -> Result<KnownHost> {
+    if !path.exists() {
+        return Ok(KnownHost::Unknown);
+    }
     match russh::keys::check_known_hosts_path(host, port, key, path) {
         Ok(true) => Ok(KnownHost::Match),
         Ok(false) => Ok(KnownHost::Unknown),
@@ -133,43 +181,99 @@ pub struct Handler {
 }
 impl client::Handler for Handler {
     type Error = anyhow::Error;
-    async fn check_server_key(&mut self, k: &russh::keys::PublicKeyOrCertificate) -> Result<bool, Self::Error> {
+    async fn check_server_key(
+        &mut self,
+        k: &russh::keys::PublicKeyOrCertificate,
+    ) -> Result<bool, Self::Error> {
         let key = k.public_key();
         let fp = key.fingerprint(HashAlg::Sha256).to_string();
         *self.seen.lock().unwrap() = Some(format!("{} {fp}", key.algorithm()));
         match check_known_host(&self.host, self.port, &key, &self.known_hosts)? {
             KnownHost::Match => Ok(true),
             KnownHost::Changed { line } => {
-                *self.failure.lock().unwrap() = Some(tf("ssh.hostkey_changed", &[("host", &self.host), ("port", &self.port), ("fp", &fp), ("file", &self.known_hosts.display()), ("line", &line)]));
+                *self.failure.lock().unwrap() = Some(tf(
+                    "ssh.hostkey_changed",
+                    &[
+                        ("host", &self.host),
+                        ("port", &self.port),
+                        ("fp", &fp),
+                        ("file", &self.known_hosts.display()),
+                        ("line", &line),
+                    ],
+                ));
                 Ok(false)
             }
-            KnownHost::Unknown if HOST_KEY_POLICY.load(std::sync::atomic::Ordering::Relaxed) == 1 => {
-                *self.failure.lock().unwrap() = Some(tf("ssh.strict_unknown", &[("host", &self.host), ("port", &self.port), ("fp", &fp)]));
+            KnownHost::Unknown
+                if HOST_KEY_POLICY.load(std::sync::atomic::Ordering::Relaxed) == 1 =>
+            {
+                *self.failure.lock().unwrap() = Some(tf(
+                    "ssh.strict_unknown",
+                    &[("host", &self.host), ("port", &self.port), ("fp", &fp)],
+                ));
                 Ok(false)
             }
-            KnownHost::Unknown if HOST_KEY_POLICY.load(std::sync::atomic::Ordering::Relaxed) == 2 => {
-                russh::keys::known_hosts::learn_known_hosts_path(&self.host, self.port, &key, &self.known_hosts)?;
+            KnownHost::Unknown
+                if HOST_KEY_POLICY.load(std::sync::atomic::Ordering::Relaxed) == 2 =>
+            {
+                russh::keys::known_hosts::learn_known_hosts_path(
+                    &self.host,
+                    self.port,
+                    &key,
+                    &self.known_hosts,
+                )?;
                 Ok(true)
             }
             KnownHost::Unknown => {
                 let (tx, rx) = flume::bounded(1);
-                if self.prompt.send_async(HostKeyPrompt {
-                    host: self.host.clone(), port: self.port, algorithm: key.algorithm().to_string(), fingerprint: fp, reply: tx,
-                }).await.is_err() { *self.failure.lock().unwrap() = Some(t("ssh.user_rejected").into()); return Ok(false); }
+                if self
+                    .prompt
+                    .send_async(HostKeyPrompt {
+                        host: self.host.clone(),
+                        port: self.port,
+                        algorithm: key.algorithm().to_string(),
+                        fingerprint: fp,
+                        reply: tx,
+                    })
+                    .await
+                    .is_err()
+                {
+                    *self.failure.lock().unwrap() = Some(t("ssh.user_rejected").into());
+                    return Ok(false);
+                }
                 match rx.recv_async().await.unwrap_or(HostKeyDecision::Reject) {
                     HostKeyDecision::AcceptAndSave => {
-                        russh::keys::known_hosts::learn_known_hosts_path(&self.host, self.port, &key, &self.known_hosts)?;
+                        russh::keys::known_hosts::learn_known_hosts_path(
+                            &self.host,
+                            self.port,
+                            &key,
+                            &self.known_hosts,
+                        )?;
                         Ok(true)
                     }
                     HostKeyDecision::AcceptOnce => Ok(true),
-                    HostKeyDecision::Reject => { *self.failure.lock().unwrap() = Some(t("ssh.user_rejected").into()); Ok(false) }
+                    HostKeyDecision::Reject => {
+                        *self.failure.lock().unwrap() = Some(t("ssh.user_rejected").into());
+                        Ok(false)
+                    }
                 }
             }
         }
     }
-    async fn server_channel_open_forwarded_tcpip(&mut self, channel: russh::Channel<client::Msg>, _ca: &str, connected_port: u32, _oa: &str, _op: u32, reply: client::ChannelOpenHandle, _s: &mut client::Session) -> Result<(), Self::Error> {
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        _ca: &str,
+        connected_port: u32,
+        _oa: &str,
+        _op: u32,
+        reply: client::ChannelOpenHandle,
+        _s: &mut client::Session,
+    ) -> Result<(), Self::Error> {
         let dest = self.forwards.lock().unwrap().get(&connected_port).cloned();
-        let Some((h, p)) = dest else { drop(reply); return Ok(()) };
+        let Some((h, p)) = dest else {
+            drop(reply);
+            return Ok(());
+        };
         reply.accept().await;
         tokio::spawn(async move {
             if let Ok(mut tcp) = tokio::net::TcpStream::connect((h.as_str(), p)).await {
@@ -179,7 +283,12 @@ impl client::Handler for Handler {
         });
         Ok(())
     }
-    async fn server_channel_open_agent_forward(&mut self, channel: russh::Channel<client::Msg>, reply: client::ChannelOpenHandle, _s: &mut client::Session) -> Result<(), Self::Error> {
+    async fn server_channel_open_agent_forward(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        reply: client::ChannelOpenHandle,
+        _s: &mut client::Session,
+    ) -> Result<(), Self::Error> {
         #[cfg(not(unix))]
         let _ = (&channel, &reply);
         #[cfg(unix)]
@@ -208,7 +317,9 @@ pub struct Conn {
 }
 
 impl Conn {
-    pub fn is_closed(&self) -> bool { self.handle.is_closed() }
+    pub fn is_closed(&self) -> bool {
+        self.handle.is_closed()
+    }
     /// Run a command; returns (exit status, stdout+stderr). Bounded by `timeout`.
     pub async fn exec(&self, cmd: &str, timeout: Duration) -> Result<(Option<u32>, Vec<u8>)> {
         let mut ch = self.handle.channel_open_session().await?;
@@ -218,7 +329,9 @@ impl Conn {
         let fut = async {
             while let Some(m) = ch.wait().await {
                 match m {
-                    ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => body.extend_from_slice(&data),
+                    ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
+                        body.extend_from_slice(&data)
+                    }
                     ChannelMsg::ExitStatus { exit_status } => code = Some(exit_status),
                     ChannelMsg::Eof => {}
                     ChannelMsg::Close => break,
@@ -233,19 +346,47 @@ impl Conn {
     pub async fn write_file(&self, path: &str, content: &[u8]) -> Result<()> {
         let mut ch = self.handle.channel_open_session().await?;
         let dir = path.rsplit_once('/').map(|x| x.0).unwrap_or(".");
-        ch.exec(true, format!("umask 077; mkdir -p {d} && cat > {p}", d = sh_quote(dir), p = sh_quote(path))).await?;
+        ch.exec(
+            true,
+            format!(
+                "umask 077; mkdir -p {d} && cat > {p}",
+                d = sh_quote(dir),
+                p = sh_quote(path)
+            ),
+        )
+        .await?;
         ch.data(content).await?;
         ch.eof().await?;
         let mut code = None;
-        let _ = tokio::time::timeout(Duration::from_secs(10), async { while let Some(m) = ch.wait().await { if let ChannelMsg::ExitStatus { exit_status } = m { code = Some(exit_status); } else if matches!(m, ChannelMsg::Close) { break; } } }).await;
-        if code.unwrap_or(1) != 0 { bail!("remote write {path} failed"); }
+        let _ = tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(m) = ch.wait().await {
+                if let ChannelMsg::ExitStatus { exit_status } = m {
+                    code = Some(exit_status);
+                } else if matches!(m, ChannelMsg::Close) {
+                    break;
+                }
+            }
+        })
+        .await;
+        if code.unwrap_or(1) != 0 {
+            bail!("remote write {path} failed");
+        }
         Ok(())
     }
     /// -R: ask the server to listen on `bind:port` (0 = any free port) and forward to `to`.
-    pub async fn remote_forward(&self, bind: &str, port: u32, to_host: &str, to_port: u16) -> Result<u32> {
+    pub async fn remote_forward(
+        &self,
+        bind: &str,
+        port: u32,
+        to_host: &str,
+        to_port: u16,
+    ) -> Result<u32> {
         let got = self.handle.tcpip_forward(bind, port).await?;
         let actual = if port == 0 { got } else { port };
-        self.forwards.lock().unwrap().insert(actual, (to_host.to_string(), to_port));
+        self.forwards
+            .lock()
+            .unwrap()
+            .insert(actual, (to_host.to_string(), to_port));
         Ok(actual)
     }
     pub async fn cancel_remote_forward(&self, bind: &str, port: u32) -> Result<()> {
@@ -255,7 +396,10 @@ impl Conn {
     }
     /// Open a direct-tcpip channel as a byte stream.
     pub async fn direct(&self, host: &str, port: u16) -> Result<russh::ChannelStream<client::Msg>> {
-        let ch = self.handle.channel_open_direct_tcpip(host, port as u32, "127.0.0.1", 0).await?;
+        let ch = self
+            .handle
+            .channel_open_direct_tcpip(host, port as u32, "127.0.0.1", 0)
+            .await?;
         Ok(ch.into_stream())
     }
     /// SFTP session on a new channel.
@@ -273,188 +417,424 @@ pub fn tmux_command(name: &str) -> String {
 }
 
 pub fn sh_quote(s: &str) -> String {
-    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+=:@,".contains(c)) { s.into() } else { format!("'{}'", s.replace('\'', "'\\''")) }
+    if !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-+=:@,".contains(c))
+    {
+        s.into()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
 }
 
 fn preferred(t: &SshTarget) -> russh::Preferred {
     let mut p = russh::Preferred::default();
     if !t.kex.is_empty() {
-        let v: Vec<russh::kex::Name> = t.kex.iter().filter_map(|n| russh::kex::Name::try_from(n.as_str()).ok()).collect();
-        if !v.is_empty() { p.kex = std::borrow::Cow::Owned(v); }
+        let v: Vec<russh::kex::Name> = t
+            .kex
+            .iter()
+            .filter_map(|n| russh::kex::Name::try_from(n.as_str()).ok())
+            .collect();
+        if !v.is_empty() {
+            p.kex = std::borrow::Cow::Owned(v);
+        }
     }
     if !t.ciphers.is_empty() {
-        let v: Vec<russh::cipher::Name> = t.ciphers.iter().filter_map(|n| russh::cipher::Name::try_from(n.as_str()).ok()).collect();
-        if !v.is_empty() { p.cipher = std::borrow::Cow::Owned(v); }
+        let v: Vec<russh::cipher::Name> = t
+            .ciphers
+            .iter()
+            .filter_map(|n| russh::cipher::Name::try_from(n.as_str()).ok())
+            .collect();
+        if !v.is_empty() {
+            p.cipher = std::borrow::Cow::Owned(v);
+        }
     }
     p
 }
 
 async fn ask(prompts: &Prompts, label: String, kind: AuthKind) -> Option<(String, bool)> {
     let (tx, rx) = flume::bounded(1);
-    prompts.auth.send_async(AuthPrompt { label, kind, reply: tx }).await.ok()?;
+    prompts
+        .auth
+        .send_async(AuthPrompt {
+            label,
+            kind,
+            reply: tx,
+        })
+        .await
+        .ok()?;
     rx.recv_async().await.ok().flatten()
 }
 
 /// Connect and authenticate (recursively through `jump`).
-pub fn connect<'a>(tg: &'a SshTarget, prompts: &'a Prompts) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Arc<Conn>>> + Send + 'a>> {
+pub fn connect<'a>(
+    tg: &'a SshTarget,
+    prompts: &'a Prompts,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Arc<Conn>>> + Send + 'a>> {
     Box::pin(async move {
         use std::sync::atomic::Ordering::Relaxed;
         let failure = Arc::new(std::sync::Mutex::new(None));
         let ka = KEEPALIVE_SECS.load(Relaxed);
-        let cfg = Arc::new(client::Config { inactivity_timeout: None, keepalive_interval: (ka > 0).then(|| Duration::from_secs(ka)), keepalive_max: 3, preferred: preferred(tg), ..Default::default() });
+        let cfg = Arc::new(client::Config {
+            inactivity_timeout: None,
+            keepalive_interval: (ka > 0).then(|| Duration::from_secs(ka)),
+            keepalive_max: 3,
+            preferred: preferred(tg),
+            ..Default::default()
+        });
         let forwards: ForwardMap = Default::default();
-        let handler = Handler { host: tg.host.clone(), port: tg.port, known_hosts: tg.known_hosts.clone(), prompt: prompts.hostkey.clone(), failure: failure.clone(), forwards: forwards.clone(), seen: Default::default() };
+        let handler = Handler {
+            host: tg.host.clone(),
+            port: tg.port,
+            known_hosts: tg.known_hosts.clone(),
+            prompt: prompts.hostkey.clone(),
+            failure: failure.clone(),
+            forwards: forwards.clone(),
+            seen: Default::default(),
+        };
         let secs = CONNECT_TIMEOUT_SECS.load(Relaxed).max(1);
         let res: Result<(client::Handle<Handler>, Option<Arc<Conn>>)> = async {
             if let Some(j) = &tg.jump {
-                let jc = connect(j, prompts).await.map_err(|e| anyhow!(tf("ssh.jump_failed", &[("jump", &j.label()), ("err", &format!("{e:#}"))])))?;
-                let stream = tokio::time::timeout(Duration::from_secs(secs), jc.direct(&tg.host, tg.port)).await.map_err(|_| anyhow!(tf("ssh.connect_timeout", &[("secs", &secs)])))??;
-                let h = tokio::time::timeout(Duration::from_secs(300), client::connect_stream(cfg, stream, handler)).await.map_err(|_| anyhow!(t("ssh.handshake_timeout")))??;
+                let jc = connect(j, prompts).await.map_err(|e| {
+                    anyhow!(tf(
+                        "ssh.jump_failed",
+                        &[("jump", &j.label()), ("err", &format!("{e:#}"))]
+                    ))
+                })?;
+                let stream =
+                    tokio::time::timeout(Duration::from_secs(secs), jc.direct(&tg.host, tg.port))
+                        .await
+                        .map_err(|_| anyhow!(tf("ssh.connect_timeout", &[("secs", &secs)])))??;
+                let h = tokio::time::timeout(
+                    Duration::from_secs(300),
+                    client::connect_stream(cfg, stream, handler),
+                )
+                .await
+                .map_err(|_| anyhow!(t("ssh.handshake_timeout")))??;
                 Ok((h, Some(jc)))
             } else {
                 // Opt-in proxy: HTTP CONNECT / SOCKS5 for this hop. Jump hosts ride the first hop's tunnel.
                 let tcp = match crate::proxy::for_ssh(&tg.host, tg.use_proxy)? {
-                    Some(p) => tokio::time::timeout(Duration::from_secs(secs), crate::proxy::connect(&p, &tg.host, tg.port)).await
-                        .map_err(|_| anyhow!(tf("ssh.connect_timeout", &[("secs", &secs)])))??,
-                    None => tokio::time::timeout(Duration::from_secs(secs), tokio::net::TcpStream::connect((tg.host.as_str(), tg.port))).await
-                        .map_err(|_| anyhow!(tf("ssh.connect_timeout", &[("secs", &secs)])))??,
+                    Some(p) => tokio::time::timeout(
+                        Duration::from_secs(secs),
+                        crate::proxy::connect(&p, &tg.host, tg.port),
+                    )
+                    .await
+                    .map_err(|_| anyhow!(tf("ssh.connect_timeout", &[("secs", &secs)])))??,
+                    None => tokio::time::timeout(
+                        Duration::from_secs(secs),
+                        tokio::net::TcpStream::connect((tg.host.as_str(), tg.port)),
+                    )
+                    .await
+                    .map_err(|_| anyhow!(tf("ssh.connect_timeout", &[("secs", &secs)])))??,
                 };
                 let _ = tcp.set_nodelay(true);
-                let h = tokio::time::timeout(Duration::from_secs(300), client::connect_stream(cfg, tcp, handler)).await.map_err(|_| anyhow!(t("ssh.handshake_timeout")))??;
+                let h = tokio::time::timeout(
+                    Duration::from_secs(300),
+                    client::connect_stream(cfg, tcp, handler),
+                )
+                .await
+                .map_err(|_| anyhow!(t("ssh.handshake_timeout")))??;
                 Ok((h, None))
             }
-        }.await;
-        let (mut h, jump) = match res { Ok(x) => x, Err(e) => return Err(match failure.lock().unwrap().clone() { Some(f) => anyhow!(f), None => e }) };
+        }
+        .await;
+        let (mut h, jump) = match res {
+            Ok(x) => x,
+            Err(e) => {
+                return Err(match failure.lock().unwrap().clone() {
+                    Some(f) => anyhow!(f),
+                    None => e,
+                })
+            }
+        };
         authenticate(&mut h, tg, prompts).await?;
-        Ok(Arc::new(Conn { handle: h, label: tg.label(), forwards, _jump: jump }))
+        Ok(Arc::new(Conn {
+            handle: h,
+            label: tg.label(),
+            forwards,
+            _jump: jump,
+        }))
     })
 }
 
-type DynAgent = russh::keys::agent::client::AgentClient<Box<dyn russh::keys::agent::client::AgentStream + Send + Unpin>>;
+type DynAgent = russh::keys::agent::client::AgentClient<
+    Box<dyn russh::keys::agent::client::AgentStream + Send + Unpin>,
+>;
 
 /// Unix: $SSH_AUTH_SOCK. Windows: $SSH_AUTH_SOCK or the Win32-OpenSSH pipe, then Pageant.
 async fn connect_agent() -> Result<DynAgent, russh::keys::Error> {
     use russh::keys::agent::client::AgentClient;
     #[cfg(unix)]
-    { Ok(AgentClient::connect_env().await?.dynamic()) }
+    {
+        Ok(AgentClient::connect_env().await?.dynamic())
+    }
     #[cfg(windows)]
     {
-        let pipe = std::env::var_os("SSH_AUTH_SOCK").unwrap_or_else(|| r"\\.\pipe\openssh-ssh-agent".into());
+        let pipe = std::env::var_os("SSH_AUTH_SOCK")
+            .unwrap_or_else(|| r"\\.\pipe\openssh-ssh-agent".into());
         match AgentClient::connect_named_pipe(&pipe).await {
             Ok(a) => Ok(a.dynamic()),
-            Err(e) => AgentClient::connect_pageant().await.map(|a| a.dynamic()).map_err(|_| e),
+            Err(e) => AgentClient::connect_pageant()
+                .await
+                .map(|a| a.dynamic())
+                .map_err(|_| e),
         }
     }
 }
 
-async fn authenticate(h: &mut client::Handle<Handler>, tg: &SshTarget, prompts: &Prompts) -> Result<()> {
-    let (mode, no_agent) = match tg.auth.as_str() { "" => ("auto", false), "auto-noagent" => ("auto", true), m => (m, false) };
+async fn authenticate(
+    h: &mut client::Handle<Handler>,
+    tg: &SshTarget,
+    prompts: &Prompts,
+) -> Result<()> {
+    let (mode, no_agent) = match tg.auth.as_str() {
+        "" => ("auto", false),
+        "auto-noagent" => ("auto", true),
+        m => (m, false),
+    };
     let mut errors: Vec<String> = Vec::new();
     // ask the server which methods it offers ("none" probe), so we never prompt for a password
     // the server would not accept (e.g. a PAM / 2FA-only host)
     let offered: Option<Vec<russh::MethodKind>> = match h.authenticate_none(&tg.user).await? {
         russh::client::AuthResult::Success => return Ok(()),
-        russh::client::AuthResult::Failure { remaining_methods, .. } => Some(remaining_methods.to_vec()),
+        russh::client::AuthResult::Failure {
+            remaining_methods, ..
+        } => Some(remaining_methods.to_vec()),
     };
-    let offers = |m: russh::MethodKind| offered.as_ref().is_none_or(|v| v.is_empty() || v.contains(&m));
+    let offers = |m: russh::MethodKind| {
+        offered
+            .as_ref()
+            .is_none_or(|v| v.is_empty() || v.contains(&m))
+    };
     // methods in the configured order ("password,key,agent" …); "auto" = agent → keys → password → kbd
-    let order: Vec<&str> = if mode == "auto" { vec!["agent", "key", "password"] } else { mode.split(',').map(str::trim).filter(|m| !m.is_empty()).collect() };
+    let order: Vec<&str> = if mode == "auto" {
+        vec!["agent", "key", "password"]
+    } else {
+        mode.split(',')
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .collect()
+    };
     let single = order.len() == 1;
     for step in order.iter().copied() {
-    match step {
-    "agent" if !no_agent => {
-        match connect_agent().await {
-            Ok(mut agent) => {
-                let ids = agent.request_identities().await.unwrap_or_default();
-                if ids.is_empty() { errors.push(t("ssh.agent_empty").into()); }
-                for id in ids {
-                    let key = match &id { russh::keys::agent::AgentIdentity::PublicKey { key, .. } => key.clone(), _ => continue };
-                    let hash = h.best_supported_rsa_hash().await?.flatten();
-                    match h.authenticate_publickey_with(&tg.user, key, hash, &mut agent).await {
-                        Ok(r) if r.success() => return Ok(()),
-                        Ok(_) => {}
-                        Err(e) => errors.push(format!("agent: {e}")),
+        match step {
+            "agent" if !no_agent => match connect_agent().await {
+                Ok(mut agent) => {
+                    let ids = agent.request_identities().await.unwrap_or_default();
+                    if ids.is_empty() {
+                        errors.push(t("ssh.agent_empty").into());
                     }
-                }
-            }
-            Err(e) => if single || mode != "auto" { errors.push(tf("ssh.agent_unavailable", &[("err", &e)])); },
-        }
-    }
-    "cert" => {
-        // OpenSSH certificate + its private key (first identity file)
-        let (Some(cp), Some(kp)) = (tg.cert.as_ref(), tg.keys.first()) else { errors.push(t("ssh.cert_missing").into()); continue };
-        let cert = match russh::keys::Certificate::read_file(cp) { Ok(c) => c, Err(e) => { errors.push(format!("{}: {e}", cp.display())); continue } };
-        let pp = tg.passphrase_override.clone().or_else(|| SECRETS.get().and_then(|s| s.get(&passphrase_secret(kp))).map(|x| x.0));
-        let key = match load_secret_key(kp, pp.as_deref()) { Ok(k) => k, Err(e) => { errors.push(format!("{}: {e}", kp.display())); continue } };
-        if h.authenticate_openssh_cert(&tg.user, Arc::new(key), cert).await?.success() { return Ok(()); }
-        errors.push(tf("ssh.key_rejected", &[("key", &cp.display())]));
-    }
-    "key" => {
-        for kp in &tg.keys {
-            if !kp.exists() { if mode != "auto" { errors.push(format!("{}: not found", kp.display())); } continue; }
-            let key = match load_secret_key(kp, None) {
-                Ok(k) => k,
-                Err(russh::keys::Error::KeyIsEncrypted) => {
-                    let saved = tg.passphrase_override.clone().or_else(|| SECRETS.get().and_then(|s| s.get(&passphrase_secret(kp))).map(|x| x.0));
-                    let mut loaded = None;
-                    if let Some(p) = saved { loaded = load_secret_key(kp, Some(&p)).ok(); }
-                    let mut tries = 0;
-                    while loaded.is_none() && tries < 3 {
-                        tries += 1;
-                        let Some((p, save)) = ask(prompts, kp.display().to_string(), AuthKind::Passphrase(kp.clone())).await else { break };
-                        if let Ok(k) = load_secret_key(kp, Some(&p)) {
-                            if save { if let Some(s) = SECRETS.get() { let _ = s.set(&passphrase_secret(kp), &p); } }
-                            loaded = Some(k);
+                    for id in ids {
+                        let key = match &id {
+                            russh::keys::agent::AgentIdentity::PublicKey { key, .. } => key.clone(),
+                            _ => continue,
+                        };
+                        let hash = h.best_supported_rsa_hash().await?.flatten();
+                        match h
+                            .authenticate_publickey_with(&tg.user, key, hash, &mut agent)
+                            .await
+                        {
+                            Ok(r) if r.success() => return Ok(()),
+                            Ok(_) => {}
+                            Err(e) => errors.push(format!("agent: {e}")),
                         }
                     }
-                    match loaded { Some(k) => k, None => { errors.push(tf("ssh.passphrase_failed", &[("key", &kp.display())])); continue } }
                 }
-                Err(e) => { errors.push(format!("{}: {e}", kp.display())); continue }
-            };
-            let hash = h.best_supported_rsa_hash().await?.flatten();
-            if h.authenticate_publickey(&tg.user, PrivateKeyWithHashAlg::new(Arc::new(key), hash)).await?.success() { return Ok(()); }
-            errors.push(tf("ssh.key_rejected", &[("key", &kp.display())]));
-        }
-    }
-    "password" if offers(russh::MethodKind::Password) => {
-        let name = tg.password_secret();
-        if let Some(pw) = tg.password_override.clone() {
-            if h.authenticate_password(&tg.user, pw).await?.success() { return Ok(()); }
-            errors.push(t("ssh.password_rejected").into());
-            continue;
-        }
-        if let Some((pw, _)) = SECRETS.get().and_then(|s| s.get(&name)) {
-            if h.authenticate_password(&tg.user, pw).await?.success() { return Ok(()); }
-            errors.push(t("ssh.saved_password_rejected").into());
-        }
-        for _ in 0..3 {
-            let Some((pw, save)) = ask(prompts, tg.label(), AuthKind::Password).await else { break };
-            if h.authenticate_password(&tg.user, pw.clone()).await?.success() {
-                if save { if let Some(s) = SECRETS.get() { let _ = s.set(&name, &pw); } }
-                return Ok(());
+                Err(e) => {
+                    if single || mode != "auto" {
+                        errors.push(tf("ssh.agent_unavailable", &[("err", &e)]));
+                    }
+                }
+            },
+            "cert" => {
+                // OpenSSH certificate + its private key (first identity file)
+                let (Some(cp), Some(kp)) = (tg.cert.as_ref(), tg.keys.first()) else {
+                    errors.push(t("ssh.cert_missing").into());
+                    continue;
+                };
+                let cert = match russh::keys::Certificate::read_file(cp) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        errors.push(format!("{}: {e}", cp.display()));
+                        continue;
+                    }
+                };
+                let pp = tg.passphrase_override.clone().or_else(|| {
+                    SECRETS
+                        .get()
+                        .and_then(|s| s.get(&passphrase_secret(kp)))
+                        .map(|x| x.0)
+                });
+                let key = match load_secret_key(kp, pp.as_deref()) {
+                    Ok(k) => k,
+                    Err(e) => {
+                        errors.push(format!("{}: {e}", kp.display()));
+                        continue;
+                    }
+                };
+                if h.authenticate_openssh_cert(&tg.user, Arc::new(key), cert)
+                    .await?
+                    .success()
+                {
+                    return Ok(());
+                }
+                errors.push(tf("ssh.key_rejected", &[("key", &cp.display())]));
             }
-            errors.push(t("ssh.password_rejected").into());
+            "key" => {
+                for kp in &tg.keys {
+                    if !kp.exists() {
+                        if mode != "auto" {
+                            errors.push(format!("{}: not found", kp.display()));
+                        }
+                        continue;
+                    }
+                    let key = match load_secret_key(kp, None) {
+                        Ok(k) => k,
+                        Err(russh::keys::Error::KeyIsEncrypted) => {
+                            let saved = tg.passphrase_override.clone().or_else(|| {
+                                SECRETS
+                                    .get()
+                                    .and_then(|s| s.get(&passphrase_secret(kp)))
+                                    .map(|x| x.0)
+                            });
+                            let mut loaded = None;
+                            if let Some(p) = saved {
+                                loaded = load_secret_key(kp, Some(&p)).ok();
+                            }
+                            let mut tries = 0;
+                            while loaded.is_none() && tries < 3 {
+                                tries += 1;
+                                let Some((p, save)) = ask(
+                                    prompts,
+                                    kp.display().to_string(),
+                                    AuthKind::Passphrase(kp.clone()),
+                                )
+                                .await
+                                else {
+                                    break;
+                                };
+                                if let Ok(k) = load_secret_key(kp, Some(&p)) {
+                                    if save {
+                                        if let Some(s) = SECRETS.get() {
+                                            let _ = s.set(&passphrase_secret(kp), &p);
+                                        }
+                                    }
+                                    loaded = Some(k);
+                                }
+                            }
+                            match loaded {
+                                Some(k) => k,
+                                None => {
+                                    errors.push(tf(
+                                        "ssh.passphrase_failed",
+                                        &[("key", &kp.display())],
+                                    ));
+                                    continue;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            errors.push(format!("{}: {e}", kp.display()));
+                            continue;
+                        }
+                    };
+                    let hash = h.best_supported_rsa_hash().await?.flatten();
+                    if h.authenticate_publickey(
+                        &tg.user,
+                        PrivateKeyWithHashAlg::new(Arc::new(key), hash),
+                    )
+                    .await?
+                    .success()
+                    {
+                        return Ok(());
+                    }
+                    errors.push(tf("ssh.key_rejected", &[("key", &kp.display())]));
+                }
+            }
+            "password" if offers(russh::MethodKind::Password) => {
+                let name = tg.password_secret();
+                if let Some(pw) = tg.password_override.clone() {
+                    if h.authenticate_password(&tg.user, pw).await?.success() {
+                        return Ok(());
+                    }
+                    errors.push(t("ssh.password_rejected").into());
+                    continue;
+                }
+                if let Some((pw, _)) = SECRETS.get().and_then(|s| s.get(&name)) {
+                    if h.authenticate_password(&tg.user, pw).await?.success() {
+                        return Ok(());
+                    }
+                    errors.push(t("ssh.saved_password_rejected").into());
+                }
+                for _ in 0..3 {
+                    let Some((pw, save)) = ask(prompts, tg.label(), AuthKind::Password).await
+                    else {
+                        break;
+                    };
+                    if h.authenticate_password(&tg.user, pw.clone())
+                        .await?
+                        .success()
+                    {
+                        if save {
+                            if let Some(s) = SECRETS.get() {
+                                let _ = s.set(&name, &pw);
+                            }
+                        }
+                        return Ok(());
+                    }
+                    errors.push(t("ssh.password_rejected").into());
+                }
+            }
+            _ => {}
         }
-    }
-    _ => {}
-    }
     }
     // 4. keyboard-interactive (2FA / OTP / PAM): each server prompt goes to the UI, answers are never stored
-    if (mode == "auto" || order.iter().any(|m| matches!(*m, "password" | "kbd"))) && tg.password_override.is_none() && offers(russh::MethodKind::KeyboardInteractive) {
+    if (mode == "auto" || order.iter().any(|m| matches!(*m, "password" | "kbd")))
+        && tg.password_override.is_none()
+        && offers(russh::MethodKind::KeyboardInteractive)
+    {
         use russh::client::KeyboardInteractiveAuthResponse as R;
-        let mut r = h.authenticate_keyboard_interactive_start(&tg.user, None::<String>).await?;
+        let mut r = h
+            .authenticate_keyboard_interactive_start(&tg.user, None::<String>)
+            .await?;
         let mut rounds = 0;
         loop {
             match r {
                 R::Success => return Ok(()),
-                R::Failure { .. } => { if rounds > 0 { errors.push(t("ssh.kbd_rejected").into()); } break }
-                R::InfoRequest { name, instructions, prompts: ps } => {
+                R::Failure { .. } => {
+                    if rounds > 0 {
+                        errors.push(t("ssh.kbd_rejected").into());
+                    }
+                    break;
+                }
+                R::InfoRequest {
+                    name,
+                    instructions,
+                    prompts: ps,
+                } => {
                     rounds += 1;
-                    if rounds > 6 { break }
-                    let head = [name, instructions].into_iter().filter(|s| !s.trim().is_empty()).collect::<Vec<_>>().join("\n");
+                    if rounds > 6 {
+                        break;
+                    }
+                    let head = [name, instructions]
+                        .into_iter()
+                        .filter(|s| !s.trim().is_empty())
+                        .collect::<Vec<_>>()
+                        .join("\n");
                     let mut answers = Vec::with_capacity(ps.len());
                     for p in ps {
-                        let Some((a, _)) = ask(prompts, tg.label(), AuthKind::Interactive { instructions: head.clone(), prompt: p.prompt.trim().to_string(), echo: p.echo }).await else {
+                        let Some((a, _)) = ask(
+                            prompts,
+                            tg.label(),
+                            AuthKind::Interactive {
+                                instructions: head.clone(),
+                                prompt: p.prompt.trim().to_string(),
+                                echo: p.echo,
+                            },
+                        )
+                        .await
+                        else {
                             bail!(tf("ssh.auth_failed", &[("err", &t("ssh.kbd_cancelled"))]))
                         };
                         answers.push(a);
@@ -464,20 +844,39 @@ async fn authenticate(h: &mut client::Handle<Handler>, tg: &SshTarget, prompts: 
             }
         }
     }
-    if errors.is_empty() { errors.push(t("ssh.no_key").into()); }
+    if errors.is_empty() {
+        errors.push(t("ssh.no_key").into());
+    }
     bail!(tf("ssh.auth_failed", &[("err", &errors.join("; "))]))
 }
 
 /// One step of "Test connection": 0 DNS, 1 TCP, 2 SSH handshake + host key, 3 authentication.
 /// `ok: None` = running.
 #[derive(Clone, Debug)]
-pub struct TestStep { pub idx: u8, pub ok: Option<bool>, pub ms: u128, pub detail: String }
+pub struct TestStep {
+    pub idx: u8,
+    pub ok: Option<bool>,
+    pub ms: u128,
+    pub detail: String,
+}
 
 /// Diagnose a target step by step (no pooling, no jump/proxy shortcuts: the first hop is tested
 /// directly). Each step is bounded by `secs`. Host-key trust and auth prompts go through `prompts`.
-pub async fn test_connection(tg: &SshTarget, prompts: &Prompts, secs: u64, tx: flume::Sender<TestStep>) {
+pub async fn test_connection(
+    tg: &SshTarget,
+    prompts: &Prompts,
+    secs: u64,
+    tx: flume::Sender<TestStep>,
+) {
     use std::time::Instant;
-    let send = |idx: u8, ok: Option<bool>, ms: u128, detail: String| { let _ = tx.send(TestStep { idx, ok, ms, detail }); };
+    let send = |idx: u8, ok: Option<bool>, ms: u128, detail: String| {
+        let _ = tx.send(TestStep {
+            idx,
+            ok,
+            ms,
+            detail,
+        });
+    };
     let lim = Duration::from_secs(secs.max(1));
     let to = |what: &str| tf("ssh.test_timeout", &[("what", &what), ("secs", &secs)]);
     // 1. DNS. A proxied hop lets the proxy resolve the name, so a local lookup failure is not fatal.
@@ -488,28 +887,55 @@ pub async fn test_connection(tg: &SshTarget, prompts: &Prompts, secs: u64, tx: f
         Ok(v) => v,
     };
     let direct_addr = if via.is_some() {
-        let via_detail = if tg.host.parse::<std::net::IpAddr>().is_ok() { t("ssh.proxy_ip") } else { t("ssh.proxy_dns") };
+        let via_detail = if tg.host.parse::<std::net::IpAddr>().is_ok() {
+            t("ssh.proxy_ip")
+        } else {
+            t("ssh.proxy_dns")
+        };
         send(0, Some(true), t0.elapsed().as_millis(), via_detail.into());
         None
     } else {
-        let addrs = match tokio::time::timeout(lim, tokio::net::lookup_host((tg.host.as_str(), tg.port))).await {
-            Err(_) => return send(0, Some(false), t0.elapsed().as_millis(), to("DNS")),
-            Ok(Err(e)) => return send(0, Some(false), t0.elapsed().as_millis(), format!("{e}")),
-            Ok(Ok(a)) => a.collect::<Vec<_>>(),
+        let addrs =
+            match tokio::time::timeout(lim, tokio::net::lookup_host((tg.host.as_str(), tg.port)))
+                .await
+            {
+                Err(_) => return send(0, Some(false), t0.elapsed().as_millis(), to("DNS")),
+                Ok(Err(e)) => {
+                    return send(0, Some(false), t0.elapsed().as_millis(), format!("{e}"))
+                }
+                Ok(Ok(a)) => a.collect::<Vec<_>>(),
+            };
+        let Some(addr) = addrs.first().copied() else {
+            return send(
+                0,
+                Some(false),
+                t0.elapsed().as_millis(),
+                t("ssh.test_no_address").into(),
+            );
         };
-        let Some(addr) = addrs.first().copied() else { return send(0, Some(false), t0.elapsed().as_millis(), t("ssh.test_no_address").into()) };
-        send(0, Some(true), t0.elapsed().as_millis(), addr.ip().to_string());
+        send(
+            0,
+            Some(true),
+            t0.elapsed().as_millis(),
+            addr.ip().to_string(),
+        );
         Some(addr)
     };
     // 2. TCP
     send(1, None, 0, String::new());
     let t1 = Instant::now();
     let tcp = match via {
-        Some(p) => tokio::time::timeout(lim, crate::proxy::connect(&p, &tg.host, tg.port)).await.map(|r| r.map_err(|e| format!("{e:#}"))),
-        None => tokio::time::timeout(lim, tokio::net::TcpStream::connect(direct_addr.unwrap())).await.map(|r| r.map_err(|e| match e.kind() {
-            std::io::ErrorKind::ConnectionRefused => t("ssh.test_refused").to_string(),
-            _ => e.to_string(),
-        })),
+        Some(p) => tokio::time::timeout(lim, crate::proxy::connect(&p, &tg.host, tg.port))
+            .await
+            .map(|r| r.map_err(|e| format!("{e:#}"))),
+        None => tokio::time::timeout(lim, tokio::net::TcpStream::connect(direct_addr.unwrap()))
+            .await
+            .map(|r| {
+                r.map_err(|e| match e.kind() {
+                    std::io::ErrorKind::ConnectionRefused => t("ssh.test_refused").to_string(),
+                    _ => e.to_string(),
+                })
+            }),
     };
     let tcp = match tcp {
         Err(_) => return send(1, Some(false), t1.elapsed().as_millis(), to("TCP")),
@@ -517,21 +943,61 @@ pub async fn test_connection(tg: &SshTarget, prompts: &Prompts, secs: u64, tx: f
         Ok(Ok(s)) => s,
     };
     let _ = tcp.set_nodelay(true);
-    send(1, Some(true), t1.elapsed().as_millis(), direct_addr.map(|a| a.to_string()).unwrap_or_else(|| format!("{}:{}", tg.host, tg.port)));
+    send(
+        1,
+        Some(true),
+        t1.elapsed().as_millis(),
+        direct_addr
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| format!("{}:{}", tg.host, tg.port)),
+    );
     // 3. SSH handshake + host key (an unknown key is offered for trust through the normal prompt)
     send(2, None, 0, String::new());
     let t2 = Instant::now();
     let failure = Arc::new(std::sync::Mutex::new(None));
     let seen: Arc<std::sync::Mutex<Option<String>>> = Default::default();
-    let cfg = Arc::new(client::Config { inactivity_timeout: None, preferred: preferred(tg), ..Default::default() });
-    let handler = Handler { host: tg.host.clone(), port: tg.port, known_hosts: tg.known_hosts.clone(), prompt: prompts.hostkey.clone(), failure: failure.clone(), forwards: Default::default(), seen: seen.clone() };
+    let cfg = Arc::new(client::Config {
+        inactivity_timeout: None,
+        preferred: preferred(tg),
+        ..Default::default()
+    });
+    let handler = Handler {
+        host: tg.host.clone(),
+        port: tg.port,
+        known_hosts: tg.known_hosts.clone(),
+        prompt: prompts.hostkey.clone(),
+        failure: failure.clone(),
+        forwards: Default::default(),
+        seen: seen.clone(),
+    };
     // the host-key prompt may wait for the user: allow it beyond the step limit
-    let mut h = match tokio::time::timeout(Duration::from_secs(120), client::connect_stream(cfg, tcp, handler)).await {
+    let mut h = match tokio::time::timeout(
+        Duration::from_secs(120),
+        client::connect_stream(cfg, tcp, handler),
+    )
+    .await
+    {
         Err(_) => return send(2, Some(false), t2.elapsed().as_millis(), to("SSH")),
-        Ok(Err(e)) => return send(2, Some(false), t2.elapsed().as_millis(), failure.lock().unwrap().clone().unwrap_or_else(|| format!("{e}"))),
+        Ok(Err(e)) => {
+            return send(
+                2,
+                Some(false),
+                t2.elapsed().as_millis(),
+                failure
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_else(|| format!("{e}")),
+            )
+        }
         Ok(Ok(h)) => h,
     };
-    send(2, Some(true), t2.elapsed().as_millis(), seen.lock().unwrap().clone().unwrap_or_default());
+    send(
+        2,
+        Some(true),
+        t2.elapsed().as_millis(),
+        seen.lock().unwrap().clone().unwrap_or_default(),
+    );
     // 4. authentication
     send(3, None, 0, String::new());
     let t3 = Instant::now();
@@ -544,7 +1010,8 @@ pub async fn test_connection(tg: &SshTarget, prompts: &Prompts, secs: u64, tx: f
 }
 
 /// Connection reuse (PRD: multiplexing): one SSH connection per user@host:port (+jump chain).
-static POOL: std::sync::LazyLock<tokio::sync::Mutex<HashMap<String, std::sync::Weak<Conn>>>> = std::sync::LazyLock::new(Default::default);
+static POOL: std::sync::LazyLock<tokio::sync::Mutex<HashMap<String, std::sync::Weak<Conn>>>> =
+    std::sync::LazyLock::new(Default::default);
 pub static REUSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 /// Session-only ls/grep colors. Does not rewrite remote shell rc files.
 pub static STYLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -582,14 +1049,22 @@ exec bash --rcfile "$f" -i
 
 /// A live pooled connection for this target, if one exists. Never connects.
 pub async fn pooled(t: &SshTarget) -> Option<Arc<Conn>> {
-    POOL.lock().await.get(&t.pool_key()).and_then(|w| w.upgrade()).filter(|c| !c.is_closed())
+    POOL.lock()
+        .await
+        .get(&t.pool_key())
+        .and_then(|w| w.upgrade())
+        .filter(|c| !c.is_closed())
 }
 
 pub async fn connect_shared(t: &SshTarget, prompts: &Prompts) -> Result<(Arc<Conn>, bool)> {
     let key = t.pool_key();
     let mut pool = POOL.lock().await;
     if REUSE.load(Ordering::Relaxed) {
-        if let Some(c) = pool.get(&key).and_then(|w| w.upgrade()) { if !c.is_closed() { return Ok((c, true)); } }
+        if let Some(c) = pool.get(&key).and_then(|w| w.upgrade()) {
+            if !c.is_closed() {
+                return Ok((c, true));
+            }
+        }
     }
     let c = connect(t, prompts).await?;
     pool.insert(key, Arc::downgrade(&c));
@@ -598,7 +1073,8 @@ pub async fn connect_shared(t: &SshTarget, prompts: &Prompts) -> Result<(Arc<Con
 
 /// Runtime knobs set from the settings page (ssh.keepalive_secs / connect_timeout_secs / host_key_policy).
 pub static KEEPALIVE_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(30);
-pub static CONNECT_TIMEOUT_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(15);
+pub static CONNECT_TIMEOUT_SECS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(15);
 /// 0 = ask on unknown keys (TOFU prompt), 1 = strict (reject unknown), 2 = accept-new (save without asking).
 pub static HOST_KEY_POLICY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
@@ -612,10 +1088,21 @@ pub static POLICY_ENDPOINT: StdMutex<Option<(u16, String)>> = StdMutex::new(None
 
 /// Start connecting in the background and return the Session immediately (non-blocking).
 /// Connection progress/errors are shown in the terminal and in `Session::conn_error`.
-pub fn spawn_ssh(rt: &tokio::runtime::Handle, target: SshTarget, size: Size, prompts: Prompts) -> Arc<Session> {
+pub fn spawn_ssh(
+    rt: &tokio::runtime::Handle,
+    target: SshTarget,
+    size: Size,
+    prompts: Prompts,
+) -> Arc<Session> {
     let (session, out_tx, from_ui) = Session::new(size);
     let s = session.clone();
-    let _ = out_tx.send(format!("{}\r\n", tf("ssh.connecting", &[("target", &target.label())])).into_bytes());
+    let _ = out_tx.send(
+        format!(
+            "{}\r\n",
+            tf("ssh.connecting", &[("target", &target.label())])
+        )
+        .into_bytes(),
+    );
     rt.spawn(async move {
         let mut attempt = 0u32;
         loop {
@@ -655,12 +1142,28 @@ fn is_fatal(e: &anyhow::Error) -> bool {
     m.contains(t("ssh.user_rejected")) || m.contains("known_hosts") || m.starts_with(auth.trim())
 }
 
-enum ShellEnd { Exited, Lost, UiGone }
+enum ShellEnd {
+    Exited,
+    Lost,
+    UiGone,
+}
 
-async fn run_shell(target: &SshTarget, prompts: &Prompts, s: &Arc<Session>, out_tx: &flume::Sender<Vec<u8>>, from_ui: &flume::Receiver<BackendMsg>, reconnect: bool) -> Result<ShellEnd> {
+async fn run_shell(
+    target: &SshTarget,
+    prompts: &Prompts,
+    s: &Arc<Session>,
+    out_tx: &flume::Sender<Vec<u8>>,
+    from_ui: &flume::Receiver<BackendMsg>,
+    reconnect: bool,
+) -> Result<ShellEnd> {
     let (conn, reused) = connect_shared(target, prompts).await?;
-    if reused { let _ = out_tx.send(format!("{}\r\n", t("ssh.reused")).into_bytes()); }
-    if reconnect { let _ = out_tx.send(format!("\x1b[32m[ssh] {}\x1b[0m\r\n", t("ssh.reconnected")).into_bytes()); }
+    if reused {
+        let _ = out_tx.send(format!("{}\r\n", t("ssh.reused")).into_bytes());
+    }
+    if reconnect {
+        let _ =
+            out_tx.send(format!("\x1b[32m[ssh] {}\x1b[0m\r\n", t("ssh.reconnected")).into_bytes());
+    }
     // remote history on a separate exec channel (read-only, best effort)
     if s.history_seed.lock().unwrap().is_none() {
         if let Ok((_, body)) = conn.exec(HISTORY_CMD, Duration::from_secs(3)).await {
@@ -671,22 +1174,66 @@ async fn run_shell(target: &SshTarget, prompts: &Prompts, s: &Arc<Session>, out_
     if target.remote_hooks && !reused {
         let ep = POLICY_ENDPOINT.lock().unwrap().clone();
         if let Some((lport, token)) = ep {
-            match conn.remote_forward("127.0.0.1", 0, "127.0.0.1", lport).await {
+            match conn
+                .remote_forward("127.0.0.1", 0, "127.0.0.1", lport)
+                .await
+            {
                 Ok(rport) => {
-                    let host = if target.host.is_empty() { target.label() } else { target.host.clone() };
+                    let host = if target.host.is_empty() {
+                        target.label()
+                    } else {
+                        target.host.clone()
+                    };
                     let body = serde_json::json!({"url": format!("http://127.0.0.1:{rport}"), "token": token, "pid": 0, "host": host}).to_string();
-                    let ok = conn.write_file(".local/share/shellax/policy-endpoint.json", body.as_bytes()).await.is_ok();
-                    let _ = out_tx.send(format!("\x1b[2m[shellax] {}\x1b[0m\r\n", tf(if ok { "ssh.remote_hooks_on" } else { "ssh.remote_hooks_write_failed" }, &[("port", &rport)])).into_bytes());
+                    let ok = conn
+                        .write_file(".local/share/shellax/policy-endpoint.json", body.as_bytes())
+                        .await
+                        .is_ok();
+                    let _ = out_tx.send(
+                        format!(
+                            "\x1b[2m[shellax] {}\x1b[0m\r\n",
+                            tf(
+                                if ok {
+                                    "ssh.remote_hooks_on"
+                                } else {
+                                    "ssh.remote_hooks_write_failed"
+                                },
+                                &[("port", &rport)]
+                            )
+                        )
+                        .into_bytes(),
+                    );
                 }
-                Err(e) => { let _ = out_tx.send(format!("\x1b[33m[shellax] {}\x1b[0m\r\n", tf("ssh.remote_hooks_failed", &[("err", &e)])).into_bytes()); }
+                Err(e) => {
+                    let _ = out_tx.send(
+                        format!(
+                            "\x1b[33m[shellax] {}\x1b[0m\r\n",
+                            tf("ssh.remote_hooks_failed", &[("err", &e)])
+                        )
+                        .into_bytes(),
+                    );
+                }
             }
         }
     }
     let ch = conn.handle.channel_open_session().await?;
-    if target.agent_forward { let _ = ch.agent_forward(false).await; }
-    if target.remote_hooks { let _ = ch.set_env(false, "SHELLAX_HOST", target.host.clone()).await; }
+    if target.agent_forward {
+        let _ = ch.agent_forward(false).await;
+    }
+    if target.remote_hooks {
+        let _ = ch.set_env(false, "SHELLAX_HOST", target.host.clone()).await;
+    }
     let sz = s.size();
-    ch.request_pty(false, "xterm-256color", sz.cols as u32, sz.rows as u32, 0, 0, &[]).await?;
+    ch.request_pty(
+        false,
+        "xterm-256color",
+        sz.cols as u32,
+        sz.rows as u32,
+        0,
+        0,
+        &[],
+    )
+    .await?;
     match &target.tmux {
         // reattach (or create) the persistent session; fall back to a login shell without tmux
         Some(name) => ch.exec(false, tmux_command(name)).await?,
@@ -696,7 +1243,9 @@ async fn run_shell(target: &SshTarget, prompts: &Prompts, s: &Arc<Session>, out_
     let (mut rd, wr) = ch.split();
     s.connected.store(true, Ordering::Release);
     *s.conn_error.lock().unwrap() = None;
-    if !reconnect { let _ = out_tx.send(b"\x1b[2K\r".to_vec()); }
+    if !reconnect {
+        let _ = out_tx.send(b"\x1b[2K\r".to_vec());
+    }
     let mut exited = false;
     loop {
         tokio::select! {

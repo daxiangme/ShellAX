@@ -6,10 +6,25 @@ use ssh_term_proto::doc::{id_text, Mongo};
 #[test]
 #[ignore]
 fn mongo_find_edit() {
-    let Some(a) = std::env::var("SHELLAX_TEST_MONGO").ok().filter(|v| !v.is_empty()) else { eprintln!("SHELLAX_TEST_MONGO not set"); return };
+    let Some(a) = std::env::var("SHELLAX_TEST_MONGO")
+        .ok()
+        .filter(|v| !v.is_empty())
+    else {
+        eprintln!("SHELLAX_TEST_MONGO not set");
+        return;
+    };
     let (h, p) = a.rsplit_once(':').unwrap();
-    let c = DbConn { kind: DbKind::Mongodb, host: h.into(), port: p.parse().ok(), ..Default::default() };
-    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+    let c = DbConn {
+        kind: DbKind::Mongodb,
+        host: h.into(),
+        port: p.parse().ok(),
+        ..Default::default()
+    };
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
     rt.block_on(async {
         let m = Mongo::open(&c, None, None).await.unwrap();
         assert!(m.version.starts_with('7'));
