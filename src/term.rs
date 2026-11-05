@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term};
 
 /// Scrollback lines for new sessions (settings: terminal.scrollback).
@@ -416,11 +417,19 @@ impl Session {
         let mut out = String::new();
         for l in 0..g.screen_lines() {
             let row = &g[Line(l as i32)];
-            let mut line: String = (0..g.columns())
-                .map(|c| row[Column(c)].c)
-                .filter(|c| *c != '\0')
-                .collect();
-            line.truncate(line.trim_end().len());
+            let mut line = String::new();
+            for col in 0..g.columns() {
+                let cell = &row[Column(col)];
+                if cell
+                    .flags
+                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                {
+                    continue;
+                }
+                line.push(if cell.c == '\0' { ' ' } else { cell.c });
+            }
+            let end = line.trim_end().len();
+            line.truncate(end);
             out.push_str(&line);
             out.push('\n');
         }

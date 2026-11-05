@@ -13,6 +13,7 @@ pub mod dev;
 pub mod fileinfo;
 pub mod gen;
 pub mod history;
+pub mod net;
 pub mod num;
 pub mod pinyin;
 pub mod text;
@@ -453,6 +454,11 @@ pub fn out_fit(id: &str) -> bool {
             | "timestamp"
             | "date_calc"
             | "workday"
+            | "ip_lookup"
+            | "ifaces"
+            | "cidr"
+            | "ip_overlap"
+            | "ip_convert"
             | "world_clock"
             | "tz_convert"
             | "pdf_merge"
@@ -499,6 +505,7 @@ pub const CATEGORIES: &[(&str, &str)] = &[
     ("unit", "tools.cat_unit"),
     ("text", "tools.cat_text"),
     ("dev", "tools.cat_dev"),
+    ("net", "tools.cat_net"),
     ("crypto", "tools.cat_crypto"),
     ("time", "tools.cat_time"),
     ("gen", "tools.cat_gen"),
@@ -547,6 +554,11 @@ pub fn icon_of(id: &str) -> &'static str {
         "html" => "code-xml",
         "naming" => "case-sensitive",
         "radix" => "binary",
+        "ip_lookup" => "globe",
+        "ifaces" => "ethernet-port",
+        "cidr" => "calculator",
+        "ip_overlap" => "git-compare",
+        "ip_convert" => "arrow-left-right",
         "sql" => "database",
         "websocket" => "radio-tower",
         // 加解密与编码
@@ -923,6 +935,61 @@ pub fn builtin() -> Vec<ToolSpec> {
             live: false,
             ..spec("websocket", "dev", "websocket ws wss test", vec![], vec![])
         },
+        // 网络
+        ToolSpec {
+            heavy: true,
+            live: false,
+            ..spec(
+                "ip_lookup",
+                "net",
+                "ip address geo location whois public",
+                vec![F::text("input", t("tools.f_ip"))],
+                vec![F::toggle("mine", t("tools.net_mine"), false)],
+            )
+        },
+        ToolSpec {
+            live: false,
+            ..spec(
+                "ifaces",
+                "net",
+                "local interface address nic",
+                vec![],
+                vec![],
+            )
+        },
+        spec(
+            "cidr",
+            "net",
+            "cidr subnet mask calculator",
+            vec![F::text("input", t("tools.f_cidr")).with_default("192.168.1.0/24")],
+            vec![],
+        ),
+        spec(
+            "ip_overlap",
+            "net",
+            "cidr overlap contains subnet",
+            vec![
+                F::text("a", t("tools.net_net_a")).with_default("10.0.0.0/8"),
+                F::text("b", t("tools.net_net_b")).with_default("10.1.0.0/16"),
+            ],
+            vec![],
+        ),
+        spec(
+            "ip_convert",
+            "net",
+            "netmask prefix integer ipv4",
+            vec![F::text("input", t("tools.f_value")).with_default("24")],
+            vec![F::select(
+                "mode",
+                t("tools.f_mode"),
+                &[
+                    ("prefix_to_mask", "tools.net_prefix_to_mask"),
+                    ("mask_to_prefix", "tools.net_mask_to_prefix"),
+                    ("ipv4_to_int", "tools.net_ipv4_to_int"),
+                    ("int_to_ipv4", "tools.net_int_to_ipv4"),
+                ],
+            )],
+        ),
         // 加密编码
         spec("md5", "crypto", "md5 hash", vec![short(3, 10)], vec![]),
         ToolSpec {
@@ -1361,6 +1428,11 @@ pub fn run(id: &str, a: &Args) -> Result<Output> {
             dev::radix_rows(a.get("input"), a.get("from"))?,
             RowFmt::Pad(4),
         ),
+        "ip_lookup" => net::lookup_rows(a)?,
+        "ifaces" => net::iface_rows(),
+        "cidr" => net::cidr_rows(a)?,
+        "ip_overlap" => net::overlap_rows(a)?,
+        "ip_convert" => net::convert_rows(a)?,
         "md5" => Output::kv(crypto::md5_rows(a.get("input")), RowFmt::Colon),
         "file_md5" => {
             let p = a
@@ -1637,11 +1709,11 @@ mod tests {
     #[test]
     fn registry_complete() {
         let all = builtin();
-        assert_eq!(all.len(), 44);
+        assert_eq!(all.len(), 49);
         let mut ids: Vec<_> = all.iter().map(|s| s.id.clone()).collect();
         ids.sort();
         ids.dedup();
-        assert_eq!(ids.len(), 44, "ids unique");
+        assert_eq!(ids.len(), 49, "ids unique");
         for s in &all {
             assert!(CATEGORIES.iter().any(|c| c.0 == s.cat), "{}", s.id);
             assert!(!s.name.starts_with("tools."), "missing name {}", s.id);

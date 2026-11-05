@@ -16,6 +16,500 @@ use crate::termview::Spec;
 use crate::theme::{c, cur};
 use crate::ui::{self, icon, IconName};
 use crate::{chrome, config, HostDrag, Root};
+use ssh_term_proto::agent::AgentState;
+
+struct AgentDockRow {
+    pane: Entity<crate::termview::TermView>,
+    title: String,
+    status: String,
+    ago: String,
+    context: String,
+    used: u64,
+    window: u64,
+    working: bool,
+    needs: bool,
+    kind: String,
+    /// This conversation is the one open in the terminal.
+    current: bool,
+}
+
+fn agent_groups(root: &Root, cx: &gpui::App) -> Vec<(String, Vec<AgentDockRow>)> {
+    let mut groups: Vec<(String, Vec<AgentDockRow>)> = Vec::new();
+    for tab in &root.tabs {
+        for pane in tab.layout.leaves() {
+            let v = pane.read(cx);
+            let screen = v
+                .session
+                .as_ref()
+                .map(|s| s.screen_text())
+                .unwrap_or_default();
+            let board = ssh_term_proto::agent::parse_claude_agents(&screen);
+            let claude = v.agent_id().as_deref() == Some("claude") || board.is_some();
+            if let Some(cwd) = board
+                .as_ref()
+                .and_then(|b| b.cwd.clone())
+                .filter(|c| !c.is_empty())
+                .or_else(|| claude.then(|| v.shell_cwd()).flatten())
+                .or_else(|| bound_cwd(pane.entity_id()))
+            {
+                bind_cwd(pane.entity_id(), cwd);
+            }
+            // A short Claude chat has no "Claude" header and only a few lines. That is not a shell.
+            if !claude && !board.is_some() && powershell_prompt(&screen) {
+                unbind_cwd(pane.entity_id());
+                forget_screen(pane.entity_id());
+                clear_open(pane.entity_id());
+            }
+            if let Some(board) = board.as_ref().filter(|b| !b.sessions.is_empty()) {
+                let cwd = board
+                    .cwd
+                    .clone()
+                    .or_else(|| v.shell_cwd())
+                    .or_else(|| bound_cwd(pane.entity_id()))
+                    .unwrap_or_default();
+                if !cwd.is_empty() {
+                    bind_cwd(pane.entity_id(), cwd.clone());
+                }
+                remember_screen(
+                    pane.entity_id(),
+                    SavedBoard {
+                        group: if cwd.is_empty() {
+                            project_label(v)
+                        } else {
+                            local_project(&cwd)
+                        },
+                        cwd,
+                        sessions: board
+                            .sessions
+                            .iter()
+                            .map(|s| SavedSession {
+                                title: s.title.clone(),
+                                status: s.status.clone(),
+                                ago: s.ago.clone(),
+                                needs: s.needs,
+                            })
+                            .collect(),
+                    },
+                );
+            }
+            if let Some(cwd) = bound_cwd(pane.entity_id()) {
+                let records = ssh_term_proto::agent::claude_records_for(&cwd);
+                if !records.is_empty() {
+                    let caption = v.agent_caption();
+                    let rows = records
+                        .into_iter()
+                        .map(|r| record_row(pane.clone(), &caption, r))
+                        .collect();
+                    push_group(&mut groups, local_project(&cwd), rows);
+                    continue;
+                }
+            }
+            if let Some(saved) = remembered_screen(pane.entity_id()) {
+                let caption = v.agent_caption();
+                let rows = saved
+                    .sessions
+                    .iter()
+                    .map(|s| AgentDockRow {
+                        pane: pane.clone(),
+                        title: s.title.clone(),
+                        status: s.status.clone(),
+                        ago: s.ago.clone(),
+                        context: {
+                            let label = ssh_term_proto::agent::claude_context_label(&s.title, &saved.cwd)
+                                .unwrap_or_default();
+                            context_tip(&label)
+                        },
+                        used: 0,
+                        window: 0,
+                        working: false,
+                        needs: s.needs,
+                        kind: "claude".into(),
+                        current: row_current(pane.entity_id(), &s.title, &caption),
+                    })
+                    .collect();
+                push_group(&mut groups, saved.group, rows);
+                continue;
+            }
+            if let Some(board) = board.as_ref().filter(|b| !b.sessions.is_empty()) {
+                let group = board
+                    .cwd
+                    .as_deref()
+                    .map(local_project)
+                    .unwrap_or_else(|| project_label(v));
+                let cwd = board
+                    .cwd
+                    .clone()
+                    .or_else(|| v.shell_cwd())
+                    .unwrap_or_default();
+                let rows = board
+                    .sessions
+                    .iter()
+                    .map(|s| AgentDockRow {
+                        pane: pane.clone(),
+                        title: s.title.clone(),
+                        status: s.status.clone(),
+                        ago: s.ago.clone(),
+                        context: {
+                            let label = ssh_term_proto::agent::claude_context_label(&s.title, &cwd)
+                                .unwrap_or_default();
+                            context_tip(&label)
+                        },
+                        used: 0,
+                        window: 0,
+                        working: false,
+                        needs: s.needs,
+                        kind: "claude".into(),
+                        current: false,
+                    })
+                    .collect();
+                push_group(&mut groups, group, rows);
+                continue;
+            }
+            if v.agent_id().is_none() || fleet_title(&v.agent_caption()) {
+                continue;
+            }
+            let caption = v.agent_caption();
+            let kind = v.agent_id().unwrap_or_else(|| "claude".into());
+            let (used, window) = (0u64, 0u64);
+            let row = AgentDockRow {
+                pane: pane.clone(),
+                title: caption,
+                status: String::new(),
+                ago: ago_label(v.agent_started()),
+                context: String::new(),
+                used,
+                window,
+                working: v
+                    .agent_label()
+                    .is_some_and(|(_, st)| st == AgentState::Working),
+                needs: v
+                    .agent_label()
+                    .is_some_and(|(_, st)| st == AgentState::Blocked),
+                kind,
+                current: true,
+            };
+            push_group(&mut groups, project_label(v), vec![row]);
+        }
+    }
+    groups
+}
+
+fn record_row(
+    pane: Entity<crate::termview::TermView>,
+    caption: &str,
+    rec: ssh_term_proto::agent::ClaudeRecord,
+) -> AgentDockRow {
+    let context = if rec.window > 0 && rec.used > 0 {
+        format!(
+            "已用 {} / 共 {}",
+            ssh_term_proto::agent::format_tokens(rec.used),
+            ssh_term_proto::agent::format_tokens(rec.window)
+        )
+    } else {
+        String::new()
+    };
+    AgentDockRow {
+        pane: pane.clone(),
+        current: row_current(pane.entity_id(), &rec.name, caption),
+        title: rec.name,
+        status: rec.status,
+        ago: String::new(),
+        context,
+        used: rec.used,
+        window: rec.window,
+        working: rec.working,
+        needs: rec.needs,
+        kind: "claude".into(),
+    }
+}
+
+fn context_tip(label: &str) -> String {
+    if label.is_empty() {
+        String::new()
+    } else {
+        format!("上下文 {label}")
+    }
+}
+
+/// A real PowerShell / cmd prompt. A Claude chat also ends with `>`, so that alone is not enough.
+fn powershell_prompt(screen: &str) -> bool {
+    if ssh_term_proto::agent::parse_claude_agents(screen).is_some() {
+        return false;
+    }
+    if screen.to_lowercase().contains("claude") {
+        return false;
+    }
+    screen.lines().rev().any(|line| {
+        let line = line.trim();
+        line.starts_with("PS ")
+            || line.starts_with("PS>")
+            || (line.contains('>') && line.contains(":\\"))
+    })
+}
+
+#[derive(Clone)]
+struct SavedSession {
+    title: String,
+    status: String,
+    ago: String,
+    needs: bool,
+}
+
+#[derive(Clone)]
+struct SavedBoard {
+    group: String,
+    cwd: String,
+    sessions: Vec<SavedSession>,
+}
+
+fn remember_screen(id: gpui::EntityId, board: SavedBoard) {
+    screens().lock().unwrap().insert(id, board);
+}
+
+fn remembered_screen(id: gpui::EntityId) -> Option<SavedBoard> {
+    screens().lock().unwrap().get(&id).cloned()
+}
+
+fn forget_screen(id: gpui::EntityId) {
+    screens().lock().unwrap().remove(&id);
+}
+
+fn screens() -> &'static std::sync::Mutex<std::collections::HashMap<gpui::EntityId, SavedBoard>> {
+    static MEM: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<gpui::EntityId, SavedBoard>>,
+    > = std::sync::OnceLock::new();
+    MEM.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn bind_cwd(id: gpui::EntityId, cwd: String) {
+    if !cwd.trim().is_empty() {
+        bindings().lock().unwrap().insert(id, cwd);
+    }
+}
+
+fn bound_cwd(id: gpui::EntityId) -> Option<String> {
+    bindings().lock().unwrap().get(&id).cloned()
+}
+
+fn unbind_cwd(id: gpui::EntityId) {
+    bindings().lock().unwrap().remove(&id);
+}
+
+fn bindings() -> &'static std::sync::Mutex<std::collections::HashMap<gpui::EntityId, String>> {
+    static MEM: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<gpui::EntityId, String>>,
+    > = std::sync::OnceLock::new();
+    MEM.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn mark_open(id: gpui::EntityId, title: &str) {
+    opened().lock().unwrap().insert(id, title.to_string());
+}
+
+fn opened_title(id: gpui::EntityId) -> Option<String> {
+    opened().lock().unwrap().get(&id).cloned()
+}
+
+fn clear_open(id: gpui::EntityId) {
+    opened().lock().unwrap().remove(&id);
+}
+
+fn opened() -> &'static std::sync::Mutex<std::collections::HashMap<gpui::EntityId, String>> {
+    static MEM: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<gpui::EntityId, String>>,
+    > = std::sync::OnceLock::new();
+    MEM.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn row_current(id: gpui::EntityId, title: &str, caption: &str) -> bool {
+    if let Some(open) = opened_title(id) {
+        return open == title;
+    }
+    titles_match(caption, title)
+}
+
+fn titles_match(caption: &str, title: &str) -> bool {
+    let caption = caption.trim();
+    let title = title.trim();
+    if caption.is_empty() || title.is_empty() || fleet_title(caption) {
+        return false;
+    }
+    caption.eq_ignore_ascii_case(title)
+        || caption.contains(title)
+        || title.contains(caption)
+}
+
+fn session_title(id: usize, text: String, working: bool) -> AnyElement {
+    let title = ui::row_title(text);
+    if working && !crate::motion::reduced() {
+        title
+            .with_animation(
+                ("agent-title", id),
+                gpui::Animation::new(std::time::Duration::from_millis(1400))
+                    .repeat()
+                    .with_easing(|t| (t * std::f32::consts::PI).sin()),
+                |d, t| d.opacity(0.28 + 0.72 * t),
+            )
+            .into_any_element()
+    } else {
+        title.into_any_element()
+    }
+}
+
+fn context_color_frac(frac: f32) -> u32 {
+    let th = cur();
+    let n = (frac.clamp(0., 1.) * 100.).round() as u32;
+    if n >= 80 {
+        th.error
+    } else if n >= 50 {
+        th.warning
+    } else {
+        th.success
+    }
+}
+
+fn fleet_title(title: &str) -> bool {
+    let title = title.trim().to_lowercase();
+    title == "claude agents" || title.ends_with(" claude agents")
+}
+
+fn push_group(groups: &mut Vec<(String, Vec<AgentDockRow>)>, group: String, rows: Vec<AgentDockRow>) {
+    if let Some((_, have)) = groups.iter_mut().find(|(name, _)| name == &group) {
+        have.extend(rows);
+    } else {
+        groups.push((group, rows));
+    }
+}
+
+fn project_label(v: &crate::termview::TermView) -> String {
+    let cwd = v.shell_cwd();
+    match &v.spec {
+        Spec::Local => cwd
+            .as_deref()
+            .map(local_project)
+            .unwrap_or_else(|| t("sb.local").to_string()),
+        Spec::Ssh(target) => cwd
+            .as_deref()
+            .and_then(path_tail)
+            .unwrap_or_else(|| target.label()),
+    }
+}
+
+fn local_project(cwd: &str) -> String {
+    let mut path = std::path::PathBuf::from(cwd);
+    let leaf = path_tail(cwd).unwrap_or_else(|| cwd.to_string());
+    for _ in 0..12 {
+        if path.join(".git").exists() {
+            return path
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or(leaf);
+        }
+        if !path.pop() {
+            break;
+        }
+    }
+    leaf
+}
+
+fn path_tail(path: &str) -> Option<String> {
+    let path = path.trim_end_matches(['/', '\\']);
+    path.rsplit(['/', '\\'])
+        .next()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+fn agent_mark(kind: &str, _needs: bool) -> AnyElement {
+    match kind {
+        "codex" => pixel_icon(CODEX_ICON, 0x3DDC97, 0x0B6B45),
+        "grok" => pixel_icon(GROK_ICON, 0xF2F2F2, 0x1A1A1A),
+        _ => pixel_icon(CLAUDE_ICON, 0xF0B27A, 0xC46A3A),
+    }
+}
+
+/// Claude's session mark: the small orange creature from its agents list.
+const CLAUDE_ICON: &[&str] = &[
+    "..DDDDDDDDDDDDDDD....",
+    "..OOOOOOOOOOOOOOO....",
+    "..OOOOOOOOOOOOOOO....",
+    "..OOODOOOOOOOOOOO....",
+    "..OOO.OOOOOOOODOO....",
+    "DDOOODOOOOOOOOMOODD..",
+    "OOOOOOOOOOOOOOOOOOOD.",
+    "OOOOOOOOOOOOOOOOOOOD.",
+    "DDOOOOOOOOOOOOOOODDD.",
+    "..OOOOOOOOOOOOOOO....",
+    "..OOOOOOOOOOOOOOO....",
+    "...OO.OD....ODOO.....",
+    "...OO.OD....ODOO.....",
+    "....D.D.....D..D.....",
+];
+
+const CODEX_ICON: &[&str] = &[
+    "DDDDDDDD",
+    "DOOOOOOD",
+    "DO.OO.OD",
+    "DOOOOOOD",
+    "DOOOO.OD",
+    "DO.OOOOD",
+    "DOOOOOOD",
+    "DDDDDDDD",
+];
+
+const GROK_ICON: &[&str] = &[
+    ".DDDDDD.",
+    "DOOOOOOD",
+    "DOO.O.OD",
+    "DOOOOOOD",
+    "DO.OO.OD",
+    ".DDDDDD.",
+];
+
+fn pixel_icon(rows: &[&str], body: u32, ink: u32) -> AnyElement {
+    let h = rows.len() as f32;
+    let w = rows.iter().map(|r| r.chars().count()).max().unwrap_or(0) as f32;
+    let scale = (16. / h).min(16. / w).max(1.);
+    let mut icon = div()
+        .relative()
+        .w(px(w * scale))
+        .h(px(h * scale))
+        .flex_shrink_0();
+    for (y, row) in rows.iter().enumerate() {
+        for (x, ch) in row.chars().enumerate() {
+            let color = match ch {
+                'O' | 'M' => body,
+                'D' => ink,
+                _ => continue,
+            };
+            icon = icon.child(
+                div()
+                    .absolute()
+                    .left(px(x as f32 * scale))
+                    .top(px(y as f32 * scale))
+                    .size(px(scale))
+                    .bg(c(color)),
+            );
+        }
+    }
+    icon.into_any_element()
+}
+
+fn ago_label(started: Option<std::time::Instant>) -> String {
+    let Some(started) = started else {
+        return String::new();
+    };
+    let secs = started.elapsed().as_secs();
+    if secs < 60 {
+        "<1m".into()
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86_400)
+    }
+}
 
 pub(crate) fn action_tip(label: &str, binding: &str) -> String {
     if binding.is_empty() {
@@ -139,6 +633,15 @@ pub(crate) enum SbModal {
 /// Drag payload of the sidebar's right-edge resize handle.
 #[derive(Clone)]
 pub(crate) struct SbResize;
+
+/// Drag payload of the divider between the host list and the Agents split.
+#[derive(Clone)]
+pub(crate) struct AgentsResize;
+impl Render for AgentsResize {
+    fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
 impl Render for SbResize {
     fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
@@ -1074,7 +1577,7 @@ impl Root {
             });
             cx.notify();
         }));
-        let mut col = self.sb_frame(cx);
+        let mut col = card_layout::island("sidebar-hosts").flex_1().min_h_0();
         col = col
             .child(ui::panel_header(
                 self.tool.label(),
@@ -1372,8 +1875,242 @@ impl Root {
             );
         }
         let _ = searching;
-        let handle = self.sb_resize_handle(cx);
-        col.child(list).child(handle)
+        let width_handle = self.sb_resize_handle(cx);
+        let host = col.child(list);
+        let mut shell = div()
+            .id("sidebar-shell")
+            .relative()
+            .w(px(self.sb_width))
+            .h_full()
+            .flex()
+            .flex_col()
+            .on_drag_move(
+                cx.listener(|this, ev: &gpui::DragMoveEvent<SbResize>, _w, cx| {
+                    let w = (f32::from(ev.event.position.x - ev.bounds.left()) + 2.0)
+                        .clamp(180.0, 480.0);
+                    if (w - this.sb_width).abs() >= 1.0 {
+                        this.sb_width = w;
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_drag_move(
+                cx.listener(|this, ev: &gpui::DragMoveEvent<AgentsResize>, _w, cx| {
+                    let from_bottom = f32::from(ev.bounds.bottom() - ev.event.position.y);
+                    let h = from_bottom.clamp(96.0, 480.0);
+                    if (h - this.agents_h).abs() >= 1.0 {
+                        this.agents_h = h;
+                        this.agents_open = true;
+                        cx.notify();
+                    }
+                }),
+            )
+            .child(host);
+        if !remote_only {
+            shell = shell
+                .child(self.agents_split_handle(cx))
+                .child(self.agent_dock(cx));
+        }
+        shell.child(width_handle)
+    }
+
+    /// Horizontal divider above the Agents split. Drag it to change that pane's height.
+    fn agents_split_handle(&mut self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id("agents-split")
+            .h(px(card_layout::CARD_GAP))
+            .w_full()
+            .flex_shrink_0()
+            .cursor_row_resize()
+            .hover(|d| d.bg(c(cur().accent).opacity(0.35)))
+            .on_drag(AgentsResize, |d: &AgentsResize, _, _, cx| cx.new(|_| d.clone()))
+            .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _w, cx| {
+                if ev.click_count() >= 2 {
+                    this.agents_h = 200.0;
+                    cx.notify();
+                }
+            }))
+    }
+
+    /// Bottom of the host sidebar: an Agents button, and under it the open sessions.
+    fn agent_dock(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let groups = agent_groups(self, cx);
+        let open = self.agents_open;
+        let th = cur();
+        let n = groups.iter().map(|(_, rows)| rows.len()).sum::<usize>();
+        let mut footer = card_layout::island("sidebar-agents")
+            .flex_shrink_0()
+            .when(open, |d| d.h(px(self.agents_h)).min_h(px(96.)));
+        footer = footer.child(
+            div()
+                .id("agents-toggle")
+                .h(px(32.))
+                .px(px(ui::SP_2))
+                .flex()
+                .items_center()
+                .gap_2()
+                .cursor_pointer()
+                .hover(|s| s.bg(crate::theme::hover_bg()))
+                .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    this.agents_open = !this.agents_open;
+                    cx.stop_propagation();
+                    cx.notify();
+                }))
+                .child(icon(
+                    IconName::Sparkles,
+                    ui::IC_SM,
+                    c(if open { th.accent } else { th.overlay1 }),
+                ))
+                .child(
+                    div()
+                        .text_size(px(ui::fs_body()))
+                        .text_color(c(th.text))
+                        .child(t("sb.agents")),
+                )
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .text_size(px(ui::fs_caption()))
+                        .text_color(c(th.overlay1))
+                        .child(if n == 0 {
+                            String::new()
+                        } else {
+                            n.to_string()
+                        }),
+                )
+                .child(icon(
+                    if open {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    },
+                    ui::IC_XS,
+                    c(th.overlay1),
+                )),
+        );
+        if open {
+            let mut list = div()
+                .id("agent-dock-list")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .pb(px(ui::SP_2));
+            if groups.is_empty() {
+                list = list.child(
+                    div()
+                        .px(px(ui::SP_3))
+                        .py_2()
+                        .text_size(px(ui::fs_small()))
+                        .text_color(c(th.overlay1))
+                        .child(t("sb.agents_empty")),
+                );
+            }
+            for (gi, (group, rows)) in groups.into_iter().enumerate() {
+                list = list.child(
+                    div()
+                        .px(px(ui::SP_3))
+                        .pt(px(4.))
+                        .text_size(px(ui::fs_caption()))
+                        .text_color(c(th.overlay1))
+                        .child(group),
+                );
+                for (i, row) in rows.into_iter().enumerate() {
+                    let open_pane = row.pane;
+                    let needs = row.needs;
+                    let status = if !row.status.is_empty() {
+                        row.status.clone()
+                    } else if needs {
+                        t("sb.needs_you").to_string()
+                    } else {
+                        row.ago.clone()
+                    };
+                    let tip = if status.is_empty() {
+                        row.title.clone()
+                    } else {
+                        format!("{}\n{}", row.title, status)
+                    };
+                    let tip = if row.context.is_empty() {
+                        tip
+                    } else {
+                        format!("{tip}\n{}", row.context)
+                    };
+                    let working = row.working;
+                    let used = row.used;
+                    let window = row.window;
+                    let ring_tip = row.context.clone();
+                    let title_text = row.title.clone();
+                    let title = row.title.clone();
+                    let kind = row.kind.clone();
+                    let pane_id = open_pane.entity_id();
+                    let already = row.current;
+                    list = list.child(
+                        ui::list_row(("agent-dock", gi * 1000 + i), 0, row.current)
+                            .when(!status.is_empty(), |d| d.min_h(px(ui::row2_h())))
+                            .tooltip(ui::tip(tip))
+                            .on_click(cx.listener(move |this, _, w, cx| {
+                                this.focus_leaf(open_pane.clone(), w, cx);
+                                if already || kind != "claude" {
+                                    return;
+                                }
+                                mark_open(pane_id, &title);
+                                open_pane.update(cx, |v, cx| {
+                                    v.open_claude_session(title.clone(), cx);
+                                });
+                                cx.notify();
+                            }))
+                            .child(agent_mark(&row.kind, needs))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .justify_center()
+                                    .child(session_title(
+                                        gi * 1000 + i,
+                                        title_text,
+                                        working,
+                                    ))
+                                    .when(!status.is_empty(), |d| {
+                                        d.child(
+                                            div()
+                                                .min_w_0()
+                                                .whitespace_nowrap()
+                                                .overflow_hidden()
+                                                .text_ellipsis()
+                                                .text_size(px(ui::fs_caption()))
+                                                .line_height(px(ui::lh(ui::fs_caption())))
+                                                .text_color(c(if needs {
+                                                    th.error
+                                                } else {
+                                                    th.overlay1
+                                                }))
+                                                .child(status),
+                                        )
+                                    }),
+                            )
+                            .when(window > 0 && used > 0, |d| {
+                                let frac = used as f32 / window as f32;
+                                d.child(
+                                    div()
+                                        .id(("agent-ring", gi * 1000 + i))
+                                        .flex_shrink_0()
+                                        .size(px(16.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .tooltip(ui::tip(ring_tip))
+                                        .child(ui::ring(frac, c(context_color_frac(frac)))),
+                                )
+                            }),
+                    );
+                }
+            }
+            footer = footer.child(list);
+        }
+        footer.into_any_element()
     }
 
     /// Left tool-window frame: fixed width; the resize handle (`sb_resize_handle`) must be appended as the last child.

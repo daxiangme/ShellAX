@@ -918,6 +918,319 @@ impl Settings {
         Ok(())
     }
 
+    /// A copy of the settings file for another machine. Refuses if a secret field is present.
+    pub fn export_text(&self) -> anyhow::Result<String> {
+        let fresh = tidy_floats(&toml::to_string_pretty(self)?);
+        let value: toml::Value = toml::from_str(&fresh)?;
+        if let Some(path) = secret_field(&value, "") {
+            anyhow::bail!("refusing to export secret field {path}");
+        }
+        Ok(format!("# ShellAX settings export\n{fresh}"))
+    }
+}
+
+/// What an import will change. `next` is the settings to write after the user confirms.
+pub struct ImportPlan {
+    pub added_hosts: usize,
+    pub updated_hosts: usize,
+    pub kept_hosts: usize,
+    pub added_links: usize,
+    pub updated_links: usize,
+    pub kept_links: usize,
+    pub setting_changes: Vec<String>,
+    pub next: Settings,
+}
+
+pub fn plan_import(current: &Settings, incoming: &Settings) -> ImportPlan {
+    let mut next = incoming.clone();
+    let (hosts, added_hosts, updated_hosts, kept_hosts) =
+        merge_hosts(&current.hosts, &incoming.hosts);
+    next.hosts = hosts;
+    let (db, a, u, k) = merge_json_list(&current.db, &incoming.db);
+    next.db = db;
+    let (redis, a2, u2, k2) = merge_json_list(&current.redis, &incoming.redis);
+    next.redis = redis;
+    let (docker, a3, u3, k3) = merge_json_list(&current.docker, &incoming.docker);
+    next.docker = docker;
+    let (groups, _, _, _) = merge_groups(&current.groups, &incoming.groups);
+    next.groups = groups;
+    let mut setting_changes = Vec::new();
+    if let (Ok(a), Ok(b)) = (
+        toml::Value::try_from(current),
+        toml::Value::try_from(&next),
+    ) {
+        diff_settings("", &a, &b, &mut setting_changes);
+    }
+    ImportPlan {
+        added_hosts,
+        updated_hosts,
+        kept_hosts,
+        added_links: a + a2 + a3,
+        updated_links: u + u2 + u3,
+        kept_links: k + k2 + k3,
+        setting_changes,
+        next,
+    }
+}
+
+fn secret_field(v: &toml::Value, path: &str) -> Option<String> {
+    match v {
+        toml::Value::Table(t) => {
+            for (k, child) in t {
+                let p = if path.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{path}.{k}")
+                };
+                if matches!(
+                    k.to_ascii_lowercase().as_str(),
+                    "password" | "api_key" | "secret" | "access_token" | "private_key"
+                ) {
+                    return Some(p);
+                }
+                if let Some(found) = secret_field(child, &p) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        toml::Value::Array(items) => items.iter().find_map(|c| secret_field(c, path)),
+        _ => None,
+    }
+}
+
+fn host_key(h: &ssh_term_proto::hosts::HostEntry) -> String {
+    format!(
+        "{}|{}|{}",
+        h.host.trim().to_lowercase(),
+        h.port.unwrap_or(22),
+        h.user.as_deref().unwrap_or("").trim().to_lowercase()
+    )
+}
+
+fn merge_hosts(
+    local: &[ssh_term_proto::hosts::HostEntry],
+    incoming: &[ssh_term_proto::hosts::HostEntry],
+) -> (Vec<ssh_term_proto::hosts::HostEntry>, usize, usize, usize) {
+    let mut out = Vec::new();
+    let mut used = vec![false; local.len()];
+    let mut added = 0;
+    let mut updated = 0;
+    for inc in incoming {
+        if let Some(i) = local.iter().position(|h| host_key(h) == host_key(inc)) {
+            used[i] = true;
+            out.push(overlay_host(&local[i], inc));
+            updated += 1;
+        } else {
+            let mut h = inc.clone();
+            h.source = "config";
+            out.push(h);
+            added += 1;
+        }
+    }
+    let mut kept = 0;
+    for (i, h) in local.iter().enumerate() {
+        if !used[i] {
+            out.push(h.clone());
+            kept += 1;
+        }
+    }
+    (out, added, updated, kept)
+}
+
+fn take_owned(dst: &mut String, src: &str) {
+    if !src.trim().is_empty() {
+        *dst = src.to_string();
+    }
+}
+fn take_opt(dst: &mut Option<String>, src: &Option<String>) {
+    if let Some(s) = src {
+        if !s.trim().is_empty() {
+            *dst = Some(s.clone());
+        }
+    }
+}
+
+fn overlay_host(
+    local: &ssh_term_proto::hosts::HostEntry,
+    inc: &ssh_term_proto::hosts::HostEntry,
+) -> ssh_term_proto::hosts::HostEntry {
+    let mut h = local.clone();
+    take_owned(&mut h.name, &inc.name);
+    take_owned(&mut h.host, &inc.host);
+    take_opt(&mut h.user, &inc.user);
+    if inc.port.is_some() {
+        h.port = inc.port;
+    }
+    take_opt(&mut h.identity_file, &inc.identity_file);
+    take_opt(&mut h.group, &inc.group);
+    take_opt(&mut h.auth, &inc.auth);
+    take_opt(&mut h.jump, &inc.jump);
+    if !inc.tags.is_empty() {
+        h.tags = inc.tags.clone();
+    }
+    if inc.production {
+        h.production = true;
+    }
+    h.source = "config";
+    h
+}
+
+fn merge_json_list<T>(local: &[T], incoming: &[T]) -> (Vec<T>, usize, usize, usize)
+where
+    T: serde::Serialize + serde::de::DeserializeOwned + Clone,
+{
+    let to_val = |item: &T| serde_json::to_value(item).unwrap_or(serde_json::Value::Null);
+    let local_v: Vec<_> = local.iter().map(to_val).collect();
+    let incoming_v: Vec<_> = incoming.iter().map(to_val).collect();
+    let id = |v: &serde_json::Value| {
+        v.get("id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let mut out = Vec::new();
+    let mut used = vec![false; local_v.len()];
+    let mut added = 0;
+    let mut updated = 0;
+    for inc in &incoming_v {
+        let key = id(inc);
+        if !key.is_empty() {
+            if let Some(i) = local_v.iter().position(|h| id(h) == key) {
+                used[i] = true;
+                out.push(overlay_json(local_v[i].clone(), inc.clone()));
+                updated += 1;
+                continue;
+            }
+        }
+        out.push(inc.clone());
+        added += 1;
+    }
+    let mut kept = 0;
+    for (i, item) in local_v.iter().enumerate() {
+        if !used[i] {
+            out.push(item.clone());
+            kept += 1;
+        }
+    }
+    let parsed = out
+        .into_iter()
+        .filter_map(|v| serde_json::from_value(v).ok())
+        .collect();
+    (parsed, added, updated, kept)
+}
+
+fn overlay_json(mut base: serde_json::Value, inc: serde_json::Value) -> serde_json::Value {
+    if let (serde_json::Value::Object(a), serde_json::Value::Object(b)) = (&mut base, inc) {
+        for (k, v) in b {
+            if v.is_null() {
+                continue;
+            }
+            if let serde_json::Value::String(s) = &v {
+                if s.trim().is_empty() {
+                    continue;
+                }
+            }
+            if let serde_json::Value::Array(items) = &v {
+                if items.is_empty() {
+                    continue;
+                }
+            }
+            a.insert(k, v);
+        }
+    }
+    base
+}
+
+fn merge_groups(
+    local: &[ssh_term_proto::hosttree::GroupEntry],
+    incoming: &[ssh_term_proto::hosttree::GroupEntry],
+) -> (Vec<ssh_term_proto::hosttree::GroupEntry>, usize, usize, usize) {
+    let mut out = Vec::new();
+    let mut used = vec![false; local.len()];
+    let mut added = 0;
+    let mut updated = 0;
+    for inc in incoming {
+        if let Some(i) = local.iter().position(|g| g.path == inc.path) {
+            used[i] = true;
+            let mut g = local[i].clone();
+            if !inc.tags.is_empty() {
+                g.tags = inc.tags.clone();
+            }
+            if inc.icon.is_some() {
+                g.icon = inc.icon.clone();
+            }
+            if inc.icon_color.is_some() {
+                g.icon_color = inc.icon_color.clone();
+            }
+            out.push(g);
+            updated += 1;
+        } else {
+            out.push(inc.clone());
+            added += 1;
+        }
+    }
+    let mut kept = 0;
+    for (i, g) in local.iter().enumerate() {
+        if !used[i] {
+            out.push(g.clone());
+            kept += 1;
+        }
+    }
+    (out, added, updated, kept)
+}
+
+fn diff_settings(path: &str, old: &toml::Value, new: &toml::Value, out: &mut Vec<String>) {
+    if out.len() >= 24 {
+        return;
+    }
+    match (old, new) {
+        (toml::Value::Table(a), toml::Value::Table(b)) => {
+            let mut keys: Vec<&String> = a.keys().chain(b.keys()).collect();
+            keys.sort();
+            keys.dedup();
+            for k in keys {
+                if path.is_empty()
+                    && matches!(
+                        k.as_str(),
+                        "hosts" | "groups" | "db" | "redis" | "docker" | "theme" | "known_hosts"
+                            | "ssh_config"
+                    )
+                {
+                    continue;
+                }
+                let child = if path.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{path}.{k}")
+                };
+                match (a.get(k), b.get(k)) {
+                    (Some(x), Some(y)) if x != y => diff_settings(&child, x, y, out),
+                    (None, Some(y)) => out.push(format!("{child}: — → {}", brief(y))),
+                    (Some(x), None) => out.push(format!("{child}: {} → —", brief(x))),
+                    _ => {}
+                }
+            }
+        }
+        (a, b) if a != b => out.push(format!("{path}: {} → {}", brief(a), brief(b))),
+        _ => {}
+    }
+}
+
+fn brief(v: &toml::Value) -> String {
+    let s = match v {
+        toml::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    let s = s.replace('\n', " ");
+    if s.chars().count() > 40 {
+        format!("{}…", s.chars().take(40).collect::<String>())
+    } else {
+        s
+    }
+}
+
+impl Settings {
     // ---- generic dotted-path access used by the settings page
     pub fn get(&self, path: &str) -> Option<toml::Value> {
         let v = toml::Value::try_from(self).ok()?;
@@ -1403,6 +1716,48 @@ mod tests {
             .is_err());
         let back = Settings::parse(&toml::to_string_pretty(&s).unwrap()).unwrap();
         assert_eq!(back, s);
+    }
+
+    #[test]
+    fn import_keeps_local_hosts_and_takes_file_settings() {
+        use ssh_term_proto::hosts::HostEntry;
+        let mut cur = super::Settings::default();
+        cur.hosts.push(HostEntry {
+            name: "keep".into(),
+            host: "1.1.1.1".into(),
+            user: Some("a".into()),
+            ..Default::default()
+        });
+        cur.hosts.push(HostEntry {
+            name: "old".into(),
+            host: "2.2.2.2".into(),
+            user: Some("a".into()),
+            ..Default::default()
+        });
+        cur.terminal.scrollback = 1000;
+        let mut inc = super::Settings::default();
+        inc.hosts.push(HostEntry {
+            name: "renamed".into(),
+            host: "2.2.2.2".into(),
+            user: Some("a".into()),
+            ..Default::default()
+        });
+        inc.hosts.push(HostEntry {
+            name: "added".into(),
+            host: "3.3.3.3".into(),
+            ..Default::default()
+        });
+        inc.terminal.scrollback = 5000;
+        let plan = super::plan_import(&cur, &inc);
+        assert_eq!((plan.added_hosts, plan.updated_hosts, plan.kept_hosts), (1, 1, 1));
+        assert!(plan.next.hosts.iter().any(|h| h.host == "1.1.1.1"));
+        assert!(plan.next.hosts.iter().any(|h| h.name == "renamed"));
+        assert_eq!(plan.next.terminal.scrollback, 5000);
+        assert!(plan
+            .setting_changes
+            .iter()
+            .any(|s| s.contains("scrollback")));
+        assert!(cur.export_text().unwrap().contains("1.1.1.1"));
     }
 
     #[test]

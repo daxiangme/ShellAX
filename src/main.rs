@@ -478,6 +478,10 @@ pub(crate) struct Root {
     /// Toast is playing its exit fade.
     toast_out: bool,
     toast_seq: u64,
+    /// Host sidebar: Agents button is expanded.
+    agents_open: bool,
+    /// Height of the Agents split under the host list.
+    agents_h: f32,
     pub(crate) port_view: Option<Entity<port_view::PortView>>,
     pub(crate) chat_view: Option<Entity<chat_view::ChatView>>,
     quit_confirm: bool,
@@ -1868,6 +1872,25 @@ impl Root {
         })
         .detach();
     }
+
+    fn focus_leaf(&mut self, pane: Entity<TermView>, window: &mut Window, cx: &mut Context<Self>) {
+        let found = self.tabs.iter().enumerate().find_map(|(i, tab)| {
+            tab.layout
+                .leaves()
+                .iter()
+                .any(|p| p.entity_id() == pane.entity_id())
+                .then_some(i)
+        });
+        if let Some(i) = found {
+            self.active = i;
+            self.leave_settings();
+            self.tabs[i].focused = pane.clone();
+            let fh = pane.read(cx).focus.clone();
+            window.focus(&fh, cx);
+        }
+        cx.notify();
+    }
+
     // ---- broadcast input (P2)
     fn toggle_broadcast(&mut self, confirmed: bool, cx: &mut Context<Self>) {
         use ssh_term_proto::broadcast::{start, Start, Target};
@@ -5939,6 +5962,8 @@ fn open_main(
                     toast: None,
                     toast_out: false,
                     toast_seq: 0,
+                    agents_open: false,
+                    agents_h: 200.0,
                     _subs: vec![],
                 };
                 crate::ctxmenu_view::init(root.rt.handle().clone(), root.prompts.clone());

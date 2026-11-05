@@ -178,6 +178,8 @@ pub struct SettingsView {
     tester: Entity<InputState>,
     notice: Option<String>,
     notice_seq: u64,
+    /// Parsed file waiting for the user to confirm an import.
+    import_plan: Option<config::ImportPlan>,
     /// Newer release found by "Check now".
     update_found: Option<ssh_term_proto::update::Manifest>,
     update_err_open: bool,
@@ -373,6 +375,7 @@ impl SettingsView {
             tester,
             notice: None,
             notice_seq: 0,
+            import_plan: None,
             update_found: None,
             update_err_open: false,
             ai_sel: config::get().ai.default_provider().map(|p| p.id.clone()),
@@ -2842,6 +2845,157 @@ impl SettingsView {
             .into_any_element()
     }
 
+    fn sync_card(&self, cx: &mut Context<Self>) -> AnyElement {
+        let th = cur();
+        let mut card = div()
+            .w_full()
+            .p_4()
+            .rounded(px(ui::R_LG))
+            .bg(crate::theme::sub_bg())
+            .border_1()
+            .border_color(crate::theme::divider())
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(Self::section_title(t("ui.config_sync")))
+            .child(
+                div()
+                    .text_size(px(ui::fs_small()))
+                    .text_color(c(th.subtext))
+                    .whitespace_normal()
+                    .child(t("ui.config_sync_desc")),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        ui::button("cfg-export", t("ui.export_config"), 0).on_click(cx.listener(
+                            |this, _, _w, cx| this.export_config(cx),
+                        )),
+                    )
+                    .child(
+                        ui::button("cfg-import", t("ui.import_config"), 1).on_click(cx.listener(
+                            |this, _, _w, cx| this.import_config(cx),
+                        )),
+                    ),
+            );
+        if let Some(plan) = &self.import_plan {
+            let mut lines = vec![tf(
+                "ui.import_hosts",
+                &[
+                    ("add", &plan.added_hosts),
+                    ("upd", &plan.updated_hosts),
+                    ("keep", &plan.kept_hosts),
+                ],
+            )];
+            lines.push(tf(
+                "ui.import_links",
+                &[
+                    ("add", &plan.added_links),
+                    ("upd", &plan.updated_links),
+                    ("keep", &plan.kept_links),
+                ],
+            ));
+            for change in plan.setting_changes.iter().take(12) {
+                lines.push(change.clone());
+            }
+            card = card
+                .child(
+                    div()
+                        .text_size(px(ui::fs_small()))
+                        .text_color(c(th.text))
+                        .whitespace_normal()
+                        .child(lines.join("\n")),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(
+                            ui::button("cfg-import-ok", t("ui.import_confirm"), 1).on_click(
+                                cx.listener(|this, _, _w, cx| this.confirm_import(cx)),
+                            ),
+                        )
+                        .child(
+                            ui::button("cfg-import-no", t("ui.cancel"), 0).on_click(cx.listener(
+                                |this, _, _w, cx| {
+                                    this.import_plan = None;
+                                    cx.notify();
+                                },
+                            )),
+                        ),
+                );
+        }
+        card.into_any_element()
+    }
+
+    fn export_config(&mut self, cx: &mut Context<Self>) {
+        let text = match config::get().export_text() {
+            Ok(t) => t,
+            Err(e) => {
+                self.notice = Some(format!("{e:#}"));
+                cx.notify();
+                return;
+            }
+        };
+        let dir = config::config_path()
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| ".".into());
+        let rx = cx.prompt_for_new_path(&dir, Some("shellax-config.toml"));
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(path))) = rx.await else { return };
+            let err = std::fs::write(&path, text).err().map(|e| e.to_string());
+            let _ = this.update(cx, |v, cx| {
+                v.notice = Some(match err {
+                    None => tf("ui.exported", &[("path", &path.display())]),
+                    Some(e) => tf("ui.export_failed", &[("e", &e)]),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn import_config(&mut self, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: None,
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            let parsed = std::fs::read_to_string(&path).ok().and_then(|text| {
+                config::Settings::parse(&text)
+                    .ok()
+                    .map(|incoming| config::plan_import(&config::get(), &incoming))
+            });
+            let _ = this.update(cx, |v, cx| {
+                match parsed {
+                    Some(plan) => v.import_plan = Some(plan),
+                    None => v.notice = Some(t("ui.import_failed").into()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn confirm_import(&mut self, cx: &mut Context<Self>) {
+        let Some(plan) = self.import_plan.take() else { return };
+        if let Some(e) = config::update(|s| *s = plan.next) {
+            self.notice = Some(e);
+            cx.notify();
+            return;
+        }
+        cx.emit(SettingsEvent::Changed("import".into()));
+        self.notice = Some(t("ui.import_done").into());
+        cx.notify();
+    }
+
     fn general_extra(&self, cx: &mut Context<Self>) -> AnyElement {
         use ssh_term_proto::updater::Phase;
         use std::sync::atomic::Ordering;
@@ -3291,6 +3445,7 @@ impl SettingsView {
             .flex()
             .flex_col()
             .gap_3()
+            .child(self.sync_card(cx))
             .child(Self::section_title(t("ui.updates")))
             .child(version_card)
             .child(github_card)

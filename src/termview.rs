@@ -901,6 +901,33 @@ fn char_to_byte_ranges(s: &str, hl: &[(usize, usize)]) -> Vec<std::ops::Range<us
 }
 
 // ---------------------------------------------------------------- pane
+#[derive(Clone)]
+pub(crate) struct AgentMemoryRow {
+    pub title: String,
+    pub status: String,
+    pub ago: String,
+    pub needs: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct AgentMemory {
+    pub cwd: String,
+    pub sessions: Vec<AgentMemoryRow>,
+}
+
+/// Move to the first agents-list row, then down to `index`, then Enter.
+fn session_select_keys(index: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    for _ in 0..40 {
+        out.extend_from_slice(b"\x1b[A");
+    }
+    for _ in 0..index {
+        out.extend_from_slice(b"\x1b[B");
+    }
+    out.push(b'\r');
+    out
+}
+
 pub struct TermView {
     /// SFTP browser hosted in this layout leaf (PRD 5.21 tab/split mode); no shell session then.
     pub sftp: Option<Entity<crate::sftp_view::SftpView>>,
@@ -934,6 +961,10 @@ pub struct TermView {
     manifests: Arc<Vec<Manifest>>,
     last_command: Option<String>,
     pub agent: Option<(usize, AgentState)>,
+    /// When the current agent first appeared in this pane. Cleared when it exits.
+    agent_started: Option<Instant>,
+    /// Sessions last seen on Claude's agents screen, kept after opening one of them.
+    agent_memory: Option<AgentMemory>,
     agent_seen: Instant,
     last_detect: Instant,
     detect_scheduled: bool,
@@ -1360,6 +1391,8 @@ impl TermView {
             manifests,
             last_command: None,
             agent: None,
+            agent_started: None,
+            agent_memory: None,
             agent_seen: Instant::now(),
             last_detect: Instant::now() - Duration::from_secs(5),
             detect_scheduled: false,
@@ -1681,9 +1714,12 @@ impl TermView {
         let fg = s.foreground_process();
         let title = s.title();
         let progress = s.shared.progress.lock().unwrap().clone();
+        let screen = s.screen_text();
+        let board = agent::parse_claude_agents(&screen);
         let is_shell = fg
             .as_deref()
-            .is_some_and(|p| matches!(p, "bash" | "zsh" | "sh" | "fish" | "dash"));
+            .is_some_and(|p| matches!(p, "bash" | "zsh" | "sh" | "fish" | "dash"))
+            && board.is_none();
         let idx = if is_shell {
             None
         } else {
@@ -1693,18 +1729,26 @@ impl TermView {
             } else {
                 self.last_command.as_deref()
             };
-            agent::identify(&self.manifests, fg.as_deref(), cmd, &title).filter(|i| {
-                let a = &config::get().agents;
-                match self.manifests[*i].id.as_str() {
-                    "claude" => a.detect_claude,
-                    "codex" => a.detect_codex,
-                    "grok" => a.detect_grok,
-                    _ => true,
-                }
-            })
+            agent::identify(&self.manifests, fg.as_deref(), cmd, &title)
+                .or_else(|| {
+                    board.as_ref().and_then(|_| {
+                        self.manifests.iter().position(|m| m.id == "claude")
+                    })
+                })
+                .filter(|i| {
+                    let a = &config::get().agents;
+                    match self.manifests[*i].id.as_str() {
+                        "claude" => a.detect_claude,
+                        "codex" => a.detect_codex,
+                        "grok" => a.detect_grok,
+                        _ => true,
+                    }
+                })
         };
         let new = idx.map(|i| {
-            let screen = s.screen_text();
+            if let Some(board) = &board {
+                return (i, board.state);
+            }
             let d = self.manifests[i].detect(DetectionInput {
                 screen: &screen,
                 osc_title: &title,
@@ -1740,8 +1784,36 @@ impl TermView {
                 ));
             }
         }
+        if let Some(board) = board.as_ref().filter(|b| !b.sessions.is_empty()) {
+            self.agent_memory = Some(AgentMemory {
+                cwd: board
+                    .cwd
+                    .clone()
+                    .or_else(|| self.shell_cwd())
+                    .unwrap_or_default(),
+                sessions: board
+                    .sessions
+                    .iter()
+                    .map(|s| AgentMemoryRow {
+                        title: s.title.clone(),
+                        status: s.status.clone(),
+                        ago: s.ago.clone(),
+                        needs: s.needs,
+                    })
+                    .collect(),
+            });
+        }
+        if new.is_none() {
+            self.agent_memory = None;
+        }
+        let prev_idx = self.agent.map(|(i, _)| i);
         if new != self.agent {
             self.agent = new;
+            match new {
+                Some((i, _)) if prev_idx != Some(i) => self.agent_started = Some(Instant::now()),
+                None => self.agent_started = None,
+                _ => {}
+            }
             if let Some((i, _)) = new {
                 self.last_agent = Some(agent::display_name(&self.manifests[i].id).to_string());
             }
@@ -1749,10 +1821,120 @@ impl TermView {
         }
     }
 
+    /// Short name for the sidebar: the terminal title, else the first command, else the agent.
+    pub fn agent_caption(&self) -> String {
+        if let Some(s) = &self.session {
+            let title = s.title();
+            let title = title.trim();
+            if !title.is_empty() && !Self::shellish_title(title) {
+                return Self::clip_caption(title);
+            }
+        }
+        if let Some(cmd) = &self.last_command {
+            let one = cmd.lines().next().unwrap_or("").trim();
+            if !one.is_empty() && !Self::shellish_title(one) {
+                return Self::clip_caption(one);
+            }
+        }
+        self.agent_label()
+            .map(|(n, _)| n)
+            .unwrap_or_default()
+    }
+
+    pub fn agent_started(&self) -> Option<Instant> {
+        self.agent_started
+    }
+
     pub fn agent_label(&self) -> Option<(String, AgentState)> {
         self.agent
             .map(|(i, st)| (agent::display_name(&self.manifests[i].id).to_string(), st))
     }
+
+    pub fn agent_id(&self) -> Option<String> {
+        self.agent.map(|(i, _)| self.manifests[i].id.clone())
+    }
+
+    /// Select this conversation the way the agents screen does: move to its row and press Enter.
+    /// Inside a conversation, Left first returns to that screen.
+    pub(crate) fn open_claude_session(&mut self, title: String, cx: &mut Context<Self>) {
+        let Some(s) = self.session.clone() else {
+            return;
+        };
+        let screen = s.screen_text();
+        if let Some(board) = agent::parse_claude_agents(&screen) {
+            let index = board
+                .sessions
+                .iter()
+                .position(|row| row.title == title)
+                .unwrap_or(0);
+            s.write(session_select_keys(index));
+            return;
+        }
+        s.write(b"\x1b[D".to_vec());
+        cx.spawn(async move |this, cx| {
+            for _ in 0..12 {
+                cx.background_executor()
+                    .timer(Duration::from_millis(120))
+                    .await;
+                let found = this
+                    .update(cx, |v, _| {
+                        v.session.as_ref().and_then(|s| {
+                            let board = agent::parse_claude_agents(&s.screen_text())?;
+                            Some(
+                                board
+                                    .sessions
+                                    .iter()
+                                    .position(|row| row.title == title)
+                                    .unwrap_or(0),
+                            )
+                        })
+                    })
+                    .ok()
+                    .flatten();
+                if let Some(index) = found {
+                    let _ = this.update(cx, |v, _| {
+                        if let Some(s) = &v.session {
+                            s.write(session_select_keys(index));
+                        }
+                    });
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn agent_memory(&self) -> Option<&AgentMemory> {
+        self.agent_memory.as_ref()
+    }
+
+fn shellish_title(s: &str) -> bool {
+    let s = s.trim().trim_matches(|c: char| c == '"' || c == '\'');
+    let base = s.rsplit(['/', '\\']).next().unwrap_or(s);
+    let base = base.split_whitespace().next().unwrap_or(base);
+    matches!(
+        base.to_ascii_lowercase().as_str(),
+        "bash" | "zsh" | "sh" | "fish" | "dash" | "pwsh" | "powershell" | "cmd" | "cmd.exe"
+            | "powershell.exe" | "pwsh.exe"
+    )
+}
+
+fn clip_caption(s: &str) -> String {
+    let mut n = 0;
+    let mut end = s.len();
+    for (i, _) in s.char_indices() {
+        n += 1;
+        if n > 32 {
+            end = i;
+            break;
+        }
+    }
+    if end < s.len() {
+        format!("{}…", &s[..end])
+    } else {
+        s.to_string()
+    }
+}
 
     // ---------------- input line / suggestions
     fn line_state(&self) -> Option<LineState> {
