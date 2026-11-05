@@ -358,8 +358,8 @@ pub fn spawn_local_in(
                 match msg {
                     BackendMsg::Close => break,
                     BackendMsg::Input(b) => {
-                        // ConPTY 以 win32-input-mode 启动。裸 0x03 不会变成 CTRL_C_EVENT，
-                        // 前台程序（如 ktctl）就收不到中断。改发 Ctrl+C 的按键记录。
+                        // ConPTY 以 win32-input-mode 启动。Ctrl+C 要写成按键记录（结尾是 `_`），
+                        // 才会变成 CTRL_C_EVENT。结尾写成 `u` 时这段记录会被丢掉。
                         #[cfg(windows)]
                         let b = conpty_input(b);
                         let _ = writer.write_all(&b);
@@ -382,10 +382,11 @@ pub fn spawn_local_in(
 
 /// Ctrl+C 的 win32-input-mode 记录：按下再松开。
 /// VK_C=67，扫描码=46，Unicode=ETX(3)，LEFT_CTRL_PRESSED=8。
+/// 结束符必须是 `_`。同样的内容以 `u` 结尾时，ConPTY 会整段丢掉，前台命令收不到中断。
 #[cfg(windows)]
 fn conpty_input(bytes: Vec<u8>) -> Vec<u8> {
     if bytes == [0x03] {
-        b"\x1b[67;46;3;1;8;1u\x1b[67;46;3;0;8;1u".to_vec()
+        b"\x1b[67;46;3;1;8;1_\x1b[67;46;3;0;8;1_".to_vec()
     } else {
         bytes
     }
@@ -404,7 +405,7 @@ mod cwd_tests {
     #[test]
     fn ctrl_c_is_a_win32_key_record() {
         let encoded = super::conpty_input(vec![0x03]);
-        assert_eq!(encoded, b"\x1b[67;46;3;1;8;1u\x1b[67;46;3;0;8;1u");
+        assert_eq!(encoded, b"\x1b[67;46;3;1;8;1_\x1b[67;46;3;0;8;1_");
         assert_eq!(super::conpty_input(b"ls\r".to_vec()), b"ls\r");
     }
     #[test]
