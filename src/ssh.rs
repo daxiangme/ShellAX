@@ -1017,6 +1017,8 @@ pub static REUSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool:
 pub static STYLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 /// Remote command that starts an interactive shell with color aliases for this session only.
+/// Bash and zsh get a temporary rc file. Alpine and other systems without bash keep `$SHELL`
+/// (BusyBox ash reads `$ENV` on interactive startup) instead of failing on `bash: not found`.
 pub fn style_shell_command() -> String {
     r#"if [ -n "$ZSH_VERSION" ] || [ "$(basename "${SHELL:-}")" = zsh ]; then
   d=$(mktemp -d /tmp/shellax-style.XXXXXX 2>/dev/null) || d=$(mktemp -d) || exec "${SHELL:-/bin/sh}" -l
@@ -1032,8 +1034,9 @@ alias fgrep='fgrep --color=auto'
 END
   ZDOTDIR="$d" exec zsh -i
 fi
-f=$(mktemp /tmp/shellax-style.XXXXXX 2>/dev/null) || f=$(mktemp) || exec "${SHELL:-/bin/bash}" -l
-cat > "$f" << 'END'
+if command -v bash >/dev/null 2>&1; then
+  f=$(mktemp /tmp/shellax-style.XXXXXX 2>/dev/null) || f=$(mktemp) || exec "${SHELL:-/bin/sh}" -l
+  cat > "$f" << 'END'
 [ -f /etc/profile ] && . /etc/profile
 [ -f ~/.bashrc ] && . ~/.bashrc
 if command -v dircolors >/dev/null 2>&1; then eval "$(dircolors -b 2>/dev/null)"; fi
@@ -1043,7 +1046,18 @@ alias grep='grep --color=auto'
 alias egrep='egrep --color=auto'
 alias fgrep='fgrep --color=auto'
 END
-exec bash --rcfile "$f" -i
+  exec bash --rcfile "$f" -i
+fi
+f=$(mktemp /tmp/shellax-style.XXXXXX 2>/dev/null) || f=$(mktemp) || exec "${SHELL:-/bin/sh}" -l
+cat > "$f" << 'END'
+if command -v dircolors >/dev/null 2>&1; then eval "$(dircolors -b 2>/dev/null)"; fi
+alias ls='ls --color=auto'
+alias ll='ls -alF --color=auto'
+alias grep='grep --color=auto'
+alias egrep='egrep --color=auto'
+alias fgrep='fgrep --color=auto'
+END
+ENV="$f" exec "${SHELL:-/bin/sh}" -l -i
 "#.to_string()
 }
 
@@ -1277,5 +1291,10 @@ mod tests {
         assert!(c.contains("alias ll='ls -alF --color=auto'"));
         assert!(!c.contains(">>"), "must not append to the remote shell rc");
         assert!(c.contains(". ~/.bashrc"));
+        assert!(c.contains("command -v bash"), "bash is optional");
+        assert!(
+            c.contains("ENV=\"$f\" exec \"${SHELL:-/bin/sh}\" -l -i"),
+            "systems without bash, such as Alpine ash, must keep the account shell"
+        );
     }
 }
