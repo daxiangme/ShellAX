@@ -282,6 +282,23 @@ impl ToolView {
         }
     }
 
+    fn lookup_mine(&self) -> bool {
+        self.spec.id == "ip_lookup" && self.picks.get("mine").map(|s| s.as_str()) == Some("true")
+    }
+
+    /// IP 查询：查本机时随时可运行；查指定地址时必须先填 IP。
+    fn lookup_can_run(&self, cx: &gpui::App) -> bool {
+        if self.spec.id != "ip_lookup" {
+            return true;
+        }
+        if self.lookup_mine() {
+            return true;
+        }
+        self.texts
+            .get("input")
+            .is_some_and(|e| !e.read(cx).value().trim().is_empty())
+    }
+
     fn args(&self, cx: &gpui::App) -> Args {
         let mut a = Args::default();
         for (k, s) in &self.texts {
@@ -301,7 +318,7 @@ impl ToolView {
     }
 
     pub fn run(&mut self, cx: &mut Context<Self>) {
-        if self.spec.interactive {
+        if self.spec.interactive || !self.lookup_can_run(cx) {
             return;
         }
         let args = self.args(cx);
@@ -1652,7 +1669,11 @@ impl Render for ToolView {
                     );
                 }
                 InSize::Line => {
-                    row = row.child(ui::text_field(&self.texts[&f.id], false));
+                    let unused =
+                        self.spec.id == "ip_lookup" && f.id == "input" && self.lookup_mine();
+                    row = row
+                        .when(unused, |d| d.opacity(0.4))
+                        .child(ui::text_field(&self.texts[&f.id], false));
                 }
                 InSize::Zone => {
                     let id = f.id.clone();
@@ -1742,16 +1763,21 @@ impl Render for ToolView {
         for f in &shown {
             opts = opts.child(self.option_el(f, &me, cx));
         }
-        let run_btn = ui::button(
-            "tool-run",
-            if self.spec.live {
-                t("tools.ui_refresh")
-            } else {
-                t("tools.ui_run")
-            },
-            1,
-        )
-        .on_click(cx.listener(|this, _, _w, cx| this.run(cx)));
+        let mine = self.lookup_mine();
+        let can_run = self.lookup_can_run(cx);
+        let run_label = if mine {
+            t("tools.net_run_mine")
+        } else if self.spec.live {
+            t("tools.ui_refresh")
+        } else {
+            t("tools.ui_run")
+        };
+        let run_btn = if can_run {
+            ui::button("tool-run", run_label, 1)
+                .on_click(cx.listener(|this, _, _w, cx| this.run(cx)))
+        } else {
+            ui::button_disabled("tool-run", run_label, 1)
+        };
         let opts_h = self.opts_h.clone();
         let opts_card = if stack {
             sub_card()
@@ -1766,10 +1792,11 @@ impl Render for ToolView {
                 .child(div().w_full().flex().justify_end().child(run_btn))
         } else {
             sub_card()
+                .w_full()
                 .relative()
                 .p(px(SUB_PAD))
                 .flex()
-                .items_end()
+                .items_center()
                 .gap_3()
                 .flex_shrink_0()
                 .child(div().flex_1().min_w_0().child(opts))

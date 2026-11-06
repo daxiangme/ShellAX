@@ -1906,7 +1906,7 @@ impl Root {
                 }),
             )
             .child(host);
-        if !remote_only {
+        if !remote_only && config::get().agents.show_panel {
             shell = shell
                 .child(self.agents_split_handle(cx))
                 .child(self.agent_dock(cx));

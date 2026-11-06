@@ -438,6 +438,8 @@ pub struct Agents {
     pub write_to_pty: String,
     /// Agent quick launch entries (palette, AI / Agent panel): name + command typed into a new pane
     pub quick_launch: Vec<QuickLaunch>,
+    /// Host sidebar Agents card. Off until the user turns it on.
+    pub show_panel: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
@@ -470,6 +472,7 @@ impl Default for Agents {
             policy_port: 0,
             write_to_pty: "ask".into(),
             quick_launch: default_quick_launch(),
+            show_panel: false,
         }
     }
 }

@@ -915,10 +915,12 @@ pub(crate) struct AgentMemory {
     pub sessions: Vec<AgentMemoryRow>,
 }
 
-/// Move to the first agents-list row, then down to `index`, then Enter.
-fn session_select_keys(index: usize) -> Vec<u8> {
+/// Move onto the agents-list row and press Enter. Plain cursor sequences only:
+/// win32 key records contain digits, and Claude's list prints those digits.
+fn session_select_keys(index: usize, count: usize) -> Vec<u8> {
     let mut out = Vec::new();
-    for _ in 0..40 {
+    let ups = count.max(index + 1).min(12);
+    for _ in 0..ups {
         out.extend_from_slice(b"\x1b[A");
     }
     for _ in 0..index {
@@ -1862,39 +1864,32 @@ impl TermView {
         };
         let screen = s.screen_text();
         if let Some(board) = agent::parse_claude_agents(&screen) {
-            let index = board
-                .sessions
-                .iter()
-                .position(|row| row.title == title)
-                .unwrap_or(0);
-            s.write(session_select_keys(index));
+            let Some(index) = board.sessions.iter().position(|row| row.title == title) else {
+                return;
+            };
+            s.write(session_select_keys(index, board.sessions.len()));
             return;
         }
         s.write(b"\x1b[D".to_vec());
         cx.spawn(async move |this, cx| {
-            for _ in 0..12 {
+            for _ in 0..20 {
                 cx.background_executor()
-                    .timer(Duration::from_millis(120))
+                    .timer(Duration::from_millis(150))
                     .await;
                 let found = this
                     .update(cx, |v, _| {
                         v.session.as_ref().and_then(|s| {
                             let board = agent::parse_claude_agents(&s.screen_text())?;
-                            Some(
-                                board
-                                    .sessions
-                                    .iter()
-                                    .position(|row| row.title == title)
-                                    .unwrap_or(0),
-                            )
+                            let index = board.sessions.iter().position(|row| row.title == title)?;
+                            Some((index, board.sessions.len()))
                         })
                     })
                     .ok()
                     .flatten();
-                if let Some(index) = found {
+                if let Some((index, count)) = found {
                     let _ = this.update(cx, |v, _| {
                         if let Some(s) = &v.session {
-                            s.write(session_select_keys(index));
+                            s.write(session_select_keys(index, count));
                         }
                     });
                     return;

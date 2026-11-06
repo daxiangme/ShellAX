@@ -957,6 +957,12 @@ impl SettingsView {
             ),
             r(
                 Agents,
+                t("ui.agents_sidebar"),
+                t("ui.agents_sidebar_desc"),
+                Ctl::Toggle("agents.show_panel"),
+            ),
+            r(
+                Agents,
                 t("ui.detect_claude_code"),
                 "",
                 Ctl::Toggle("agents.detect_claude"),

@@ -505,7 +505,16 @@ pub fn row_actions(group: impl Into<SharedString>) -> Div {
 
 /// Standard button. `kind`: 0 = secondary, 1 = primary, 2 = danger, 3 = ghost.
 pub fn button(id: impl Into<ElementId>, label: impl Into<SharedString>, kind: u8) -> Stateful<Div> {
-    button_base(id, label, kind, H_DEFAULT, SP_3, fs_body())
+    button_base(id, label, kind, H_DEFAULT, SP_3, fs_body(), true)
+}
+
+/// Same as `button`, but not clickable: no pointer, no press feedback.
+pub fn button_disabled(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    kind: u8,
+) -> Stateful<Div> {
+    button_base(id, label, kind, H_DEFAULT, SP_3, fs_body(), false)
 }
 
 /// 紧凑按钮：高 24、左右内边距 8、次要字号；用于行内与表格内操作。
@@ -514,7 +523,7 @@ pub fn button_sm(
     label: impl Into<SharedString>,
     kind: u8,
 ) -> Stateful<Div> {
-    button_base(id, label, kind, H_COMPACT, SP_2, fs_small())
+    button_base(id, label, kind, H_COMPACT, SP_2, fs_small(), true)
 }
 
 fn button_base(
@@ -524,6 +533,7 @@ fn button_base(
     h: f32,
     pad: f32,
     fs: f32,
+    enabled: bool,
 ) -> Stateful<Div> {
     let th = cur();
     let (bg, fg, border) = match kind {
@@ -540,7 +550,7 @@ fn button_base(
         ),
         _ => (c(th.surface0), c(th.text), c(th.surface1)),
     };
-    div()
+    let mut btn = div()
         .id(id)
         .h(px(h))
         .px(px(pad))
@@ -549,17 +559,22 @@ fn button_base(
         .items_center()
         .justify_center()
         .gap_1()
-        .cursor_pointer()
         .bg(bg)
         .text_color(fg)
         .border_1()
         .border_color(border)
         .text_size(px(fs))
         .font_weight(FontWeight::MEDIUM)
-        .hover(move |s| s.opacity(0.85))
-        // pressed state: one step darker than hover
-        .active(move |s| s.opacity(0.7))
-        .child(label.into())
+        .child(label.into());
+    if enabled {
+        btn = btn
+            .cursor_pointer()
+            .hover(move |s| s.opacity(0.85))
+            .active(move |s| s.opacity(0.7));
+    } else {
+        btn = btn.opacity(0.4).cursor_default();
+    }
+    btn
 }
 
 /// 筛选 chip：高 24 的胶囊；未选淡底 + 次文本，选中淡强调底 + 强调色文字。
