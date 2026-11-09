@@ -1,8 +1,9 @@
-//! Offline network calculations plus a public-IP geolocation lookup.
+//! Network calculations, a public-IP geolocation lookup, and a one-shot TCP latency probe.
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::io::ErrorKind;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
 
@@ -446,6 +447,174 @@ fn prefix_of_mask(mask: u32) -> Result<u8> {
     Ok(mask.count_ones() as u8)
 }
 
+const LATENCY_TIMEOUT: Duration = Duration::from_secs(2);
+const LATENCY_COUNT_MAX: i64 = 8;
+
+/// 一次探测。拒绝也算主机有响应，超时和其他错误不计入平均。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Probe {
+    Ok(Duration),
+    Refused(Duration),
+    Lost,
+}
+
+fn normalize_host(raw: &str) -> Result<&str> {
+    let s = raw.trim();
+    if s.is_empty() {
+        bail!(t("tools.net_need_host"));
+    }
+    if s.contains('/') || s.contains(char::is_whitespace) {
+        bail!(tf("tools.net_bad_host", &[("v", &s)]));
+    }
+    let s = s.trim_matches(|c| c == '[' || c == ']');
+    if s.is_empty() {
+        bail!(tf("tools.net_bad_host", &[("v", &raw.trim())]));
+    }
+    Ok(s)
+}
+
+fn port_of(a: &Args) -> Result<u16> {
+    let raw = a.get("port").trim();
+    if raw.is_empty() {
+        return Ok(443);
+    }
+    let n = a.num("port")?.round() as i64;
+    if (1..=65535).contains(&n) {
+        Ok(n as u16)
+    } else {
+        bail!(tf("tools.net_bad_port", &[("v", &raw)]))
+    }
+}
+
+fn probe_count(a: &Args) -> Result<usize> {
+    if a.get("count").trim().is_empty() {
+        return Ok(4);
+    }
+    Ok(a.int("count", 1, LATENCY_COUNT_MAX)? as usize)
+}
+
+fn resolve_once(host: &str, port: u16) -> Result<(SocketAddr, Duration)> {
+    let started = Instant::now();
+    let mut addrs = (host, port).to_socket_addrs().map_err(|e| {
+        anyhow::anyhow!(tf(
+            "tools.net_resolve_failed",
+            &[("e", &e.to_string())],
+        ))
+    })?;
+    let addr = addrs.next().ok_or_else(|| {
+        anyhow::anyhow!(tf("tools.net_resolve_failed", &[("e", &host)]))
+    })?;
+    Ok((addr, started.elapsed()))
+}
+
+fn is_refused(err: &std::io::Error) -> bool {
+    err.kind() == ErrorKind::ConnectionRefused
+        || matches!(err.raw_os_error(), Some(61 | 111 | 10061))
+}
+
+fn probe_once(addr: SocketAddr, timeout: Duration) -> Probe {
+    let started = Instant::now();
+    match TcpStream::connect_timeout(&addr, timeout) {
+        Ok(stream) => {
+            let elapsed = started.elapsed();
+            drop(stream);
+            Probe::Ok(elapsed)
+        }
+        Err(e) if is_refused(&e) => Probe::Refused(started.elapsed()),
+        Err(_) => Probe::Lost,
+    }
+}
+
+fn fmt_ms(d: Duration) -> String {
+    let ms = d.as_secs_f64() * 1000.0;
+    if ms < 100.0 {
+        format!("{ms:.1} ms")
+    } else {
+        format!("{ms:.0} ms")
+    }
+}
+
+fn average(samples: &[Duration]) -> Option<Duration> {
+    if samples.is_empty() {
+        return None;
+    }
+    let sum: u128 = samples.iter().map(|d| d.as_nanos()).sum();
+    Some(Duration::from_nanos((sum / samples.len() as u128) as u64))
+}
+
+fn latency_output(addr: SocketAddr, dns: Duration, probes: &[Probe]) -> Output {
+    let responded: Vec<Duration> = probes
+        .iter()
+        .filter_map(|p| match p {
+            Probe::Ok(d) | Probe::Refused(d) => Some(*d),
+            Probe::Lost => None,
+        })
+        .collect();
+    let ok_n = probes.iter().filter(|p| matches!(p, Probe::Ok(_))).count();
+    let refused_n = probes
+        .iter()
+        .filter(|p| matches!(p, Probe::Refused(_)))
+        .count();
+    let lost_n = probes.len() - ok_n - refused_n;
+    let mut rows = vec![
+        Row::kv(t("tools.net_latency_resolved"), addr.to_string()),
+        Row::kv(t("tools.net_latency_dns"), fmt_ms(dns)),
+    ];
+    if let Some(avg) = average(&responded) {
+        rows.push(Row::kv(t("tools.net_latency_avg"), fmt_ms(avg)).primary());
+        rows.push(Row::kv(
+            t("tools.net_latency_min"),
+            fmt_ms(responded.iter().copied().min().unwrap_or(avg)),
+        ));
+        rows.push(Row::kv(
+            t("tools.net_latency_max"),
+            fmt_ms(responded.iter().copied().max().unwrap_or(avg)),
+        ));
+    }
+    rows.push(Row::kv(t("tools.net_latency_ok"), ok_n.to_string()));
+    if refused_n > 0 {
+        rows.push(Row::kv(
+            t("tools.net_latency_refused"),
+            refused_n.to_string(),
+        ));
+    }
+    rows.push(Row::kv(t("tools.net_latency_timeout"), lost_n.to_string()));
+    for (i, probe) in probes.iter().enumerate() {
+        let label = tf("tools.net_latency_probe", &[("n", &(i + 1))]);
+        rows.push(match probe {
+            Probe::Ok(d) => Row::kv(label, fmt_ms(*d)).tone(Tone::Good),
+            Probe::Refused(d) => Row::kv(label, fmt_ms(*d))
+                .tag(t("tools.net_latency_port_closed"), Tone::Warn)
+                .tone(Tone::Warn),
+            Probe::Lost => Row::kv(label, t("tools.net_latency_lost")).tone(Tone::Danger),
+        });
+    }
+    let (tone, banner) = if probes.is_empty() || lost_n == probes.len() {
+        (Tone::Danger, t("tools.net_latency_none"))
+    } else if lost_n > 0 {
+        (Tone::Warn, t("tools.net_latency_partial"))
+    } else if ok_n == 0 {
+        (Tone::Good, t("tools.net_latency_refused_all"))
+    } else if refused_n > 0 {
+        (Tone::Good, t("tools.net_latency_responded"))
+    } else {
+        (Tone::Good, t("tools.net_latency_all_ok"))
+    };
+    Output::kv(rows, RowFmt::Colon).verdict(tone, banner)
+}
+
+/// 对一个地址的一个端口做几次 TCP 连接，汇总最小、平均、最大耗时。
+pub fn latency_rows(a: &Args) -> Result<Output> {
+    let host = normalize_host(a.get("input"))?;
+    let port = port_of(a)?;
+    let count = probe_count(a)?;
+    let (addr, dns) = resolve_once(host, port)?;
+    let probes: Vec<Probe> = (0..count)
+        .map(|_| probe_once(addr, LATENCY_TIMEOUT))
+        .collect();
+    Ok(latency_output(addr, dns, &probes))
+}
+
 fn parse_u32(s: &str) -> Result<u32> {
     let s = s.trim();
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
@@ -524,5 +693,150 @@ mod tests {
         assert_eq!(convert_rows(&a).unwrap().rows[0].value, "10.0.0.1");
         a.set("mode", "mask_to_prefix").set("input", "255.0.255.0");
         assert!(convert_rows(&a).is_err());
+    }
+
+    fn row<'a>(o: &'a Output, label: &str) -> &'a Row {
+        o.rows
+            .iter()
+            .find(|r| r.label == label)
+            .unwrap_or_else(|| panic!("missing {label}"))
+    }
+
+    #[test]
+    fn latency_formats_milliseconds() {
+        assert_eq!(fmt_ms(Duration::from_millis(10)), "10.0 ms");
+        assert_eq!(fmt_ms(Duration::from_millis(100)), "100 ms");
+        assert_eq!(fmt_ms(Duration::from_micros(400)), "0.4 ms");
+    }
+
+    #[test]
+    fn latency_summary_mixes_success_refused_and_loss() {
+        let addr = SocketAddr::from(([127, 0, 0, 1], 443));
+        let o = latency_output(
+            addr,
+            Duration::from_millis(5),
+            &[
+                Probe::Ok(Duration::from_millis(10)),
+                Probe::Refused(Duration::from_millis(30)),
+                Probe::Lost,
+            ],
+        );
+        assert_eq!(o.verdict.as_ref().unwrap().tone, Tone::Warn);
+        assert_eq!(o.verdict.as_ref().unwrap().text, t("tools.net_latency_partial"));
+        assert_eq!(row(&o, t("tools.net_latency_resolved")).value, "127.0.0.1:443");
+        assert_eq!(row(&o, t("tools.net_latency_dns")).value, "5.0 ms");
+        assert!(row(&o, t("tools.net_latency_avg")).primary);
+        assert_eq!(row(&o, t("tools.net_latency_avg")).value, "20.0 ms");
+        assert_eq!(row(&o, t("tools.net_latency_min")).value, "10.0 ms");
+        assert_eq!(row(&o, t("tools.net_latency_max")).value, "30.0 ms");
+        assert_eq!(row(&o, t("tools.net_latency_ok")).value, "1");
+        assert_eq!(row(&o, t("tools.net_latency_refused")).value, "1");
+        assert_eq!(row(&o, t("tools.net_latency_timeout")).value, "1");
+        let refused = o.rows.iter().find(|r| r.tag.is_some()).unwrap();
+        assert_eq!(refused.value, "30.0 ms");
+        assert_eq!(
+            refused.tag.as_ref().unwrap().0,
+            t("tools.net_latency_port_closed")
+        );
+        assert!(o.rows.iter().any(|r| r.value == t("tools.net_latency_lost")));
+    }
+
+    #[test]
+    fn latency_summary_banner_follows_responses() {
+        let addr = SocketAddr::from(([127, 0, 0, 1], 9));
+        let all_ok = latency_output(
+            addr,
+            Duration::ZERO,
+            &[Probe::Ok(Duration::from_millis(10)), Probe::Ok(Duration::from_millis(10))],
+        );
+        assert_eq!(all_ok.verdict.as_ref().unwrap().tone, Tone::Good);
+        assert_eq!(all_ok.verdict.as_ref().unwrap().text, t("tools.net_latency_all_ok"));
+        let refused = latency_output(addr, Duration::ZERO, &[Probe::Refused(Duration::from_millis(8))]);
+        assert_eq!(refused.verdict.as_ref().unwrap().tone, Tone::Good);
+        assert_eq!(
+            refused.verdict.as_ref().unwrap().text,
+            t("tools.net_latency_refused_all")
+        );
+        assert_eq!(row(&refused, t("tools.net_latency_avg")).value, "8.0 ms");
+        let lost = latency_output(addr, Duration::ZERO, &[Probe::Lost, Probe::Lost]);
+        assert_eq!(lost.verdict.as_ref().unwrap().tone, Tone::Danger);
+        assert!(lost.rows.iter().all(|r| r.label != t("tools.net_latency_avg")));
+    }
+
+    #[test]
+    fn latency_rejects_empty_cidr_and_bad_port_without_connecting() {
+        assert_eq!(
+            latency_rows(&Args::default()).unwrap_err().to_string(),
+            t("tools.net_need_host")
+        );
+        let mut a = Args::default();
+        a.set("input", "10.0.0.0/24");
+        assert_eq!(
+            latency_rows(&a).unwrap_err().to_string(),
+            tf("tools.net_bad_host", &[("v", &"10.0.0.0/24")])
+        );
+        a.set("input", "127.0.0.1").set("port", "0");
+        assert!(latency_rows(&a).is_err());
+        a.set("port", "65536");
+        assert!(latency_rows(&a).is_err());
+        assert_eq!(port_of(&Args::default()).unwrap(), 443);
+        a.set("count", "100");
+        assert_eq!(probe_count(&a).unwrap(), 8);
+        a.set("count", "");
+        assert_eq!(probe_count(&a).unwrap(), 4);
+        assert_eq!(normalize_host("[::1]").unwrap(), "::1");
+    }
+
+    #[test]
+    fn latency_reaches_a_local_listener() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let _ = listener.accept();
+        });
+        let mut a = Args::default();
+        a.set("input", "127.0.0.1")
+            .set("port", port.to_string())
+            .set("count", "1");
+        let o = latency_rows(&a).unwrap();
+        assert_eq!(
+            o.verdict.as_ref().map(|v| v.tone),
+            Some(Tone::Good),
+            "{}",
+            o.text
+        );
+        assert_eq!(o.verdict.as_ref().unwrap().text, t("tools.net_latency_all_ok"));
+        assert_eq!(row(&o, t("tools.net_latency_ok")).value, "1");
+        assert_eq!(row(&o, t("tools.net_latency_timeout")).value, "0");
+        assert!(row(&o, t("tools.net_latency_resolved"))
+            .value
+            .starts_with("127.0.0.1:"));
+    }
+
+    #[test]
+    fn latency_counts_a_closed_local_port() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        // Some Windows stacks drop the first SYN and refuse on the retransmit,
+        // which can take about two seconds. Wait past that so the RST is visible.
+        let probe = probe_once(addr, Duration::from_secs(4));
+        assert!(matches!(probe, Probe::Refused(_)), "{probe:?}");
+        let o = latency_output(addr, Duration::ZERO, &[probe]);
+        assert_eq!(
+            o.verdict.as_ref().unwrap().text,
+            t("tools.net_latency_refused_all"),
+            "{}",
+            o.text
+        );
+        assert_eq!(row(&o, t("tools.net_latency_ok")).value, "0");
+        assert_eq!(row(&o, t("tools.net_latency_timeout")).value, "0");
+        assert_eq!(row(&o, t("tools.net_latency_refused")).value, "1");
+        assert!(o.rows.iter().any(|r| {
+            r.tag
+                .as_ref()
+                .is_some_and(|tag| tag.0 == t("tools.net_latency_port_closed"))
+        }));
     }
 }

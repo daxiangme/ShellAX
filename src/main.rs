@@ -927,6 +927,28 @@ impl Root {
         }
         self.open_host_dock(window, cx);
     }
+    /// The shell pane whose directory card uses `key` (the tab's first leaf id).
+    fn pane_for_dir(&self, key: u64, cx: &App) -> Option<Entity<TermView>> {
+        for tab in &self.tabs {
+            let leaves = tab.layout.leaves();
+            if leaves.first().is_none_or(|p| p.entity_id().as_u64() != key) {
+                continue;
+            }
+            let shells: Vec<_> = leaves
+                .iter()
+                .filter(|p| !p.read(cx).embedded())
+                .cloned()
+                .collect();
+            if shells.is_empty() {
+                return None;
+            }
+            if !tab.focused.read(cx).embedded() {
+                return Some(tab.focused.clone());
+            }
+            return Some(shells[0].clone());
+        }
+        None
+    }
     /// 活动标签里第一个窗格的 id；这个标签没有普通终端时返回 None。
     fn active_dir_key(&self, cx: &App) -> Option<u64> {
         let tab = self.tabs.get(self.active)?;
@@ -1001,6 +1023,12 @@ impl Root {
                     dir_view::DirEvent::Pick(k) => {
                         this.dir_pick = Some(*k);
                         cx.notify();
+                    }
+                    dir_view::DirEvent::Cd { key, path } => {
+                        if let Some(pane) = this.pane_for_dir(*key, cx) {
+                            let path = path.clone();
+                            pane.update(cx, |v, cx| v.cd_to(&path, cx));
+                        }
                     }
                 },
             ),

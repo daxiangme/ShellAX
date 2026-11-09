@@ -4041,7 +4041,14 @@ fn clip_caption(s: &str) -> String {
             Act::OpenTool(id, text) => cx.emit(TermEvent::CtxOpenTool(id, text)),
             Act::PasteInput(text) => self.insert_text(&text),
             Act::UseAiContext => cx.emit(TermEvent::CtxUseAi),
-            Act::Download(_) | Act::Upload(_) => {}
+            Act::Download(_)
+            | Act::Upload(_)
+            | Act::SftpView(_)
+            | Act::SftpDelete(_)
+            | Act::SftpRename(_)
+            | Act::SftpChmod(_)
+            | Act::SftpCopy(_)
+            | Act::SftpCut(_) => {}
         }
         cx.notify();
     }

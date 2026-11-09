@@ -368,7 +368,7 @@ fn menus_by_type_with_previews_and_missing_tools() {
     };
     let m = build(
         &file("/srv/my files/a b.zip", false, 0o644),
-        &ctx(Place::RemotePanel, Some(&tools), &[]),
+        &ctx(Place::Terminal { remote: true }, Some(&tools), &[]),
     );
     assert_eq!(
         find(&m, "extract_here").act,
@@ -380,6 +380,15 @@ fn menus_by_type_with_previews_and_missing_tools() {
         Act::Insert("unzip -l '/srv/my files/a b.zip'".into())
     );
     assert!(find(&m, "extract_here").enabled());
+    let m = build(
+        &file("/srv/my files/a b.zip", false, 0o644),
+        &ctx(Place::RemotePanel, Some(&tools), &[]),
+    );
+    assert!(m.items.iter().all(|i| i.id != "extract_here"));
+    assert_eq!(
+        find(&m, "view").act,
+        Act::SftpView("/srv/my files/a b.zip".into())
+    );
     assert_eq!(
         find(&m, "download").act,
         Act::Download(vec!["/srv/my files/a b.zip".into()])
@@ -390,12 +399,14 @@ fn menus_by_type_with_previews_and_missing_tools() {
     );
     assert_eq!(
         find(&m, "rm").act,
-        Act::Insert("rm -- '/srv/my files/a b.zip'".into())
+        Act::SftpDelete(vec!["/srv/my files/a b.zip".into()])
     );
+    assert!(matches!(find(&m, "cp").act, Act::SftpCopy(_)));
+    assert!(matches!(find(&m, "cut").act, Act::SftpCut(_)));
     // rar without unrar → greyed out with apt hint
     let m = build(
         &file("/x/y.rar", false, 0o644),
-        &ctx(Place::RemotePanel, Some(&tools), &[]),
+        &ctx(Place::Terminal { remote: true }, Some(&tools), &[]),
     );
     let it = find(&m, "extract_here");
     assert!(!it.enabled());
@@ -404,7 +415,7 @@ fn menus_by_type_with_previews_and_missing_tools() {
     // unknown tools (probe in flight) → enabled, marked unknown
     let m = build(
         &file("/x/y.7z", false, 0o644),
-        &ctx(Place::RemotePanel, None, &[]),
+        &ctx(Place::Terminal { remote: true }, None, &[]),
     );
     assert!(find(&m, "extract_here").enabled() && find(&m, "extract_here").unknown);
     assert_eq!(
@@ -414,20 +425,25 @@ fn menus_by_type_with_previews_and_missing_tools() {
     // tar variants
     let m = build(
         &file("/d/a.tar.xz", false, 0),
-        &ctx(Place::LocalPanel, Some(&tools), &[]),
+        &ctx(Place::Terminal { remote: false }, Some(&tools), &[]),
     );
     assert_eq!(
         find(&m, "extract_here").act,
         Act::Insert("tar -xJf /d/a.tar.xz -C /d".into())
     );
     assert_eq!(find(&m, "extract_here").missing, vec!["xz"]);
+    let m = build(
+        &file("/d/a.tar.xz", false, 0),
+        &ctx(Place::LocalPanel, Some(&tools), &[]),
+    );
+    assert!(m.items.iter().all(|i| i.id != "extract_here"));
     assert_eq!(
         find(&m, "upload").act,
         Act::Upload(vec!["/d/a.tar.xz".into()])
     );
     let m = build(
         &file("/d/a.gz", false, 0),
-        &ctx(Place::LocalPanel, Some(&tools), &[]),
+        &ctx(Place::Terminal { remote: false }, Some(&tools), &[]),
     );
     assert_eq!(
         find(&m, "extract_here").act,
@@ -436,7 +452,7 @@ fn menus_by_type_with_previews_and_missing_tools() {
     // directory
     let m = build(
         &file("/home/u/项目 A", true, 0o755),
-        &ctx(Place::RemotePanel, Some(&tools), &[]),
+        &ctx(Place::Terminal { remote: true }, Some(&tools), &[]),
     );
     assert_eq!(
         find(&m, "targz_dir").act,
@@ -455,9 +471,17 @@ fn menus_by_type_with_previews_and_missing_tools() {
         find(&m, "cd_tab").act,
         Act::CdNewTab("/home/u/项目 A".into())
     );
+    let m = build(
+        &file("/home/u/项目 A", true, 0o755),
+        &ctx(Place::RemotePanel, Some(&tools), &[]),
+    );
+    assert!(m
+        .items
+        .iter()
+        .all(|i| i.id != "zip_dir" && i.id != "du" && i.id != "cd_tab"));
     assert_eq!(
         find(&m, "rm").act,
-        Act::Insert("rm -r -- '/home/u/项目 A'".into())
+        Act::SftpDelete(vec!["/home/u/项目 A".into()])
     );
     // text: remote → built-in editor; local → $EDITOR
     let m = build(
@@ -467,6 +491,14 @@ fn menus_by_type_with_previews_and_missing_tools() {
     assert_eq!(
         find(&m, "edit").act,
         Act::OpenEditor("/etc/nginx/nginx.conf".into())
+    );
+    assert!(m
+        .items
+        .iter()
+        .all(|i| i.id != "tail_f" && i.id != "less" && i.id != "diff"));
+    let m = build(
+        &file("/etc/nginx/nginx.conf", false, 0o644),
+        &ctx(Place::Terminal { remote: true }, Some(&tools), &[]),
     );
     assert_eq!(
         find(&m, "tail_f").act,
@@ -484,7 +516,7 @@ fn menus_by_type_with_previews_and_missing_tools() {
     // script / log
     let m = build(
         &file("/opt/run me.sh", false, 0o644),
-        &ctx(Place::RemotePanel, Some(&tools), &[]),
+        &ctx(Place::Terminal { remote: true }, Some(&tools), &[]),
     );
     assert_eq!(
         find(&m, "run").act,
@@ -496,12 +528,12 @@ fn menus_by_type_with_previews_and_missing_tools() {
     );
     let m = build(
         &file("/opt/x.py", false, 0o644),
-        &ctx(Place::RemotePanel, Some(&tools), &[]),
+        &ctx(Place::Terminal { remote: true }, Some(&tools), &[]),
     );
     assert_eq!(find(&m, "run").missing, vec!["python3"]);
     let m = build(
         &file("/var/log/app.log", false, 0o644),
-        &ctx(Place::RemotePanel, Some(&tools), &[]),
+        &ctx(Place::Terminal { remote: true }, Some(&tools), &[]),
     );
     assert_eq!(
         find(&m, "grep").act,
@@ -509,7 +541,7 @@ fn menus_by_type_with_previews_and_missing_tools() {
     );
     let m = build(
         &file("/usr/local/bin/srv", false, 0o755),
-        &ctx(Place::RemotePanel, Some(&tools), &[]),
+        &ctx(Place::Terminal { remote: true }, Some(&tools), &[]),
     );
     assert_eq!(
         find(&m, "run_exec").act,
@@ -528,23 +560,33 @@ fn menus_by_type_with_previews_and_missing_tools() {
             mode: 0,
         },
     ]);
-    let m = build(&multi, &ctx(Place::RemotePanel, Some(&tools), &[]));
+    let m = build(
+        &multi,
+        &ctx(Place::Terminal { remote: true }, Some(&tools), &[]),
+    );
     assert_eq!(
         find(&m, "diff2").act,
         Act::Insert("diff -u -- /d/a.txt '/d/b c.txt'".into())
     );
     assert_eq!(
-        find(&m, "rm").act,
-        Act::Insert("rm -- /d/a.txt '/d/b c.txt'".into())
-    );
-    assert_eq!(
         find(&m, "targz_sel").act,
         Act::Insert("tar -czf /d/archive.tar.gz -C /d a.txt 'b c.txt'".into())
     );
-    assert!(m
-        .items
-        .iter()
-        .all(|i| i.id != "rename" && i.id != "extract_here"));
+    let m = build(&multi, &ctx(Place::RemotePanel, Some(&tools), &[]));
+    assert_eq!(
+        find(&m, "rm").act,
+        Act::SftpDelete(vec!["/d/a.txt".into(), "/d/b c.txt".into()])
+    );
+    assert!(m.items.iter().all(|i| {
+        i.id != "rename" && i.id != "extract_here" && i.id != "diff2" && i.id != "targz_sel"
+    }));
+    let m = build(
+        &file("/tmp/a.txt", false, 0o644),
+        &ctx(Place::Terminal { remote: false }, Some(&tools), &[]),
+    );
+    assert!(matches!(find(&m, "rm").act, Act::Insert(_)));
+    assert!(matches!(find(&m, "cp").act, Act::Insert(_)));
+    assert!(m.items.iter().all(|i| i.id != "cut"));
     // url / ip / selection
     let m = build(
         &Target::Url("https://ex.com/a b".into()),

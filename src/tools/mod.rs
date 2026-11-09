@@ -455,6 +455,7 @@ pub fn out_fit(id: &str) -> bool {
             | "date_calc"
             | "workday"
             | "ip_lookup"
+            | "ip_latency"
             | "ifaces"
             | "cidr"
             | "ip_overlap"
@@ -555,6 +556,7 @@ pub fn icon_of(id: &str) -> &'static str {
         "naming" => "case-sensitive",
         "radix" => "binary",
         "ip_lookup" => "globe",
+        "ip_latency" => "activity",
         "ifaces" => "ethernet-port",
         "cidr" => "calculator",
         "ip_overlap" => "git-compare",
@@ -945,6 +947,20 @@ pub fn builtin() -> Vec<ToolSpec> {
                 "ip address geo location whois public",
                 vec![F::text("input", t("tools.f_ip"))],
                 vec![F::toggle("mine", t("tools.net_mine"), false)],
+            )
+        },
+        ToolSpec {
+            heavy: true,
+            live: false,
+            ..spec(
+                "ip_latency",
+                "net",
+                "ping latency rtt delay tcp",
+                vec![F::text("input", t("tools.f_host"))],
+                vec![
+                    F::number("port", t("tools.f_port"), "443"),
+                    F::number("count", t("tools.f_count"), "4"),
+                ],
             )
         },
         ToolSpec {
@@ -1429,6 +1445,7 @@ pub fn run(id: &str, a: &Args) -> Result<Output> {
             RowFmt::Pad(4),
         ),
         "ip_lookup" => net::lookup_rows(a)?,
+        "ip_latency" => net::latency_rows(a)?,
         "ifaces" => net::iface_rows(),
         "cidr" => net::cidr_rows(a)?,
         "ip_overlap" => net::overlap_rows(a)?,
@@ -1709,11 +1726,11 @@ mod tests {
     #[test]
     fn registry_complete() {
         let all = builtin();
-        assert_eq!(all.len(), 49);
+        assert_eq!(all.len(), 50);
         let mut ids: Vec<_> = all.iter().map(|s| s.id.clone()).collect();
         ids.sort();
         ids.dedup();
-        assert_eq!(ids.len(), 49, "ids unique");
+        assert_eq!(ids.len(), 50, "ids unique");
         for s in &all {
             assert!(CATEGORIES.iter().any(|c| c.0 == s.cat), "{}", s.id);
             assert!(!s.name.starts_with("tools."), "missing name {}", s.id);

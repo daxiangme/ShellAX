@@ -179,6 +179,22 @@ pub fn entry_row(
     dark: bool,
     cols: Cols,
 ) -> gpui::Stateful<gpui::Div> {
+    entry_checked(id, e, selected, dark, cols, None)
+}
+
+/// 同一行，可在图标前面放一个勾选框。`check` 为 (元素 id, 是否勾选, 点击)。
+pub fn entry_checked(
+    id: impl Into<gpui::ElementId>,
+    e: &Entry,
+    selected: bool,
+    dark: bool,
+    cols: Cols,
+    check: Option<(
+        gpui::ElementId,
+        bool,
+        Box<dyn Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static>,
+    )>,
+) -> gpui::Stateful<gpui::Div> {
     let th = cur();
     let hidden = e.name.starts_with('.');
     let mut row = div()
@@ -194,23 +210,26 @@ pub fn entry_row(
         .cursor_pointer()
         .when(hidden, |d| d.opacity(0.72))
         .when(selected, |d| d.bg(c(th.accent).opacity(0.2)))
-        .when(!selected, |d| d.hover(|d| d.bg(crate::theme::hover_bg())))
-        .child(crate::file_icon::entry_icon(
-            &e.name,
-            e.is_dir,
-            e.mode,
-            crate::ui::IC_LG,
-            dark,
-        ))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .child(e.name.clone()),
-        );
+        .when(!selected, |d| d.hover(|d| d.bg(crate::theme::hover_bg())));
+    if let Some((cid, on, f)) = check {
+        row = row.child(check_box(cid, on, f));
+    }
+    row = row.child(crate::file_icon::entry_icon(
+        &e.name,
+        e.is_dir,
+        e.mode,
+        crate::ui::IC_LG,
+        dark,
+    ));
+    row = row.child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .child(e.name.clone()),
+    );
     if let Some(w) = cols.mtime {
         row = row.child(meta(w, fmt_mtime(e.mtime), false));
     }
@@ -229,6 +248,41 @@ pub fn entry_row(
         row = row.child(meta(w, kind_label(e), true));
     }
     row
+}
+
+fn check_box(
+    id: gpui::ElementId,
+    on: bool,
+    f: Box<dyn Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static>,
+) -> gpui::Stateful<gpui::Div> {
+    let th = cur();
+    div()
+        .id(id)
+        .size(px(14.))
+        .flex_shrink_0()
+        .rounded(px(3.))
+        .border_1()
+        .border_color(if on { c(th.accent) } else { c(th.overlay1) })
+        .bg(if on {
+            c(th.accent)
+        } else {
+            gpui::transparent_black()
+        })
+        .flex()
+        .items_center()
+        .justify_center()
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(move |ev, w, cx| {
+            f(ev, w, cx);
+            cx.stop_propagation();
+        })
+        .when(on, |d| {
+            d.child(crate::ui::icon(
+                crate::ui::IconName::Check,
+                crate::ui::IC_XS,
+                gpui::white(),
+            ))
+        })
 }
 
 /// 「..」行：次要文字色，双击由调用方处理。

@@ -99,6 +99,8 @@ pub fn local_home() -> String {
 
 pub enum DirEvent {
     Pick(u64),
+    /// Run `cd` in the terminal this card is showing.
+    Cd { key: u64, path: String },
 }
 
 /// 目录卡片自己的剪贴板：路径、是否目录、来自本机还是哪台主机。
@@ -778,6 +780,11 @@ impl DirView {
         .when(path_ok, |d| {
             d.on_click(cx.listener(|v, _, _, cx| v.copy_cwd(cx)))
         });
+        let go = ui::icon_button("dir-go", IconName::FolderInput, ui::IconBtn::Md, t("dir.go"))
+            .when(!path_ok, |d| d.opacity(0.4))
+            .when(path_ok, |d| {
+                d.on_click(cx.listener(|v, _, _, cx| v.go_cwd(cx)))
+            });
         ui::toolbar()
             .child(back)
             .child(refresh)
@@ -788,6 +795,7 @@ impl DirView {
                     .child(ui::text_field(&self.path_in, false)),
             )
             .child(copy)
+            .child(go)
     }
 
     fn copy_cwd(&mut self, cx: &mut Context<Self>) {
@@ -802,6 +810,28 @@ impl DirView {
         }
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(path));
         self.flash(t("dir.copied_path").into(), cx);
+    }
+
+    /// Ask the terminal this card follows to `cd` into the path in the field.
+    fn go_cwd(&mut self, cx: &mut Context<Self>) {
+        let typed = self.path_in.read(cx).value().trim().to_string();
+        let raw = if typed.is_empty() {
+            self.dir.clone()
+        } else {
+            typed
+        };
+        if raw.is_empty() {
+            return;
+        }
+        let Some(path) = filelist::resolve_cwd(&raw, &self.home, self.remote) else {
+            self.path_err = Some(t("dir.bad_path").to_string());
+            cx.notify();
+            return;
+        };
+        let Some(key) = self.pick else { return };
+        self.path_err = None;
+        cx.emit(DirEvent::Cd { key, path });
+        cx.notify();
     }
 
     fn sort_head(&self, cx: &mut Context<Self>) -> AnyElement {

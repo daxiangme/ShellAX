@@ -910,6 +910,18 @@ pub enum Act {
     UseAiContext,
     /// Open a built-in tool (id) with the selection as its input.
     OpenTool(String, String),
+    /// SFTP panel: open this file read-only.
+    SftpView(String),
+    /// SFTP panel: delete these paths in place.
+    SftpDelete(Vec<String>),
+    /// SFTP panel: rename this path with the in-panel dialog.
+    SftpRename(String),
+    /// SFTP panel: change permissions with the in-panel dialog.
+    SftpChmod(String),
+    /// SFTP panel: remember these paths for paste.
+    SftpCopy(Vec<String>),
+    /// SFTP panel: remember these paths and delete them after a successful paste.
+    SftpCut(Vec<String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1136,6 +1148,7 @@ pub fn build(target: &Target, ctx: &Ctx) -> Menu {
                 .map(|p| quote_path(p))
                 .collect::<Vec<_>>()
                 .join(" ");
+            let in_panel = matches!(ctx.place, Place::LocalPanel | Place::RemotePanel);
             if files.len() == 1 {
                 let f = &files[0];
                 let name = file_name(&f.path).to_string();
@@ -1144,11 +1157,11 @@ pub fn build(target: &Target, ctx: &Ctx) -> Menu {
                 let q = quote_path(&f.path);
                 for k in &ks {
                     match *k {
-                        Kind::Archive(a) => {
+                        Kind::Archive(a) if !in_panel => {
                             archive_items(&mut b, a, &f.path);
                             b.sep();
                         }
-                        Kind::Dir => {
+                        Kind::Dir if !in_panel => {
                             b.ins("zip_dir", t("cm.zip_dir"), zip_command(&f.path), &["zip"]);
                             b.ins(
                                 "targz_dir",
@@ -1165,7 +1178,7 @@ pub fn build(target: &Target, ctx: &Ctx) -> Menu {
                             b.ins("du", t("cm.du"), format!("du -sh -- {q}"), &["du"]);
                             b.sep();
                         }
-                        Kind::Log => {
+                        Kind::Log if !in_panel => {
                             b.ins(
                                 "tail_f",
                                 t("cm.tail_f"),
@@ -1180,7 +1193,7 @@ pub fn build(target: &Target, ctx: &Ctx) -> Menu {
                             );
                             b.sep();
                         }
-                        Kind::Script => {
+                        Kind::Script if !in_panel => {
                             let i = interpreter(&name).unwrap_or("sh");
                             b.ins("run", t("cm.run"), format!("{i} {q}"), &[i]);
                             if f.mode & 0o111 == 0 {
@@ -1188,7 +1201,7 @@ pub fn build(target: &Target, ctx: &Ctx) -> Menu {
                             }
                             b.sep();
                         }
-                        Kind::Executable => {
+                        Kind::Executable if !in_panel => {
                             if !ks.contains(&Kind::Script) {
                                 let run = if f.path.contains('/') {
                                     q.clone()
@@ -1200,18 +1213,15 @@ pub fn build(target: &Target, ctx: &Ctx) -> Menu {
                             }
                         }
                         Kind::Text => {
-                            let remote_file = matches!(
-                                ctx.place,
-                                Place::RemotePanel | Place::Terminal { remote: true }
-                            );
-                            if remote_file {
+                            let remote_term = matches!(ctx.place, Place::Terminal { remote: true });
+                            if in_panel || remote_term {
                                 b.push(
                                     "edit",
                                     t("cm.edit").into(),
                                     Act::OpenEditor(f.path.clone()),
                                     &[],
                                 );
-                            } else {
+                            } else if !in_panel {
                                 b.ins(
                                     "edit_local",
                                     t("cm.edit_local"),
@@ -1219,30 +1229,34 @@ pub fn build(target: &Target, ctx: &Ctx) -> Menu {
                                     &[],
                                 );
                             }
-                            if !ks.contains(&Kind::Log) {
+                            if !in_panel {
+                                if !ks.contains(&Kind::Log) {
+                                    b.ins(
+                                        "tail_f",
+                                        t("cm.tail_f"),
+                                        format!("tail -f -- {q}"),
+                                        &["tail"],
+                                    );
+                                }
+                                b.ins("less", t("cm.less"), format!("less -- {q}"), &["less"]);
                                 b.ins(
-                                    "tail_f",
-                                    t("cm.tail_f"),
-                                    format!("tail -f -- {q}"),
-                                    &["tail"],
+                                    "diff",
+                                    t("cm.diff"),
+                                    format!(
+                                        "diff -u -- {q} {}",
+                                        quote_path(&format!("{}.orig", f.path))
+                                    ),
+                                    &["diff"],
                                 );
                             }
-                            b.ins("less", t("cm.less"), format!("less -- {q}"), &["less"]);
-                            b.ins(
-                                "diff",
-                                t("cm.diff"),
-                                format!(
-                                    "diff -u -- {q} {}",
-                                    quote_path(&format!("{}.orig", f.path))
-                                ),
-                                &["diff"],
-                            );
                             b.sep();
                         }
-                        Kind::File => {}
+                        Kind::File | Kind::Archive(_) | Kind::Dir | Kind::Log | Kind::Script
+                        | Kind::Executable => {}
                     }
                 }
-                if !f.is_dir
+                if !in_panel
+                    && !f.is_dir
                     && !ks
                         .iter()
                         .any(|k| matches!(k, Kind::Script | Kind::Executable))
@@ -1250,7 +1264,7 @@ pub fn build(target: &Target, ctx: &Ctx) -> Menu {
                 {
                     b.ins("chmod_x", t("cm.chmod_x"), format!("chmod +x -- {q}"), &[]);
                 }
-            } else {
+            } else if !in_panel {
                 header = tf("cm.n_items", &[("n", &files.len())]);
                 let dir = parent_dir(&paths[0]);
                 let names = files
@@ -1284,6 +1298,8 @@ pub fn build(target: &Target, ctx: &Ctx) -> Menu {
                 }
                 b.ins("du", t("cm.du"), format!("du -shc -- {qall}"), &["du"]);
                 b.sep();
+            } else {
+                header = tf("cm.n_items", &[("n", &files.len())]);
             }
             // common
             let single = files.len() == 1;
@@ -1295,52 +1311,90 @@ pub fn build(target: &Target, ctx: &Ctx) -> Menu {
             } else {
                 ""
             };
-            b.ins(
-                "cp",
-                t("cm.copy_to"),
+            if in_panel {
+                if single && !files[0].is_dir {
+                    b.push(
+                        "view",
+                        t("dir.view").into(),
+                        Act::SftpView(p0.clone()),
+                        &[],
+                    );
+                }
+                b.push(
+                    "cp",
+                    t("cm.copy_to").into(),
+                    Act::SftpCopy(paths.clone()),
+                    &[],
+                );
+                b.push("cut", t("cm.cut").into(), Act::SftpCut(paths.clone()), &[]);
                 if single {
-                    format!(
-                        "cp {r}-- {} {}",
-                        quote_path(p0),
-                        quote_path(&format!("{p0}.copy"))
-                    )
-                } else {
-                    format!("cp {r}-- {qall} {qdir}")
-                },
-                &[],
-            );
-            b.ins("mv", t("cm.move_to"), format!("mv -- {qall} {qdir}"), &[]);
-            if single {
+                    b.push(
+                        "rename",
+                        t("cm.rename").into(),
+                        Act::SftpRename(p0.clone()),
+                        &[],
+                    );
+                    b.push(
+                        "chmod",
+                        t("cm.chmod").into(),
+                        Act::SftpChmod(p0.clone()),
+                        &[],
+                    );
+                }
+                b.push(
+                    "rm",
+                    t("cm.delete").into(),
+                    Act::SftpDelete(paths.clone()),
+                    &[],
+                );
+            } else {
                 b.ins(
-                    "rename",
-                    t("cm.rename"),
-                    format!("mv -- {} {}", quote_path(p0), quote_path(p0)),
+                    "cp",
+                    t("cm.copy_to"),
+                    if single {
+                        format!(
+                            "cp {r}-- {} {}",
+                            quote_path(p0),
+                            quote_path(&format!("{p0}.copy"))
+                        )
+                    } else {
+                        format!("cp {r}-- {qall} {qdir}")
+                    },
+                    &[],
+                );
+                b.ins("mv", t("cm.move_to"), format!("mv -- {qall} {qdir}"), &[]);
+                if single {
+                    b.ins(
+                        "rename",
+                        t("cm.rename"),
+                        format!("mv -- {} {}", quote_path(p0), quote_path(p0)),
+                        &[],
+                    );
+                }
+                b.ins("rm", t("cm.delete"), format!("rm {r}-- {qall}"), &[]);
+                b.ins(
+                    "chmod",
+                    t("cm.chmod"),
+                    format!(
+                        "chmod {}-- {qall}",
+                        if files.iter().any(|f| f.is_dir) {
+                            "-R 755 "
+                        } else {
+                            "644 "
+                        }
+                    ),
+                    &[],
+                );
+                b.ins(
+                    "chown",
+                    t("cm.chown"),
+                    format!(
+                        "chown {}\"$USER\": -- {qall}",
+                        if r.is_empty() { "" } else { "-R " }
+                    ),
                     &[],
                 );
             }
-            b.ins("rm", t("cm.delete"), format!("rm {r}-- {qall}"), &[]);
-            b.ins(
-                "chmod",
-                t("cm.chmod"),
-                format!(
-                    "chmod {}-- {qall}",
-                    if files.iter().any(|f| f.is_dir) {
-                        "-R 755 "
-                    } else {
-                        "644 "
-                    }
-                ),
-                &[],
-            );
-            b.ins(
-                "chown",
-                t("cm.chown"),
-                format!(
-                    "chown {}\"$USER\": -- {qall}",
-                    if r.is_empty() { "" } else { "-R " }
-                ),
-                &[],
-            );
             b.sep();
             match ctx.place {
                 Place::RemotePanel => b.push(

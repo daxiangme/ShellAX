@@ -1,6 +1,7 @@
 //! Dual-pane SFTP browser. Each pane picks its own source (this computer or any saved host),
 //! so files can move local ↔ remote, local ↔ local and remote ↔ remote (relayed through a
 //! temporary directory on this computer). Remote panes reuse the pooled SSH connection.
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -15,7 +16,7 @@ use ssh_term_proto::hosts::HostEntry;
 use ssh_term_proto::hosttree;
 use ssh_term_proto::i18n::{t, tf};
 use ssh_term_proto::session_store::SftpSide;
-use ssh_term_proto::sftp::{self, Dir, Entry, JobState, Queue, Side};
+use ssh_term_proto::sftp::{self, Dir, Entry, JobState, Queue, Side, WhenExists};
 use ssh_term_proto::sftp_follow::Follow;
 use ssh_term_proto::ssh::{self, SshTarget};
 
@@ -124,7 +125,10 @@ struct Pane {
     back: Vec<String>,
     fwd: Vec<String>,
     sel: Option<usize>,
-    multi: Vec<usize>,
+    /// Selected file names. Survives a refresh that reorders the list.
+    picked: Vec<String>,
+    /// When set, each row shows a checkbox in front of the name.
+    pick_mode: bool,
 }
 impl Pane {
     fn new(src: Src) -> Self {
@@ -142,7 +146,8 @@ impl Pane {
             back: vec![],
             fwd: vec![],
             sel: None,
-            multi: vec![],
+            picked: vec![],
+            pick_mode: false,
         }
     }
     fn remote(&self) -> Option<&Remote> {
@@ -204,20 +209,35 @@ impl Pane {
     }
     fn clear_sel(&mut self) {
         self.sel = None;
-        self.multi.clear();
+        self.picked.clear();
+    }
+    fn retain_picked(&mut self) {
+        let have: HashSet<&str> = self.entries.iter().map(|e| e.name.as_str()).collect();
+        self.picked.retain(|n| have.contains(n.as_str()));
+        if self
+            .sel
+            .and_then(|i| self.entries.get(i))
+            .is_none()
+        {
+            self.sel = self
+                .picked
+                .first()
+                .and_then(|n| self.entries.iter().position(|e| &e.name == n));
+        }
     }
     fn selection(&self) -> Vec<Entry> {
-        let mut idx = self.multi.clone();
-        if idx.is_empty() {
-            if let Some(i) = self.sel {
-                idx.push(i);
-            }
-        }
-        idx.sort();
-        idx.dedup();
-        idx.into_iter()
-            .filter_map(|i| self.entries.get(i).cloned())
+        self.picked
+            .iter()
+            .filter_map(|n| self.entries.iter().find(|e| &e.name == n).cloned())
             .collect()
+    }
+    fn toggle_name(&mut self, name: &str, index: usize) {
+        if let Some(x) = self.picked.iter().position(|n| n == name) {
+            self.picked.remove(x);
+        } else {
+            self.picked.push(name.to_string());
+        }
+        self.sel = Some(index);
     }
     fn save(&self) -> SftpSide {
         match &self.src {
@@ -257,9 +277,9 @@ pub struct SftpView {
     status_seq: u64,
     error: bool,
     edit: Option<(Edit, usize, String, Entity<InputState>)>,
-    confirm_delete: Option<(usize, String)>,
-    /// Built-in editor: (pane, path, version when opened, editor, overwrite on next save).
-    editor: Option<(usize, String, sftp::Version, Entity<EditorState>, bool)>,
+    confirm_delete: Option<(usize, Vec<String>)>,
+    /// Built-in editor. `readonly` is the directory-style viewer.
+    editor: Option<OpenFile>,
     ticking: bool,
     _subs: Vec<gpui::Subscription>,
     sync: Option<SyncUi>,
@@ -271,6 +291,61 @@ pub struct SftpView {
     pub follow: Follow,
     follow_task: bool,
     next_token: u64,
+    /// Transfer waiting on same-name choices.
+    batch: Option<Batch>,
+    conflict_rest: bool,
+    /// Files remembered by Copy / Cut. `from` is the source pane when it is one of the two panes.
+    clip: Option<Clip>,
+    /// Cut sources to delete once these queue jobs finish.
+    cut_after: Option<CutAfter>,
+    /// Job ids already refreshed after completion.
+    seen_done: HashSet<u64>,
+    blank_menu: Option<(usize, Point<Pixels>, std::time::Instant)>,
+    /// A same-name prompt is on screen for the current batch item.
+    asking: bool,
+}
+
+#[derive(Clone)]
+struct XItem {
+    src: String,
+    name: String,
+    is_dir: bool,
+}
+
+struct Batch {
+    /// None means the files come from outside this window (a system file drop).
+    from: Option<usize>,
+    to: usize,
+    items: Vec<XItem>,
+    index: usize,
+    rest: Option<WhenExists>,
+    cut: bool,
+    cut_srcs: Vec<String>,
+    cut_ids: Vec<u64>,
+    queued: usize,
+}
+
+#[derive(Clone)]
+struct Clip {
+    from: Option<usize>,
+    cut: bool,
+    items: Vec<XItem>,
+}
+
+#[derive(Clone)]
+struct OpenFile {
+    pane: usize,
+    path: String,
+    ver: sftp::Version,
+    text: Entity<EditorState>,
+    force: bool,
+    readonly: bool,
+}
+
+struct CutAfter {
+    from: usize,
+    paths: Vec<String>,
+    ids: Vec<u64>,
 }
 
 /// Sync panel state: mode, delete flag, computed plan, delete confirmation pending.
@@ -337,6 +412,13 @@ impl SftpView {
             follow: Follow::new(false),
             follow_task: false,
             next_token: 0,
+            batch: None,
+            conflict_rest: false,
+            clip: None,
+            cut_after: None,
+            seen_done: HashSet::new(),
+            blank_menu: None,
+            asking: false,
         };
         if let Some(t) = target {
             me.panes[1].src = Src::Remote(Box::new(me.new_remote(host_name(&t), t)));
@@ -687,7 +769,7 @@ impl SftpView {
         p.fwd.clear();
         p.filter = None;
         self.sync = None;
-        if self.editor.as_ref().is_some_and(|e| e.0 == pi) {
+        if self.editor.as_ref().is_some_and(|e| e.pane == pi) {
             self.editor = None;
         }
         cx.emit(SftpEvent::Retitle);
@@ -741,33 +823,49 @@ impl SftpView {
 
     // ---- listing / navigation
     fn refresh_local(&mut self, pi: usize) {
+        self.refresh_local_mode(pi, false);
+    }
+    fn refresh_local_mode(&mut self, pi: usize, quiet: bool) {
         let p = &mut self.panes[pi];
         if !p.is_local() {
             return;
         }
         if p.ldir.as_os_str().is_empty() {
             p.entries = windows_drives();
+            p.retain_picked();
             return;
         }
         match sftp::list_local(&p.ldir, p.hidden) {
-            Ok(v) => p.entries = v,
+            Ok(v) => {
+                p.entries = v;
+                p.retain_picked();
+            }
             Err(e) => {
-                p.entries.clear();
+                if !quiet {
+                    p.entries.clear();
+                }
                 let m = format!("{}: {e}", p.ldir.display());
                 self.set_status(m, true)
             }
         }
     }
     fn refresh(&mut self, pi: usize, cx: &mut Context<Self>) {
+        self.refresh_in(pi, false, cx);
+    }
+    /// `quiet` keeps the current rows until the new listing arrives.
+    fn refresh_in(&mut self, pi: usize, quiet: bool, cx: &mut Context<Self>) {
         if self.panes[pi].is_local() {
-            return self.refresh_local(pi);
+            self.refresh_local_mode(pi, quiet);
+            return;
         }
         let p = &mut self.panes[pi];
         let Some(s) = p.sess() else { return };
         p.gen = p.gen.wrapping_add(1);
         let (gen, dir, hidden) = (p.gen, p.rdir.clone(), p.hidden);
-        p.loading = true;
-        p.entries.clear();
+        if !quiet {
+            p.loading = true;
+            p.entries.clear();
+        }
         let (tx, rx) = flume::bounded(1);
         self.rt.spawn(async move {
             let _ = tx.send(sftp::list_remote(&s, &dir, hidden).await);
@@ -781,7 +879,10 @@ impl SftpView {
                     }
                     p.loading = false;
                     match r {
-                        Ok(ls) => p.entries = ls,
+                        Ok(ls) => {
+                            p.entries = ls;
+                            p.retain_picked();
+                        }
                         Err(e) => v.set_status(format!("{e:#}"), true),
                     }
                     cx.notify();
@@ -793,6 +894,10 @@ impl SftpView {
     fn refresh_all(&mut self, cx: &mut Context<Self>) {
         self.refresh(0, cx);
         self.refresh(1, cx);
+    }
+    fn refresh_quiet(&mut self, cx: &mut Context<Self>) {
+        self.refresh_in(0, true, cx);
+        self.refresh_in(1, true, cx);
     }
     fn set_dir(&mut self, pi: usize, dir: String, cx: &mut Context<Self>) {
         let p = &mut self.panes[pi];
@@ -868,36 +973,38 @@ impl SftpView {
             self.active = pi;
         }
         let p = &mut self.panes[pi];
-        if m.control || m.platform {
-            if let Some(x) = p.multi.iter().position(|&x| x == i) {
-                p.multi.remove(x);
-            } else {
-                p.multi.push(i);
-            }
-            p.sel = Some(i);
+        let Some(name) = p.entries.get(i).map(|e| e.name.clone()) else {
+            return;
+        };
+        if p.pick_mode && !m.shift {
+            p.toggle_name(&name, i);
+        } else if m.control || m.platform {
+            p.toggle_name(&name, i);
         } else if m.shift && p.sel.is_some() {
             let a = p.sel.unwrap_or(i);
-            p.multi = (a.min(i)..=a.max(i)).collect();
+            let (lo, hi) = (a.min(i), a.max(i));
+            p.picked = (lo..=hi)
+                .filter_map(|k| p.entries.get(k).map(|e| e.name.clone()))
+                .collect();
+            p.sel = Some(i);
         } else {
             p.sel = Some(i);
-            p.multi = vec![i];
+            p.picked = vec![name];
         }
-    }
-    fn selected(&self) -> Option<(usize, Entry)> {
-        let p = &self.panes[self.active];
-        p.sel
-            .and_then(|i| p.entries.get(i).cloned())
-            .map(|e| (self.active, e))
     }
     fn open_ctx_menu(&mut self, pi: usize, i: usize, pos: Point<Pixels>, cx: &mut Context<Self>) {
         use ssh_term_proto::ctxmenu::{FileObj, Place, Target};
-        let in_sel = self.active == pi
-            && (self.panes[pi].multi.contains(&i) || self.panes[pi].sel == Some(i));
+        let name = self.panes[pi]
+            .entries
+            .get(i)
+            .map(|e| e.name.clone())
+            .unwrap_or_default();
+        let in_sel = self.active == pi && self.panes[pi].picked.iter().any(|n| n == &name);
         if !in_sel {
             self.panes[self.active].clear_sel();
             self.active = pi;
             self.panes[pi].sel = Some(i);
-            self.panes[pi].multi = vec![i];
+            self.panes[pi].picked = vec![name];
         }
         let p = &self.panes[pi];
         let files: Vec<FileObj> = p
@@ -942,7 +1049,7 @@ impl SftpView {
         }
         cx.notify();
     }
-    fn ctx_pick(&mut self, i: usize, _w: &mut Window, cx: &mut Context<Self>) {
+    fn ctx_pick(&mut self, i: usize, w: &mut Window, cx: &mut Context<Self>) {
         use ssh_term_proto::ctxmenu::Act;
         let Some((pi, m)) = self.ctx_menu.take() else {
             return;
@@ -966,7 +1073,8 @@ impl SftpView {
             Act::Insert(command) => cx.emit(SftpEvent::Insert { target, command }),
             Act::CdNewTab(dir) => cx.emit(SftpEvent::CdTab { target, dir }),
             Act::Copy(text) => cx.write_to_clipboard(gpui::ClipboardItem::new_string(text)),
-            Act::OpenEditor(p) => self.edit_in(pi, p, cx),
+            Act::OpenEditor(p) => self.open_text(pi, p, false, cx),
+            Act::SftpView(p) => self.open_text(pi, p, true, cx),
             Act::Download(paths) | Act::Upload(paths) => {
                 let names = paths
                     .into_iter()
@@ -983,6 +1091,11 @@ impl SftpView {
                 self.send(pi, 1 - pi, names, cx)
             }
             Act::OpenUrl(u) => cx.open_url(&u),
+            Act::SftpDelete(paths) => self.ask_delete_paths(pi, paths, cx),
+            Act::SftpRename(_) => self.begin_edit(Edit::Rename, pi, w, cx),
+            Act::SftpChmod(_) => self.begin_edit(Edit::Chmod, pi, w, cx),
+            Act::SftpCopy(paths) => self.remember(pi, paths, false, cx),
+            Act::SftpCut(paths) => self.remember(pi, paths, true, cx),
             Act::Search(_)
             | Act::AiExplain(_)
             | Act::PasteInput(_)
@@ -1014,6 +1127,7 @@ impl SftpView {
                 let _ = this.update(cx, |v, cx| {
                     match r {
                         Ok(x) => apply(v, x, cx),
+                        Err(e) if v.batch.is_some() => v.fail_batch(e, cx),
                         Err(e) => v.set_status(format!("{e:#}"), true),
                     }
                     cx.notify();
@@ -1046,107 +1160,321 @@ impl SftpView {
         if self.panes[to].is_local() && self.panes[to].ldir.as_os_str().is_empty() {
             return self.set_status(t("sftp.no_target_dir").into(), true);
         }
-        match (self.panes[from].is_local(), self.panes[to].is_local()) {
-            (true, false) => {
-                for (p, _) in items {
-                    self.upload_to(to, PathBuf::from(p), cx)
+        let xitems = items
+            .into_iter()
+            .map(|(src, name)| {
+                let is_dir = self.panes[from]
+                    .entries
+                    .iter()
+                    .any(|e| e.name == name && e.is_dir)
+                    || Path::new(&src).is_dir();
+                XItem { src, name, is_dir }
+            })
+            .collect();
+        self.begin_batch(Some(from), to, xitems, false, cx);
+    }
+    fn begin_batch(
+        &mut self,
+        from: Option<usize>,
+        to: usize,
+        items: Vec<XItem>,
+        cut: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if items.is_empty() {
+            return;
+        }
+        if self.batch.is_some() {
+            self.set_status(t("sftp.busy_conflict").into(), true);
+            cx.notify();
+            return;
+        }
+        if self.panes[to].is_local() && self.panes[to].ldir.as_os_str().is_empty() {
+            self.set_status(t("sftp.no_target_dir").into(), true);
+            cx.notify();
+            return;
+        }
+        self.conflict_rest = false;
+        self.batch = Some(Batch {
+            from,
+            to,
+            items,
+            index: 0,
+            rest: None,
+            cut,
+            cut_srcs: vec![],
+            cut_ids: vec![],
+            queued: 0,
+        });
+        self.pump(cx);
+    }
+    fn pump(&mut self, cx: &mut Context<Self>) {
+        let Some(b) = &self.batch else { return };
+        if b.index >= b.items.len() {
+            self.finish_batch(cx);
+            return;
+        }
+        let name = b.items[b.index].name.clone();
+        let to = b.to;
+        let dest = self.panes[to].path_of(&name);
+        let side = self.panes[to].side();
+        let sess = self.panes[to].sess();
+        self.remote_op(
+            cx,
+            async move { Ok(sftp::exists_path(sess.as_deref(), side, &dest).await) },
+            move |v, exists, cx| {
+                if !exists {
+                    v.use_name(name, cx);
+                    return;
                 }
-            }
-            (false, true) => {
-                for (p, n) in items {
-                    self.download_from(from, p, n, to, cx)
+                if let Some(choice) = v.batch.as_ref().and_then(|b| b.rest) {
+                    v.apply_choice(choice, cx);
+                } else {
+                    v.asking = true;
+                    v.set_status(tf("sftp.conflict", &[("name", &name)]), false);
+                    cx.notify();
                 }
+            },
+        );
+    }
+    fn use_name(&mut self, dest_name: String, cx: &mut Context<Self>) {
+        let Some(item) = self.batch.as_ref().and_then(|b| b.items.get(b.index).cloned()) else {
+            return;
+        };
+        self.asking = false;
+        if let Some(b) = self.batch.as_mut() {
+            b.index += 1;
+        }
+        self.enqueue(&item, &dest_name, cx);
+    }
+    fn apply_choice(&mut self, choice: WhenExists, cx: &mut Context<Self>) {
+        self.asking = false;
+        if self.conflict_rest {
+            if let Some(b) = self.batch.as_mut() {
+                b.rest = Some(choice);
             }
-            (true, true) => self.copy_local(items, to, cx),
-            (false, false) => {
-                for (p, n) in items {
-                    self.relay(from, p, n, to, cx)
+        }
+        let Some(b) = &self.batch else { return };
+        let name = b.items[b.index].name.clone();
+        let to = b.to;
+        let dir = self.panes[to].dir();
+        let side = self.panes[to].side();
+        let sess = self.panes[to].sess();
+        self.remote_op(
+            cx,
+            async move { Ok(sftp::resolve_name(sess.as_deref(), side, &dir, &name, choice).await) },
+            |v, dest, cx| {
+                v.asking = false;
+                match dest {
+                    Some(dest) => v.use_name(dest, cx),
+                    None => {
+                        if let Some(b) = v.batch.as_mut() {
+                            b.index += 1;
+                        }
+                        v.pump(cx);
+                    }
+                }
+            },
+        );
+    }
+    fn fail_batch(&mut self, err: anyhow::Error, cx: &mut Context<Self>) {
+        self.batch = None;
+        self.asking = false;
+        self.conflict_rest = false;
+        self.set_status(format!("{err:#}"), true);
+        cx.notify();
+    }
+    fn finish_batch(&mut self, cx: &mut Context<Self>) {
+        let Some(b) = self.batch.take() else { return };
+        self.conflict_rest = false;
+        self.asking = false;
+        if b.cut {
+            if let Some(from) = b.from {
+                if !b.cut_ids.is_empty() {
+                    self.cut_after = Some(CutAfter {
+                        from,
+                        paths: b.cut_srcs,
+                        ids: b.cut_ids,
+                    });
+                } else if b.queued > 0 && b.cut_srcs.is_empty() {
+                    // Local copies already removed their sources.
                 }
             }
         }
+        if b.queued == 0 {
+            self.set_status(t("sftp.all_skipped").into(), false);
+        }
         cx.notify();
     }
-    /// Upload a local file / folder (also from the system file manager) into remote pane `to`.
-    fn upload_to(&mut self, to: usize, local: PathBuf, cx: &mut Context<Self>) {
+    fn enqueue(&mut self, item: &XItem, dest_name: &str, cx: &mut Context<Self>) {
+        let Some(b) = &self.batch else { return };
+        let (from, to, cut) = (b.from, b.to, b.cut);
+        let from_local = from
+            .map(|i| self.panes[i].is_local())
+            .unwrap_or(true);
+        let to_local = self.panes[to].is_local();
+        let src = item.src.clone();
+        let dest_path = self.panes[to].path_of(dest_name);
+        if src == dest_path {
+            self.set_status(tf("sftp.same_place", &[("p", &src)]), true);
+            self.pump(cx);
+            return;
+        }
+        match (from_local, to_local) {
+            (true, false) => self.queue_upload(to, PathBuf::from(&src), dest_name, src, cx),
+            (false, true) => self.queue_download(from.unwrap_or(0), src, dest_name, to, cx),
+            (true, true) => self.queue_local(src, dest_name, to, cut, item.is_dir, cx),
+            (false, false) => self.queue_relay(from.unwrap_or(0), src, dest_name, to, cx),
+        }
+    }
+    fn note_queued(&mut self, ids: Vec<u64>, src: String, cx: &mut Context<Self>) {
+        if let Some(b) = self.batch.as_mut() {
+            b.queued += 1;
+            if b.cut {
+                b.cut_ids.extend(ids);
+                b.cut_srcs.push(src);
+            }
+        }
+        self.start_worker(cx);
+        self.pump(cx);
+    }
+    fn queue_upload(
+        &mut self,
+        to: usize,
+        local: PathBuf,
+        dest_name: &str,
+        src: String,
+        cx: &mut Context<Self>,
+    ) {
         let Some(s) = self.panes[to].sess() else {
+            self.batch = None;
+            self.asking = false;
             return self.set_status(t("sftp.not_connected").into(), true);
         };
-        let name = local
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let remote = sftp::join(&self.panes[to].rdir, &name);
+        let remote = sftp::join(&self.panes[to].rdir, dest_name);
         let Some(q) = self.panes[to].remote().map(|r| r.queue.clone()) else {
+            self.batch = None;
+            self.asking = false;
             return;
         };
-        self.start_worker(cx);
         self.remote_op(
             cx,
-            async move { q.push_upload_tree(&s, &local, &remote).await },
-            |v, n, _| v.set_status(tf("sftp.queued", &[("n", &n)]), false),
+            async move {
+                let before = q.max_id();
+                let queued = async {
+                    let n = q.push_upload_tree(&s, &local, &remote).await?;
+                    Ok::<_, anyhow::Error>((n, q.ids_after(before)))
+                }
+                .await;
+                Ok(queued)
+            },
+            move |v, queued, cx| match queued {
+                Ok((_n, ids)) => {
+                    v.set_status(tf("sftp.queued", &[("n", &ids.len().max(1))]), false);
+                    v.note_queued(ids, src, cx);
+                }
+                Err(e) => v.fail_batch(e, cx),
+            },
         );
     }
-    fn download_from(
+    fn queue_download(
         &mut self,
         from: usize,
         remote: String,
-        name: String,
+        dest_name: &str,
         to: usize,
         cx: &mut Context<Self>,
     ) {
         let Some(s) = self.panes[from].sess() else {
+            self.batch = None;
+            self.asking = false;
             return self.set_status(t("sftp.not_connected").into(), true);
         };
-        let local = self.panes[to].ldir.join(name);
+        let local = self.panes[to].ldir.join(dest_name);
         let Some(q) = self.panes[from].remote().map(|r| r.queue.clone()) else {
+            self.batch = None;
+            self.asking = false;
             return;
         };
-        self.start_worker(cx);
-        self.remote_op(
-            cx,
-            async move { q.push_download_tree(&s, &remote, &local).await },
-            |v, n, _| v.set_status(tf("sftp.queued", &[("n", &n)]), false),
-        );
-    }
-    fn copy_local(&mut self, items: Vec<(String, String)>, to: usize, cx: &mut Context<Self>) {
-        let dst = self.panes[to].ldir.clone();
-        let _ = crate::audit_log().append(
-            "sftp.copy_local",
-            "user",
-            &format!("n={} to={:?}", items.len(), dst.display()),
-        );
+        let src = remote.clone();
         self.remote_op(
             cx,
             async move {
-                tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
-                    let mut n = 0;
-                    for (p, name) in items {
-                        let (a, b) = (PathBuf::from(&p), dst.join(&name));
-                        if a == b {
-                            anyhow::bail!("{}", tf("sftp.same_place", &[("p", &p)]));
-                        }
-                        n += sftp::copy_tree(&a, &b).map_err(|e| anyhow::anyhow!("{p}: {e}"))?;
-                    }
-                    Ok(n)
-                })
-                .await?
+                let before = q.max_id();
+                let queued = async {
+                    let n = q.push_download_tree(&s, &remote, &local).await?;
+                    Ok::<_, anyhow::Error>((n, q.ids_after(before)))
+                }
+                .await;
+                Ok(queued)
             },
-            |v, n, cx| v.after_change(tf("sftp.copied", &[("n", &n)]), cx),
+            move |v, queued, cx| match queued {
+                Ok((_n, ids)) => {
+                    v.set_status(tf("sftp.queued", &[("n", &ids.len().max(1))]), false);
+                    v.note_queued(ids, src, cx);
+                }
+                Err(e) => v.fail_batch(e, cx),
+            },
         );
     }
-    /// Remote → remote: download into a temporary folder on this computer, then queue the upload.
-    fn relay(
+    fn queue_local(
+        &mut self,
+        src: String,
+        dest_name: &str,
+        to: usize,
+        cut: bool,
+        is_dir: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let dst = self.panes[to].ldir.join(dest_name);
+        let src_path = src.clone();
+        self.remote_op(
+            cx,
+            async move {
+                tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                    if PathBuf::from(&src_path) == dst {
+                        anyhow::bail!("{}", tf("sftp.same_place", &[("p", &src_path)]));
+                    }
+                    sftp::copy_tree(&PathBuf::from(&src_path), &dst)
+                        .map_err(|e| anyhow::anyhow!("{src_path}: {e}"))?;
+                    if cut {
+                        let p = PathBuf::from(&src_path);
+                        if is_dir {
+                            std::fs::remove_dir_all(&p)?;
+                        } else {
+                            std::fs::remove_file(&p)?;
+                        }
+                    }
+                    Ok(())
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("{e:#}"))?
+            },
+            move |v, _, cx| {
+                if let Some(b) = v.batch.as_mut() {
+                    b.queued += 1;
+                }
+                v.after_change(t("sftp.copied_one").into(), cx);
+                v.pump(cx);
+            },
+        );
+    }
+    fn queue_relay(
         &mut self,
         from: usize,
         path: String,
-        name: String,
+        dest_name: &str,
         to: usize,
         cx: &mut Context<Self>,
     ) {
         let (Some(sa), Some(sb)) = (self.panes[from].sess(), self.panes[to].sess()) else {
+            self.batch = None;
+            self.asking = false;
             return self.set_status(t("sftp.not_connected").into(), true);
         };
         let Some(qb) = self.panes[to].remote().map(|r| r.queue.clone()) else {
+            self.batch = None;
+            self.asking = false;
             return;
         };
         let stamp = std::time::SystemTime::now()
@@ -1154,19 +1482,9 @@ impl SftpView {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let tmp_root = std::env::temp_dir().join(format!("shellax-relay-{stamp}"));
-        let tmp = tmp_root.join(&name);
-        let dest = sftp::join(&self.panes[to].rdir, &name);
-        let (ha, hb) = (self.panes[from].label(), self.panes[to].label());
-        let _ = crate::audit_log().append(
-            "sftp.relay",
-            "user",
-            &format!("from={ha} path={path:?} to={hb} dest={dest:?}"),
-        );
-        self.set_status(
-            tf("sftp.relaying", &[("p", &name), ("a", &ha), ("b", &hb)]),
-            false,
-        );
-        self.start_worker(cx);
+        let tmp = tmp_root.join(dest_name);
+        let dest = sftp::join(&self.panes[to].rdir, dest_name);
+        let src = path.clone();
         self.remote_op(
             cx,
             async move {
@@ -1186,12 +1504,48 @@ impl SftpView {
                     let _ = std::fs::remove_dir_all(&tmp_root);
                     anyhow::bail!("{}", failed.join("; "));
                 }
-                qb.push_upload_tree(&sb, &tmp, &dest).await
+                let before = qb.max_id();
+                let _n = qb.push_upload_tree(&sb, &tmp, &dest).await?;
+                Ok(qb.ids_after(before))
             },
-            |v, n, cx| {
-                v.start_worker(cx);
-                v.set_status(tf("sftp.relay_queued", &[("n", &n)]), false)
+            move |v, ids, cx| {
+                v.set_status(tf("sftp.relay_queued", &[("n", &ids.len().max(1))]), false);
+                v.note_queued(ids, src, cx);
             },
+        );
+    }
+    fn poll_cut(&mut self, cx: &mut Context<Self>) {
+        let Some(cut) = &self.cut_after else { return };
+        let mut failed = false;
+        let mut pending = false;
+        for id in &cut.ids {
+            let state = self.queues().iter().find_map(|(_, q)| q.state_of(*id));
+            match state {
+                Some(JobState::Failed) => failed = true,
+                Some(JobState::Done) => {}
+                Some(_) => pending = true,
+                None => {}
+            }
+        }
+        if pending {
+            return;
+        }
+        let cut = self.cut_after.take().unwrap();
+        if failed {
+            self.set_status(t("sftp.cut_kept").into(), true);
+            return;
+        }
+        let (s, side) = (self.panes[cut.from].sess(), self.panes[cut.from].side());
+        let paths = cut.paths;
+        self.remote_op(
+            cx,
+            async move {
+                for p in &paths {
+                    sftp::remove(s.as_deref(), side, p).await?;
+                }
+                Ok(paths.len())
+            },
+            |v, n, cx| v.after_change(tf("sftp.cut_done", &[("n", &n)]), cx),
         );
     }
     /// Remote panes with their transfer queues.
@@ -1212,22 +1566,37 @@ impl SftpView {
             return;
         }
         self.ticking = true;
-        // repaint while jobs are active; refresh listings when they finish
+        // Jobs are already queued. Refresh the panes when one finishes, without clearing the list.
         cx.spawn(async move |this, cx| loop {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(200))
                 .await;
             let Ok(busy) = this.update(cx, |v, cx| {
-                let busy = v.queues().iter().any(|(_, q)| {
-                    q.jobs
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .any(|j| matches!(j.state(), JobState::Queued | JobState::Running))
-                });
+                let mut busy = false;
+                let mut freshly_done = false;
+                for (_, q) in v.queues() {
+                    let jobs = q.jobs.lock().unwrap();
+                    for j in jobs.iter() {
+                        match j.state() {
+                            JobState::Queued | JobState::Running => busy = true,
+                            JobState::Done => {
+                                if v.seen_done.insert(j.id) {
+                                    freshly_done = true;
+                                }
+                            }
+                            JobState::Failed | JobState::Paused => {}
+                        }
+                    }
+                }
+                v.poll_cut(cx);
+                if freshly_done {
+                    v.refresh_quiet(cx);
+                }
                 if !busy {
                     v.ticking = false;
-                    v.refresh_all(cx);
+                    if !freshly_done {
+                        v.refresh_quiet(cx);
+                    }
                 }
                 cx.notify();
                 busy
@@ -1266,7 +1635,12 @@ impl SftpView {
             return;
         }
         let sel = if self.active == pi {
-            self.selected().map(|s| s.1)
+            let picked = self.panes[pi].selection();
+            if picked.len() == 1 {
+                picked.into_iter().next()
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -1343,7 +1717,12 @@ impl SftpView {
     fn edit_selected(&mut self, pi: usize, cx: &mut Context<Self>) {
         self.ops_menu = None;
         let sel = if self.active == pi {
-            self.selected().map(|s| s.1)
+            let picked = self.panes[pi].selection();
+            if picked.len() == 1 {
+                picked.into_iter().next()
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -1353,29 +1732,66 @@ impl SftpView {
             return;
         };
         let path = self.panes[pi].path_of(&e.name);
-        self.edit_in(pi, path, cx);
+        self.open_text(pi, path, false, cx);
+    }
+    /// Open the selected file read-only, local or remote, like the directory panel.
+    fn view_selected(&mut self, pi: usize, cx: &mut Context<Self>) {
+        self.ops_menu = None;
+        self.blank_menu = None;
+        let sel = if self.active == pi {
+            let picked = self.panes[pi].selection();
+            if picked.len() == 1 {
+                picked.into_iter().next()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let Some(e) = sel.filter(|e| !e.is_dir) else {
+            self.set_status(t("sftp.view_select").into(), true);
+            cx.notify();
+            return;
+        };
+        let path = self.panes[pi].path_of(&e.name);
+        self.open_text(pi, path, true, cx);
     }
     /// Open a remote text file of the host pane in the built-in editor (waits for the connection).
     pub fn edit_path(&mut self, path: String, cx: &mut Context<Self>) {
         match self.remote_pane() {
-            Some(pi) => self.edit_in(pi, path, cx),
+            Some(pi) => self.open_text(pi, path, false, cx),
             None => self.set_status(t("sftp.not_connected").into(), true),
         }
     }
-    fn edit_in(&mut self, pi: usize, path: String, cx: &mut Context<Self>) {
-        let Some(s) = self.panes[pi].sess() else {
-            if self.panes[pi].remote().is_some() {
-                self.pending_edit = Some(path);
-            }
-            cx.notify();
-            return;
-        };
+    fn open_text(&mut self, pi: usize, path: String, readonly: bool, cx: &mut Context<Self>) {
+        let local = self.panes[pi].is_local();
         let host = self.panes[pi].target().map(|t| t.host).unwrap_or_default();
-        let p2 = path.clone();
         let (tx, rx) = flume::bounded(1);
-        self.rt.spawn(async move {
-            let _ = tx.send(sftp::read_text(&s, &p2).await);
-        });
+        if local {
+            let p2 = path.clone();
+            self.rt.spawn(async move {
+                let r = tokio::task::spawn_blocking(move || {
+                    sftp::read_text_local(std::path::Path::new(&p2))
+                })
+                .await
+                .unwrap_or_else(|e| Err(anyhow::anyhow!("{e}")));
+                let _ = tx.send(r);
+            });
+        } else {
+            let Some(s) = self.panes[pi].sess() else {
+                if self.panes[pi].remote().is_some() && !readonly {
+                    self.pending_edit = Some(path);
+                } else {
+                    self.set_status(t("sftp.not_connected").into(), true);
+                }
+                cx.notify();
+                return;
+            };
+            let p2 = path.clone();
+            self.rt.spawn(async move {
+                let _ = tx.send(sftp::read_text(&s, &p2).await);
+            });
+        }
         cx.spawn(async move |this, cx| {
             let Ok(r) = rx.recv_async().await else { return };
             let Some(window) = cx.update(|cx| cx.active_window()) else {
@@ -1390,13 +1806,27 @@ impl SftpView {
                                     .line_number(true)
                                     .default_value(text)
                             });
-                            let _ = crate::audit_log().append(
-                                "sftp.edit.open",
-                                "user",
-                                &format!("host={host} path={path:?} bytes={}", ver.0),
-                            );
-                            v.editor = Some((pi, path.clone(), ver, st, false));
-                            v.set_status(tf("sftp.edit_opened", &[("p", &path)]), false);
+                            if !readonly {
+                                let _ = crate::audit_log().append(
+                                    "sftp.edit.open",
+                                    "user",
+                                    &format!("host={host} path={path:?} bytes={}", ver.0),
+                                );
+                            }
+                            v.editor = Some(OpenFile {
+                                pane: pi,
+                                path: path.clone(),
+                                ver,
+                                text: st,
+                                force: false,
+                                readonly,
+                            });
+                            let key = if readonly {
+                                "sftp.view_opened"
+                            } else {
+                                "sftp.edit_opened"
+                            };
+                            v.set_status(tf(key, &[("p", &path)]), false);
                         }
                         Err(e) => v.set_status(format!("{e:#}"), true),
                     }
@@ -1407,9 +1837,13 @@ impl SftpView {
         .detach();
     }
     fn save_editor(&mut self, cx: &mut Context<Self>) {
-        let Some((pi, path, ver, st, force)) = self.editor.clone() else {
+        let Some(ed) = self.editor.clone() else {
             return;
         };
+        if ed.readonly {
+            return;
+        }
+        let (pi, path, ver, st, force) = (ed.pane, ed.path, ed.ver, ed.text, ed.force);
         let Some(s) = self.panes[pi].sess() else {
             return;
         };
@@ -1437,8 +1871,8 @@ impl SftpView {
                             &format!("host={host} path={path:?} bytes={n} overwrite={force}"),
                         );
                         if let Some(ed) = v.editor.as_mut() {
-                            ed.2 = nv;
-                            ed.4 = false;
+                            ed.ver = nv;
+                            ed.force = false;
                         }
                         v.after_change(tf("sftp.edit_saved", &[("p", &path), ("n", &n)]), cx);
                     }
@@ -1446,7 +1880,7 @@ impl SftpView {
                         let msg = format!("{e:#}");
                         if msg.contains("changed on the server") {
                             if let Some(ed) = v.editor.as_mut() {
-                                ed.4 = true;
+                                ed.force = true;
                             }
                             let _ = crate::audit_log().append(
                                 "sftp.edit.conflict",
@@ -1462,24 +1896,101 @@ impl SftpView {
         })
         .detach();
     }
+    fn remember(&mut self, pi: usize, paths: Vec<String>, cut: bool, cx: &mut Context<Self>) {
+        let items = paths
+            .into_iter()
+            .map(|src| {
+                let name = src
+                    .trim_end_matches(['/', '\\'])
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or("file")
+                    .to_string();
+                let is_dir = self.panes[pi]
+                    .entries
+                    .iter()
+                    .any(|e| e.name == name && e.is_dir);
+                XItem { src, name, is_dir }
+            })
+            .collect::<Vec<_>>();
+        let n = items.len();
+        self.clip = Some(Clip {
+            from: Some(pi),
+            cut,
+            items,
+        });
+        self.set_status(
+            tf(
+                if cut { "sftp.cut_n" } else { "sftp.copied_n" },
+                &[("n", &n)],
+            ),
+            false,
+        );
+        cx.notify();
+    }
+    fn paste_into(&mut self, to: usize, cx: &mut Context<Self>) {
+        let Some(clip) = self.clip.clone() else { return };
+        self.blank_menu = None;
+        self.begin_batch(clip.from, to, clip.items, clip.cut, cx);
+    }
+    fn visible_names(&self, pi: usize, cx: &gpui::App) -> Vec<String> {
+        let p = &self.panes[pi];
+        let q = p
+            .filter
+            .as_ref()
+            .map(|f| f.read(cx).value().trim().to_lowercase())
+            .unwrap_or_default();
+        filelist::sorted_indices(&p.entries, p.sort)
+            .into_iter()
+            .filter(|&i| {
+                let e = &p.entries[i];
+                q.is_empty() || e.name.to_lowercase().contains(&q)
+            })
+            .map(|i| p.entries[i].name.clone())
+            .take(2000)
+            .collect()
+    }
     fn ask_delete(&mut self, pi: usize, cx: &mut Context<Self>) {
+        let paths = self.panes[pi]
+            .selection()
+            .iter()
+            .map(|e| self.panes[pi].path_of(&e.name))
+            .collect();
+        self.ask_delete_paths(pi, paths, cx);
+    }
+    fn ask_delete_paths(&mut self, pi: usize, paths: Vec<String>, cx: &mut Context<Self>) {
         self.ops_menu = None;
-        match self.selected().filter(|(p, _)| *p == pi) {
-            Some((_, e)) => self.confirm_delete = Some((pi, self.panes[pi].path_of(&e.name))),
-            None => self.set_status(t("sftp.select_first").into(), true),
+        self.blank_menu = None;
+        if paths.is_empty() {
+            self.set_status(t("sftp.select_first").into(), true);
+        } else {
+            self.confirm_delete = Some((pi, paths));
         }
         cx.notify();
     }
     fn delete_confirmed(&mut self, cx: &mut Context<Self>) {
-        let Some((pi, path)) = self.confirm_delete.take() else {
+        let Some((pi, paths)) = self.confirm_delete.take() else {
             return;
         };
         let (s, side) = (self.panes[pi].sess(), self.panes[pi].side());
-        let p2 = path.clone();
+        let n = paths.len();
+        let shown = paths.first().cloned().unwrap_or_default();
         self.remote_op(
             cx,
-            async move { sftp::remove(s.as_deref(), side, &p2).await },
-            move |v, _, cx| v.after_change(tf("sftp.deleted", &[("p", &path)]), cx),
+            async move {
+                for p in &paths {
+                    sftp::remove(s.as_deref(), side, p).await?;
+                }
+                Ok(())
+            },
+            move |v, _, cx| {
+                let msg = if n == 1 {
+                    tf("sftp.deleted", &[("p", &shown)])
+                } else {
+                    tf("sftp.deleted_n", &[("n", &n)])
+                };
+                v.after_change(msg, cx);
+            },
         );
         self.panes[pi].clear_sel();
         cx.notify();
@@ -1539,7 +2050,6 @@ impl SftpView {
         }
         su.busy = true;
         let smode = su.mode;
-        self.start_worker(cx);
         let Some(q) = self.panes[r].remote().map(|x| x.queue.clone()) else {
             return;
         };
@@ -2101,13 +2611,19 @@ impl SftpView {
         let dark = th.appearance == Appearance::Dark;
         if !at_drives {
             list = list.child(
-                filelist::parent_row(("sftp-up", pi), dark).on_click(cx.listener(
-                    move |v, ev: &gpui::ClickEvent, _, cx| {
+                filelist::parent_row(("sftp-up", pi), dark)
+                    .on_click(cx.listener(move |v, ev: &gpui::ClickEvent, _, cx| {
                         if ev.click_count() >= 2 {
                             v.up(pi, cx)
                         }
-                    },
-                )),
+                    }))
+                    .on_mouse_down(
+                        gpui::MouseButton::Right,
+                        cx.listener(move |v, ev: &gpui::MouseDownEvent, _, cx| {
+                            v.open_blank(pi, ev.position, cx);
+                            cx.stop_propagation();
+                        }),
+                    ),
             );
         }
         if p.loading {
@@ -2136,14 +2652,31 @@ impl SftpView {
             if shown > 2000 {
                 break;
             }
-            let selected = selected_on && (p.multi.contains(&i) || p.sel == Some(i));
+            let selected = selected_on && p.picked.iter().any(|n| n == &e.name);
             let drag = DragFile {
                 pane: pi,
                 path: p.path_of(&e.name),
                 name: e.name.clone(),
             };
+            let row_id = pid(pi, i);
+            let name = e.name.clone();
+            let check = p.pick_mode.then(|| {
+                let on = p.picked.iter().any(|n| n == &name);
+                let toggle_name = name.clone();
+                let f: Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static> =
+                    Box::new(cx.listener(move |v, _, _, cx| {
+                        if v.active != pi {
+                            v.panes[v.active].clear_sel();
+                            v.active = pi;
+                        }
+                        v.panes[pi].toggle_name(&toggle_name, i);
+                        cx.stop_propagation();
+                        cx.notify();
+                    }));
+                (("sftp-ck", row_id).into(), on, f)
+            });
             list = list.child(
-                filelist::entry_row(("sftp-row", pid(pi, i)), e, selected, dark, cols)
+                filelist::entry_checked(("sftp-row", row_id), e, selected, dark, cols, check)
                     .on_click(cx.listener(move |v, ev: &gpui::ClickEvent, _, cx| {
                         if ev.click_count() >= 2 {
                             v.open(pi, i, cx)
@@ -2164,6 +2697,13 @@ impl SftpView {
                     }),
             );
         }
+        list = list.on_mouse_down(
+            gpui::MouseButton::Right,
+            cx.listener(move |v, ev: &gpui::MouseDownEvent, _, cx| {
+                v.open_blank(pi, ev.position, cx);
+                cx.stop_propagation();
+            }),
+        );
         if shown == 0 && !q.is_empty() {
             list = list.child(
                 div()
@@ -2477,25 +3017,19 @@ impl SftpView {
                 }
             }))
             .on_drop(cx.listener(move |v, ps: &ExternalPaths, _, cx| {
-                let items: Vec<(String, String)> = ps
+                let items = ps
                     .paths()
                     .iter()
-                    .map(|f| {
-                        (
-                            f.to_string_lossy().into_owned(),
-                            f.file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_default(),
-                        )
+                    .map(|f| XItem {
+                        src: f.to_string_lossy().into_owned(),
+                        name: f
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
+                        is_dir: f.is_dir(),
                     })
                     .collect();
-                if v.panes[pi].is_local() {
-                    v.copy_local(items, pi, cx);
-                } else {
-                    for (f, _) in items {
-                        v.upload_to(pi, PathBuf::from(f), cx);
-                    }
-                }
+                v.begin_batch(None, pi, items, false, cx);
                 cx.notify();
             }))
             .child(self.pane_header(pi, cx));
@@ -2527,7 +3061,7 @@ impl SftpView {
         let remote = p.remote().is_some();
         let other_ready = self.panes[1 - pi].ready();
         let has_sel = self.active == pi && !p.selection().is_empty();
-        let one_sel = self.active == pi && p.sel.is_some();
+        let one_sel = self.active == pi && p.selection().len() == 1;
         let to_label = if p.is_local() && !self.panes[1 - pi].is_local() {
             t("sftp.upload").to_string()
         } else if !p.is_local() && self.panes[1 - pi].is_local() {
@@ -2594,6 +3128,19 @@ impl SftpView {
             move |v: &mut Self, _w: &mut Window, cx: &mut Context<Self>| v.refresh(pi, cx)
         );
         item!(
+            IconName::ListChecks,
+            if p.pick_mode {
+                t("sftp.multi_off")
+            } else {
+                t("sftp.multi")
+            },
+            ready,
+            false,
+            move |v: &mut Self, _w: &mut Window, _cx: &mut Context<Self>| {
+                v.panes[pi].pick_mode = !v.panes[pi].pick_mode;
+            }
+        );
+        item!(
             if p.hidden {
                 IconName::EyeOff
             } else {
@@ -2648,6 +3195,13 @@ impl SftpView {
             )
         );
         item!(
+            IconName::Eye,
+            t("dir.view"),
+            ready && one_sel && p.selection().first().is_some_and(|e| !e.is_dir),
+            false,
+            move |v: &mut Self, _w: &mut Window, cx: &mut Context<Self>| v.view_selected(pi, cx)
+        );
+        item!(
             IconName::FileText,
             t("sftp.edit"),
             ready && remote && one_sel,
@@ -2674,7 +3228,7 @@ impl SftpView {
         item!(
             IconName::Trash,
             t("sftp.delete"),
-            ready && one_sel,
+            ready && has_sel,
             true,
             move |v: &mut Self, _w: &mut Window, cx: &mut Context<Self>| v.ask_delete(pi, cx)
         );
@@ -2707,6 +3261,210 @@ impl SftpView {
         )
     }
 
+    fn open_blank(&mut self, pi: usize, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        self.ctx_menu = None;
+        self.ops_menu = None;
+        if self.active != pi {
+            self.panes[self.active].clear_sel();
+            self.active = pi;
+        }
+        self.blank_menu = Some((pi, pos, std::time::Instant::now()));
+        cx.notify();
+    }
+    fn blank_menu_el(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (pi, pos, _) = self.blank_menu.clone()?;
+        let p = &self.panes[pi];
+        let ready = p.ready();
+        let has_sel = self.active == pi && !p.selection().is_empty();
+        let other_ready = self.panes[1 - pi].ready();
+        let mut k = 0usize;
+        let mut id = || {
+            k += 1;
+            ("sftp-blank", pid(pi, k))
+        };
+        let mut list = ui::popover()
+            .id("sftp-blank-menu")
+            .occlude()
+            .min_w(px(220.))
+            .p(px(5.))
+            .flex()
+            .flex_col()
+            .on_mouse_down_out(cx.listener(|v, _, _, cx| {
+                if v.blank_menu
+                    .as_ref()
+                    .is_some_and(|m| m.2.elapsed() < std::time::Duration::from_millis(250))
+                {
+                    return;
+                }
+                v.blank_menu = None;
+                cx.notify();
+            }));
+        macro_rules! item {
+            ($ic:expr, $label:expr, $en:expr, $f:expr) => {{
+                let f = $f;
+                let el = ui::menu_item(id(), Some($ic), $label, $en, false);
+                list = list.child(if $en {
+                    el.on_click(cx.listener(
+                        move |v: &mut Self, _, w: &mut Window, cx: &mut Context<Self>| {
+                            v.blank_menu = None;
+                            f(v, w, cx);
+                            cx.notify();
+                        },
+                    ))
+                } else {
+                    el
+                });
+            }};
+        }
+        item!(
+            IconName::FolderPlus,
+            t("sftp.mkdir"),
+            ready,
+            move |v: &mut Self, w: &mut Window, cx: &mut Context<Self>| {
+                v.begin_edit(Edit::Mkdir, pi, w, cx)
+            }
+        );
+        item!(
+            IconName::RefreshCw,
+            t("sftp.refresh"),
+            ready,
+            move |v: &mut Self, _w: &mut Window, cx: &mut Context<Self>| v.refresh(pi, cx)
+        );
+        item!(
+            IconName::ListChecks,
+            if p.pick_mode {
+                t("sftp.multi_off")
+            } else {
+                t("sftp.multi")
+            },
+            ready,
+            move |v: &mut Self, _w: &mut Window, _cx: &mut Context<Self>| {
+                v.panes[pi].pick_mode = !v.panes[pi].pick_mode;
+            }
+        );
+        item!(
+            IconName::CheckCheck,
+            t("sftp.select_all"),
+            ready,
+            move |v: &mut Self, _w: &mut Window, cx: &mut Context<Self>| {
+                v.panes[pi].picked = v.visible_names(pi, cx);
+                v.panes[pi].sel = v.panes[pi].picked.first().and_then(|n| {
+                    v.panes[pi].entries.iter().position(|e| &e.name == n)
+                });
+            }
+        );
+        item!(
+            IconName::Square,
+            t("sftp.select_none"),
+            ready && has_sel,
+            move |v: &mut Self, _w: &mut Window, _cx: &mut Context<Self>| {
+                v.panes[pi].clear_sel();
+            }
+        );
+        if has_sel {
+            let to_label = if p.is_local() && !self.panes[1 - pi].is_local() {
+                t("sftp.upload")
+            } else if !p.is_local() && self.panes[1 - pi].is_local() {
+                t("sftp.download")
+            } else {
+                t("sftp.copy_other")
+            };
+            item!(
+                IconName::ArrowRight,
+                to_label,
+                ready && other_ready,
+                move |v: &mut Self, _w: &mut Window, cx: &mut Context<Self>| v.transfer_from(pi, cx)
+            );
+            item!(
+                IconName::Trash,
+                t("sftp.delete"),
+                ready,
+                move |v: &mut Self, _w: &mut Window, cx: &mut Context<Self>| v.ask_delete(pi, cx)
+            );
+        }
+        if self.clip.is_some() {
+            item!(
+                IconName::ClipboardPaste,
+                t("sftp.paste"),
+                ready,
+                move |v: &mut Self, _w: &mut Window, cx: &mut Context<Self>| v.paste_into(pi, cx)
+            );
+        }
+        Some(
+            gpui::deferred(
+                gpui::anchored()
+                    .position(pos)
+                    .snap_to_window_with_margin(px(8.))
+                    .child(crate::chrome::pop_in("sftp-blank-pop", list)),
+            )
+            .with_priority(3)
+            .into_any_element(),
+        )
+    }
+    fn conflict_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.asking {
+            return None;
+        }
+        let b = self.batch.as_ref()?;
+        let name = b.items.get(b.index)?.name.clone();
+        let th = cur();
+        let rest = self.conflict_rest;
+        Some(
+            div()
+                .mt_2()
+                .p_2()
+                .rounded(px(R_MD))
+                .bg(c(th.warning).opacity(0.12))
+                .border_1()
+                .border_color(c(th.warning).opacity(0.5))
+                .flex()
+                .items_center()
+                .gap_2()
+                .flex_wrap()
+                .text_size(px(fs_small()))
+                .text_color(c(th.text))
+                .child(icon(IconName::TriangleAlert, ui::IC_SM, c(th.warning)))
+                .child(div().flex_1().min_w(px(160.)).child(tf(
+                    "sftp.conflict",
+                    &[("name", &name)],
+                )))
+                .child(
+                    ui::button("sftp-over", t("sftp.overwrite"), 2).on_click(cx.listener(
+                        |v, _, _, cx| v.apply_choice(WhenExists::Overwrite, cx),
+                    )),
+                )
+                .child(
+                    ui::button("sftp-skip", t("sftp.skip"), 3).on_click(cx.listener(
+                        |v, _, _, cx| v.apply_choice(WhenExists::Skip, cx),
+                    )),
+                )
+                .child(
+                    ui::button("sftp-keep", t("sftp.keep_both"), 1).on_click(cx.listener(
+                        |v, _, _, cx| v.apply_choice(WhenExists::KeepBoth, cx),
+                    )),
+                )
+                .child(
+                    ui::button(
+                        "sftp-rest",
+                        t("sftp.apply_rest"),
+                        if rest { 1 } else { 3 },
+                    )
+                    .on_click(cx.listener(|v, _, _, cx| {
+                        v.conflict_rest = !v.conflict_rest;
+                        cx.notify();
+                    })),
+                )
+                .child(
+                    ui::button("sftp-stop", t("ui.cancel"), 3).on_click(cx.listener(|v, _, _, cx| {
+                        v.batch = None;
+                        v.asking = false;
+                        v.conflict_rest = false;
+                        cx.notify();
+                    })),
+                )
+                .into_any_element(),
+        )
+    }
     fn queue_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
         let qs = self.queues();
@@ -2917,7 +3675,7 @@ impl Render for SftpView {
         if let Some(pi) = self.remote_pane() {
             if self.panes[pi].sess().is_some() {
                 if let Some(p) = self.pending_edit.take() {
-                    self.edit_in(pi, p, cx);
+                    self.open_text(pi, p, false, cx);
                 }
             }
         }
@@ -2955,7 +3713,19 @@ impl Render for SftpView {
                     )),
                 )
         });
-        let confirm = self.confirm_delete.as_ref().map(|(pi, p)| {
+        let confirm = self.confirm_delete.as_ref().map(|(pi, paths)| {
+            let side = self.panes[*pi].label();
+            let text = if paths.len() == 1 {
+                tf(
+                    "sftp.confirm_delete",
+                    &[("p", &paths[0]), ("side", &side)],
+                )
+            } else {
+                tf(
+                    "sftp.confirm_delete_n",
+                    &[("n", &paths.len()), ("side", &side)],
+                )
+            };
             div()
                 .mt_2()
                 .p_2()
@@ -2969,10 +3739,7 @@ impl Render for SftpView {
                 .text_size(px(fs_small()))
                 .text_color(c(th.text))
                 .child(icon(IconName::TriangleAlert, ui::IC_SM, c(th.error)))
-                .child(div().flex_1().child(tf(
-                    "sftp.confirm_delete",
-                    &[("p", p), ("side", &self.panes[*pi].label())],
-                )))
+                .child(div().flex_1().child(text))
                 .child(
                     ui::button("del-ok", t("sftp.delete"), 2)
                         .on_click(cx.listener(|v, _, _, cx| v.delete_confirmed(cx))),
@@ -2986,7 +3753,13 @@ impl Render for SftpView {
                     )),
                 )
         });
-        if let Some((pi, path, _, st, force)) = self.editor.clone() {
+        if let Some(ed) = self.editor.clone() {
+            let (pi, path, st, force, readonly) = (ed.pane, ed.path, ed.text, ed.force, ed.readonly);
+            let heading = if readonly {
+                t("sftp.view_title")
+            } else {
+                t("sftp.editor_title")
+            };
             let ed = div()
                 .flex_1()
                 .min_h_0()
@@ -3001,26 +3774,47 @@ impl Render for SftpView {
                         .gap_2()
                         .text_size(px(fs_small()))
                         .text_color(c(th.text))
-                        .child(icon(IconName::FileText, ui::IC_SM, c(th.accent)))
+                        .child(icon(
+                            if readonly {
+                                IconName::Eye
+                            } else {
+                                IconName::FileText
+                            },
+                            ui::IC_SM,
+                            c(th.accent),
+                        ))
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_color(c(th.subtext))
+                                .child(if readonly {
+                                    t("dir.view_title")
+                                } else {
+                                    t("dir.edit_title")
+                                }),
+                        )
                         .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
                                 .overflow_hidden()
+                                .text_ellipsis()
                                 .child(format!("{}:{path}", self.panes[pi].label())),
                         )
-                        .child(
-                            ui::button(
-                                "ed-save",
-                                if force {
-                                    t("sftp.edit_overwrite")
-                                } else {
-                                    t("ui.save")
-                                },
-                                if force { 2 } else { 1 },
+                        .when(!readonly, |d| {
+                            d.child(
+                                ui::button(
+                                    "ed-save",
+                                    if force {
+                                        t("sftp.edit_overwrite")
+                                    } else {
+                                        t("ui.save")
+                                    },
+                                    if force { 2 } else { 1 },
+                                )
+                                .on_click(cx.listener(|v, _, _, cx| v.save_editor(cx))),
                             )
-                            .on_click(cx.listener(|v, _, _, cx| v.save_editor(cx))),
-                        )
+                        })
                         .child(ui::button("ed-close", t("sftp.edit_close"), 3).on_click(
                             cx.listener(|v, _, _, cx| {
                                 v.editor = None;
@@ -3036,7 +3830,7 @@ impl Render for SftpView {
                         .border_color(crate::theme::divider())
                         .rounded(px(ui::R_LG))
                         .overflow_hidden()
-                        .child(Editor::new(&st).h_full()),
+                        .child(Editor::new(&st).h_full().readonly(readonly)),
                 );
             let status = div()
                 .py_2()
@@ -3049,7 +3843,7 @@ impl Render for SftpView {
                 .child(self.status.clone());
             return self
                 .frame()
-                .child(self.page_head(t("sftp.editor_title"), cx))
+                .child(self.page_head(heading, cx))
                 .child(ed)
                 .child(status);
         }
@@ -3114,12 +3908,16 @@ impl Render for SftpView {
             .as_ref()
             .map(|(_, m)| crate::ctxmenu_view::render(m, cx, Self::ctx_pick, Self::ctx_close));
         let ops = self.ops_menu_el(cx);
+        let blank = self.blank_menu_el(cx);
+        let conflict = self.conflict_bar(cx);
         self.frame()
             .child(self.page_head(t("ui.sftp_files"), cx))
             .children(ctx)
             .children(ops)
+            .children(blank)
             .children(edit_bar)
             .children(confirm)
+            .children(conflict)
             .children(sync)
             .child(body)
             .child(div().pt_3().flex_shrink_0().child(self.queue_view(cx)))
@@ -3140,5 +3938,30 @@ mod tests {
         assert_eq!(sftp::copy_tree(&d.join("a"), &d.join("c")).unwrap(), 1);
         assert!(sftp::copy_tree(&d.join("a"), &d.join("a/b/inner")).is_err());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    fn ent(name: &str) -> Entry {
+        Entry {
+            name: name.into(),
+            is_dir: false,
+            size: 1,
+            mode: 0,
+            mtime: 0,
+        }
+    }
+
+    #[test]
+    fn picked_names_follow_the_file_after_reorder() {
+        let mut p = Pane::new(Src::Local);
+        p.entries = vec![ent("b"), ent("a")];
+        p.picked = vec!["a".into()];
+        p.sel = Some(1);
+        p.entries = vec![ent("a"), ent("b")];
+        p.retain_picked();
+        assert_eq!(p.selection().len(), 1);
+        assert_eq!(p.selection()[0].name, "a");
+        p.entries = vec![ent("b")];
+        p.retain_picked();
+        assert!(p.selection().is_empty());
     }
 }

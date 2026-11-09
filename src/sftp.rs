@@ -378,6 +378,8 @@ pub struct Job {
     pub done: AtomicU64,
     /// Bytes already present when the job started (resumed from).
     pub resumed_from: AtomicU64,
+    /// Set only when the user continues a paused or failed job.
+    resume: AtomicBool,
     state: AtomicU8,
     cancel: AtomicBool,
     pub error: Mutex<Option<String>>,
@@ -417,7 +419,80 @@ impl Job {
 
 const CHUNK: usize = 64 * 1024;
 
-/// Copy with resume: if the destination already has `n` bytes (n <= source size), continue at n.
+/// What to do when the destination name is already taken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WhenExists {
+    Overwrite,
+    Skip,
+    KeepBoth,
+}
+
+/// Byte offset for a transfer. A new transfer always rewrites from the start.
+/// Continuing a paused or failed job keeps bytes already stored, when they fit.
+pub fn transfer_offset(resume: bool, have: u64, total: u64) -> u64 {
+    if resume && have > 0 && have <= total {
+        have
+    } else {
+        0
+    }
+}
+
+/// Destination name after the user has already seen that `name` exists.
+/// `exists` is asked about candidate names. Skip yields `None`.
+pub fn choose_name(name: &str, choice: WhenExists, exists: impl Fn(&str) -> bool) -> Option<String> {
+    match choice {
+        WhenExists::Skip => None,
+        WhenExists::Overwrite => Some(name.to_string()),
+        WhenExists::KeepBoth => {
+            for n in 2..100 {
+                let alt = alt_name(name, n);
+                if !exists(&alt) {
+                    return Some(alt);
+                }
+            }
+            Some(alt_name(name, 100))
+        }
+    }
+}
+
+pub async fn exists_path(s: Option<&SftpSession>, side: Side, path: &str) -> bool {
+    match side {
+        Side::Local => Path::new(path).exists(),
+        Side::Remote => match s {
+            Some(s) => s.metadata(path.to_string()).await.is_ok(),
+            None => false,
+        },
+    }
+}
+
+/// Pick the destination file name. `dir` is the destination directory.
+pub async fn resolve_name(
+    s: Option<&SftpSession>,
+    side: Side,
+    dir: &str,
+    name: &str,
+    choice: WhenExists,
+) -> Option<String> {
+    let path_of = |n: &str| match side {
+        Side::Local => Path::new(dir).join(n).to_string_lossy().into_owned(),
+        Side::Remote => join(dir, n),
+    };
+    match choice {
+        WhenExists::Skip => None,
+        WhenExists::Overwrite => Some(name.to_string()),
+        WhenExists::KeepBoth => {
+            for n in 2..100 {
+                let alt = alt_name(name, n);
+                if !exists_path(s, side, &path_of(&alt)).await {
+                    return Some(alt);
+                }
+            }
+            Some(alt_name(name, 100))
+        }
+    }
+}
+
+/// Copy with resume only when `job.resume` is set (continue a paused or failed job).
 pub async fn run_job(s: &SftpSession, job: &Job) -> Result<()> {
     job.cancel.store(false, Ordering::Release);
     job.set(JobState::Running);
@@ -434,7 +509,7 @@ pub async fn run_job(s: &SftpSession, job: &Job) -> Result<()> {
                     .ok()
                     .and_then(|m| m.size)
                     .unwrap_or(0);
-                let off = if have <= total { have } else { 0 };
+                let off = transfer_offset(job.resume.load(Ordering::Acquire), have, total);
                 let mut dst = if off > 0 {
                     s.open_with_flags(job.remote.clone(), OpenFlags::WRITE)
                         .await?
@@ -493,7 +568,7 @@ pub async fn run_job(s: &SftpSession, job: &Job) -> Result<()> {
                 let total = src.metadata().await?.size.unwrap_or(0);
                 job.total.store(total, Ordering::Relaxed);
                 let have = std::fs::metadata(&job.local).map(|m| m.len()).unwrap_or(0);
-                let off = if have <= total { have } else { 0 };
+                let off = transfer_offset(job.resume.load(Ordering::Acquire), have, total);
                 let mut dst = tokio::fs::OpenOptions::new()
                     .write(true)
                     .create(true)
@@ -658,6 +733,7 @@ impl Queue {
             total: 0.into(),
             done: 0.into(),
             resumed_from: 0.into(),
+            resume: AtomicBool::new(false),
             state: AtomicU8::new(0),
             cancel: false.into(),
             error: Mutex::new(None),
@@ -719,10 +795,37 @@ impl Queue {
         if let Some(j) = self.jobs.lock().unwrap().iter().find(|j| j.id == id) {
             if matches!(j.state(), JobState::Paused | JobState::Failed) {
                 *j.error.lock().unwrap() = None;
+                j.resume.store(true, Ordering::Release);
                 j.set(JobState::Queued);
                 self.wake.notify_one();
             }
         }
+    }
+    pub fn max_id(&self) -> u64 {
+        self.jobs
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|j| j.id)
+            .max()
+            .unwrap_or(0)
+    }
+    pub fn ids_after(&self, id: u64) -> Vec<u64> {
+        self.jobs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|j| j.id > id)
+            .map(|j| j.id)
+            .collect()
+    }
+    pub fn state_of(&self, id: u64) -> Option<JobState> {
+        self.jobs
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|j| j.id == id)
+            .map(|j| j.state())
     }
     pub fn clear_done(&self) {
         self.jobs
@@ -796,6 +899,32 @@ mod tests {
         assert_eq!(alt_name("notes.txt", 2), "notes (2).txt");
         assert_eq!(alt_name("报告.tar.gz", 3), "报告 (3).tar.gz");
         assert_eq!(alt_name("dir", 2), "dir (2)");
+    }
+    #[test]
+    fn new_transfer_restarts_and_resume_continues() {
+        assert_eq!(transfer_offset(false, 10, 20), 0);
+        assert_eq!(transfer_offset(false, 20, 20), 0);
+        assert_eq!(transfer_offset(true, 10, 20), 10);
+        assert_eq!(transfer_offset(true, 20, 20), 20);
+        assert_eq!(transfer_offset(true, 30, 20), 0);
+        assert_eq!(transfer_offset(true, 0, 20), 0);
+    }
+    #[test]
+    fn choose_name_skips_overwrites_or_renames() {
+        let taken = |n: &str| n == "notes.txt" || n == "notes (2).txt";
+        assert_eq!(
+            choose_name("notes.txt", WhenExists::Overwrite, taken),
+            Some("notes.txt".into())
+        );
+        assert_eq!(choose_name("notes.txt", WhenExists::Skip, taken), None);
+        assert_eq!(
+            choose_name("notes.txt", WhenExists::KeepBoth, taken),
+            Some("notes (3).txt".into())
+        );
+        assert_eq!(
+            choose_name("fresh.txt", WhenExists::KeepBoth, |_| false),
+            Some("fresh (2).txt".into())
+        );
     }
     #[test]
     fn local_copy_and_text() {
