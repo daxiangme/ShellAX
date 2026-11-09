@@ -122,26 +122,36 @@ jobs:
     needs: [windows, macos]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
       - uses: actions/download-artifact@v4
         with:
           path: out
           merge-multiple: true
       - name: Checksums
         run: cd out && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Release notes from CHANGELOG.md
+        run: |
+          set -euo pipefail
+          python3 tools/release_notes.py "$TAG" changelog.md
+          {
+            echo "### 下载 / Downloads"
+            echo "- Windows x64：\`ShellAX-Setup-x64.exe\`（安装包）或 \`ShellAX-portable-x64.zip\`（便携版）"
+            echo "- macOS Apple Silicon：\`ShellAX-macos-aarch64.dmg\` 或 \`.zip\`"
+            echo
+            echo "### 注意 / Notes"
+            echo "- macOS：打开 dmg 后把 ShellAX 拖到 Applications。应用仅做 ad-hoc 签名、未公证，首次打开若提示“无法验证”，请在“应用程序”里右键 ShellAX →“打开”，或到“系统设置 → 隐私与安全性”点“仍要打开”，或执行 \`xattr -dr com.apple.quarantine /Applications/ShellAX.app\`。"
+            echo "- Windows 安装包未做代码签名，SmartScreen 可能提示“已保护你的电脑”，点“更多信息 → 仍要运行”。"
+            echo
+            echo "### 更新内容"
+            cat changelog.md
+          } > notes.md
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG }}
           name: ShellAX ${{ env.TAG }}
           prerelease: ${{ contains(env.TAG, '-beta') || contains(env.TAG, '-rc') }}
-          generate_release_notes: true
-          body: |
-            ### 下载 / Downloads
-            - Windows x64：`ShellAX-Setup-x64.exe`（安装包）或 `ShellAX-portable-x64.zip`（便携版）
-            - macOS Apple Silicon：`ShellAX-macos-aarch64.dmg` 或 `.zip`
-
-            ### 注意 / Notes
-            - macOS：打开 dmg 后把 ShellAX 拖到 Applications。应用仅做 ad-hoc 签名、未公证，首次打开若提示“无法验证”，请在“应用程序”里右键 ShellAX →“打开”，或到“系统设置 → 隐私与安全性”点“仍要打开”，或执行 `xattr -dr com.apple.quarantine /Applications/ShellAX.app`。
-              macOS: drag ShellAX to Applications. The app is ad-hoc signed, not notarized: on first launch right-click → Open, use System Settings → Privacy & Security → Open Anyway, or run `xattr -dr com.apple.quarantine /Applications/ShellAX.app`.
-            - Windows 安装包未做代码签名，SmartScreen 可能提示“已保护你的电脑”，点“更多信息 → 仍要运行”。
-              The Windows installer is unsigned; SmartScreen may warn on first run.
+          generate_release_notes: false
+          body_path: notes.md
           files: out/*

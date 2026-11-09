@@ -10,6 +10,8 @@ ShellAX is a cross-platform terminal and SSH client written in Rust and GPUI. Be
 
 Platforms: Windows x64 and Mac (Apple Silicon). There is no Linux release build yet; build it from source.
 
+What changed in each version is in the [changelog](CHANGELOG.md). When a change has a GitHub issue, put the issue number at the end of that entry.
+
 ## Interface
 
 <img src="docs/screenshots/terminal.png" alt="Hosts and terminal" width="100%" />
