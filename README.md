@@ -10,7 +10,7 @@ ShellAX 是用 Rust + GPUI 编写的跨平台终端 / SSH 客户端。除终端�
 
 支持平台：Windows x64、Mac（Apple Silicon）。Linux 暂无发布包，可从源码构建。
 
-各版本改了什么见 [更新记录](CHANGELOG.md)。有对应的 GitHub issue 时，编号写在那一节的条目末尾。
+各版本改了什么见 [更新记录](CHANGELOG.md)。
 
 ## 界面
 

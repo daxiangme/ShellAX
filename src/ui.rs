@@ -196,21 +196,36 @@ pub fn ring(frac: f32, color: Hsla) -> impl IntoElement {
 
 /// 以 (cx, cy) 为圆心、半径 r，从 12 点起顺时针画 `frac` 圈的描边弧。
 fn arc(window: &mut gpui::Window, (cx, cy): (f32, f32), r: f32, frac: f32, color: Hsla) {
+    if !r.is_finite() || r < 0.5 || !cx.is_finite() || !cy.is_finite() {
+        return;
+    }
+    let frac = if frac.is_finite() {
+        frac.clamp(0., 1.)
+    } else {
+        return;
+    };
     let mut pb = gpui::PathBuilder::stroke(px(RING_STROKE));
     let radii = gpui::point(px(r), px(r));
     pb.move_to(gpui::point(px(cx), px(cy - r)));
-    if frac >= 0.999 {
+    let a = frac * std::f32::consts::TAU;
+    let (ex, ey) = (cx + r * a.sin(), cy - r * a.cos());
+    let (dx, dy) = (ex - cx, ey - (cy - r));
+    // A nearly closed arc puts the end point on the start point. Lyon's SVG
+    // arc rejects that and can abort while the context ring is painting.
+    let almost_closed = frac >= 0.999 || (frac > 0.75 && dx * dx + dy * dy < 1.);
+    if almost_closed {
         pb.arc_to(radii, px(0.), false, true, gpui::point(px(cx), px(cy + r)));
         pb.arc_to(radii, px(0.), false, true, gpui::point(px(cx), px(cy - r)));
-    } else {
-        let a = frac * std::f32::consts::TAU;
+    } else if frac > 0.004 {
         pb.arc_to(
             radii,
             px(0.),
             a > std::f32::consts::PI,
             true,
-            gpui::point(px(cx + r * a.sin()), px(cy - r * a.cos())),
+            gpui::point(px(ex), px(ey)),
         );
+    } else {
+        return;
     }
     if let Ok(path) = pb.build() {
         window.paint_path(path, color);

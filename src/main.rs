@@ -18,6 +18,7 @@ mod ctxmenu_view;
 mod db_dialog;
 mod db_editor;
 mod db_tree;
+mod db_transfer;
 mod db_ui;
 mod db_view;
 mod dir_view;
@@ -5592,6 +5593,12 @@ impl Render for Root {
         }
         if let Some(m) = self.modal.clone() {
             root = root.child(self.render_modal(m, cx));
+        }
+        if self.dbp.new_db.is_some() {
+            root = root.child(self.db_create_dialog(cx));
+        }
+        if self.dbp.transfer.is_some() {
+            root = root.child(self.db_transfer_dialog(cx));
         }
         if let Some(m) = self.sb_modal.clone() {
             root = root.child(self.sb_modal_el(m, cx));

@@ -11,13 +11,13 @@ use gpui::{
 use gpui_component::input::{InputEvent, InputState};
 use ssh_term_proto::assets::{DbConn, DbKind, Family};
 use ssh_term_proto::db::{
-    dialect,
+    alter, dialect,
     objtree::{self, Group},
     saved,
 };
 use ssh_term_proto::i18n::{t, tf};
 
-use crate::db_ui::{key_parts, Kids, LiveState, SEP};
+use crate::db_ui::{key_parts, EncodingPick, Kids, LiveState, NewDatabase, SEP};
 use crate::db_view::{Intent, Target};
 use crate::theme::{c, cur};
 use crate::ui::{self, icon, IconName};
@@ -607,37 +607,545 @@ impl Root {
     }
 
     fn db_new_database(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let st = cx.new(|cx| InputState::new(window, cx).placeholder(t("dbt.new_database")));
-        let id_owned = id.to_string();
-        self._subs.push(
-            cx.subscribe_in(&st, window, move |this, st, ev: &InputEvent, _w, cx| {
-                if !matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
-                    return;
+        let version = self
+            .db_ready(id)
+            .map(|l| l.version.clone())
+            .unwrap_or_default();
+        let (charset, collation) = alter::default_database_encoding(&version);
+        let st = cx.new(|cx| InputState::new(window, cx).placeholder(t("dbt.db_name")));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder(t("dbt.encoding_search")));
+        self._subs.push(cx.subscribe_in(
+            &st,
+            window,
+            |this, _, ev: &InputEvent, _w, cx| {
+                if matches!(ev, InputEvent::PressEnter { .. }) {
+                    this.submit_new_database(cx);
                 }
-                let Some((cid, field)) = this.dbp.new_db.take() else {
-                    return;
-                };
-                if cid != id_owned {
-                    this.dbp.new_db = Some((cid, field));
-                    return;
+            },
+        ));
+        self._subs.push(cx.subscribe_in(
+            &search,
+            window,
+            |this, _, ev: &InputEvent, _w, cx| {
+                if matches!(ev, InputEvent::PressEnter { .. }) {
+                    this.accept_encoding_search(cx);
                 }
-                let name = st.read(cx).value().trim().to_string();
-                if !name.is_empty() {
-                    this.db_create_database(&cid, &name, cx);
-                }
-                cx.notify();
-            }),
-        );
+            },
+        ));
         st.update(cx, |s, cx| s.focus(window, cx));
-        self.dbp.new_db = Some((id.to_string(), st));
+        let conn = id.to_string();
+        self.dbp.new_db = Some(NewDatabase {
+            conn: conn.clone(),
+            version,
+            name: st,
+            search,
+            charset: charset.to_string(),
+            collation: collation.to_string(),
+            charsets: Vec::new(),
+            loading: true,
+            dirty: false,
+            pick: None,
+            error: None,
+        });
+        cx.notify();
+        self.load_charset_catalog(&conn, cx);
+    }
+
+    fn load_charset_catalog(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(live) = self.db_ready(id) else {
+            self.finish_charset_load(id, Err(anyhow::anyhow!(t("db.not_connected"))), cx);
+            return;
+        };
+        let id_owned = id.to_string();
+        let h = self.rt.spawn(async move {
+            live.driver
+                .execute(
+                    "",
+                    "SELECT c.CHARACTER_SET_NAME, c.DEFAULT_COLLATE_NAME, k.COLLATION_NAME \
+                     FROM information_schema.CHARACTER_SETS c \
+                     JOIN information_schema.COLLATIONS k \
+                       ON k.CHARACTER_SET_NAME = c.CHARACTER_SET_NAME \
+                     ORDER BY c.CHARACTER_SET_NAME, k.COLLATION_NAME",
+                    true,
+                )
+                .await
+        });
+        cx.spawn(async move |this, cx| {
+            let r = h.await.map_err(anyhow::Error::from).and_then(|r| r);
+            let _ = this.update(cx, |this, cx| {
+                this.finish_charset_load(&id_owned, r, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn finish_charset_load(
+        &mut self,
+        id: &str,
+        r: anyhow::Result<Vec<ssh_term_proto::db::ResultSet>>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(form) = self.dbp.new_db.as_ref() else {
+            return;
+        };
+        if form.conn != id {
+            return;
+        }
+        let version = form.version.clone();
+        let dirty = form.dirty;
+        let (catalog, err) = match r {
+            Ok(sets) => {
+                let failed = sets.iter().find_map(|s| s.error.clone());
+                let rows = sets
+                    .first()
+                    .map(|s| {
+                        s.rows
+                            .iter()
+                            .map(|row| {
+                                let cell = |i| row.get(i).cloned().flatten().unwrap_or_default();
+                                (cell(0), cell(1), cell(2))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let catalog = alter::charset_catalog(&rows);
+                if let Some(e) = failed {
+                    (alter::builtin_charsets(&version), Some(e))
+                } else if catalog.is_empty() {
+                    (
+                        alter::builtin_charsets(&version),
+                        Some(t("dbt.charset_rejected").into()),
+                    )
+                } else {
+                    (catalog, None)
+                }
+            }
+            Err(e) => (
+                alter::builtin_charsets(&version),
+                Some(format!("{e:#}")),
+            ),
+        };
+        let Some(form) = self.dbp.new_db.as_mut() else {
+            return;
+        };
+        if let Some(e) = err {
+            form.error = Some(tf("dbt.charset_fallback", &[("e", &e)]));
+        }
+        let keep = dirty
+            && catalog.iter().any(|c| {
+                c.name == form.charset && c.collations.iter().any(|col| col == &form.collation)
+            });
+        if !keep {
+            if let Some((charset, collation)) = alter::preferred_encoding(&catalog) {
+                form.charset = charset;
+                form.collation = collation;
+            }
+        }
+        form.charsets = catalog;
+        form.loading = false;
         cx.notify();
     }
 
-    fn db_create_database(&mut self, id: &str, name: &str, cx: &mut Context<Self>) {
+    fn toggle_encoding_pick(
+        &mut self,
+        which: EncodingPick,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(form) = self.dbp.new_db.as_mut() else {
+            return;
+        };
+        if form.loading {
+            return;
+        }
+        form.pick = if form.pick == Some(which) {
+            None
+        } else {
+            Some(which)
+        };
+        let open = form.pick == Some(which);
+        let search = form.search.clone();
+        if open {
+            search.update(cx, |s, cx| {
+                s.set_value("", window, cx);
+                s.focus(window, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    fn accept_encoding_search(&mut self, cx: &mut Context<Self>) {
+        let Some(form) = self.dbp.new_db.as_ref() else {
+            return;
+        };
+        let Some(which) = form.pick else {
+            return;
+        };
+        let q = form.search.read(cx).value().trim().to_lowercase();
+        let options: Vec<String> = match which {
+            EncodingPick::Charset => form.charsets.iter().map(|c| c.name.clone()).collect(),
+            EncodingPick::Collation => form
+                .charsets
+                .iter()
+                .find(|c| c.name == form.charset)
+                .map(|c| c.collations.clone())
+                .unwrap_or_default(),
+        };
+        let Some(hit) = options.into_iter().find(|name| {
+            q.is_empty() || name.to_lowercase().contains(&q)
+        }) else {
+            return;
+        };
+        self.pick_encoding(which, hit, cx);
+    }
+
+    fn pick_encoding(&mut self, which: EncodingPick, value: String, cx: &mut Context<Self>) {
+        let Some(form) = self.dbp.new_db.as_mut() else {
+            return;
+        };
+        match which {
+            EncodingPick::Charset => {
+                let Some(cs) = form.charsets.iter().find(|c| c.name == value) else {
+                    return;
+                };
+                let collation = if cs.collations.iter().any(|c| c == &cs.default_collation) {
+                    cs.default_collation.clone()
+                } else {
+                    cs.collations.first().cloned().unwrap_or_default()
+                };
+                form.charset = cs.name.clone();
+                form.collation = collation;
+            }
+            EncodingPick::Collation => {
+                let ok = form.charsets.iter().any(|c| {
+                    c.name == form.charset && c.collations.iter().any(|col| col == &value)
+                });
+                if !ok {
+                    return;
+                }
+                form.collation = value;
+            }
+        }
+        form.dirty = true;
+        form.pick = None;
+        form.error = None;
+        cx.notify();
+    }
+
+    fn submit_new_database(&mut self, cx: &mut Context<Self>) {
+        let Some(form) = self.dbp.new_db.as_ref() else {
+            return;
+        };
+        let name = form.name.read(cx).value().trim().to_string();
+        let (conn, charset, collation, loading, pair_ok) = (
+            form.conn.clone(),
+            form.charset.clone(),
+            form.collation.clone(),
+            form.loading,
+            form.charsets.iter().any(|c| {
+                c.name == form.charset && c.collations.iter().any(|col| col == &form.collation)
+            }),
+        );
+        if loading {
+            return;
+        }
+        if name.is_empty() {
+            self.dbp.new_db.as_mut().unwrap().error = Some(t("dbt.name_required").into());
+            cx.notify();
+            return;
+        }
+        if !pair_ok {
+            self.dbp.new_db.as_mut().unwrap().error = Some(t("dbt.charset_rejected").into());
+            cx.notify();
+            return;
+        }
+        let sql = match alter::create_database(&name, &charset, &collation) {
+            Ok(sql) => sql,
+            Err(e) => {
+                self.dbp.new_db.as_mut().unwrap().error = Some(e.to_string());
+                cx.notify();
+                return;
+            }
+        };
+        if self.db_ready(&conn).is_none() {
+            self.dbp.new_db.as_mut().unwrap().error = Some(t("db.not_connected").into());
+            cx.notify();
+            return;
+        }
+        self.dbp.new_db = None;
+        self.db_create_database(&conn, sql, cx);
+    }
+
+    /// Searchable charset or collation list. Options come from the server catalog.
+    fn encoding_menu(
+        &mut self,
+        which: EncodingPick,
+        caption: &str,
+        value: String,
+        options: Vec<String>,
+        loading: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let th = cur();
+        let open = self.dbp.new_db.as_ref().and_then(|f| f.pick) == Some(which);
+        let q = self
+            .dbp
+            .new_db
+            .as_ref()
+            .map(|f| f.search.read(cx).value().trim().to_lowercase())
+            .unwrap_or_default();
+        let search = self.dbp.new_db.as_ref().map(|f| f.search.clone());
+        let shown: Vec<String> = options
+            .into_iter()
+            .filter(|name| q.is_empty() || name.to_lowercase().contains(&q))
+            .collect();
+        let shown_text = if loading {
+            t("db.loading").to_string()
+        } else {
+            value.clone()
+        };
+        let which_btn = which;
+        let which_out = which;
+        let field_id = match which {
+            EncodingPick::Charset => "newdb-charset-field",
+            EncodingPick::Collation => "newdb-collation-field",
+        };
+        let list_id = match which {
+            EncodingPick::Charset => "newdb-charset-list",
+            EncodingPick::Collation => "newdb-collation-list",
+        };
+        let mut field = div().id(field_id).relative().flex_1().min_w_0().child(
+            div()
+                .id(SharedString::from(format!("{field_id}-btn")))
+                .w_full()
+                .h(px(ui::H_DEFAULT))
+                .px(px(ui::INPUT_PX))
+                .rounded(px(ui::R_MD))
+                .bg(c(th.surface0).opacity(0.85))
+                .border_1()
+                .border_color(if open { c(th.accent) } else { c(th.surface1) })
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .when(!loading, |d| d.cursor_pointer())
+                .when(loading, |d| d.opacity(0.6))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.toggle_encoding_pick(which_btn, window, cx);
+                }))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .font_family(ui::mono_family())
+                        .text_size(px(ui::fs_body()))
+                        .text_color(c(th.text))
+                        .child(shown_text),
+                )
+                .child(icon(
+                    if open {
+                        IconName::ChevronUp
+                    } else {
+                        IconName::ChevronDown
+                    },
+                    ui::IC_XS,
+                    c(th.overlay1),
+                )),
+        );
+        if open {
+            if let Some(search) = search {
+                let mut list = div()
+                    .id(list_id)
+                    .w_full()
+                    .max_h(px(180.))
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.));
+                if shown.is_empty() {
+                    list = list.child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .text_size(px(ui::fs_small()))
+                            .text_color(c(th.overlay1))
+                            .child(t("dbt.no_match")),
+                    );
+                }
+                for (i, name) in shown.iter().enumerate() {
+                    let sel = name == &value;
+                    let picked = name.clone();
+                    let which_row = which;
+                    list = list.child(
+                        div()
+                            .id((list_id, i))
+                            .px_2()
+                            .py(px(4.))
+                            .rounded(px(ui::R_SM))
+                            .cursor_pointer()
+                            .font_family(ui::mono_family())
+                            .text_size(px(ui::fs_small()))
+                            .text_color(c(th.text))
+                            .when(sel, |d| d.bg(crate::theme::selected_bg()))
+                            .hover(|d| d.bg(crate::theme::hover_bg()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.pick_encoding(which_row, picked.clone(), cx);
+                            }))
+                            .child(name.clone()),
+                    );
+                }
+                // Absolute and deferred: the list floats over the dialog instead of
+                // growing the form. The card clips overflow, so this layer paints above it.
+                let popover = ui::popover()
+                    .id(SharedString::from(format!("{field_id}-pop")))
+                    .occlude()
+                    .absolute()
+                    .top(px(ui::H_DEFAULT + 4.))
+                    .left_0()
+                    .right_0()
+                    .w_full()
+                    .p(px(ui::SP_2))
+                    .flex()
+                    .flex_col()
+                    .gap(px(ui::SP_2))
+                    .on_mouse_down_out(cx.listener(move |this, _, _, cx| {
+                        let Some(form) = this.dbp.new_db.as_mut() else {
+                            return;
+                        };
+                        if form.pick == Some(which_out) {
+                            form.pick = None;
+                            cx.notify();
+                        }
+                    }))
+                    .child(ui::search_field(&search, false))
+                    .child(list);
+                field = field.child(deferred(popover).with_priority(3));
+            }
+        }
+        div()
+            .flex()
+            .items_start()
+            .gap_3()
+            .child(
+                div()
+                    .w(px(72.))
+                    .flex_shrink_0()
+                    .pt(px(4.))
+                    .text_size(px(ui::fs_body()))
+                    .text_color(c(th.subtext))
+                    .child(caption.to_string()),
+            )
+            .child(field)
+    }
+
+    /// Full-window dialog. The database tool sits in the narrow sidebar, so the
+    /// form is painted from the root rather than inside that column.
+    pub(crate) fn db_create_dialog(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(form) = self.dbp.new_db.clone() else {
+            return div().into_any_element();
+        };
+        let th = cur();
+        let subtitle = Self::db_conn(&form.conn).map(|c| SharedString::from(c.name));
+        let label = |s: &str| {
+            div()
+                .w(px(72.))
+                .flex_shrink_0()
+                .pt(px(4.))
+                .text_size(px(ui::fs_body()))
+                .text_color(c(th.subtext))
+                .child(s.to_string())
+        };
+        let charset = form.charset.clone();
+        let collation = form.collation.clone();
+        let loading = form.loading;
+        let charset_opts: Vec<String> = form.charsets.iter().map(|c| c.name.clone()).collect();
+        let collation_opts = form
+            .charsets
+            .iter()
+            .find(|c| c.name == form.charset)
+            .map(|c| c.collations.clone())
+            .unwrap_or_default();
+        let name = form.name.clone();
+        let mut form_el = div()
+            .p(px(ui::SP_5))
+            .flex()
+            .flex_col()
+            .gap(px(ui::SP_3))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(label(t("dbt.db_name")))
+                    .child(div().flex_1().min_w_0().child(ui::text_field(&name, false))),
+            )
+            .child(self.encoding_menu(
+                EncodingPick::Charset,
+                t("dbt.charset"),
+                charset,
+                charset_opts,
+                loading,
+                cx,
+            ))
+            .child(self.encoding_menu(
+                EncodingPick::Collation,
+                t("dbt.collation"),
+                collation,
+                collation_opts,
+                loading,
+                cx,
+            ));
+        if let Some(e) = &form.error {
+            form_el = form_el.child(
+                div()
+                    .text_size(px(ui::fs_body()))
+                    .text_color(c(th.error))
+                    .child(e.clone()),
+            );
+        }
+        let me_close = cx.entity().downgrade();
+        let close = ui::dialog_close("newdb-x", move |_w, cx| {
+            let _ = me_close.update(cx, |this, cx| {
+                this.dbp.new_db = None;
+                cx.notify();
+            });
+        });
+        ui::modal(
+            ui::card(520.)
+                .child(ui::dialog_header(
+                    Some(IconName::Database),
+                    c(th.accent),
+                    t("dbt.new_database"),
+                    subtitle,
+                    Some(close),
+                ))
+                .child(form_el)
+                .child(ui::dialog_footer(
+                    None,
+                    vec![
+                        ui::button("newdb-cancel", t("ui.cancel"), 0)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.dbp.new_db = None;
+                                cx.notify();
+                            }))
+                            .into_any_element(),
+                        ui::button("newdb-ok", t("dbt.create"), 1)
+                            .when(loading, |b| b.opacity(0.5))
+                            .on_click(cx.listener(|this, _, _, cx| this.submit_new_database(cx)))
+                            .into_any_element(),
+                    ],
+                )),
+        )
+        .into_any_element()
+    }
+
+    fn db_create_database(&mut self, id: &str, sql: String, cx: &mut Context<Self>) {
         let (Some(live), Some(conn)) = (self.db_ready(id), Self::db_conn(id)) else {
             return;
         };
-        let sql = ssh_term_proto::db::alter::create_database(name);
         let (log, cname, id) = (self.exec_log.clone(), conn.name.clone(), id.to_string());
         let h = self.rt.spawn(async move {
             live.driver
@@ -933,17 +1441,6 @@ impl Root {
             r = r.child(div().size(px(7.)).rounded_full().bg(col));
         }
         list = list.child(r);
-        if let Some((eid, st)) = self.dbp.new_db.clone() {
-            if eid == id {
-                list = list.child(
-                    div()
-                        .pl(indent(depth + 1))
-                        .pr_2()
-                        .py_1()
-                        .child(ui::text_field(&st, false)),
-                );
-            }
-        }
         if let Some(e) = fail {
             if self.dbp.open.contains(&id) {
                 list = list.child(err_row(&e, depth + 1));
@@ -1583,6 +2080,26 @@ impl Root {
                     false,
                     |this, _w, cx| this.db_refresh(&k, cx)
                 );
+            }
+            if db.is_some() && self.db_up(&id) && Self::holds_groups(&key) {
+                let k = key.clone();
+                item!(
+                    "dbm-dump",
+                    IconName::Download,
+                    t("dbt.dump_sql"),
+                    false,
+                    |this, _w, cx| this.db_open_dump(&k, cx)
+                );
+                if Self::db_conn(&id).is_some_and(|c| !c.read_only) {
+                    let k = key.clone();
+                    item!(
+                        "dbm-runsql",
+                        IconName::Import,
+                        t("dbt.run_sql"),
+                        false,
+                        |this, w, cx| this.db_open_import(&k, w, cx)
+                    );
+                }
             }
             if db.is_none() {
                 if self.db_up(&id) && Self::mysql_writable(&id) {

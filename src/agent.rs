@@ -975,12 +975,16 @@ fn records_from_jobs(jobs: &std::path::Path) -> Vec<ClaudeRecord> {
     rows
 }
 
+/// Context window in tokens. Model ids look like `deepseek-flash[1M]` or
+/// `claude-sonnet[200k]`. The largest tag wins, so a later mention of the
+/// 200k default does not shrink a 1M model. With no tag, the fallback is
+/// Claude's 200k window.
 fn context_window(text: &str) -> u64 {
     let lower = text.to_ascii_lowercase();
     let bytes = lower.as_bytes();
-    let mut i = 0;
     let mut window = 200_000u64;
-    while i + 4 < bytes.len() {
+    let mut i = 0;
+    while i + 3 < bytes.len() {
         if bytes[i] == b'[' {
             let start = i + 1;
             let mut j = start;
@@ -992,19 +996,30 @@ fn context_window(text: &str) -> u64 {
                 && matches!(bytes[j], b'm' | b'k')
                 && bytes[j + 1] == b']'
             {
-                if let Ok(n) = lower[start..j].parse::<u64>() {
+                if let Some(n) = parse_u64(&bytes[start..j]) {
                     let size = if bytes[j] == b'm' {
                         n.saturating_mul(1_000_000)
                     } else {
                         n.saturating_mul(1_000)
                     };
                     if size >= 8_000 {
-                        window = size;
+                        window = window.max(size);
                     }
                 }
             }
         }
         i += 1;
+    }
+    for key in [
+        b"\"context_window\"".as_slice(),
+        b"\"contextwindow\"".as_slice(),
+        b"\"context_length\"".as_slice(),
+    ] {
+        if let Some(n) = number_after_bytes(bytes, key) {
+            if n >= 8_000 {
+                window = window.max(n);
+            }
+        }
     }
     window
 }
@@ -1018,33 +1033,51 @@ fn last_context_used(path: &std::path::Path) -> Option<u64> {
     }
     let take = len.min(512 * 1024);
     file.seek(SeekFrom::Start(len - take)).ok()?;
-    let mut buf = String::new();
-    file.read_to_string(&mut buf).ok()?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+    // Scan bytes, not a String. The usage object sits next to Chinese text, and
+    // a fixed look-back (`at - 240`) often lands in the middle of a character.
+    // Slicing a String there aborts the process while the sidebar paints the ring.
     let mut last = None;
+    let key = b"\"input_tokens\"";
     let mut from = 0;
-    while let Some(rel) = buf[from..].find("\"input_tokens\"") {
+    while let Some(rel) = find_bytes(&buf[from..], key) {
         let at = from + rel;
-        let start = at.saturating_sub(240);
-        let rest = &buf[start..buf.len().min(at + 360)];
-        if let Some(input) = number_after(rest, "\"input_tokens\"") {
-            let read = number_after(rest, "\"cache_read_input_tokens\"").unwrap_or(0);
-            let create = number_after(rest, "\"cache_creation_input_tokens\"").unwrap_or(0);
-            last = Some(input + read + create);
+        let start = at.saturating_sub(480);
+        let end = (at + 720).min(buf.len());
+        let rest = &buf[start..end];
+        if let Some(input) = number_after_bytes(rest, key) {
+            let read = number_after_bytes(rest, b"\"cache_read_input_tokens\"").unwrap_or(0);
+            let create = number_after_bytes(rest, b"\"cache_creation_input_tokens\"").unwrap_or(0);
+            last = Some(input.saturating_add(read).saturating_add(create));
         }
-        from = at + 14;
+        from = at + key.len();
     }
     last
 }
 
-fn number_after(text: &str, key: &str) -> Option<u64> {
-    let at = text.find(key)?;
-    let rest = text[at + key.len()..].trim_start_matches([':', ' ', '"']);
-    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-    if digits.is_empty() {
-        None
-    } else {
-        digits.parse().ok()
+fn find_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+fn number_after_bytes(text: &[u8], key: &[u8]) -> Option<u64> {
+    let at = find_bytes(text, key)?;
+    let mut i = at + key.len();
+    while i < text.len() && matches!(text[i], b':' | b' ' | b'"') {
+        i += 1;
     }
+    let start = i;
+    while i < text.len() && text[i].is_ascii_digit() {
+        i += 1;
+    }
+    parse_u64(&text[start..i])
+}
+
+fn parse_u64(digits: &[u8]) -> Option<u64> {
+    if digits.is_empty() {
+        return None;
+    }
+    std::str::from_utf8(digits).ok()?.parse().ok()
 }
 
 fn number_before(text: &str, marker: &str) -> Option<u32> {
@@ -1215,6 +1248,40 @@ Completed
         let map = context_from_jobs(&dir.join("jobs"));
         let key = context_key("greeting response", r"D:\Workspace\qkchi\air2");
         assert_eq!(map.get(&key).map(String::as_str), Some("5%"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn one_meg_window_survives_a_later_200k_tag_and_cjk_usage() {
+        let dir = std::env::temp_dir().join(format!(
+            "shellax-ctx-big-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let job = dir.join("abc");
+        std::fs::create_dir_all(&job).unwrap();
+        let transcript = dir.join("session.jsonl");
+        let mut body = "中".repeat(80);
+        body.push_str(
+            r#"{"usage":{"input_tokens":180000,"cache_creation_input_tokens":20000,"cache_read_input_tokens":850000}}"#,
+        );
+        body.push('\n');
+        std::fs::write(&transcript, body).unwrap();
+        let state = format!(
+            "{{\"name\":\"long chat\",\"cwd\":\"D:\\\\work\",\"model\":\"deepseek-flash[1M]\",\"note\":\"fallback [200k]\",\"linkScanPath\":{}}}",
+            serde_json::to_string(&transcript).unwrap()
+        );
+        std::fs::write(job.join("state.json"), &state).unwrap();
+        assert_eq!(context_window(&state), 1_000_000);
+        assert_eq!(last_context_used(&transcript), Some(1_050_000));
+        let rows = records_from_jobs(&dir);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].used, 1_050_000);
+        assert_eq!(rows[0].window, 1_000_000);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

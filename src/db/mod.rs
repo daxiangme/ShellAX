@@ -633,6 +633,185 @@ impl dyn SqlDriver {
         r
     }
 
+    /// Navicat-style SQL dump of selected tables: optional DROP, CREATE and INSERT data.
+    /// `tables` is `(name, is_view)`. Views are structure only. Progress text is replaced as
+    /// each table starts and as insert batches are written. A failure deletes `path`.
+    pub async fn dump_sql(
+        &self,
+        db: &str,
+        schema: Option<&str>,
+        tables: &[(String, bool)],
+        structure: bool,
+        data: bool,
+        drop_object: bool,
+        path: &std::path::Path,
+        cancel: Option<Arc<CancelSlot>>,
+        progress: &Mutex<String>,
+    ) -> Result<(usize, u64)> {
+        if !structure && !data {
+            anyhow::bail!(crate::i18n::t("dbt.dump_need").to_string());
+        }
+        if tables.is_empty() {
+            anyhow::bail!(crate::i18n::t("dbt.dump_no_table").to_string());
+        }
+        let f = self.family();
+        let file = std::fs::File::create(path)?;
+        let mut out = std::io::BufWriter::new(file);
+        let write_dump = async {
+            use std::io::Write;
+            writeln!(out, "-- ShellAX SQL dump")?;
+            writeln!(out, "-- Database: {db}")?;
+            if f == Family::Mysql {
+                writeln!(out, "SET NAMES utf8mb4;")?;
+                writeln!(out, "SET FOREIGN_KEY_CHECKS = 0;")?;
+            }
+            writeln!(out)?;
+            let mut rows_written = 0u64;
+            let total = tables.len();
+            for (i, (name, view)) in tables.iter().enumerate() {
+                if cancel.as_ref().is_some_and(|c| c.requested()) {
+                    anyhow::bail!(crate::i18n::t("db.cancelled_by_user").to_string());
+                }
+                if let Ok(mut g) = progress.lock() {
+                    *g = crate::i18n::tf(
+                        "dbt.dump_progress",
+                        &[
+                            ("name", name),
+                            ("i", &(i + 1)),
+                            ("n", &total),
+                            ("rows", &rows_written),
+                        ],
+                    );
+                }
+                let q = dialect::qualified(f, db, schema, name);
+                if drop_object {
+                    writeln!(
+                        out,
+                        "DROP {} IF EXISTS {q};",
+                        if *view { "VIEW" } else { "TABLE" }
+                    )?;
+                }
+                if structure {
+                    let ddl = self.ddl(db, schema, name).await?;
+                    let ddl = ddl.trim().trim_end_matches(';');
+                    writeln!(out, "{ddl};")?;
+                    writeln!(out)?;
+                }
+                if data && !*view {
+                    let opts = RunOpts {
+                        schema: schema.map(str::to_string),
+                        transaction: false,
+                        cancel: cancel.clone(),
+                    };
+                    let mut header: Vec<String> = Vec::new();
+                    let mut batch: Vec<Vec<Option<String>>> = Vec::new();
+                    let flush = |out: &mut std::io::BufWriter<std::fs::File>,
+                                 header: &[String],
+                                 batch: &[Vec<Option<String>>]|
+                     -> Result<()> {
+                        for s in export::insert_statements(f, &q, header, batch, 100) {
+                            writeln!(out, "{s};")?;
+                        }
+                        Ok(())
+                    };
+                    {
+                        let mut sink = |cols: &[ColumnInfo], row: Vec<Option<String>>| {
+                            if cancel.as_ref().is_some_and(|c| c.requested()) {
+                                anyhow::bail!(crate::i18n::t("db.cancelled_by_user").to_string());
+                            }
+                            if header.is_empty() {
+                                header = cols.iter().map(|c| c.name.clone()).collect();
+                            }
+                            batch.push(row);
+                            rows_written += 1;
+                            if batch.len() >= 100 {
+                                flush(&mut out, &header, &batch)?;
+                                batch.clear();
+                                if let Ok(mut g) = progress.lock() {
+                                    *g = crate::i18n::tf(
+                                        "dbt.dump_progress",
+                                        &[
+                                            ("name", name),
+                                            ("i", &(i + 1)),
+                                            ("n", &total),
+                                            ("rows", &rows_written),
+                                        ],
+                                    );
+                                }
+                            }
+                            Ok(())
+                        };
+                        self.stream(db, format!("SELECT * FROM {q}"), &opts, &mut sink)
+                            .await?;
+                    }
+                    if !batch.is_empty() {
+                        flush(&mut out, &header, &batch)?;
+                    }
+                    writeln!(out)?;
+                }
+            }
+            if f == Family::Mysql {
+                writeln!(out, "SET FOREIGN_KEY_CHECKS = 1;")?;
+            }
+            out.flush()?;
+            Ok((total, rows_written))
+        };
+        let result = write_dump.await;
+        std::mem::drop(out);
+        if result.is_err() {
+            let _ = std::fs::remove_file(path);
+        }
+        result
+    }
+
+    /// Run a script statement by statement. Stops at the first error. Already executed
+    /// statements are left in place. `progress` is `{done}/{total}`.
+    pub async fn run_sql_script(
+        &self,
+        db: &str,
+        schema: Option<&str>,
+        sql: &str,
+        cancel: Option<Arc<CancelSlot>>,
+        progress: &Mutex<String>,
+    ) -> Result<usize> {
+        let stmts: Vec<String> = split::split(sql).into_iter().map(|s| s.text).collect();
+        if stmts.is_empty() {
+            anyhow::bail!(crate::i18n::t("dbt.run_empty").to_string());
+        }
+        let total = stmts.len();
+        let mut done = 0usize;
+        for chunk in stmts.chunks(40) {
+            if cancel.as_ref().is_some_and(|c| c.requested()) {
+                anyhow::bail!(crate::i18n::t("db.cancelled_by_user").to_string());
+            }
+            if let Ok(mut g) = progress.lock() {
+                *g = crate::i18n::tf(
+                    "dbt.run_progress",
+                    &[("i", &done), ("n", &total)],
+                );
+            }
+            let opts = RunOpts {
+                schema: schema.map(str::to_string),
+                transaction: false,
+                cancel: cancel.clone(),
+            };
+            let v = self.run(db, chunk.to_vec(), 1, &opts).await?;
+            if let Some(bad) = v.iter().find(|r| r.error.is_some()) {
+                if cancel.as_ref().is_some_and(|c| c.requested()) {
+                    anyhow::bail!(crate::i18n::t("db.cancelled_by_user").to_string());
+                }
+                let msg = bad.error.clone().unwrap_or_default();
+                let preview: String = bad.sql.chars().take(240).collect();
+                anyhow::bail!("{msg}\n{preview}");
+            }
+            done += chunk.len();
+        }
+        if let Ok(mut g) = progress.lock() {
+            *g = crate::i18n::tf("dbt.run_progress", &[("i", &done), ("n", &total)]);
+        }
+        Ok(done)
+    }
+
     /// Run `stmts` as one transaction; the first error rolls everything back and is returned.
     pub async fn apply(&self, db: &str, schema: Option<&str>, stmts: Vec<String>) -> Result<u64> {
         let opts = RunOpts {

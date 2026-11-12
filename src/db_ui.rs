@@ -36,6 +36,57 @@ pub enum Kids {
 /// under a node is `<node>\x1e<group id>` (see `db_tree`).
 pub(crate) const SEP: char = '\u{1f}';
 
+/// Which encoding dropdown is open.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EncodingPick {
+    Charset,
+    Collation,
+}
+
+/// Dialog for `CREATE DATABASE` on one MySQL connection.
+#[derive(Clone)]
+pub(crate) struct NewDatabase {
+    pub conn: String,
+    pub version: String,
+    pub name: Entity<InputState>,
+    pub search: Entity<InputState>,
+    pub charset: String,
+    pub collation: String,
+    pub charsets: Vec<ssh_term_proto::db::alter::CharsetCatalog>,
+    pub loading: bool,
+    /// The user already chose a value, so a late catalog response must not overwrite it.
+    pub dirty: bool,
+    pub pick: Option<EncodingPick>,
+    pub error: Option<String>,
+}
+
+/// One table or view offered in the dump dialog.
+#[derive(Clone)]
+pub(crate) struct DumpObject {
+    pub name: String,
+    pub view: bool,
+    pub on: bool,
+}
+
+/// Export a SQL dump, or run a SQL file, against one database.
+pub(crate) struct SqlJob {
+    pub conn: String,
+    pub database: String,
+    pub schema: Option<String>,
+    pub export: bool,
+    pub tables: Vec<DumpObject>,
+    pub loading: bool,
+    pub structure: bool,
+    pub data: bool,
+    pub drop: bool,
+    pub path: String,
+    pub running: bool,
+    pub progress: String,
+    pub error: Option<String>,
+    pub done: Option<String>,
+    pub slot: Option<Arc<ssh_term_proto::db::CancelSlot>>,
+}
+
 #[derive(Default)]
 pub struct DbPanel {
     pub live: HashMap<String, LiveState>,
@@ -55,8 +106,10 @@ pub struct DbPanel {
     conn_try: HashMap<String, u64>,
     /// Inline editor: (group key, member being renamed or empty for a filter, input).
     pub(crate) edit: Option<(String, Option<String>, Entity<InputState>)>,
-    /// Connection id and the name field for CREATE DATABASE.
-    pub(crate) new_db: Option<(String, Entity<InputState>)>,
+    /// Create-database dialog. Charset and collation are searchable lists read from the server.
+    pub(crate) new_db: Option<NewDatabase>,
+    /// Dump SQL / run SQL file for one database (Navicat-style).
+    pub(crate) transfer: Option<SqlJob>,
     /// Destructive menu entry waiting for a second click.
     pub(crate) arm: Option<String>,
     collapsed_groups: Vec<String>,

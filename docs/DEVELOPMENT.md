@@ -115,16 +115,17 @@ cargo build --profile dist --bin shellax --bin shellax-cli   # 发布构建，�
    - `Cargo.toml` 的 `version`
    - `packaging/windows/installer.nsi` 的 `!define VER` 和 `VIProductVersion`
    - `packaging/windows/shellax.rc` 的 `FILEVERSION` / `PRODUCTVERSION`
-2. 提交并推送到 main，然后打标签：
+2. 在 `CHANGELOG.md` 最上方写这一版的说明。节标题与 `Cargo.toml` 的版本号相同，例如 `## 1.3.7`；Git 标签为 `v1.3.7`。有对应的 GitHub issue 时，在条目末尾写 `#编号`。发布说明使用这一节。
+3. 提交并推送到 main，然后打标签：
    ```sh
    git tag v0.x.y && git push origin v0.x.y
    ```
    标签含 `-beta` / `-rc`（如 `v0.2.0-beta.1`）时发布为预发布版本，只有“测试版”更新通道的用户会收到。
-3. GitHub Actions（`.github/workflows/release.yml`）会在 Windows 和 macOS（Apple Silicon）上构建，并把以下文件上传到对应的 Release：
+4. GitHub Actions（`.github/workflows/release.yml`）会在 Windows 和 macOS（Apple Silicon）上构建，并把以下文件上传到对应的 Release：
    `ShellAX-Setup-x64.exe`、`ShellAX-portable-x64.zip`、`ShellAX-macos-aarch64.dmg`、`ShellAX-macos-aarch64.zip`、`SHA256SUMS.txt`。
    也可以在 Actions 页面手动运行（workflow_dispatch），填一个已存在的标签。
-4. 应用内“检查更新”读取 GitHub Releases：正式版通道读 `releases/latest`，测试版通道读最新一条（含预发布）。
-5. 应用内下载并更新（`src/updater.rs`、`src/update_ui.rs`）依赖上面这些文件名，改名时要同步修改代码：
+5. 应用内“检查更新”读取 GitHub Releases：正式版通道读 `releases/latest`，测试版通道读最新一条（含预发布）。
+6. 应用内下载并更新（`src/updater.rs`、`src/update_ui.rs`）依赖上面这些文件名，改名时要同步修改代码：
    - 发现新版本后，设置 > 更新里点“下载更新”（或开启“自动下载更新”），后台经 `proxy::ureq_builder` 下载到
      `<数据目录>/updates/<版本号>/`：Windows 下载 `ShellAX-Setup-x64.exe`，macOS 下载 `ShellAX-macos-aarch64.zip`
      （release 地址里的 `.dmg` 自动换成 `.zip`，便于直接替换 .app）。

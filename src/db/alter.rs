@@ -225,9 +225,229 @@ pub fn create_table(f: Family, table: &str, ops: &[Op]) -> Result<String> {
     ))
 }
 
-/// `CREATE DATABASE` with a quoted identifier.
-pub fn create_database(name: &str) -> String {
-    format!("CREATE DATABASE {}", quote_ident(Family::Mysql, name))
+struct MysqlCharset {
+    id: &'static str,
+    /// Always valid for this character set.
+    collations: &'static [&'static str],
+    /// Prepended on MySQL 8+ (not MariaDB). `utf8mb4_0900_ai_ci` is one of these.
+    mysql8_first: &'static [&'static str],
+    /// MySQL 8 renamed `utf8` to `utf8mb3`. Older servers and MariaDB still use `utf8`.
+    mysql8_only: bool,
+    legacy_only: bool,
+}
+
+const MYSQL_CHARSETS: &[MysqlCharset] = &[
+    MysqlCharset {
+        id: "utf8mb4",
+        collations: &[
+            "utf8mb4_unicode_ci",
+            "utf8mb4_general_ci",
+            "utf8mb4_bin",
+        ],
+        mysql8_first: &["utf8mb4_0900_ai_ci"],
+        mysql8_only: false,
+        legacy_only: false,
+    },
+    MysqlCharset {
+        id: "utf8mb3",
+        collations: &["utf8mb3_general_ci", "utf8mb3_unicode_ci", "utf8mb3_bin"],
+        mysql8_first: &[],
+        mysql8_only: true,
+        legacy_only: false,
+    },
+    MysqlCharset {
+        id: "utf8",
+        collations: &["utf8_general_ci", "utf8_unicode_ci", "utf8_bin"],
+        mysql8_first: &[],
+        mysql8_only: false,
+        legacy_only: true,
+    },
+    MysqlCharset {
+        id: "latin1",
+        collations: &["latin1_swedish_ci", "latin1_general_ci", "latin1_bin"],
+        mysql8_first: &[],
+        mysql8_only: false,
+        legacy_only: false,
+    },
+    MysqlCharset {
+        id: "gbk",
+        collations: &["gbk_chinese_ci", "gbk_bin"],
+        mysql8_first: &[],
+        mysql8_only: false,
+        legacy_only: false,
+    },
+    MysqlCharset {
+        id: "gb18030",
+        collations: &["gb18030_chinese_ci", "gb18030_bin"],
+        mysql8_first: &[],
+        mysql8_only: false,
+        legacy_only: false,
+    },
+];
+
+fn mysql8(version: &str) -> bool {
+    let v = version.trim().to_ascii_lowercase();
+    if v.contains("mariadb") {
+        return false;
+    }
+    v.chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse::<u32>()
+        .unwrap_or(0)
+        >= 8
+}
+
+fn charset_spec(id: &str) -> Option<&'static MysqlCharset> {
+    MYSQL_CHARSETS.iter().find(|c| c.id == id)
+}
+
+fn charset_available(version: &str, spec: &MysqlCharset) -> bool {
+    let eight = mysql8(version);
+    if spec.mysql8_only && !eight {
+        return false;
+    }
+    if spec.legacy_only && eight {
+        return false;
+    }
+    true
+}
+
+/// Character sets the server can use for `CREATE DATABASE`.
+pub fn database_charsets(version: &str) -> Vec<&'static str> {
+    MYSQL_CHARSETS
+        .iter()
+        .filter(|c| charset_available(version, c))
+        .map(|c| c.id)
+        .collect()
+}
+
+/// Collations for `charset` on this server. Empty when the character set is not offered.
+pub fn database_collations(version: &str, charset: &str) -> Vec<&'static str> {
+    let Some(spec) = charset_spec(charset.trim()) else {
+        return Vec::new();
+    };
+    if !charset_available(version, spec) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    if mysql8(version) {
+        out.extend_from_slice(spec.mysql8_first);
+    }
+    out.extend_from_slice(spec.collations);
+    out
+}
+
+/// Default for a new database: `utf8mb4`, with `utf8mb4_0900_ai_ci` on MySQL 8
+/// and `utf8mb4_unicode_ci` on MySQL 5.7 and MariaDB.
+pub fn default_database_encoding(version: &str) -> (&'static str, &'static str) {
+    let charset = "utf8mb4";
+    let collation = database_collations(version, charset)
+        .into_iter()
+        .next()
+        .unwrap_or("utf8mb4_unicode_ci");
+    (charset, collation)
+}
+
+/// One character set and the collations the server reported for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CharsetCatalog {
+    pub name: String,
+    pub default_collation: String,
+    pub collations: Vec<String>,
+}
+
+fn sql_ident(s: &str) -> bool {
+    let b = s.as_bytes();
+    (1..=64).contains(&b.len())
+        && b[0].is_ascii_alphabetic()
+        && b.iter()
+            .all(|c| c.is_ascii_alphanumeric() || *c == b'_')
+}
+
+/// Rows are `(character set, its default collation, one collation name)`.
+pub fn charset_catalog(rows: &[(String, String, String)]) -> Vec<CharsetCatalog> {
+    let mut out: Vec<CharsetCatalog> = Vec::new();
+    for (charset, default, collation) in rows {
+        let charset = charset.trim();
+        let default = default.trim();
+        let collation = collation.trim();
+        if !sql_ident(charset) || !sql_ident(collation) {
+            continue;
+        }
+        if out.last().map(|c| c.name.as_str()) != Some(charset) {
+            out.push(CharsetCatalog {
+                name: charset.to_string(),
+                default_collation: if sql_ident(default) {
+                    default.to_string()
+                } else {
+                    String::new()
+                },
+                collations: Vec::new(),
+            });
+        }
+        let entry = out.last_mut().unwrap();
+        if !entry.collations.iter().any(|c| c == collation) {
+            entry.collations.push(collation.to_string());
+        }
+    }
+    for entry in &mut out {
+        if !entry.collations.iter().any(|c| c == &entry.default_collation) {
+            entry.default_collation = entry.collations.first().cloned().unwrap_or_default();
+        }
+    }
+    out
+}
+
+/// Built-in list used only when the server catalog cannot be read.
+pub fn builtin_charsets(version: &str) -> Vec<CharsetCatalog> {
+    database_charsets(version)
+        .into_iter()
+        .map(|name| {
+            let collations: Vec<String> = database_collations(version, name)
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+            let default_collation = collations.first().cloned().unwrap_or_default();
+            CharsetCatalog {
+                name: name.to_string(),
+                default_collation,
+                collations,
+            }
+        })
+        .collect()
+}
+
+/// Prefer `utf8mb4` and that character set's default collation.
+pub fn preferred_encoding(list: &[CharsetCatalog]) -> Option<(String, String)> {
+    let cs = list
+        .iter()
+        .find(|c| c.name.eq_ignore_ascii_case("utf8mb4"))
+        .or_else(|| list.first())?;
+    let col = if cs.collations.iter().any(|c| c == &cs.default_collation) {
+        cs.default_collation.clone()
+    } else {
+        cs.collations.first().cloned()?
+    };
+    Some((cs.name.clone(), col))
+}
+
+/// `CREATE DATABASE` with a quoted name. Character set and collation must be plain identifiers;
+/// the dialog only offers values read from the server.
+pub fn create_database(name: &str, charset: &str, collation: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!(crate::i18n::t("dbt.name_required").to_string());
+    }
+    let charset = charset.trim();
+    let collation = collation.trim();
+    if !sql_ident(charset) || !sql_ident(collation) {
+        bail!(crate::i18n::t("dbt.charset_rejected").to_string());
+    }
+    Ok(format!(
+        "CREATE DATABASE {} CHARACTER SET {charset} COLLATE {collation}",
+        quote_ident(Family::Mysql, name)
+    ))
 }
 
 /// Statements for `ops` on `table` (qualified and quoted). `schema` qualifies PostgreSQL
@@ -668,6 +888,65 @@ mod tests {
         assert!(sql.contains("`id` int NOT NULL COMMENT 'id'"));
         assert!(sql.contains("UNIQUE KEY `ix` (`id`)"));
         assert!(create_table(Family::Mysql, "`t`", &[]).is_err());
-        assert_eq!(create_database("a`b"), "CREATE DATABASE `a``b`");
+        assert_eq!(
+            create_database("a`b", "utf8mb4", "utf8mb4_0900_ai_ci").unwrap(),
+            "CREATE DATABASE `a``b` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci"
+        );
+    }
+
+    #[test]
+    fn create_database_picks_encoding_for_the_server() {
+        assert_eq!(
+            default_database_encoding("8.0.36"),
+            ("utf8mb4", "utf8mb4_0900_ai_ci")
+        );
+        assert_eq!(
+            default_database_encoding("5.7.44-log"),
+            ("utf8mb4", "utf8mb4_unicode_ci")
+        );
+        assert_eq!(
+            default_database_encoding("10.11.6-MariaDB"),
+            ("utf8mb4", "utf8mb4_unicode_ci")
+        );
+        assert!(database_charsets("8.0.36").contains(&"utf8mb3"));
+        assert!(!database_charsets("8.0.36").contains(&"utf8"));
+        assert!(database_charsets("5.7.44").contains(&"utf8"));
+        assert!(!database_charsets("5.7.44").contains(&"utf8mb3"));
+        assert!(create_database("  ", "utf8mb4", "utf8mb4_0900_ai_ci").is_err());
+        assert!(create_database("shop", "utf8mb4;drop", "utf8mb4_bin").is_err());
+        assert_eq!(
+            create_database("shop", "gbk", "gbk_chinese_ci").unwrap(),
+            "CREATE DATABASE `shop` CHARACTER SET gbk COLLATE gbk_chinese_ci"
+        );
+        let catalog = charset_catalog(&[
+            (
+                "utf8mb4".into(),
+                "utf8mb4_unicode_ci".into(),
+                "utf8mb4_bin".into(),
+            ),
+            (
+                "utf8mb4".into(),
+                "utf8mb4_unicode_ci".into(),
+                "utf8mb4_unicode_ci".into(),
+            ),
+            ("latin1".into(), "latin1_swedish_ci".into(), "latin1_bin".into()),
+            (
+                "latin1".into(),
+                "latin1_swedish_ci".into(),
+                "latin1_swedish_ci".into(),
+            ),
+            ("bad;name".into(), "utf8mb4_bin".into(), "utf8mb4_bin".into()),
+        ]);
+        assert_eq!(catalog.len(), 2);
+        assert_eq!(catalog[0].name, "utf8mb4");
+        assert_eq!(catalog[0].default_collation, "utf8mb4_unicode_ci");
+        assert_eq!(
+            catalog[0].collations,
+            vec!["utf8mb4_bin".to_string(), "utf8mb4_unicode_ci".to_string()]
+        );
+        assert_eq!(
+            preferred_encoding(&catalog),
+            Some(("utf8mb4".into(), "utf8mb4_unicode_ci".into()))
+        );
     }
 }
