@@ -123,6 +123,31 @@ fn half() -> f32 {
     0.5
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskState {
+    #[default]
+    Active,
+    Completed,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TaskMeta {
+    pub id: String,
+    pub name: String,
+    pub repo: std::path::PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<std::path::PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    pub agent: String,
+    pub created: i64,
+    #[serde(default)]
+    pub state: TaskState,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct LayoutSave {
     pub version: u32,
@@ -132,6 +157,15 @@ pub struct LayoutSave {
     /// Custom tab names (PRD 5.23), parallel to `tabs`; empty when no tab was renamed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub names: Vec<Option<String>>,
+    /// Per-tab task/worktree metadata, parallel to `tabs`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<Option<TaskMeta>>,
+    /// Per-tab flag (`true` = belongs to the `Agents` module), parallel to `tabs`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_tabs: Vec<bool>,
+    /// Stable leaf `pane_id`s per tab (in leaf order), parallel to `tabs`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pane_ids: Vec<Vec<String>>,
 }
 
 pub fn save(path: &Path, l: &LayoutSave) -> Result<()> {
@@ -296,7 +330,7 @@ pub fn remote_cd_command(path: &str) -> Option<String> {
     Some(format!("cd -- {}", crate::ctxmenu::quote_path(p)))
 }
 
-/// Command that resumes the most recent conversation of a detected agent (by display name).
+/// Command that resumes the most recent conversation of a detected agent (by display name or id).
 pub fn resume_command(agent: &str) -> Option<&'static str> {
     let a = agent.to_lowercase();
     if a.contains("claude") {
@@ -305,6 +339,10 @@ pub fn resume_command(agent: &str) -> Option<&'static str> {
         Some("codex resume --last")
     } else if a.contains("grok") {
         Some("grok --resume")
+    } else if a.contains("opencode") {
+        Some("opencode --continue")
+    } else if a.contains("gemini") {
+        Some("gemini --resume latest")
     } else {
         None
     }
@@ -315,15 +353,18 @@ pub fn new_session_name() -> String {
     format!("shellax-{}", &uuid_like()[..8])
 }
 pub fn uuid_like() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+    static SEQ: AtomicU64 = AtomicU64::new(1);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let n = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!(
         "{:016x}{:08x}",
-        n as u64 ^ 0x9e37_79b9_7f4a_7c15,
-        std::process::id()
+        (n as u64 ^ 0x9e37_79b9_7f4a_7c15).wrapping_add(seq.wrapping_mul(0xbf58_476d_1ce4_e5b9)),
+        (std::process::id()).wrapping_add(seq as u32)
     )
 }
 
@@ -343,7 +384,10 @@ mod tests {
             saved_at: "x".into(),
             active: 0,
             names: vec![],
-            tabs: vec![
+            ..Default::default()
+        };
+        let mut l = l;
+        l.tabs = vec![
                 NodeSave::Leaf {
                     pane: PaneSave::Sftp {
                         target: t.clone(),
@@ -383,8 +427,7 @@ mod tests {
                         },
                     }),
                 },
-            ],
-        };
+            ];
         let p = std::env::temp_dir().join(format!("stp-layout-sftp-{}.json", std::process::id()));
         save(&p, &l).unwrap();
         let back = load(&p).unwrap();
@@ -441,6 +484,7 @@ mod tests {
                 },
             ],
             names: vec![Some("构建 · web".into()), None],
+            ..Default::default()
         };
         let p = std::env::temp_dir().join(format!("stp-layout-{}.json", std::process::id()));
         save(&p, &l).unwrap();
@@ -483,6 +527,7 @@ mod tests {
                     },
                 },
             ],
+            ..Default::default()
         };
         let p = std::env::temp_dir().join(format!("stp-layout-cwd-{}.json", std::process::id()));
         save(&p, &l).unwrap();

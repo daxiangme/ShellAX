@@ -1,7 +1,8 @@
 //! ssh-term-proto core: backend-agnostic terminal session (alacritty_terminal grid)
 //! fed by either a local PTY (portable-pty) or an SSH channel (russh).
 pub mod agent;
-pub mod agent_desk;
+pub mod agent_history;
+pub mod agent_resume;
 pub mod ai;
 pub mod asciicast;
 pub mod assets;
@@ -43,6 +44,7 @@ pub mod outline;
 pub mod platform;
 pub mod policy;
 pub mod policy_server;
+pub mod proc_info;
 pub mod proxy;
 pub mod secrets;
 pub mod session_store;
@@ -57,3 +59,4 @@ pub mod tools;
 pub mod tray;
 pub mod update;
 pub mod updater;
+pub mod worktree;

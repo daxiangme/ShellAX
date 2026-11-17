@@ -901,35 +901,6 @@ fn char_to_byte_ranges(s: &str, hl: &[(usize, usize)]) -> Vec<std::ops::Range<us
 }
 
 // ---------------------------------------------------------------- pane
-#[derive(Clone)]
-pub(crate) struct AgentMemoryRow {
-    pub title: String,
-    pub status: String,
-    pub ago: String,
-    pub needs: bool,
-}
-
-#[derive(Clone)]
-pub(crate) struct AgentMemory {
-    pub cwd: String,
-    pub sessions: Vec<AgentMemoryRow>,
-}
-
-/// Move onto the agents-list row and press Enter. Plain cursor sequences only:
-/// win32 key records contain digits, and Claude's list prints those digits.
-fn session_select_keys(index: usize, count: usize) -> Vec<u8> {
-    let mut out = Vec::new();
-    let ups = count.max(index + 1).min(12);
-    for _ in 0..ups {
-        out.extend_from_slice(b"\x1b[A");
-    }
-    for _ in 0..index {
-        out.extend_from_slice(b"\x1b[B");
-    }
-    out.push(b'\r');
-    out
-}
-
 pub struct TermView {
     /// SFTP browser hosted in this layout leaf (PRD 5.21 tab/split mode); no shell session then.
     pub sftp: Option<Entity<crate::sftp_view::SftpView>>,
@@ -960,13 +931,21 @@ pub struct TermView {
     last_mouse_cell: Option<(usize, usize)>,
     mouse_down_btn: Option<u8>,
     // agent detection
+    pub pane_id: String,
+    pub parent_pane_id: Option<String>,
+    pub agent_unread: bool,
+    pub agent_state_since: Instant,
+    pub hook_state: Option<(String, AgentState, Instant)>,
+    pub agent_session_id: Option<String>,
+    pub agent_transcript_path: Option<String>,
+    pub auto_title: bool,
+    pub agent_started_unix: i64,
+    last_agent_sig: Option<(String, AgentState, String, Option<String>)>,
     manifests: Arc<Vec<Manifest>>,
     last_command: Option<String>,
     pub agent: Option<(usize, AgentState)>,
     /// When the current agent first appeared in this pane. Cleared when it exits.
     agent_started: Option<Instant>,
-    /// Sessions last seen on Claude's agents screen, kept after opening one of them.
-    agent_memory: Option<AgentMemory>,
     agent_seen: Instant,
     last_detect: Instant,
     detect_scheduled: bool,
@@ -1077,6 +1056,7 @@ pub enum TermEvent {
     Keyword(String, String),
     Explain,
     Agent(String, AgentState),
+    AgentRefresh,
     LongDone(String, u64, i32),
     Audit(&'static str, String),
     CtxEditor(String),
@@ -1360,6 +1340,15 @@ impl TermView {
         let subs = vec![
             cx.on_focus(&focus, window, |v, w, cx| {
                 v.st.borrow_mut().focused = true;
+                if v.agent_unread || matches!(v.agent, Some((_, AgentState::Done))) {
+                    v.agent_unread = false;
+                    if let Some((i, AgentState::Done)) = v.agent {
+                        v.agent = Some((i, AgentState::Idle));
+                    }
+                    if matches!(v.hook_state, Some((_, AgentState::Done, _))) {
+                        v.hook_state = None;
+                    }
+                }
                 v.kick_blink(w, cx);
                 cx.notify();
             }),
@@ -1390,11 +1379,20 @@ impl TermView {
             software_gpu: std::env::var("SHELLAX_FORCE_BLINK").ok().map(|_| false),
             last_mouse_cell: None,
             mouse_down_btn: None,
+            pane_id: ssh_term_proto::session_store::uuid_like(),
+            parent_pane_id: None,
+            agent_unread: false,
+            agent_state_since: Instant::now(),
+            hook_state: None,
+            agent_session_id: None,
+            agent_transcript_path: None,
+            auto_title: false,
+            agent_started_unix: 0,
+            last_agent_sig: None,
             manifests,
             last_command: None,
             agent: None,
             agent_started: None,
-            agent_memory: None,
             agent_seen: Instant::now(),
             last_detect: Instant::now() - Duration::from_secs(5),
             detect_scheduled: false,
@@ -1737,76 +1735,144 @@ impl TermView {
                         self.manifests.iter().position(|m| m.id == "claude")
                     })
                 })
-                .filter(|i| {
-                    let a = &config::get().agents;
-                    match self.manifests[*i].id.as_str() {
-                        "claude" => a.detect_claude,
-                        "codex" => a.detect_codex,
-                        "grok" => a.detect_grok,
-                        _ => true,
-                    }
-                })
+                .filter(|i| config::get().agents.is_detect_enabled(&self.manifests[*i].id))
         };
-        let new = idx.map(|i| {
-            if let Some(board) = &board {
-                return (i, board.state);
-            }
-            let d = self.manifests[i].detect(DetectionInput {
-                screen: &screen,
-                osc_title: &title,
-                osc_progress: &progress,
-            });
-            let prev = self.agent.filter(|(p, _)| *p == i).map(|(_, st)| st);
-            let state = if d.skip_state_update || d.state == AgentState::Unknown {
-                prev.unwrap_or(AgentState::Unknown)
+        let hook_override = self.hook_state.as_ref().and_then(|(hid, hst, at)| {
+            if at.elapsed() < Duration::from_secs(10) {
+                let hi = self.manifests.iter().position(|m| m.id == *hid)?;
+                Some((hi, *hst))
             } else {
-                d.state
-            };
-            (i, state)
+                None
+            }
+        });
+        let new = hook_override.or_else(|| {
+            idx.map(|i| {
+                if let Some(board) = &board {
+                    return (i, board.state);
+                }
+                let d = self.manifests[i].detect(DetectionInput {
+                    screen: &screen,
+                    osc_title: &title,
+                    osc_progress: &progress,
+                });
+                let prev = self.agent.filter(|(p, _)| *p == i).map(|(_, st)| st);
+                let state = if d.skip_state_update || d.state == AgentState::Unknown {
+                    prev.unwrap_or(AgentState::Unknown)
+                } else {
+                    d.state
+                };
+                (i, state)
+            })
         });
         let new = match new {
             Some((i, st)) if st != AgentState::Unknown => {
                 self.agent_seen = Instant::now();
-                Some((i, st))
+                let prev_st = self.agent.filter(|(p, _)| *p == i).map(|(_, s)| s);
+                let focused = self.st.borrow().focused;
+                let final_st = match st {
+                    AgentState::Working | AgentState::Blocked => {
+                        self.agent_unread = false;
+                        st
+                    }
+                    AgentState::Done => {
+                        if !focused {
+                            self.agent_unread = true;
+                            AgentState::Done
+                        } else {
+                            AgentState::Idle
+                        }
+                    }
+                    AgentState::Idle => {
+                        if prev_st == Some(AgentState::Working) && !focused {
+                            self.agent_unread = true;
+                            AgentState::Done
+                        } else if self.agent_unread && !focused {
+                            AgentState::Done
+                        } else {
+                            self.agent_unread = false;
+                            AgentState::Idle
+                        }
+                    }
+                    other => other,
+                };
+                Some((i, final_st))
             }
             Some((i, st)) => {
                 if self.agent_seen.elapsed() < Duration::from_secs(10) {
                     Some((i, st))
                 } else {
+                    self.agent_unread = false;
                     None
                 }
             }
-            None => None,
-        };
-        if let (Some((pi, ps)), Some((ni, ns))) = (self.agent, new) {
-            if pi == ni && ps != ns && ps != AgentState::Unknown && ns != AgentState::Unknown {
-                cx.emit(TermEvent::Agent(
-                    agent::display_name(&self.manifests[ni].id).to_string(),
-                    ns,
-                ));
+            None => {
+                self.agent_unread = false;
+                None
             }
+        };
+        match (self.agent, new) {
+            (Some((pi, ps)), Some((ni, ns))) => {
+                if pi != ni {
+                    self.agent_state_since = Instant::now();
+                    self.agent_started_unix = now_unix_secs();
+                    self.agent_session_id = None;
+                    self.agent_transcript_path = None;
+                    self.last_agent_sig = None;
+                    if ns != AgentState::Unknown {
+                        cx.emit(TermEvent::Agent(
+                            agent::display_name(&self.manifests[ni].id).to_string(),
+                            ns,
+                        ));
+                    }
+                } else if ps != ns {
+                    self.agent_state_since = Instant::now();
+                    if ns != AgentState::Unknown {
+                        cx.emit(TermEvent::Agent(
+                            agent::display_name(&self.manifests[ni].id).to_string(),
+                            ns,
+                        ));
+                    }
+                }
+            }
+            (None, Some((ni, ns))) => {
+                self.agent_state_since = Instant::now();
+                self.agent_started_unix = now_unix_secs();
+                if ns != AgentState::Unknown {
+                    cx.emit(TermEvent::Agent(
+                        agent::display_name(&self.manifests[ni].id).to_string(),
+                        ns,
+                    ));
+                }
+            }
+            (Some(_), None) => {
+                self.agent_started_unix = 0;
+                self.last_agent_sig = None;
+            }
+            (None, None) => {}
         }
-        if let Some(board) = board.as_ref().filter(|b| !b.sessions.is_empty()) {
-            self.agent_memory = Some(AgentMemory {
-                cwd: board
-                    .cwd
-                    .clone()
-                    .or_else(|| self.shell_cwd())
-                    .unwrap_or_default(),
-                sessions: board
-                    .sessions
-                    .iter()
-                    .map(|s| AgentMemoryRow {
-                        title: s.title.clone(),
-                        status: s.status.clone(),
-                        ago: s.ago.clone(),
-                        needs: s.needs,
-                    })
-                    .collect(),
+        let new_sig = new.map(|(ni, ns)| {
+            let screen = self.session.as_ref().map(|s| s.screen_text());
+            let osc = self.session.as_ref().map(|s| s.title()).unwrap_or_default();
+            let cwd_name = self.shell_cwd().and_then(|d| {
+                std::path::Path::new(&d)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(str::to_string)
             });
-        }
-        if new.is_none() {
-            self.agent_memory = None;
+            let title = extract_meaningful_caption(&osc, cwd_name.as_deref(), screen.as_deref())
+                .unwrap_or_default();
+            let ctx_lbl = screen
+                .as_deref()
+                .and_then(agent::context_usage_info)
+                .map(|(_, l)| l);
+            (self.manifests[ni].id.clone(), ns, title, ctx_lbl)
+        });
+        if new_sig != self.last_agent_sig {
+            self.last_agent_sig = new_sig;
+            cx.emit(TermEvent::AgentRefresh);
+            if new == self.agent {
+                cx.notify();
+            }
         }
         let prev_idx = self.agent.map(|(i, _)| i);
         if new != self.agent {
@@ -1856,51 +1922,82 @@ impl TermView {
         self.agent.map(|(i, _)| self.manifests[i].id.clone())
     }
 
-    /// Select this conversation the way the agents screen does: move to its row and press Enter.
-    /// Inside a conversation, Left first returns to that screen.
-    pub(crate) fn open_claude_session(&mut self, title: String, cx: &mut Context<Self>) {
-        let Some(s) = self.session.clone() else {
-            return;
-        };
-        let screen = s.screen_text();
-        if let Some(board) = agent::parse_claude_agents(&screen) {
-            let Some(index) = board.sessions.iter().position(|row| row.title == title) else {
-                return;
-            };
-            s.write(session_select_keys(index, board.sessions.len()));
-            return;
+    /// Apply session identity and lifecycle state reported directly by an agent hook.
+    pub fn apply_hook_report(
+        &mut self,
+        agent_id: &str,
+        session_id: Option<String>,
+        transcript_path: Option<String>,
+        state: Option<AgentState>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(sid) = session_id.filter(|s| !s.is_empty()) {
+            self.agent_session_id = Some(sid);
         }
-        s.write(b"\x1b[D".to_vec());
-        cx.spawn(async move |this, cx| {
-            for _ in 0..20 {
-                cx.background_executor()
-                    .timer(Duration::from_millis(150))
-                    .await;
-                let found = this
-                    .update(cx, |v, _| {
-                        v.session.as_ref().and_then(|s| {
-                            let board = agent::parse_claude_agents(&s.screen_text())?;
-                            let index = board.sessions.iter().position(|row| row.title == title)?;
-                            Some((index, board.sessions.len()))
-                        })
-                    })
-                    .ok()
-                    .flatten();
-                if let Some((index, count)) = found {
-                    let _ = this.update(cx, |v, _| {
-                        if let Some(s) = &v.session {
-                            s.write(session_select_keys(index, count));
-                        }
-                    });
-                    return;
+        if let Some(tp) = transcript_path.filter(|s| !s.is_empty()) {
+            self.agent_transcript_path = Some(tp);
+        }
+        if let Some(st) = state {
+            let focused = self.st.borrow().focused;
+            let eff = match st {
+                AgentState::Done if focused => {
+                    self.agent_unread = false;
+                    AgentState::Idle
+                }
+                AgentState::Done => {
+                    self.agent_unread = true;
+                    AgentState::Done
+                }
+                other => {
+                    self.agent_unread = false;
+                    other
+                }
+            };
+            self.hook_state = Some((agent_id.to_string(), eff, Instant::now()));
+            if let Some(idx) = self.manifests.iter().position(|m| m.id == agent_id) {
+                let prev = self.agent.map(|(_, s)| s);
+                self.agent = Some((idx, eff));
+                self.agent_seen = Instant::now();
+                if self.agent_started.is_none() {
+                    self.agent_started = Some(Instant::now());
+                }
+                self.last_agent = Some(agent::display_name(&self.manifests[idx].id).to_string());
+                if prev != Some(eff) {
+                    self.agent_state_since = Instant::now();
+                    cx.emit(TermEvent::Agent(
+                        agent::display_name(&self.manifests[idx].id).to_string(),
+                        eff,
+                    ));
                 }
             }
-        })
-        .detach();
+        }
+        cx.notify();
     }
 
-    pub(crate) fn agent_memory(&self) -> Option<&AgentMemory> {
-        self.agent_memory.as_ref()
+    /// Resume command saved into layout snapshots: prefers exact session ID (`agent_resume::plan`),
+    /// falling back to generic `--continue` / `resume --last`.
+    pub fn resume_command_for_snapshot(&self) -> Option<String> {
+        let aid = self
+            .agent_id()
+            .or_else(|| {
+                let last = self.last_agent.as_deref()?.to_ascii_lowercase();
+                self.manifests
+                    .iter()
+                    .find(|m| agent::display_name(&m.id).to_ascii_lowercase() == last || m.id == last)
+                    .map(|m| m.id.clone())
+            })?;
+        if let Some(sid) = self.agent_session_id.as_deref() {
+            if let Some(sref) = ssh_term_proto::agent_resume::AgentSessionRef::id(sid) {
+                if let Some(plan) = ssh_term_proto::agent_resume::plan(&aid, &sref) {
+                    if let Some(cmd) = ssh_term_proto::agent_resume::shell_line(&plan.argv) {
+                        return Some(cmd);
+                    }
+                }
+            }
+        }
+        ssh_term_proto::agent_resume::fallback_continue_command(&aid)
+            .or_else(|| ssh_term_proto::session_store::resume_command(&aid))
+            .map(str::to_string)
     }
 
 fn shellish_title(s: &str) -> bool {
@@ -5551,6 +5648,191 @@ impl Render for TermView {
     }
 }
 
+impl TermView {
+    /// Extract a meaningful conversation title from the pane's OSC title or visible user prompt.
+    pub fn meaningful_agent_caption(&self) -> Option<String> {
+        let osc = self.session.as_ref().map(|s| s.title()).unwrap_or_default();
+        let screen = self.session.as_ref().map(|s| s.screen_text());
+        let cwd_name = self.shell_cwd().and_then(|d| {
+            std::path::Path::new(&d)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(str::to_string)
+        });
+        extract_meaningful_caption(&osc, cwd_name.as_deref(), screen.as_deref())
+    }
+}
+
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn is_status_glyph(ch: char) -> bool {
+    matches!(
+        ch,
+        '⠋'..='⠏'
+            | '✳'
+            | '⠐'
+            | '●'
+            | '◉'
+            | '○'
+            | '•'
+            | '▸'
+            | '▪'
+            | '✓'
+            | '✔'
+            | '✗'
+            | '⚠'
+            | '⏳'
+    )
+}
+
+fn truncate_caption(s: &str, max_chars: usize) -> String {
+    let mut chars = s.chars();
+    let head: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
+fn is_generic_title(candidate: &str, cwd_name: Option<&str>) -> bool {
+    let trimmed = candidate.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "shellax"
+            | "zsh"
+            | "bash"
+            | "sh"
+            | "fish"
+            | "nu"
+            | "pwsh"
+            | "cmd"
+            | "-zsh"
+            | "-bash"
+            | "agy"
+            | "antigravity"
+            | "antigravity cli"
+            | "claude"
+            | "claude code"
+            | "claude-code"
+            | "codex"
+            | "codex cli"
+            | "gemini"
+            | "gemini cli"
+            | "gemini-cli"
+            | "grok"
+            | "opencode"
+            | "aider"
+    ) {
+        return true;
+    }
+    if trimmed.starts_with('/')
+        || trimmed.starts_with("~/")
+        || trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+    {
+        return true;
+    }
+    if trimmed.contains('@') && !trimmed.contains(' ') {
+        return true;
+    }
+    if trimmed.contains(':') && (trimmed.contains('/') || trimmed.contains('~')) {
+        return true;
+    }
+    if let Some(cwd) = cwd_name {
+        if !cwd.is_empty() && trimmed.eq_ignore_ascii_case(cwd) {
+            return true;
+        }
+    }
+    false
+}
+
+fn extract_meaningful_caption(
+    osc_title: &str,
+    cwd_name: Option<&str>,
+    screen: Option<&str>,
+) -> Option<String> {
+    let mut t = osc_title
+        .trim_start_matches(|c: char| is_status_glyph(c) || c.is_whitespace())
+        .trim();
+    let lower = t.to_ascii_lowercase();
+    for prefix in [
+        "claude code — ",
+        "claude code - ",
+        "claude code · ",
+        "antigravity — ",
+        "antigravity - ",
+        "antigravity · ",
+        "codex — ",
+        "codex - ",
+        "gemini — ",
+        "gemini - ",
+    ] {
+        if lower.starts_with(prefix) {
+            t = t[prefix.len()..].trim();
+            break;
+        }
+    }
+    if !is_generic_title(t, cwd_name) {
+        return Some(truncate_caption(t, 36));
+    }
+
+    let screen = screen?;
+    for raw in screen.lines() {
+        let line = raw.trim_end();
+        let trimmed_start = line.trim_start();
+        if line.len().saturating_sub(trimmed_start.len()) > 2 {
+            // Skip deeply indented markdown quotes/outputs; real CLI prompts sit near column 0.
+            continue;
+        }
+        let inner = trimmed_start.trim_start_matches(['│', '┃', ' ']);
+        let Some(rest) = inner
+            .strip_prefix("> ")
+            .or_else(|| inner.strip_prefix("❯ "))
+            .or_else(|| inner.strip_prefix("› "))
+        else {
+            continue;
+        };
+        let body = rest.trim_end_matches(['│', '┃', ' ']).trim();
+        if body.is_empty()
+            || body.starts_with('/')
+            || body.starts_with('?')
+            || body.starts_with('!')
+            || body.starts_with('>')
+            || body.starts_with('│')
+        {
+            continue;
+        }
+        let bl = body.to_ascii_lowercase();
+        if bl.starts_with("type your message")
+            || bl.starts_with("ask anything")
+            || bl.starts_with("send a message")
+            || bl.starts_with("enter a prompt")
+            || bl.starts_with("what can i help")
+            || bl.starts_with("press ?")
+            || bl.starts_with("try \"")
+            || bl.starts_with("try '")
+            || matches!(bl.as_str(), "@" | "..." | "…")
+        {
+            continue;
+        }
+        if !body.chars().any(char::is_alphanumeric) {
+            continue;
+        }
+        return Some(truncate_caption(body, 36));
+    }
+    None
+}
+
 /// Short system sound (notify.sound / terminal.bell = "sound"). Best effort, never blocks the UI.
 pub fn play_sound() {
     std::thread::spawn(|| {
@@ -5701,6 +5983,24 @@ mod tests {
         assert!(!paste(false, "v", false, true, false, false));
         assert!(!paste(false, "v", true, false, false, true));
         assert!(!paste(true, "c", false, true, false, false));
+    }
+    #[test]
+    fn meaningful_caption_filters_generic_and_uses_first_prompt() {
+        let screen = "──────────────\n> /model\nL Model set to Gemini\n\n> 你好\n\n• Thought for 5s, 146 tokens\n  > markdown blockquote\n> \n──────────────\n? for shortcuts\n";
+        assert_eq!(
+            extract_meaningful_caption("Antigravity · DXAiFlow", Some("DXAiFlow"), Some(screen))
+                .as_deref(),
+            Some("你好")
+        );
+        assert_eq!(
+            extract_meaningful_caption("✳ Fix Tab Title Bug", Some("ShellAX"), Some(screen))
+                .as_deref(),
+            Some("Fix Tab Title Bug")
+        );
+        assert_eq!(
+            extract_meaningful_caption("agy", Some("DXAiFlow"), Some("> Type your message...\n> \n")),
+            None
+        );
     }
 }
 

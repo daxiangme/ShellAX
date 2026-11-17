@@ -46,6 +46,9 @@ pub struct SshTarget {
     pub password_override: Option<String>,
     #[serde(skip)]
     pub passphrase_override: Option<String>,
+    /// Ephemeral local pane identifier injected as `SHELLAX_PANE` on SSH channels.
+    #[serde(skip)]
+    pub pane_id: Option<String>,
 }
 impl SshTarget {
     pub fn label(&self) -> String {
@@ -1236,6 +1239,9 @@ async fn run_shell(
     }
     if target.remote_hooks {
         let _ = ch.set_env(false, "SHELLAX_HOST", target.host.clone()).await;
+    }
+    if let Some(pid) = target.pane_id.as_ref().filter(|s| !s.is_empty()) {
+        let _ = ch.set_env(false, "SHELLAX_PANE", pid.clone()).await;
     }
     let sz = s.size();
     ch.request_pty(

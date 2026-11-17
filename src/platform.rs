@@ -221,6 +221,7 @@ pub fn match_installed_font(target: &str, installed: &[String]) -> Option<String
     None
 }
 
+#[allow(dead_code)]
 fn strip_json_comments(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for line in s.lines() {

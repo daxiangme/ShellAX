@@ -9,7 +9,9 @@ mod chrome;
 mod motion;
 use gpui::AnimationExt as _;
 mod activity;
+mod agent_ui;
 mod ai_mention;
+mod attention;
 mod brew_ui;
 mod brew_view;
 mod chat_view;
@@ -39,6 +41,7 @@ mod library;
 mod mcp_backend;
 mod mcp_view;
 mod palette;
+mod pane_api;
 mod panels;
 mod port_view;
 mod result_list;
@@ -229,11 +232,27 @@ fn newest_log(dir: &std::path::Path) -> Option<std::path::PathBuf> {
 
 // ---------------------------------------------------------------- app shell
 #[derive(Default)]
+pub(crate) struct PaneInit {
+    pub(crate) cwd: Option<String>,
+    pub(crate) daemon_id: Option<String>,
+    pub(crate) resume: Option<String>,
+    pub(crate) pane_id: Option<String>,
+}
 
-struct PaneInit {
-    cwd: Option<String>,
-    daemon_id: Option<String>,
-    resume: Option<String>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ToastKind {
+    Info,
+    Success,
+    Warn,
+    Error,
+}
+
+struct ToastEntry {
+    seq: u64,
+    kind: ToastKind,
+    msg: String,
+    closing: bool,
+    paused: bool,
 }
 
 #[derive(Clone)]
@@ -309,6 +328,7 @@ pub(crate) struct Tab {
     focused: Entity<TermView>,
     /** custom name (PRD 5.23) */
     name: Option<String>,
+    pub(crate) task: Option<ssh_term_proto::session_store::TaskMeta>,
 }
 
 pub(crate) enum Overlay {
@@ -475,14 +495,10 @@ pub(crate) struct Root {
     pub(crate) audit_verify: Option<Result<usize, (usize, String)>>,
     pub(crate) audit_filter: ssh_term_proto::audit::Filter,
     settings_dirty: Vec<String>,
-    toast: Option<(String, u64)>,
-    /// Toast is playing its exit fade.
-    toast_out: bool,
+    toasts: Vec<ToastEntry>,
     toast_seq: u64,
-    /// Host sidebar: Agents button is expanded.
-    agents_open: bool,
-    /// Height of the Agents split under the host list.
-    agents_h: f32,
+    pub(crate) agent_hub: agent_ui::AgentHub,
+    pub(crate) pane_waiters: Vec<pane_api::PaneWaiter>,
     pub(crate) port_view: Option<Entity<port_view::PortView>>,
     pub(crate) chat_view: Option<Entity<chat_view::ChatView>>,
     quit_confirm: bool,
@@ -653,7 +669,21 @@ impl Root {
     }
 
     pub(crate) fn toast(&mut self, msg: String, cx: &mut Context<Self>) {
-        self.toast_after(msg, std::time::Duration::from_secs(4), cx);
+        self.toast_with(ToastKind::Info, msg, std::time::Duration::from_secs(4), cx);
+    }
+
+    pub(crate) fn toast_kind(
+        &mut self,
+        kind: ToastKind,
+        msg: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let dur = match kind {
+            ToastKind::Error => std::time::Duration::from_secs(3600),
+            ToastKind::Warn => std::time::Duration::from_secs(6),
+            ToastKind::Info | ToastKind::Success => std::time::Duration::from_secs(4),
+        };
+        self.toast_with(kind, msg.into(), dur, cx);
     }
 
     pub(crate) fn toast_after(
@@ -662,23 +692,79 @@ impl Root {
         dur: std::time::Duration,
         cx: &mut Context<Self>,
     ) {
+        self.toast_with(ToastKind::Info, msg, dur, cx);
+    }
+
+    fn toast_with(
+        &mut self,
+        kind: ToastKind,
+        msg: String,
+        dur: std::time::Duration,
+        cx: &mut Context<Self>,
+    ) {
         self.toast_seq += 1;
         let seq = self.toast_seq;
-        self.toast = Some((msg, seq));
-        self.toast_out = false;
+        if self.toasts.len() >= 3 {
+            // Evict oldest non-error toast first, or oldest overall.
+            if let Some(pos) = self
+                .toasts
+                .iter()
+                .position(|t| t.kind != ToastKind::Error)
+            {
+                self.toasts.remove(pos);
+            } else {
+                self.toasts.remove(0);
+            }
+        }
+        self.toasts.push(ToastEntry {
+            seq,
+            kind,
+            msg,
+            closing: false,
+            paused: false,
+        });
         cx.notify();
+        if kind == ToastKind::Error {
+            // Error toasts stay visible until the user dismisses them.
+            return;
+        }
+        self.schedule_toast_dismiss(seq, dur, cx);
+    }
+
+    fn schedule_toast_dismiss(
+        &self,
+        seq: u64,
+        dur: std::time::Duration,
+        cx: &mut Context<Self>,
+    ) {
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(dur).await;
+            let mut remaining = dur;
+            let step = std::time::Duration::from_millis(200);
+            while !remaining.is_zero() {
+                cx.background_executor().timer(step.min(remaining)).await;
+                let state = this
+                    .update(cx, |r, _| {
+                        r.toasts
+                            .iter()
+                            .find(|t| t.seq == seq)
+                            .map(|t| t.paused)
+                    })
+                    .ok()
+                    .flatten();
+                match state {
+                    None => return,
+                    Some(true) => {}
+                    Some(false) => remaining = remaining.saturating_sub(step),
+                }
+            }
             let reduced = motion::reduced();
             let _ = this.update(cx, |r, cx| {
-                if r.toast.as_ref().is_some_and(|t| t.1 == seq) {
-                    if reduced {
-                        r.toast = None;
-                    } else {
-                        r.toast_out = true;
-                    }
-                    cx.notify();
+                if reduced {
+                    r.toasts.retain(|t| t.seq != seq);
+                } else if let Some(t) = r.toasts.iter_mut().find(|t| t.seq == seq) {
+                    t.closing = true;
                 }
+                cx.notify();
             });
             if reduced {
                 return;
@@ -687,14 +773,16 @@ impl Root {
                 .timer(motion::ms(motion::TOAST_EXIT_MS))
                 .await;
             let _ = this.update(cx, |r, cx| {
-                if r.toast.as_ref().is_some_and(|t| t.1 == seq) {
-                    r.toast = None;
-                    r.toast_out = false;
-                    cx.notify();
-                }
+                r.toasts.retain(|t| t.seq != seq);
+                cx.notify();
             });
         })
         .detach();
+    }
+
+    fn dismiss_toast(&mut self, seq: u64, cx: &mut Context<Self>) {
+        self.toasts.retain(|t| t.seq != seq);
+        cx.notify();
     }
 
     fn history_for(&mut self, key: &str) -> Arc<Mutex<History>> {
@@ -1124,13 +1212,29 @@ impl Root {
             window,
             |this, pane, ev: &termview::TermEvent, w, cx| {
                 match ev {
+                    termview::TermEvent::AgentRefresh => {
+                        this.sync_live_agent_sessions(cx);
+                        this.maybe_auto_refresh_agent_history(false, cx);
+                        cx.notify();
+                        return;
+                    }
                     termview::TermEvent::Agent(name, st) => {
+                        this.sync_live_agent_sessions(cx);
+                        if matches!(
+                            st,
+                            AgentState::Done | AgentState::Idle | AgentState::Blocked
+                        ) {
+                            this.maybe_auto_refresh_agent_history(true, cx);
+                        }
+                        this.check_pane_waiters(cx);
+                        cx.notify();
                         if !config::get().agents.notify_state {
                             return;
                         }
-                        // blocked is already covered by approval / agent_blocked; announce idle (done) and blocked
+                        // blocked is already covered by approval / agent_blocked; announce done/idle and blocked
                         let key = match st {
                             AgentState::Blocked => "main.notify_agent_blocked",
+                            AgentState::Done => "main.notify_agent_done",
                             AgentState::Idle => "main.notify_agent_idle",
                             _ => return,
                         };
@@ -1301,6 +1405,10 @@ impl Root {
         let init = Size { cols: 80, rows: 24 };
         let h = self.history_for(&spec.history_key());
         let m = self.manifests.clone();
+        let pid = pi
+            .pane_id
+            .clone()
+            .unwrap_or_else(ssh_term_proto::session_store::uuid_like);
         match spec {
             Spec::Local => {
                 let shell = config::get().terminal.shell.clone();
@@ -1326,12 +1434,13 @@ impl Root {
                         })
                         .unwrap_or_else(|| "shellax-cli".into());
                     match ssh_term_proto::daemon::ensure(&sock, &exe).and_then(|_| {
-                        ssh_term_proto::daemon::attach(
+                        ssh_term_proto::daemon::attach_with_pane(
                             &sock,
                             &id,
                             init,
                             &shell,
                             spawn_at.as_deref().unwrap_or(""),
+                            Some(pid.as_str()),
                         )
                     }) {
                         Ok(sess) => {
@@ -1339,7 +1448,10 @@ impl Root {
                             let v = cx.new(|cx| {
                                 TermView::new(&title, Spec::Local, Ok(sess), h, m, window, cx)
                             });
-                            v.update(cx, |v, _| v.daemon_id = Some(id));
+                            v.update(cx, |v, _| {
+                                v.daemon_id = Some(id);
+                                v.pane_id = pid;
+                            });
                             return v;
                         }
                         Err(e) => {
@@ -1347,17 +1459,21 @@ impl Root {
                         }
                     }
                 }
-                let sess = local::spawn_local_in(
+                let sess = local::spawn_local_with_pane(
                     init,
                     (!shell.is_empty()).then_some(shell.as_str()),
                     spawn_at.as_deref().map(std::path::Path::new),
+                    Some(pid.as_str()),
                 );
-                cx.new(|cx| TermView::new(&title, Spec::Local, sess, h, m, window, cx))
+                let v = cx.new(|cx| TermView::new(&title, Spec::Local, sess, h, m, window, cx));
+                v.update(cx, |v, _| v.pane_id = pid);
+                v
             }
             Spec::Ssh(mut t) => {
                 if config::get().session.persistent == "tmux" && t.tmux.is_none() {
                     t.tmux = Some(ssh_term_proto::session_store::new_session_name());
                 }
+                t.pane_id = Some(pid.clone());
                 // tab title: the saved host's name (alias), not user@host:port
                 let lbl = t.label();
                 let shown = self
@@ -1377,7 +1493,9 @@ impl Root {
                 let s = ssh::spawn_ssh(self.rt.handle(), t.clone(), init, self.prompts.clone());
                 let pv = self.port_view(window, cx);
                 pv.update(cx, |v, cx| v.auto_start(&t, cx));
-                cx.new(|cx| TermView::new(&title, Spec::Ssh(t), Ok(s), h, m, window, cx))
+                let v = cx.new(|cx| TermView::new(&title, Spec::Ssh(t), Ok(s), h, m, window, cx));
+                v.update(cx, |v, _| v.pane_id = pid);
+                v
             }
         }
     }
@@ -1410,6 +1528,7 @@ impl Root {
             layout: Node::Leaf(pane.clone()),
             focused: pane,
             name: None,
+            task: None,
         });
         self.active = self.tabs.len() - 1;
         // A new terminal tab comes to the front, but the settings tab stays open behind it.
@@ -1833,6 +1952,7 @@ impl Root {
             layout: Node::Leaf(pane.clone()),
             focused: pane,
             name: None,
+            task: None,
         });
         self.active = self.tabs.len() - 1;
         self.leave_settings();
@@ -1844,9 +1964,14 @@ impl Root {
         let Some(target) = self.focused_pane(window, cx) else {
             return self.new_tab(Spec::Local, window, cx);
         };
-        let (spec, sz) = {
+        let (spec, sz, ws, cwd) = {
             let v = target.read(cx);
-            (v.spec.clone(), v.session.as_ref().map(|s| s.size()))
+            (
+                v.spec.clone(),
+                v.session.as_ref().map(|s| s.size()),
+                v.ws,
+                v.shell_cwd(),
+            )
         };
         if self.block_proxy(&spec, true, window, cx) {
             return;
@@ -1854,7 +1979,18 @@ impl Root {
         let dir = dir
             .or_else(|| sz.and_then(|s| auto_direction(s.rows, s.cols)))
             .unwrap_or(Dir::Vertical);
-        let pane = self.open_pane(spec, window, cx);
+        let pane = self.open_pane_with(
+            spec,
+            PaneInit {
+                cwd,
+                ..Default::default()
+            },
+            window,
+            cx,
+        );
+        if let Some(ws) = ws {
+            pane.update(cx, |p, _| p.ws = Some(ws));
+        }
         let fh = pane.read(cx).focus.clone();
         if let Some(tab) = self.tabs.get_mut(self.active) {
             tab.layout.split(&target, pane.clone(), dir);
@@ -2206,6 +2342,7 @@ impl Root {
             layout,
             focused,
             name: None,
+            task: None,
         });
         self.active = self.tabs.len() - 1;
         self.leave_settings();
@@ -2621,11 +2758,14 @@ impl Root {
                     }
                 }
                 let resume = v
-                    .agent_label()
-                    .map(|a| a.0)
-                    .or(v.last_agent.clone())
-                    .and_then(|a| resume_command(&a))
-                    .map(str::to_string)
+                    .resume_command_for_snapshot()
+                    .or_else(|| {
+                        v.agent_label()
+                            .map(|a| a.0)
+                            .or(v.last_agent.clone())
+                            .and_then(|a| resume_command(&a))
+                            .map(str::to_string)
+                    })
                     .or(v.resume_offer.clone());
                 // Same directory the path bar shows (OSC 7 / OSC 9;9, then the process probe, then the
                 // prompt). The process probe alone is the spawn directory on Windows, and it can be
@@ -2656,6 +2796,24 @@ impl Root {
     }
     fn snapshot(&self, cx: &App) -> ssh_term_proto::session_store::LayoutSave {
         let names: Vec<Option<String>> = self.tabs.iter().map(|t| t.name.clone()).collect();
+        let tasks: Vec<Option<ssh_term_proto::session_store::TaskMeta>> =
+            self.tabs.iter().map(|t| t.task.clone()).collect();
+        let agent_tabs: Vec<bool> = self
+            .tabs
+            .iter()
+            .map(|t| Self::tab_module(t, cx) == activity::Tool::Agents)
+            .collect();
+        let pane_ids: Vec<Vec<String>> = self
+            .tabs
+            .iter()
+            .map(|t| {
+                t.layout
+                    .leaves()
+                    .into_iter()
+                    .map(|p| p.read(cx).pane_id.clone())
+                    .collect()
+            })
+            .collect();
         ssh_term_proto::session_store::LayoutSave {
             version: 1,
             saved_at: chrono::Local::now().to_rfc3339(),
@@ -2670,6 +2828,17 @@ impl Root {
             } else {
                 vec![]
             },
+            tasks: if tasks.iter().any(|t| t.is_some()) {
+                tasks
+            } else {
+                vec![]
+            },
+            agent_tabs: if agent_tabs.iter().any(|&b| b) {
+                agent_tabs
+            } else {
+                vec![]
+            },
+            pane_ids,
         }
     }
     pub(crate) fn save_layout(&self, cx: &App) {
@@ -2718,10 +2887,22 @@ impl Root {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Node<Entity<TermView>> {
+        let mut empty = [].iter();
+        self.build_node_with_ids(n, &mut empty, window, cx)
+    }
+    fn build_node_with_ids(
+        &mut self,
+        n: &ssh_term_proto::session_store::NodeSave,
+        ids: &mut std::slice::Iter<'_, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Node<Entity<TermView>> {
         use ssh_term_proto::session_store::{NodeSave, PaneSave};
         let r = self;
         match n {
-            NodeSave::Leaf { pane } => Node::Leaf(match pane.clone() {
+            NodeSave::Leaf { pane } => {
+                let next_pid = ids.next().cloned().filter(|s| !s.is_empty());
+                Node::Leaf(match pane.clone() {
                 PaneSave::Local {
                     cwd,
                     daemon_id,
@@ -2732,6 +2913,7 @@ impl Root {
                         cwd: (!cwd.is_empty()).then_some(cwd),
                         daemon_id,
                         resume,
+                        pane_id: next_pid,
                     },
                     window,
                     cx,
@@ -2745,6 +2927,7 @@ impl Root {
                         Spec::Ssh(target),
                         PaneInit {
                             resume,
+                            pane_id: next_pid,
                             ..Default::default()
                         },
                         window,
@@ -2815,7 +2998,8 @@ impl Root {
                     filter,
                     sort,
                 } => r.mongo_pane(&conn, (database, collection, filter, sort), window, cx),
-            }),
+            })
+            }
             NodeSave::Split {
                 vertical,
                 ratio,
@@ -2828,8 +3012,8 @@ impl Root {
                     Dir::Horizontal
                 },
                 ratio: *ratio,
-                a: Box::new(r.build_node(a, window, cx)),
-                b: Box::new(r.build_node(b, window, cx)),
+                a: Box::new(r.build_node_with_ids(a, ids, window, cx)),
+                b: Box::new(r.build_node_with_ids(b, ids, window, cx)),
             },
         }
     }
@@ -2843,13 +3027,27 @@ impl Root {
             return false;
         }
         for (i, n) in l.tabs.iter().enumerate() {
-            let layout = self.build_node(n, window, cx);
+            let saved_ids = l.pane_ids.get(i).map(Vec::as_slice).unwrap_or(&[]);
+            let mut id_iter = saved_ids.iter();
+            let layout = self.build_node_with_ids(n, &mut id_iter, window, cx);
+            let is_agent_tab = l.agent_tabs.get(i) == Some(&true)
+                || l.tasks.get(i).and_then(|t| t.as_ref()).is_some();
+            if is_agent_tab {
+                for leaf in layout.leaves() {
+                    leaf.update(cx, |v, _| {
+                        if v.ws.is_none() && !v.embedded() {
+                            v.ws = Some(activity::Tool::Agents);
+                        }
+                    });
+                }
+            }
             self.relink_follow(&layout, cx);
             let focused = layout.leaves()[0].clone();
             self.tabs.push(Tab {
                 layout,
                 focused,
                 name: l.names.get(i).cloned().flatten(),
+                task: l.tasks.get(i).cloned().flatten(),
             });
         }
         self.active = l.active.min(self.tabs.len() - 1);
@@ -3234,7 +3432,7 @@ impl Root {
     }
     fn report(&mut self, err: Option<String>, cx: &mut Context<Self>) {
         if let Some(e) = err {
-            self.toast(e, cx);
+            self.toast_kind(ToastKind::Error, e, cx);
         }
     }
 
@@ -3641,11 +3839,15 @@ impl Root {
             | Action::ToolDocker
             | Action::ToolPorts
             | Action::ToolTools
-            | Action::ToolBrew => {
+            | Action::ToolBrew
+            | Action::ToolAgents => {
                 if let Some(t) = activity::Tool::from_action(a) {
                     self.select_tool(t, window, cx);
                 }
             }
+            Action::AgentNextAttention => self.jump_attention(true, window, cx),
+            Action::AgentPrevAttention => self.jump_attention(false, window, cx),
+            Action::NewAgentTask => self.open_new_task_dialog(window, cx),
             Action::ToggleBottomPanel => self.toggle_bottom(None, cx),
             Action::NewDbConnection => self.open_db_dialog(None, window, cx),
             Action::OpenAbout => self.open_settings(Cat::About, window, cx),
@@ -3857,6 +4059,22 @@ impl Root {
                     );
                 }
                 if !cx.has_active_drag() && !p.read(cx).embedded() {
+                    if self
+                        .tabs
+                        .get(tab)
+                        .is_some_and(|t| t.layout.leaves().len() > 1 && t.focused.entity_id() == p.entity_id())
+                    {
+                        d = d.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .size_full()
+                                .rounded(px(ui::R_SM))
+                                .border_1()
+                                .border_color(c(th.accent).opacity(0.55)),
+                        );
+                    }
                     d = d.child(self.pane_header(p, pg, cx));
                 }
                 if cx.has_active_drag() && self.tabs.len() > 1 {
@@ -4013,6 +4231,7 @@ pub(crate) fn state_color(st: AgentState, th: &Theme) -> Hsla {
     match st {
         AgentState::Working => c(th.warning),
         AgentState::Blocked => c(th.error),
+        AgentState::Done => c(th.success),
         AgentState::Idle => c(th.success),
         AgentState::Unknown => c(th.overlay1),
     }
@@ -4162,6 +4381,12 @@ impl Render for Root {
             .iter()
             .map(|t| {
                 let panes = t.layout.leaves();
+                if let Some(auto) = self.resolve_auto_tab_title(t, cx) {
+                    if panes.len() > 1 {
+                        return format!("{auto} +{}", panes.len() - 1).into();
+                    }
+                    return auto.into();
+                }
                 match &t.name {
                     Some(n) => n.clone().into(),
                     None => {
@@ -4201,7 +4426,8 @@ impl Render for Root {
                 .iter()
                 .filter_map(|p| p.read(cx).agent_label())
                 .max_by_key(|(_, st)| match st {
-                    AgentState::Blocked => 3,
+                    AgentState::Blocked => 4,
+                    AgentState::Done => 3,
                     AgentState::Working => 2,
                     AgentState::Idle => 1,
                     _ => 0,
@@ -4528,6 +4754,8 @@ impl Render for Root {
         };
         let cwd_bar = if settings_on {
             None
+        } else if self.tool == activity::Tool::Agents {
+            Some(self.agent_center_bar(cx))
         } else {
             self.cwd_bar(window, cx)
         };
@@ -4928,12 +5156,42 @@ impl Render for Root {
                         return;
                     }
                 }
-                if ev.keystroke.key == "escape"
-                    && !matches!(this.overlay, Overlay::None | Overlay::Palette(_))
-                {
-                    this.close_overlay(w, cx);
-                    cx.stop_propagation();
-                    return;
+                if ev.keystroke.key == "escape" {
+                    let closed_agent_menu = std::mem::take(&mut this.agent_hub.agent_menu);
+                    if this.agent_hub.menu.take().is_some()
+                        || closed_agent_menu
+                        || this.agent_hub.finish_task.take().is_some()
+                        || this.agent_hub.new_task.take().is_some()
+                        || this.tab_menu.take().is_some()
+                        || this.new_menu.take().is_some()
+                        || this.sb_menu.take().is_some()
+                        || this.lib_menu.take().is_some()
+                        || this.dbp.menu.take().is_some()
+                        || this.dbp.new_db.take().is_some()
+                        || this.sb_modal.take().is_some()
+                        || this.modal.take().is_some()
+                    {
+                        cx.notify();
+                        cx.stop_propagation();
+                        return;
+                    }
+                    if this.dbp.transfer.as_ref().is_some_and(|j| !j.running) {
+                        this.dbp.transfer = None;
+                        cx.notify();
+                        cx.stop_propagation();
+                        return;
+                    }
+                    if this.quit_confirm {
+                        this.quit_confirm = false;
+                        cx.notify();
+                        cx.stop_propagation();
+                        return;
+                    }
+                    if !matches!(this.overlay, Overlay::None | Overlay::Palette(_)) {
+                        this.close_overlay(w, cx);
+                        cx.stop_propagation();
+                        return;
+                    }
                 }
                 let ks = actions::keystroke_str(&ev.keystroke);
                 if let Some(a) = actions::find(&ks) {
@@ -5631,66 +5889,117 @@ impl Render for Root {
                 }
             }
         }
+        for el in self.render_agent_overlays(cx) {
+            root = root.child(el);
+        }
         if let (Some(m), None) = (update_ui::offered(), update_ui::prompt()) {
             if !update_ui::offer_minimized() {
                 root = root.child(self.update_offer_el(m, window, cx));
             }
         }
-        if let Some((msg, seq)) = &self.toast {
-            // info toast: neutral text + info icon, 3px semantic bar on the left
-            let el = ui::corner_card(window, 40., 16.)
-                .min_w(px(ui::corner_w(window, 16.).min(320.)))
-                .pl(px(12.))
-                .pr_4()
-                .py_2()
+        if !self.toasts.is_empty() {
+            let max_w = ui::corner_w(window, 16.);
+            let min_w = max_w.min(320.);
+            let entries: Vec<(u64, ToastKind, String, bool)> = self
+                .toasts
+                .iter()
+                .map(|t| (t.seq, t.kind, t.msg.clone(), t.closing))
+                .collect();
+            let mut stack = div()
+                .absolute()
+                .bottom(px(40.))
+                .right(px(16.))
+                .max_w(px(max_w))
                 .flex()
-                .items_start()
-                .gap_2()
-                .text_size(px(ui::fs_body()))
-                .text_color(c(th.text))
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .w(px(3.))
-                        .h(px(18.))
-                        .rounded_full()
-                        .bg(c(th.info)),
-                )
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .h(px(18.))
-                        .flex()
-                        .items_center()
-                        .child(icon(IconName::Info, ui::IC_SM, c(th.info))),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .whitespace_normal()
-                        .child(ui::mid_ellipsis_tokens(msg)),
-                );
-            let el = if motion::reduced() {
-                el.into_any_element()
-            } else if self.toast_out {
-                el.with_animation(
-                    ("toast-out", *seq as usize),
-                    gpui::Animation::new(motion::ms(motion::TOAST_EXIT_MS))
-                        .with_easing(gpui::ease_in_out),
-                    |d, t| d.opacity(1. - t),
-                )
-                .into_any_element()
-            } else {
-                el.with_animation(
-                    ("toast-in", *seq as usize),
-                    gpui::Animation::new(motion::ms(motion::TOAST_ENTER_MS))
-                        .with_easing(gpui::ease_out_quint()),
-                    |d, t| d.opacity(t).bottom(px(40. - (1. - t) * 8.)),
-                )
-                .into_any_element()
-            };
-            root = root.child(el);
+                .flex_col()
+                .items_end()
+                .gap(px(ui::SP_2));
+            for (seq, kind, msg, closing) in entries {
+                let (ic, col) = match kind {
+                    ToastKind::Info => (IconName::Info, c(th.info)),
+                    ToastKind::Success => (IconName::CircleCheck, c(th.success)),
+                    ToastKind::Warn => (IconName::TriangleAlert, c(th.warning)),
+                    ToastKind::Error => (IconName::CircleAlert, c(th.error)),
+                };
+                let card = div()
+                    .id(("toast-card", seq as usize))
+                    .min_w(px(min_w))
+                    .max_w(px(max_w))
+                    .rounded(px(ui::R_LG))
+                    .border_1()
+                    .border_color(crate::theme::divider())
+                    .bg(c(th.mantle))
+                    .shadow_lg()
+                    .pl(px(12.))
+                    .pr(px(8.))
+                    .py_2()
+                    .flex()
+                    .items_start()
+                    .gap_2()
+                    .text_size(px(ui::fs_body()))
+                    .text_color(c(th.text))
+                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, _| {
+                        if let Some(t) = this.toasts.iter_mut().find(|t| t.seq == seq) {
+                            t.paused = *hovered;
+                        }
+                    }))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .w(px(3.))
+                            .h(px(18.))
+                            .rounded_full()
+                            .bg(col),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .h(px(18.))
+                            .flex()
+                            .items_center()
+                            .child(icon(ic, ui::IC_SM, col)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_normal()
+                            .child(ui::mid_ellipsis_tokens(&msg)),
+                    )
+                    .child(
+                        ui::icon_button(
+                            ("toast-x", seq as usize),
+                            IconName::X,
+                            ui::IconBtn::Sm,
+                            t("toast.close"),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.dismiss_toast(seq, cx);
+                        })),
+                    );
+                let el = if motion::reduced() {
+                    card.into_any_element()
+                } else if closing {
+                    card.with_animation(
+                        ("toast-out", seq as usize),
+                        gpui::Animation::new(motion::ms(motion::TOAST_EXIT_MS))
+                            .with_easing(gpui::ease_in_out),
+                        |d, t| d.opacity(1. - t),
+                    )
+                    .into_any_element()
+                } else {
+                    card.with_animation(
+                        ("toast-in", seq as usize),
+                        gpui::Animation::new(motion::ms(motion::TOAST_ENTER_MS))
+                            .with_easing(gpui::ease_out_quint()),
+                        |d, t| d.opacity(t),
+                    )
+                    .into_any_element()
+                };
+                stack = stack.child(el);
+            }
+            root = root.child(stack);
         }
         root
     }
@@ -5889,7 +6198,7 @@ fn open_main(
                     themes,
                     schemes,
                     histories: HashMap::new(),
-                    manifests: Arc::new(agent::bundled()),
+                    manifests: Arc::new(agent::load_manifests(&data_dir())),
                     prompts,
                     auth_pending: vec![],
                     auth_input: None,
@@ -5994,11 +6303,10 @@ fn open_main(
                     audit_verify: None,
                     audit_filter: Default::default(),
                     settings_dirty: vec![],
-                    toast: None,
-                    toast_out: false,
+                    toasts: vec![],
                     toast_seq: 0,
-                    agents_open: false,
-                    agents_h: 200.0,
+                    agent_hub: Default::default(),
+                    pane_waiters: vec![],
                     _subs: vec![],
                 };
                 crate::ctxmenu_view::init(root.rt.handle().clone(), root.prompts.clone());
@@ -6227,6 +6535,47 @@ fn open_main(
                 if !secondary() && config::get().db_mcp.enabled {
                     root.mcp_listen(cx);
                 }
+                if !secondary() {
+                    let (ptx, prx) = flume::unbounded::<ssh_term_proto::policy_server::PaneCmd>();
+                    let _ = ssh_term_proto::policy_server::PANE_TX.set(ptx);
+                    cx.spawn_in(window, async move |this, cx| {
+                        while let Ok(cmd) = prx.recv_async().await {
+                            if this
+                                .update_in(cx, |r, w, cx| r.handle_pane_cmd(cmd, w, cx))
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    })
+                    .detach();
+                }
+                if !secondary()
+                    && config::get().agents.manifest_update
+                    && std::env::var_os("SHELLAX_NO_UPDATE_CHECK").is_none()
+                {
+                    let cat_url = config::get().agents.manifest_catalog_url.clone();
+                    let dir = data_dir();
+                    cx.spawn(async move |this, cx| {
+                        let res = cx
+                            .background_executor()
+                            .spawn(async move {
+                                agent::refresh_remote_manifests(
+                                    &dir,
+                                    (!cat_url.is_empty()).then_some(cat_url.as_str()),
+                                )
+                            })
+                            .await;
+                        if let Ok(updated) = res {
+                            if updated > 0 {
+                                let _ = this.update(cx, |r, _| {
+                                    r.manifests = Arc::new(agent::load_manifests(&data_dir()));
+                                });
+                            }
+                        }
+                    })
+                    .detach();
+                }
                 // links: from this launch's command line and from later launches (/v1/open)
                 let (otx, orx) = flume::unbounded::<String>();
                 let _ = ssh_term_proto::policy_server::OPEN_TX.set(otx.clone());
@@ -6301,6 +6650,7 @@ fn open_main(
                             if approvals || mcp {
                                 cx.notify();
                             }
+                            r.check_pane_waiters(cx);
                         })
                         .is_err()
                     {
@@ -6474,6 +6824,7 @@ fn open_main(
                         layout,
                         focused: l,
                         name: None,
+                        task: None,
                     });
                     window.focus(&fh, cx);
                 }

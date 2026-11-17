@@ -6,6 +6,7 @@ use ssh_term_proto::sftp::{self, Entry};
 use ssh_term_proto::sftp_follow::{follow_target, Follow};
 
 use crate::theme::{c, cur};
+use crate::ui;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SortKey {
@@ -260,7 +261,7 @@ fn check_box(
         .id(id)
         .size(px(14.))
         .flex_shrink_0()
-        .rounded(px(3.))
+        .rounded(px(ui::R_SM))
         .border_1()
         .border_color(if on { c(th.accent) } else { c(th.overlay1) })
         .bg(if on {

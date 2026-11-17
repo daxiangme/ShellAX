@@ -32,6 +32,10 @@ pub struct PolicyCtx {
     pub approval_timeout: Duration,
     /// On approval timeout: true = deny, false = keep waiting (until the hook itself times out).
     pub timeout_deny: bool,
+    /// Policy when an agent/API writes to or closes a pane it did not spawn (`ask` | `allow` | `deny`).
+    pub write_to_pty: String,
+    /// Policy when an agent/API spawns a new pane or child agent (`allow` | `ask` | `deny`).
+    pub api_spawn: String,
 }
 impl Default for PolicyCtx {
     fn default() -> Self {
@@ -44,6 +48,8 @@ impl Default for PolicyCtx {
             prod_hosts: vec![],
             approval_timeout: Duration::from_secs(120),
             timeout_deny: true,
+            write_to_pty: "ask".into(),
+            api_spawn: "allow".into(),
         }
     }
 }
@@ -116,6 +122,95 @@ pub type CtxFn = Arc<dyn Fn() -> PolicyCtx + Send + Sync>;
 
 /// `/v1/open` target: the running App receives ssh:// / sftp:// links here (single instance).
 pub static OPEN_TX: std::sync::OnceLock<flume::Sender<String>> = std::sync::OnceLock::new();
+
+/// `/v1/pane/*` & `/v1/agent/*` target: orchestration commands dispatched onto the GPUI UI thread.
+pub static PANE_TX: std::sync::OnceLock<flume::Sender<PaneCmd>> = std::sync::OnceLock::new();
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaneInfo {
+    pub pane_id: String,
+    pub tab: usize,
+    pub title: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<crate::agent::AgentState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+}
+
+#[derive(Debug)]
+pub enum PaneCmd {
+    List {
+        reply: flume::Sender<Vec<PaneInfo>>,
+    },
+    IsChild {
+        caller_pane: String,
+        target_pane: String,
+        reply: flume::Sender<bool>,
+    },
+    Split {
+        caller_pane: Option<String>,
+        from: Option<String>,
+        dir: crate::layout::Dir,
+        cmd: Option<String>,
+        cwd: Option<String>,
+        focus: bool,
+        reply: flume::Sender<Result<String, String>>,
+    },
+    SendText {
+        pane_id: String,
+        text: String,
+        enter: bool,
+        reply: flume::Sender<Result<(), String>>,
+    },
+    SendKeys {
+        pane_id: String,
+        keys: Vec<String>,
+        reply: flume::Sender<Result<(), String>>,
+    },
+    Read {
+        pane_id: String,
+        lines: usize,
+        reply: flume::Sender<Result<String, String>>,
+    },
+    Close {
+        pane_id: String,
+        reply: flume::Sender<Result<(), String>>,
+    },
+    AgentStart {
+        caller_pane: Option<String>,
+        agent: String,
+        cwd: Option<String>,
+        prompt: Option<String>,
+        task: Option<String>,
+        reply: flume::Sender<Result<serde_json::Value, String>>,
+    },
+    AgentPrompt {
+        pane_id: String,
+        prompt: String,
+        reply: flume::Sender<Result<serde_json::Value, String>>,
+    },
+    Wait {
+        pane_id: String,
+        until: Vec<crate::agent::AgentState>,
+        timeout: Duration,
+        reply: flume::Sender<Result<serde_json::Value, String>>,
+    },
+    ReportAgent {
+        pane_id: String,
+        agent: String,
+        event: String,
+        session_id: Option<String>,
+        transcript_path: Option<String>,
+        state: Option<crate::agent::AgentState>,
+    },
+}
 
 pub struct Server {
     pub port: u16,
@@ -253,7 +348,8 @@ fn handle(stream: TcpStream, sh: &Shared) -> Result<()> {
         parts.next().unwrap_or("").to_string(),
         parts.next().unwrap_or("").to_string(),
     );
-    let (mut len, mut auth, mut host_hdr) = (0usize, String::new(), String::new());
+    let (mut len, mut auth, mut host_hdr, mut pane_hdr) =
+        (0usize, String::new(), String::new(), String::new());
     loop {
         let mut h = String::new();
         if r.read_line(&mut h)? == 0 || h == "\r\n" || h == "\n" {
@@ -266,6 +362,7 @@ fn handle(stream: TcpStream, sh: &Shared) -> Result<()> {
                 "authorization" => auth = v.strip_prefix("Bearer ").unwrap_or(&v).to_string(),
                 "x-shellax-token" => auth = v,
                 "x-shellax-host" => host_hdr = v,
+                "x-shellax-pane" => pane_hdr = v,
                 _ => {}
             }
         }
@@ -276,7 +373,11 @@ fn handle(stream: TcpStream, sh: &Shared) -> Result<()> {
     let mut body = vec![0u8; len];
     r.read_exact(&mut body)?;
     let body = String::from_utf8_lossy(&body).to_string();
-    if method == "GET" && path == "/v1/health" {
+    let (route, query) = path
+        .split_once('?')
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .unwrap_or_else(|| (path.clone(), String::new()));
+    if method == "GET" && route == "/v1/health" {
         return Ok(respond(
             stream,
             "200 OK",
@@ -287,7 +388,7 @@ fn handle(stream: TcpStream, sh: &Shared) -> Result<()> {
     if !ct_eq(&auth, &sh.token) {
         let _ = sh
             .audit
-            .append("policy.auth_fail", "policy", &format!("path={path}"));
+            .append("policy.auth_fail", "policy", &format!("path={route}"));
         return Ok(respond(
             stream,
             "401 Unauthorized",
@@ -295,10 +396,23 @@ fn handle(stream: TcpStream, sh: &Shared) -> Result<()> {
             &[],
         )?);
     }
+    if route.starts_with("/v1/pane/") || route.starts_with("/v1/agent/") {
+        let (status, out) = handle_pane_api(
+            &method,
+            &route,
+            &query,
+            &body,
+            &pane_hdr,
+            &host_hdr,
+            sh,
+            &stream,
+        );
+        return Ok(respond(stream, status, &out.to_string(), &[])?);
+    }
     if method != "POST" {
         return Ok(respond(stream, "405 Method Not Allowed", "{}", &[])?);
     }
-    if path == "/v1/check" {
+    if route == "/v1/check" {
         #[derive(Deserialize, Default)]
         #[serde(default)]
         struct Check {
@@ -336,6 +450,7 @@ fn handle(stream: TcpStream, sh: &Shared) -> Result<()> {
             },
             cwd: c.cwd,
             session: String::new(),
+            ..Default::default()
         };
         let host = if c.host.is_empty() { host_hdr } else { c.host };
         let (eff, risk, reason) = sh.decide_peer(
@@ -412,7 +527,7 @@ fn handle(stream: TcpStream, sh: &Shared) -> Result<()> {
         let (status, out) = remote_op(sh, &path, &body, &host_hdr, Some(&stream));
         return Ok(respond(stream, status, &out.to_string(), &[])?);
     }
-    if let Some(rest) = path.strip_prefix("/v1/hook/") {
+    if let Some(rest) = route.strip_prefix("/v1/hook/") {
         let mut it = rest.split('/');
         let Some(agent) = it.next().and_then(Agent::parse) else {
             return Ok(respond(
@@ -435,6 +550,31 @@ fn handle(stream: TcpStream, sh: &Shared) -> Result<()> {
         };
         if let Some(ev) = it.next().filter(|e| !e.is_empty()) {
             req.event = ev.to_string();
+        }
+        // Forward session identity and lifecycle state to the UI pane when `X-Shellax-Pane` is set.
+        if !pane_hdr.is_empty() && !req.is_subagent {
+            if let Some(tx) = PANE_TX.get() {
+                let state = hooks::state_for_event(&req.event);
+                if state.is_some() || !req.session.is_empty() {
+                    let _ = tx.send(PaneCmd::ReportAgent {
+                        pane_id: pane_hdr.clone(),
+                        agent: agent.id().to_string(),
+                        event: req.event.clone(),
+                        session_id: (!req.session.is_empty()).then(|| req.session.clone()),
+                        transcript_path: (!req.transcript_path.is_empty())
+                            .then(|| req.transcript_path.clone()),
+                        state,
+                    });
+                }
+            }
+        }
+        if hooks::is_state_only_event(&req.event) {
+            return Ok(respond(
+                stream,
+                "200 OK",
+                "",
+                &[("X-shellax-Exit", "0".to_string())],
+            )?);
         }
         let (eff, _risk, reason) = sh.decide_peer(agent.id(), &req, &host_hdr, true, Some(&stream));
         let (out, code) = hooks::render(agent, &req.event, eff, &reason);
@@ -532,6 +672,7 @@ fn remote_op(
         action: action.into(),
         cwd: String::new(),
         session: o.session.clone(),
+        ..Default::default()
     };
     let (eff, risk, reason) = sh.decide_peer(&principal, &req, &o.host, true, peer);
     // the caller may have gone away while the card was up: never run on its behalf
@@ -816,6 +957,515 @@ impl Shared {
     }
 }
 
+fn query_param(query: &str, name: &str) -> Option<String> {
+    for pair in query.split('&') {
+        let Some((k, v)) = pair.split_once('=') else {
+            continue;
+        };
+        if k == name {
+            return Some(
+                percent_encoding::percent_decode_str(v)
+                    .decode_utf8_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_pane_mutation_auth(
+    sh: &Shared,
+    caller_pane: &str,
+    target_pane: Option<&str>,
+    action_kind: &str,
+    preview: &str,
+    is_spawn: bool,
+    tx: &flume::Sender<PaneCmd>,
+    peer: &TcpStream,
+) -> Result<(), (&'static str, serde_json::Value)> {
+    let ctx = (sh.ctx)();
+    if is_spawn {
+        match ctx.api_spawn.as_str() {
+            "deny" => {
+                let _ = sh.audit.append(
+                    action_kind,
+                    "policy",
+                    &format!("caller={caller_pane:?} effect=Deny reason=api_spawn=deny preview={preview:?}"),
+                );
+                return Err(("403 Forbidden", json!({"error": "api_spawn disabled by policy"})));
+            }
+            "ask" => {
+                let req = HookReq {
+                    event: "AgentApi".into(),
+                    tool: "ShellAX".into(),
+                    command: preview.to_string(),
+                    action: action_kind.into(),
+                    ..Default::default()
+                };
+                let (eff, _, reason) = sh.decide_peer("agent-api", &req, "", true, Some(peer));
+                if eff != Effect::Allow {
+                    return Err(("403 Forbidden", json!({"error": reason})));
+                }
+            }
+            _ => {}
+        }
+        return Ok(());
+    }
+
+    // Mutating an existing pane (`send_text`, `send_keys`, `close`, `agent/prompt`):
+    // caller may freely control child panes it spawned itself; otherwise enforce `write_to_pty`.
+    let target = target_pane.unwrap_or("");
+    let mut is_child = false;
+    if !caller_pane.is_empty() && !target.is_empty() {
+        let (rtx, rrx) = flume::bounded(1);
+        if tx
+            .send(PaneCmd::IsChild {
+                caller_pane: caller_pane.to_string(),
+                target_pane: target.to_string(),
+                reply: rtx,
+            })
+            .is_ok()
+        {
+            is_child = rrx.recv_timeout(Duration::from_secs(3)).unwrap_or(false);
+        }
+    }
+    if is_child {
+        return Ok(());
+    }
+    match ctx.write_to_pty.as_str() {
+        "allow" => Ok(()),
+        "deny" => {
+            let _ = sh.audit.append(
+                action_kind,
+                "policy",
+                &format!("caller={caller_pane:?} target={target:?} effect=Deny reason=write_to_pty=deny"),
+            );
+            Err(("403 Forbidden", json!({"error": "write_to_pty denied by policy"})))
+        }
+        _ => {
+            let req = HookReq {
+                event: "PaneWrite".into(),
+                tool: "ShellAX".into(),
+                command: format!("pane={target} {preview}"),
+                action: "write_to_pty".into(),
+                ..Default::default()
+            };
+            let (eff, _, reason) = sh.decide_peer("agent-api", &req, "", true, Some(peer));
+            if eff == Effect::Allow {
+                Ok(())
+            } else {
+                Err(("403 Forbidden", json!({"error": reason})))
+            }
+        }
+    }
+}
+
+fn audit_pane_op(sh: &Shared, kind: &str, caller: &str, target: &str, text: &str) {
+    use sha2::Digest;
+    let hash = hex::encode(sha2::Sha256::digest(text.as_bytes()));
+    let (redacted, _) = crate::ai::redact(text);
+    let snippet: String = redacted.chars().take(80).collect();
+    let _ = sh.audit.append(
+        kind,
+        "agent-api",
+        &format!(
+            "caller={caller:?} target={target:?} sha256={} preview={snippet:?}",
+            &hash[..16]
+        ),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_pane_api(
+    method: &str,
+    route: &str,
+    query: &str,
+    body: &str,
+    pane_hdr: &str,
+    host_hdr: &str,
+    sh: &Shared,
+    peer: &TcpStream,
+) -> (&'static str, serde_json::Value) {
+    let mutating = !matches!(route, "/v1/pane/list" | "/v1/pane/read" | "/v1/agent/wait");
+    if mutating && !host_hdr.is_empty() {
+        return (
+            "403 Forbidden",
+            json!({"error": "local callers only"}),
+        );
+    }
+    let Some(tx) = PANE_TX.get() else {
+        return ("501 Not Implemented", json!({"error": "no UI"}));
+    };
+
+    match (method, route) {
+        ("GET" | "POST", "/v1/pane/list") => {
+            let (rtx, rrx) = flume::bounded(1);
+            if tx.send(PaneCmd::List { reply: rtx }).is_err() {
+                return ("503 Service Unavailable", json!({"error": "UI unavailable"}));
+            }
+            match rrx.recv_timeout(Duration::from_secs(5)) {
+                Ok(panes) => ("200 OK", json!({"panes": panes})),
+                Err(_) => ("504 Gateway Timeout", json!({"error": "timeout"})),
+            }
+        }
+        ("GET" | "POST", "/v1/pane/read") => {
+            let v: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+            let pane_id = query_param(query, "pane_id")
+                .or_else(|| v.get("pane_id").and_then(|x| x.as_str()).map(str::to_string))
+                .unwrap_or_default();
+            let lines = query_param(query, "lines")
+                .and_then(|s| s.parse::<usize>().ok())
+                .or_else(|| v.get("lines").and_then(|x| x.as_u64()).map(|n| n as usize))
+                .unwrap_or(200)
+                .clamp(1, 5000);
+            if pane_id.is_empty() {
+                return ("400 Bad Request", json!({"error": "missing pane_id"}));
+            }
+            let (rtx, rrx) = flume::bounded(1);
+            let _ = tx.send(PaneCmd::Read {
+                pane_id: pane_id.clone(),
+                lines,
+                reply: rtx,
+            });
+            match rrx.recv_timeout(Duration::from_secs(5)) {
+                Ok(Ok(raw)) => {
+                    let (text, redacted_count) = crate::ai::redact(&raw);
+                    (
+                        "200 OK",
+                        json!({"pane_id": pane_id, "text": text, "redacted": redacted_count}),
+                    )
+                }
+                Ok(Err(e)) => ("404 Not Found", json!({"error": e})),
+                Err(_) => ("504 Gateway Timeout", json!({"error": "timeout"})),
+            }
+        }
+        ("POST", "/v1/pane/split") => {
+            #[derive(Deserialize, Default)]
+            #[serde(default)]
+            struct SplitReq {
+                from: Option<String>,
+                dir: String,
+                cmd: Option<String>,
+                cwd: Option<String>,
+                focus: bool,
+            }
+            let r: SplitReq = match serde_json::from_str(body) {
+                Ok(x) => x,
+                Err(e) => return ("400 Bad Request", json!({"error": e.to_string()})),
+            };
+            let preview = r.cmd.as_deref().unwrap_or("shell");
+            if let Err(resp) = check_pane_mutation_auth(
+                sh,
+                pane_hdr,
+                None,
+                "pane.split",
+                preview,
+                true,
+                tx,
+                peer,
+            ) {
+                return resp;
+            }
+            let dir = match r.dir.to_ascii_lowercase().as_str() {
+                "down" | "bottom" | "h" | "horizontal" => crate::layout::Dir::Horizontal,
+                _ => crate::layout::Dir::Vertical,
+            };
+            let caller = (!pane_hdr.is_empty()).then(|| pane_hdr.to_string());
+            let (rtx, rrx) = flume::bounded(1);
+            let _ = tx.send(PaneCmd::Split {
+                caller_pane: caller,
+                from: r.from,
+                dir,
+                cmd: r.cmd.clone(),
+                cwd: r.cwd,
+                focus: r.focus,
+                reply: rtx,
+            });
+            match rrx.recv_timeout(Duration::from_secs(10)) {
+                Ok(Ok(new_id)) => {
+                    audit_pane_op(sh, "pane.split", pane_hdr, &new_id, preview);
+                    ("200 OK", json!({"pane_id": new_id}))
+                }
+                Ok(Err(e)) => ("400 Bad Request", json!({"error": e})),
+                Err(_) => ("504 Gateway Timeout", json!({"error": "timeout"})),
+            }
+        }
+        ("POST", "/v1/pane/send_text") => {
+            #[derive(Deserialize, Default)]
+            #[serde(default)]
+            struct SendReq {
+                pane_id: String,
+                text: String,
+                enter: bool,
+            }
+            let r: SendReq = match serde_json::from_str(body) {
+                Ok(x) => x,
+                Err(e) => return ("400 Bad Request", json!({"error": e.to_string()})),
+            };
+            if r.pane_id.is_empty() {
+                return ("400 Bad Request", json!({"error": "missing pane_id"}));
+            }
+            if let Err(resp) = check_pane_mutation_auth(
+                sh,
+                pane_hdr,
+                Some(&r.pane_id),
+                "pane.send_text",
+                &r.text,
+                false,
+                tx,
+                peer,
+            ) {
+                return resp;
+            }
+            let (rtx, rrx) = flume::bounded(1);
+            let _ = tx.send(PaneCmd::SendText {
+                pane_id: r.pane_id.clone(),
+                text: r.text.clone(),
+                enter: r.enter,
+                reply: rtx,
+            });
+            match rrx.recv_timeout(Duration::from_secs(5)) {
+                Ok(Ok(())) => {
+                    audit_pane_op(sh, "pane.send_text", pane_hdr, &r.pane_id, &r.text);
+                    ("200 OK", json!({"ok": true}))
+                }
+                Ok(Err(e)) => ("404 Not Found", json!({"error": e})),
+                Err(_) => ("504 Gateway Timeout", json!({"error": "timeout"})),
+            }
+        }
+        ("POST", "/v1/pane/send_keys") => {
+            #[derive(Deserialize, Default)]
+            #[serde(default)]
+            struct KeysReq {
+                pane_id: String,
+                keys: Vec<String>,
+            }
+            let r: KeysReq = match serde_json::from_str(body) {
+                Ok(x) => x,
+                Err(e) => return ("400 Bad Request", json!({"error": e.to_string()})),
+            };
+            if r.pane_id.is_empty() {
+                return ("400 Bad Request", json!({"error": "missing pane_id"}));
+            }
+            let joined = r.keys.join(" ");
+            if let Err(resp) = check_pane_mutation_auth(
+                sh,
+                pane_hdr,
+                Some(&r.pane_id),
+                "pane.send_keys",
+                &joined,
+                false,
+                tx,
+                peer,
+            ) {
+                return resp;
+            }
+            let (rtx, rrx) = flume::bounded(1);
+            let _ = tx.send(PaneCmd::SendKeys {
+                pane_id: r.pane_id.clone(),
+                keys: r.keys,
+                reply: rtx,
+            });
+            match rrx.recv_timeout(Duration::from_secs(5)) {
+                Ok(Ok(())) => {
+                    audit_pane_op(sh, "pane.send_keys", pane_hdr, &r.pane_id, &joined);
+                    ("200 OK", json!({"ok": true}))
+                }
+                Ok(Err(e)) => ("404 Not Found", json!({"error": e})),
+                Err(_) => ("504 Gateway Timeout", json!({"error": "timeout"})),
+            }
+        }
+        ("POST", "/v1/pane/close") => {
+            let v: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+            let pane_id = v
+                .get("pane_id")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            if pane_id.is_empty() {
+                return ("400 Bad Request", json!({"error": "missing pane_id"}));
+            }
+            if let Err(resp) = check_pane_mutation_auth(
+                sh,
+                pane_hdr,
+                Some(&pane_id),
+                "pane.close",
+                "close",
+                false,
+                tx,
+                peer,
+            ) {
+                return resp;
+            }
+            let (rtx, rrx) = flume::bounded(1);
+            let _ = tx.send(PaneCmd::Close {
+                pane_id: pane_id.clone(),
+                reply: rtx,
+            });
+            match rrx.recv_timeout(Duration::from_secs(5)) {
+                Ok(Ok(())) => {
+                    audit_pane_op(sh, "pane.close", pane_hdr, &pane_id, "close");
+                    ("200 OK", json!({"ok": true}))
+                }
+                Ok(Err(e)) => ("404 Not Found", json!({"error": e})),
+                Err(_) => ("504 Gateway Timeout", json!({"error": "timeout"})),
+            }
+        }
+        ("POST", "/v1/agent/start") => {
+            #[derive(Deserialize, Default)]
+            #[serde(default)]
+            struct StartReq {
+                agent: String,
+                cwd: Option<String>,
+                prompt: Option<String>,
+                task: Option<String>,
+            }
+            let r: StartReq = match serde_json::from_str(body) {
+                Ok(x) => x,
+                Err(e) => return ("400 Bad Request", json!({"error": e.to_string()})),
+            };
+            if r.agent.trim().is_empty() {
+                return ("400 Bad Request", json!({"error": "missing agent"}));
+            }
+            let preview = format!("{} {}", r.agent, r.prompt.as_deref().unwrap_or(""));
+            if let Err(resp) = check_pane_mutation_auth(
+                sh,
+                pane_hdr,
+                None,
+                "agent.start",
+                &preview,
+                true,
+                tx,
+                peer,
+            ) {
+                return resp;
+            }
+            let caller = (!pane_hdr.is_empty()).then(|| pane_hdr.to_string());
+            let (rtx, rrx) = flume::bounded(1);
+            let _ = tx.send(PaneCmd::AgentStart {
+                caller_pane: caller,
+                agent: r.agent,
+                cwd: r.cwd,
+                prompt: r.prompt,
+                task: r.task,
+                reply: rtx,
+            });
+            match rrx.recv_timeout(Duration::from_secs(40)) {
+                Ok(Ok(val)) => {
+                    let target = val.get("pane_id").and_then(|x| x.as_str()).unwrap_or("");
+                    audit_pane_op(sh, "agent.start", pane_hdr, target, &preview);
+                    ("200 OK", val)
+                }
+                Ok(Err(e)) => ("400 Bad Request", json!({"error": e})),
+                Err(_) => ("504 Gateway Timeout", json!({"error": "timeout"})),
+            }
+        }
+        ("POST", "/v1/agent/prompt") => {
+            #[derive(Deserialize, Default)]
+            #[serde(default)]
+            struct PromptReq {
+                pane_id: String,
+                prompt: String,
+            }
+            let r: PromptReq = match serde_json::from_str(body) {
+                Ok(x) => x,
+                Err(e) => return ("400 Bad Request", json!({"error": e.to_string()})),
+            };
+            if r.pane_id.is_empty() {
+                return ("400 Bad Request", json!({"error": "missing pane_id"}));
+            }
+            if let Err(resp) = check_pane_mutation_auth(
+                sh,
+                pane_hdr,
+                Some(&r.pane_id),
+                "agent.prompt",
+                &r.prompt,
+                false,
+                tx,
+                peer,
+            ) {
+                return resp;
+            }
+            let (rtx, rrx) = flume::bounded(1);
+            let _ = tx.send(PaneCmd::AgentPrompt {
+                pane_id: r.pane_id.clone(),
+                prompt: r.prompt.clone(),
+                reply: rtx,
+            });
+            match rrx.recv_timeout(Duration::from_secs(35)) {
+                Ok(Ok(val)) => {
+                    audit_pane_op(sh, "agent.prompt", pane_hdr, &r.pane_id, &r.prompt);
+                    ("200 OK", val)
+                }
+                Ok(Err(e)) => ("404 Not Found", json!({"error": e})),
+                Err(_) => ("504 Gateway Timeout", json!({"error": "timeout"})),
+            }
+        }
+        ("GET" | "POST", "/v1/agent/wait") => {
+            let v: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+            let pane_id = query_param(query, "pane_id")
+                .or_else(|| v.get("pane_id").and_then(|x| x.as_str()).map(str::to_string))
+                .unwrap_or_default();
+            if pane_id.is_empty() {
+                return ("400 Bad Request", json!({"error": "missing pane_id"}));
+            }
+            let until_raw = query_param(query, "until")
+                .or_else(|| v.get("until").and_then(|x| x.as_str()).map(str::to_string))
+                .unwrap_or_else(|| "done,blocked".into());
+            let mut until: Vec<crate::agent::AgentState> = until_raw
+                .split(',')
+                .filter_map(crate::agent::AgentState::parse_word)
+                .collect();
+            if until.is_empty() {
+                until = vec![
+                    crate::agent::AgentState::Done,
+                    crate::agent::AgentState::Blocked,
+                    crate::agent::AgentState::Idle,
+                ];
+            }
+            let timeout_secs = query_param(query, "timeout")
+                .and_then(|s| s.parse::<u64>().ok())
+                .or_else(|| v.get("timeout").and_then(|x| x.as_u64()))
+                .unwrap_or(600)
+                .clamp(1, 3600);
+            let timeout = Duration::from_secs(timeout_secs);
+            let deadline = Instant::now() + timeout;
+            let (rtx, rrx) = flume::bounded(1);
+            let _ = tx.send(PaneCmd::Wait {
+                pane_id,
+                until,
+                timeout,
+                reply: rtx,
+            });
+            loop {
+                match rrx.recv_timeout(Duration::from_millis(250)) {
+                    Ok(Ok(val)) => return ("200 OK", val),
+                    Ok(Err(e)) => {
+                        return if e == "timeout" {
+                            ("408 Request Timeout", json!({"error": "timeout"}))
+                        } else {
+                            ("404 Not Found", json!({"error": e}))
+                        };
+                    }
+                    Err(flume::RecvTimeoutError::Disconnected) => {
+                        return ("503 Service Unavailable", json!({"error": "UI closed"}));
+                    }
+                    Err(flume::RecvTimeoutError::Timeout) => {
+                        if peer_closed(peer) {
+                            return ("499 Client Closed Request", json!({"error": "cancelled"}));
+                        }
+                        if Instant::now() >= deadline + Duration::from_secs(2) {
+                            return ("408 Request Timeout", json!({"error": "timeout"}));
+                        }
+                    }
+                }
+            }
+        }
+        _ => ("404 Not Found", json!({"error": "unknown endpoint"})),
+    }
+}
+
 /// Minimal blocking HTTP client used by the CLI (no TLS; localhost or a forwarded port).
 pub fn post(
     url: &str,
@@ -825,19 +1475,48 @@ pub fn post(
     body: &str,
     timeout: Duration,
 ) -> Result<(u16, String, Option<i32>)> {
+    let pane = std::env::var("SHELLAX_PANE").ok().filter(|s| !s.is_empty());
+    request(
+        "POST",
+        url,
+        path,
+        token,
+        host_hdr,
+        pane.as_deref(),
+        body,
+        timeout,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn request(
+    method: &str,
+    url: &str,
+    path: &str,
+    token: &str,
+    host_hdr: Option<&str>,
+    pane_hdr: Option<&str>,
+    body: &str,
+    timeout: Duration,
+) -> Result<(u16, String, Option<i32>)> {
     let rest = url
         .strip_prefix("http://")
         .ok_or_else(|| anyhow!("only http:// endpoints are supported"))?;
     let addr = rest.trim_end_matches('/');
     let mut s = TcpStream::connect(addr)?;
     s.set_read_timeout(Some(timeout))?;
-    let mut req = format!("POST {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
+    let mut req = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
     if let Some(h) = host_hdr {
         req.push_str(&format!("X-shellax-Host: {h}\r\n"));
     }
+    if let Some(p) = pane_hdr.filter(|s| !s.is_empty()) {
+        req.push_str(&format!("X-shellax-Pane: {p}\r\n"));
+    }
     req.push_str("\r\n");
     s.write_all(req.as_bytes())?;
-    s.write_all(body.as_bytes())?;
+    if !body.is_empty() {
+        s.write_all(body.as_bytes())?;
+    }
     let mut resp = String::new();
     s.read_to_string(&mut resp)?;
     let (head, body) = resp
@@ -1279,5 +1958,168 @@ mod tests {
             2,
             "{log}"
         );
+    }
+
+    #[test]
+    fn pane_and_agent_orchestration_api() {
+        let (ptx, prx) = flume::unbounded::<PaneCmd>();
+        let _ = PANE_TX.set(ptx);
+        let reported = Arc::new(std::sync::Mutex::new(Vec::<(String, String, Option<String>)>::new()));
+        let rep2 = reported.clone();
+        std::thread::spawn(move || {
+            while let Ok(cmd) = prx.recv() {
+                match cmd {
+                    PaneCmd::List { reply } => {
+                        let _ = reply.send(vec![PaneInfo {
+                            pane_id: "child-1".into(),
+                            tab: 0,
+                            title: "claude".into(),
+                            cwd: "/tmp/proj".into(),
+                            agent: Some("claude".into()),
+                            state: Some(crate::agent::AgentState::Idle),
+                            session_id: Some("sess-abc".into()),
+                            parent: Some("lead-0".into()),
+                            task: Some("feat-x".into()),
+                        }]);
+                    }
+                    PaneCmd::Read { pane_id, reply, .. } => {
+                        if pane_id == "child-1" {
+                            let _ = reply.send(Ok(
+                                "status: ready\nOPENAI_API_KEY=sk-proj-1234567890abcdef1234567890abcdef\n"
+                                    .into(),
+                            ));
+                        } else {
+                            let _ = reply.send(Err("not found".into()));
+                        }
+                    }
+                    PaneCmd::IsChild {
+                        caller_pane,
+                        target_pane,
+                        reply,
+                    } => {
+                        let _ = reply.send(caller_pane == "lead-0" && target_pane == "child-1");
+                    }
+                    PaneCmd::SendText { reply, .. } => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    PaneCmd::Split { reply, .. } => {
+                        let _ = reply.send(Ok("child-2".into()));
+                    }
+                    PaneCmd::Wait { reply, .. } => {
+                        let _ = reply.send(Ok(json!({"pane_id": "child-1", "state": "done"})));
+                    }
+                    PaneCmd::ReportAgent {
+                        pane_id,
+                        event,
+                        session_id,
+                        ..
+                    } => {
+                        rep2.lock().unwrap().push((pane_id, event, session_id));
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let (s, dir) = srv(
+            PolicyCtx {
+                write_to_pty: "deny".into(),
+                api_spawn: "allow".into(),
+                ..Default::default()
+            },
+            None,
+        );
+        let url = format!("http://127.0.0.1:{}", s.port);
+        let t = Duration::from_secs(5);
+
+        // 1. /v1/pane/list returns structured panes
+        let (code, body, _) = request("GET", &url, "/v1/pane/list", &s.token, None, None, "", t).unwrap();
+        assert_eq!(code, 200);
+        assert!(body.contains("child-1") && body.contains("sess-abc"), "{body}");
+
+        // 2. /v1/pane/read redacts secrets automatically
+        let (code, body, _) = request(
+            "GET",
+            &url,
+            "/v1/pane/read?pane_id=child-1&lines=50",
+            &s.token,
+            None,
+            None,
+            "",
+            t,
+        )
+        .unwrap();
+        assert_eq!(code, 200);
+        assert!(body.contains("status: ready"), "{body}");
+        assert!(!body.contains("sk-proj-1234567890abcdef"), "secret leaked: {body}");
+
+        // 3. Parent pane ("lead-0") can write to its own child ("child-1") even when write_to_pty = deny
+        let (code, body, _) = request(
+            "POST",
+            &url,
+            "/v1/pane/send_text",
+            &s.token,
+            None,
+            Some("lead-0"),
+            r#"{"pane_id":"child-1","text":"cargo test","enter":true}"#,
+            t,
+        )
+        .unwrap();
+        assert_eq!(code, 200, "{body}");
+
+        // 4. Unrelated pane ("stranger-9") is blocked by write_to_pty = deny
+        let (code, body, _) = request(
+            "POST",
+            &url,
+            "/v1/pane/send_text",
+            &s.token,
+            None,
+            Some("stranger-9"),
+            r#"{"pane_id":"other-2","text":"echo hi","enter":true}"#,
+            t,
+        )
+        .unwrap();
+        assert_eq!(code, 403, "{body}");
+
+        // 5. Remote forwarded callers (X-shellax-Host set) cannot mutate local panes
+        let (code, _, _) = request(
+            "POST",
+            &url,
+            "/v1/pane/split",
+            &s.token,
+            Some("remote-box"),
+            Some("lead-0"),
+            r#"{"dir":"right"}"#,
+            t,
+        )
+        .unwrap();
+        assert_eq!(code, 403);
+
+        // 6. State-only lifecycle hooks (Stop / Notification / SessionStart / UserPromptSubmit)
+        //    never block (200 OK `{}`) and forward ReportAgent to UI
+        let (code, body, _) = request(
+            "POST",
+            &url,
+            "/v1/hook/claude/Stop",
+            &s.token,
+            None,
+            Some("child-1"),
+            r#"{"session_id":"sess-xyz","transcript_path":"/tmp/t.jsonl"}"#,
+            t,
+        )
+        .unwrap();
+        assert_eq!(code, 200);
+        assert!(body.trim().is_empty() || body.trim() == "{}");
+        std::thread::sleep(Duration::from_millis(50));
+        let reps = reported.lock().unwrap().clone();
+        assert!(
+            reps.iter()
+                .any(|(p, ev, sid)| p == "child-1" && ev == "Stop" && sid.as_deref() == Some("sess-xyz")),
+            "missing hook report: {reps:?}"
+        );
+
+        let log = std::fs::read_to_string(dir.join("audit.jsonl")).unwrap();
+        assert!(log.contains("pane.send_text") && !log.contains("sk-proj-1234567890abcdef"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

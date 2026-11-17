@@ -27,6 +27,7 @@ pub struct Managed {
     pub hosts: Vec<HostRule>,
     pub audit: AuditRule,
     pub pty_write: Option<String>,
+    pub agent_api_spawn: Option<String>,
     /// Set when the file could not be parsed (fail-closed policy in effect).
     #[serde(skip)]
     pub error: Option<String>,
@@ -163,6 +164,20 @@ impl Managed {
             _ => 0,
         };
         match &self.pty_write {
+            Some(org) if rank(org) > rank(user) => org.clone(),
+            _ => user.to_string(),
+        }
+    }
+    pub fn cap_agent_api_spawn(&self, user: &str) -> String {
+        let rank = |m: &str| match m {
+            "deny" => 2,
+            "ask" => 1,
+            _ => 0,
+        };
+        if self.error.is_some() {
+            return "deny".into();
+        }
+        match &self.agent_api_spawn {
             Some(org) if rank(org) > rank(user) => org.clone(),
             _ => user.to_string(),
         }

@@ -98,7 +98,7 @@ impl Cat {
             Cat::Proxy => IconName::Globe,
             Cat::Credentials => IconName::KeyRound,
             Cat::Ai => IconName::Sparkles,
-            Cat::Agents => IconName::Bot,
+            Cat::Agents => IconName::BrainCircuit,
             Cat::Permissions => IconName::ShieldCheck,
             Cat::Tags => IconName::Tag,
             Cat::Audit => IconName::ScrollText,
@@ -957,12 +957,6 @@ impl SettingsView {
             ),
             r(
                 Agents,
-                t("ui.agents_sidebar"),
-                t("ui.agents_sidebar_desc"),
-                Ctl::Toggle("agents.show_panel"),
-            ),
-            r(
-                Agents,
                 t("ui.detect_claude_code"),
                 "",
                 Ctl::Toggle("agents.detect_claude"),
@@ -984,6 +978,12 @@ impl SettingsView {
                 t("ui.notify_on_state_change"),
                 t("ui.desktop_notification_when_an_agent"),
                 Ctl::Toggle("agents.notify_state"),
+            ),
+            r(
+                Agents,
+                t("ag.manifest_update"),
+                t("ag.manifest_update_desc"),
+                Ctl::Toggle("agents.manifest_update"),
             ),
             r(
                 Agents,
@@ -2644,7 +2644,7 @@ impl SettingsView {
                     .when(i > 0, |d| {
                         d.border_t_1().border_color(crate::theme::divider())
                     })
-                    .child(icon(IconName::Bot, ui::IC_SM, c(th.accent)))
+                    .child(ui::icon_svg("shellax/agent.svg", ui::IC_SM, c(th.accent)))
                     .child(
                         div()
                             .flex_1()
@@ -2734,10 +2734,93 @@ impl SettingsView {
             );
         }
         let ep = crate::data_dir().join("policy-endpoint.json");
+        let cfg = config::get();
+        let manifests = ssh_term_proto::agent::bundled();
+        let mut detect_box = div()
+            .mt_3()
+            .flex()
+            .flex_col()
+            .rounded(px(ui::R_SUB))
+            .border_1()
+            .border_color(crate::theme::divider());
+        for (mi, mf) in manifests.iter().enumerate() {
+            let id = mf.id.clone();
+            let enabled = cfg.agents.is_detect_enabled(&id);
+            let label = ssh_term_proto::agent::display_name(&id).to_string();
+            let id_toggle = id.clone();
+            detect_box = detect_box.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px_3()
+                    .py(px(6.))
+                    .when(mi > 0, |d| {
+                        d.border_t_1().border_color(crate::theme::divider())
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_size(px(ui::fs_body()))
+                                    .text_color(c(th.text))
+                                    .child(label),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(ui::fs_caption()))
+                                    .font_family(ui::mono_family())
+                                    .text_color(c(th.overlay1))
+                                    .child(id),
+                            ),
+                    )
+                    .child(
+                        gpui_component::switch::Switch::new(("ag-det", mi))
+                            .checked(enabled)
+                            .on_click(cx.listener(move |_, checked: &bool, _, cx| {
+                                let on = *checked;
+                                let id_c = id_toggle.clone();
+                                let _ = config::update(|s| {
+                                    s.agents.detect.insert(id_c.clone(), on);
+                                    match id_c.as_str() {
+                                        "claude" => s.agents.detect_claude = on,
+                                        "codex" => s.agents.detect_codex = on,
+                                        "grok" => s.agents.detect_grok = on,
+                                        _ => {}
+                                    }
+                                });
+                                cx.notify();
+                            })),
+                    ),
+            );
+        }
         div()
             .flex()
             .flex_col()
-            .child(Self::section_title(t("ui.agent_hooks")))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(Self::section_title(t("ui.agent_hooks")))
+                    .child(
+                        ui::button("ag-copy-skill", t("ag.copy_skill"), 0)
+                            .gap_1()
+                            .child(icon(IconName::Copy, ui::IC_XS, c(th.overlay1)))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let skill = include_str!("../assets/skills/shellax/SKILL.md");
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    skill.to_string(),
+                                ));
+                                this.notice = Some(t("ag.copied_skill").to_string());
+                                cx.notify();
+                            })),
+                    ),
+            )
             .child(list)
             .children(self.notice.clone().map(|n| {
                 div()
@@ -2753,6 +2836,8 @@ impl SettingsView {
                     .text_color(c(th.overlay1))
                     .child(tf("settings.hooks_note", &[("ep", &ep.display())])),
             )
+            .child(div().pt_4().child(Self::section_title(t("ag.detect_list"))))
+            .child(detect_box)
             .into_any_element()
     }
 
@@ -2863,7 +2948,13 @@ impl SettingsView {
             .flex()
             .flex_col()
             .gap_2()
-            .child(Self::section_title(t("ui.config_sync")))
+            .child(
+                div()
+                    .text_size(px(ui::fs_body()))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(c(th.text))
+                    .child(t("ui.config_sync")),
+            )
             .child(
                 div()
                     .text_size(px(ui::fs_small()))
@@ -5682,28 +5773,14 @@ impl SettingsView {
             .unwrap_or(t("models.preset_custom"));
 
         let btn = if mode == "add" {
-            div()
-                .id("ai-add-btn")
-                .px_3()
-                .py(px(6.))
-                .rounded(px(ui::R_MD))
-                .cursor_pointer()
-                .bg(c(th.accent))
-                .text_color(gpui::white())
-                .text_size(px(ui::fs_body()))
-                .font_weight(FontWeight::MEDIUM)
-                .flex()
-                .items_center()
+            ui::button("ai-add-btn", t("ai.add_provider"), 1)
                 .gap_1()
-                .hover(|d| d.opacity(0.9))
                 .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _, cx| {
                     this.ai_menu_at = Some(ev.position());
                     this.ai_add_dropdown = !this.ai_add_dropdown;
                     this.ai_template_dropdown = false;
                     cx.notify();
                 }))
-                .child(icon(IconName::Plus, ui::IC_SM, gpui::white()))
-                .child(t("ai.add_provider"))
                 .child(icon(
                     if open {
                         IconName::ChevronUp
@@ -5711,13 +5788,13 @@ impl SettingsView {
                         IconName::ChevronDown
                     },
                     ui::IC_XS,
-                    gpui::white(),
+                    c(th.base),
                 ))
         } else {
             div()
                 .id("ai-tpl-btn")
                 .px_3()
-                .py(px(5.))
+                .h(px(ui::H_DEFAULT))
                 .rounded(px(ui::R_MD))
                 .cursor_pointer()
                 .bg(c(th.surface0))
@@ -5729,7 +5806,7 @@ impl SettingsView {
                 .flex()
                 .items_center()
                 .gap_2()
-                .hover(|d| d.bg(c(th.surface1)))
+                .hover(|d| d.bg(crate::theme::hover_bg()))
                 .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _, cx| {
                     this.ai_menu_at = Some(ev.position());
                     this.ai_template_dropdown = !this.ai_template_dropdown;

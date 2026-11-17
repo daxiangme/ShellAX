@@ -632,6 +632,9 @@ mod stream_tests {
             let _ = s.read(&mut b);
             let body = "data: {\"model\":\"m1\",\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\ndata: [DONE]\n\n";
             let _ = write!(s, "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}", body.len());
+            let _ = s.flush();
+            let _ = s.shutdown(std::net::Shutdown::Write);
+            let _ = s.read(&mut b);
         });
         let p = Provider {
             id: "t".into(),

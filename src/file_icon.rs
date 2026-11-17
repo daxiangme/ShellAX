@@ -207,6 +207,34 @@ const FILES: &[(&str, &[u8])] = &[
         include_bytes!("../assets/icons/files/os_mac_accent.svg"),
     ),
     (
+        "shellax/agent.svg",
+        include_bytes!("../assets/icons/agent.svg"),
+    ),
+    (
+        "shellax/agents/claude.svg",
+        include_bytes!("../assets/icons/agents/claude.svg"),
+    ),
+    (
+        "shellax/agents/antigravity.svg",
+        include_bytes!("../assets/icons/agents/antigravity.svg"),
+    ),
+    (
+        "shellax/agents/codex.svg",
+        include_bytes!("../assets/icons/agents/codex.svg"),
+    ),
+    (
+        "shellax/agents/gemini.svg",
+        include_bytes!("../assets/icons/agents/gemini.svg"),
+    ),
+    (
+        "shellax/agents/grok.svg",
+        include_bytes!("../assets/icons/agents/grok.svg"),
+    ),
+    (
+        "shellax/agents/opencode.svg",
+        include_bytes!("../assets/icons/agents/opencode.svg"),
+    ),
+    (
         "shellax/db/docker.svg",
         include_bytes!("../assets/icons/db/docker.svg"),
     ),
@@ -557,6 +585,19 @@ pub fn db_glyph(kind: &str, size: f32, color: gpui::Hsla) -> gpui::Svg {
         .text_color(color)
 }
 
+/// Embedded brand SVG path for a coding agent CLI (`claude`, `agy`/`antigravity`, `codex`, etc.).
+pub fn agent_glyph_path(agent_id: &str) -> Option<&'static str> {
+    match agent_id.to_ascii_lowercase().as_str() {
+        "claude" => Some("shellax/agents/claude.svg"),
+        "agy" | "antigravity" => Some("shellax/agents/antigravity.svg"),
+        "codex" => Some("shellax/agents/codex.svg"),
+        "gemini" => Some("shellax/agents/gemini.svg"),
+        "grok" => Some("shellax/agents/grok.svg"),
+        "opencode" => Some("shellax/agents/opencode.svg"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod db_glyph_tests {
     use super::*;
@@ -569,6 +610,10 @@ mod db_glyph_tests {
         {
             let p = db_glyph_path(k);
             assert!(FILES.iter().any(|(f, _)| *f == p), "{k}");
+        }
+        for aid in ["claude", "agy", "antigravity", "codex", "gemini", "grok", "opencode"] {
+            let p = agent_glyph_path(aid).expect("agent glyph path");
+            assert!(FILES.iter().any(|(f, _)| *f == p), "{aid}");
         }
         for (p, b) in FILES {
             assert!(std::str::from_utf8(b).unwrap().starts_with("<svg"), "{p}");

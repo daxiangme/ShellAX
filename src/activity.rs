@@ -19,6 +19,7 @@ pub const STRIP_W: f32 = 40.;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
     Hosts,
+    Agents,
     Sftp,
     Database,
     Redis,
@@ -29,10 +30,11 @@ pub enum Tool {
 }
 
 impl Tool {
-    /// 左侧模块栏。Homebrew 只在 macOS 上出现，插在 Docker 和端口之间。
+    /// 左侧模块栏。Agent 紧跟在主机/终端之后；Homebrew 只在 macOS 上出现。
     pub fn strip() -> Vec<Tool> {
         let mut v = vec![
             Tool::Hosts,
+            Tool::Agents,
             Tool::Sftp,
             Tool::Database,
             Tool::Redis,
@@ -48,6 +50,7 @@ impl Tool {
     pub fn id(self) -> &'static str {
         match self {
             Tool::Hosts => "hosts",
+            Tool::Agents => "agents",
             Tool::Sftp => "sftp",
             Tool::Database => "database",
             Tool::Redis => "redis",
@@ -66,6 +69,7 @@ impl Tool {
     pub fn label(self) -> &'static str {
         match self {
             Tool::Hosts => t("tool.hosts"),
+            Tool::Agents => t("tool.agents"),
             Tool::Sftp => t("tool.sftp"),
             Tool::Database => t("tool.database"),
             Tool::Redis => t("tool.redis"),
@@ -78,6 +82,7 @@ impl Tool {
     pub fn icon(self) -> IconName {
         match self {
             Tool::Hosts => IconName::Server,
+            Tool::Agents => IconName::BrainCircuit,
             Tool::Sftp => IconName::FolderSync,
             Tool::Database => IconName::Database,
             Tool::Redis => IconName::Layers,
@@ -90,6 +95,7 @@ impl Tool {
     pub fn action(self) -> Action {
         match self {
             Tool::Hosts => Action::ToolHosts,
+            Tool::Agents => Action::ToolAgents,
             Tool::Sftp => Action::ToolSftp,
             Tool::Database => Action::ToolDatabase,
             Tool::Redis => Action::ToolRedis,
@@ -285,12 +291,15 @@ impl Root {
             .gap(px(4.))
             .pb(px(8.))
             .pt(px(4.));
+        let (att_count, att_urgent) = crate::attention::summary_and_sync_badge(self, cx);
+        let th = cur();
         for (i, tool) in Tool::strip().into_iter().enumerate() {
             let tip = crate::sidebar::action_tip(tool.label(), &tool.action().binding());
-            col = col.child(
-                self.strip_btn_with(
+            let mut btn = self
+                .strip_btn_with(
                     ("act", i),
                     match tool {
+                        Tool::Agents => Some("shellax/agent.svg"),
                         Tool::Redis => Some("shellax/db/redis.svg"),
                         Tool::Docker => Some("shellax/db/docker.svg"),
                         Tool::Tools => Some("shellax/db/toolbox.svg"),
@@ -301,8 +310,37 @@ impl Root {
                     open && self.tool == tool,
                     false,
                 )
-                .on_click(cx.listener(move |this, _, _w, cx| this.select_tool(tool, _w, cx))),
-            );
+                .on_click(cx.listener(move |this, _, _w, cx| this.select_tool(tool, _w, cx)));
+            if tool == Tool::Agents && att_count > 0 {
+                let bcol = if att_urgent {
+                    c(th.error)
+                } else {
+                    c(th.success)
+                };
+                btn = btn.child(
+                    div()
+                        .absolute()
+                        .top(px(2.))
+                        .right(px(2.))
+                        .min_w(px(14.))
+                        .h(px(14.))
+                        .px(px(3.))
+                        .rounded_full()
+                        .bg(bcol)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(ui::fs_caption()))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(c(th.base))
+                        .child(if att_count > 9 {
+                            "9+".to_string()
+                        } else {
+                            att_count.to_string()
+                        }),
+                );
+            }
+            col = col.child(btn);
         }
         // 外层框架色由根节点统一提供
         col
@@ -312,6 +350,11 @@ impl Root {
     pub(crate) fn tool_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         match self.tool {
             Tool::Hosts | Tool::Sftp => self.sidebar(window, cx).into_any_element(),
+            Tool::Agents => {
+                let p = self.agents_panel(window, cx);
+                let h = self.sb_resize_handle(cx);
+                self.sb_frame(cx).child(p).child(h).into_any_element()
+            }
             Tool::Database => {
                 let p = self.db_panel(window, cx);
                 {

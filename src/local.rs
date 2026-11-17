@@ -59,30 +59,15 @@ pub fn cmd_prompt(existing: Option<&str>) -> String {
     )
 }
 
-/// 用 sysinfo 读进程的工作目录（Mac: proc_pidinfo；Windows: 读进程环境块）。
-fn sysinfo_cwd(pid: u32) -> Option<String> {
-    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
-    let mut sys = System::new();
-    let p = Pid::from_u32(pid);
-    sys.refresh_processes_specifics(
-        ProcessesToUpdate::Some(&[p]),
-        ProcessRefreshKind::new().with_cwd(UpdateKind::Always),
-    );
-    sys.process(p)
-        .and_then(|pr| pr.cwd())
-        .map(|d| d.display().to_string())
-        .filter(|d| !d.is_empty())
-}
-
-/// 本地 shell 进程的当前工作目录：Linux 读 `/proc`；Mac / Windows 用 sysinfo（libproc / 读进程环境块），
-/// 结果缓存约一秒，因为路径栏每帧都会问。
+/// 本地 shell 进程的当前工作目录：使用 `proc_info::process_cwd`（Linux `/proc`、Mac `proc_pidinfo`、Windows `sysinfo`），
+/// 非 Linux 下缓存约一秒，因为路径栏会高频读取。
 fn process_cwd_probe(pid: u32) -> crate::term::FgProbe {
     let cache: Mutex<Option<(std::time::Instant, Option<String>)>> = Mutex::new(None);
     Box::new(move || {
-        if cfg!(target_os = "linux") {
-            return std::fs::read_link(format!("/proc/{pid}/cwd"))
-                .ok()
-                .map(|p| p.display().to_string());
+        if cfg!(unix) {
+            return crate::proc_info::process_cwd(pid)
+                .map(|p| p.display().to_string())
+                .filter(|s| !s.is_empty());
         }
         let mut g = cache.lock().ok()?;
         if let Some((at, v)) = g.as_ref() {
@@ -90,7 +75,9 @@ fn process_cwd_probe(pid: u32) -> crate::term::FgProbe {
                 return v.clone();
             }
         }
-        let v = sysinfo_cwd(pid);
+        let v = crate::proc_info::process_cwd(pid)
+            .map(|p| p.display().to_string())
+            .filter(|s| !s.is_empty());
         *g = Some((std::time::Instant::now(), v.clone()));
         v
     })
@@ -198,6 +185,17 @@ pub fn spawn_local_in(
     shell: Option<&str>,
     cwd: Option<&std::path::Path>,
 ) -> Result<Arc<Session>> {
+    spawn_local_with_pane(size, shell, cwd, None)
+}
+
+/// Spawn a local PTY with an optional stable `pane_id` injected as `SHELLAX_PANE`
+/// (plus `SHELLAX_URL` / `SHELLAX_TOKEN` when the local policy server is running).
+pub fn spawn_local_with_pane(
+    size: Size,
+    shell: Option<&str>,
+    cwd: Option<&std::path::Path>,
+    pane_id: Option<&str>,
+) -> Result<Arc<Session>> {
     let (session, out_tx, from_ui) = Session::new(size);
     let pty = native_pty_system();
     let pair = pty.openpty(PtySize {
@@ -279,6 +277,13 @@ pub fn spawn_local_in(
     }
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
+    if let Some(pid) = pane_id.filter(|s| !s.is_empty()) {
+        cmd.env("SHELLAX_PANE", pid);
+        if let Some((port, token)) = crate::ssh::POLICY_ENDPOINT.lock().unwrap().clone() {
+            cmd.env("SHELLAX_URL", format!("http://127.0.0.1:{port}"));
+            cmd.env("SHELLAX_TOKEN", token);
+        }
+    }
     // Windows PowerShell 5.1 reads the console code page once, at startup, and then encodes
     // everything it writes with it. A machine whose OEM code page is not 65001 therefore emits
     // GBK (or another legacy page) into a terminal that decodes UTF-8, which is exactly the
@@ -315,24 +320,11 @@ pub fn spawn_local_in(
     // Windows/ConPTY has no tcgetpgrp: no foreground probe (agent auto-detection off there)
     #[cfg(unix)]
     {
-        // foreground process of the pty (tcgetpgrp) -> /proc/<pid>/comm; used for agent identification
+        // foreground process of the pty (tcgetpgrp) -> proc_info (Linux /proc, macOS proc_pidinfo+KERN_PROCARGS2)
         let m = master.clone();
         *session.fg_probe.lock().unwrap() = Some(Box::new(move || {
-            let pid = m.lock().ok()?.process_group_leader()?;
-            let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
-            let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
-            // node-based CLIs show up as "node"; use the script basename from argv then
-            let args: Vec<String> = cmdline
-                .split(|b| *b == 0)
-                .map(|a| String::from_utf8_lossy(a).into_owned())
-                .collect();
-            let comm = comm.trim().to_string();
-            if matches!(comm.as_str(), "node" | "bun" | "python3" | "python") {
-                if let Some(a) = args.get(1) {
-                    return Some(a.rsplit('/').next().unwrap_or(a).to_string());
-                }
-            }
-            Some(comm)
+            let pgid = m.lock().ok()?.process_group_leader()?;
+            crate::proc_info::fg_group_command(pgid)
         }));
     }
 
@@ -415,9 +407,9 @@ mod cwd_tests {
         assert!(PWSH_INTEGRATION.contains("9;9;"));
     }
     #[test]
-    fn sysinfo_reports_a_process_cwd() {
+    fn probe_reports_a_process_cwd() {
         let here = std::env::current_dir().unwrap();
-        let got = sysinfo_cwd(std::process::id()).expect("cwd of own process");
+        let got = process_cwd_probe(std::process::id())().expect("cwd of own process");
         assert_eq!(
             std::fs::canonicalize(&got).unwrap(),
             std::fs::canonicalize(here).unwrap()

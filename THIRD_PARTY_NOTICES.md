@@ -8,7 +8,10 @@ listed below under their own licenses.
 | File | Component | License | Copyright |
 |---|---|---|---|
 | `src/agent.rs` (items marked `[3p]`), modified | herdr | Apache-2.0 | Copyright (c) herdr contributors |
-| `agents/claude.toml`, `agents/codex.toml`, `agents/grok.toml`, unmodified | herdr | Apache-2.0 | Copyright (c) herdr contributors |
+| `src/agent_resume.rs` (items marked `[3p]`), modified | herdr | Apache-2.0 | Copyright (c) herdr contributors |
+| `src/proc_info.rs` (items marked `[3p]`), modified | herdr | Apache-2.0 | Copyright (c) herdr contributors |
+| `src/worktree.rs` (items marked `[3p]`), modified | herdr | Apache-2.0 | Copyright (c) herdr contributors |
+| `agents/*.toml` (22 agent detection manifests), unmodified | herdr | Apache-2.0 | Copyright (c) herdr contributors |
 | `src/layout.rs` (`auto_direction`, marked `[3p]`), modified | zellij | MIT | Copyright (c) 2020 Zellij contributors |
 
 License texts: `licenses/herdr-LICENSE-Apache-2.0.txt`, `licenses/zellij-LICENSE-MIT.md`.

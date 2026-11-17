@@ -20,7 +20,33 @@ check "monospace 字面量"                    'font_family\("monospace"\)'     
 check "界面标签大写"                        'child\(.*to_uppercase\(\)\)'                              "$TOKENS|^src/(tools|db)/"
 check "10px 及以下字号"                     'text_size\(px\((10|[1-9])(\.|\))'                         '^$'
 check "直接使用 Tooltip::new（请用 ui::tip）"  'Tooltip::new\('                                          '^src/ui\.rs:'
-check "anchored 未贴边约束"                 'anchored\(\)' 'snap_to_window_with_margin'
+anchored_hits=$(awk '
+  function flush() {
+    if (pending != "" && !ok) print pending;
+    pending = ""; ok = 0; left = 0;
+  }
+  FNR == 1 { flush() }
+  left > 0 {
+    if ($0 ~ /snap_to_window_with_margin/ || $0 ~ /ui-lint: allow/) ok = 1;
+    left--;
+    if (left == 0) flush();
+  }
+  $0 ~ /anchored\(\)/ {
+    flush();
+    pending = FILENAME ":" FNR ":" $0;
+    ok = ($0 ~ /snap_to_window_with_margin/ || $0 ~ /ui-lint: allow/);
+    left = 6;
+  }
+  END { flush() }
+' $(find src -name '*.rs' | sort))
+if [ -n "$anchored_hits" ]; then
+  n=$(printf '%s\n' "$anchored_hits" | grep -c .)
+  echo "✗ anchored 未贴边约束：${n} 处"
+  printf '%s\n' "$anchored_hits" | head -15
+  fail=1
+else
+  echo "✓ anchored 未贴边约束"
+fi
 allow=$(grep -rn --include='*.rs' 'ui-lint: allow' src | wc -l | tr -d ' ')
 echo "例外标注：${allow} 处（上限 15）"
 [ "$allow" -le 15 ] || fail=1

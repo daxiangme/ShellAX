@@ -27,6 +27,9 @@ pub struct Req {
     pub rows: u16,
     pub shell: String,
     pub cwd: String,
+    pub pane_id: String,
+    pub url: String,
+    pub token: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -112,7 +115,7 @@ fn handle(c: UnixStream, map: Map) -> Result<()> {
                         pid: p.pid,
                         alive: p.alive,
                         attached: p.client.is_some(),
-                        cwd: std::fs::read_link(format!("/proc/{}/cwd", p.pid))
+                        cwd: crate::proc_info::process_cwd(p.pid)
                             .map(|x| x.display().to_string())
                             .unwrap_or_default(),
                     }
@@ -209,6 +212,20 @@ fn spawn(req: &Req, map: Map) -> Result<Arc<Mutex<Pty>>> {
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     cmd.env("SHELLAX_DAEMON", "1");
+    let pane_env = if req.pane_id.is_empty() {
+        &req.id
+    } else {
+        &req.pane_id
+    };
+    if !pane_env.is_empty() {
+        cmd.env("SHELLAX_PANE", pane_env);
+    }
+    if !req.url.is_empty() {
+        cmd.env("SHELLAX_URL", &req.url);
+    }
+    if !req.token.is_empty() {
+        cmd.env("SHELLAX_TOKEN", &req.token);
+    }
     let cwd = if req.cwd.is_empty() {
         std::env::var("HOME").unwrap_or_else(|_| "/".into())
     } else {
@@ -326,6 +343,24 @@ extern "C" {
 
 /// Attach a terminal Session to daemon PTY `id` (created on first attach).
 pub fn attach(sock: &Path, id: &str, size: Size, shell: &str, cwd: &str) -> Result<Arc<Session>> {
+    attach_with_pane(sock, id, size, shell, cwd, None)
+}
+
+/// Attach a terminal Session to daemon PTY `id` with an optional stable `pane_id`.
+pub fn attach_with_pane(
+    sock: &Path,
+    id: &str,
+    size: Size,
+    shell: &str,
+    cwd: &str,
+    pane_id: Option<&str>,
+) -> Result<Arc<Session>> {
+    let (url, token) = crate::ssh::POLICY_ENDPOINT
+        .lock()
+        .unwrap()
+        .clone()
+        .map(|(port, tok)| (format!("http://127.0.0.1:{port}"), tok))
+        .unwrap_or_default();
     let mut c = UnixStream::connect(sock)?;
     writeln!(
         c,
@@ -336,14 +371,17 @@ pub fn attach(sock: &Path, id: &str, size: Size, shell: &str, cwd: &str) -> Resu
             cols: size.cols as u16,
             rows: size.rows as u16,
             shell: shell.into(),
-            cwd: cwd.into()
+            cwd: cwd.into(),
+            pane_id: pane_id.unwrap_or(id).into(),
+            url,
+            token,
         })?
     )?;
     let (session, out_tx, from_ui) = Session::new(size);
     session
         .connected
         .store(true, std::sync::atomic::Ordering::Release);
-    // the daemon runs on this machine: probe the shell's foreground process and cwd via /proc
+    // the daemon runs on this machine: probe the shell's foreground process and cwd via proc_info
     let pid = Arc::new(std::sync::OnceLock::<u32>::new());
     let lookup = {
         let (sock, id, pid) = (sock.to_path_buf(), id.to_string(), pid.clone());
@@ -358,24 +396,12 @@ pub fn attach(sock: &Path, id: &str, size: Size, shell: &str, cwd: &str) -> Resu
     };
     let l2 = lookup.clone();
     *session.fg_probe.lock().unwrap() = Some(Box::new(move || {
-        let pid = lookup()?;
-        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        let rest = &stat[stat.rfind(')')? + 2..];
-        let tpgid: i32 = rest.split(' ').nth(5)?.parse().ok()?;
-        if tpgid <= 0 {
-            return None;
-        }
-        Some(
-            std::fs::read_to_string(format!("/proc/{tpgid}/comm"))
-                .ok()?
-                .trim()
-                .to_string(),
-        )
+        let shell_pid = lookup()?;
+        let pgid = crate::proc_info::fg_pgid_of_shell(shell_pid)?;
+        crate::proc_info::fg_group_command(pgid)
     }));
     *session.cwd_probe.lock().unwrap() = Some(Box::new(move || {
-        std::fs::read_link(format!("/proc/{}/cwd", l2()?))
-            .ok()
-            .map(|p| p.display().to_string())
+        crate::proc_info::process_cwd(l2()?).map(|p| p.display().to_string())
     }));
     let mut rd = c.try_clone()?;
     let s2 = session.clone();

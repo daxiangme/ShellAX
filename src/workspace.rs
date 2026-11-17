@@ -149,6 +149,7 @@ impl Root {
                 }
             }
             Tool::Brew => self.open_brew_install(window, cx),
+            Tool::Agents => self.open_new_task_dialog(window, cx),
             _ => return false,
         }
         true
@@ -215,6 +216,9 @@ impl Root {
     pub(crate) fn ws_empty(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
         let tool = self.tool.workspace();
+        if tool == Tool::Agents {
+            return self.agents_ws_empty(cx);
+        }
         let s = config::get();
         let hidden = s.sidebar.empty_hide.clone();
         let shown = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));

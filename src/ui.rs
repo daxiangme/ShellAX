@@ -174,7 +174,7 @@ pub fn ring(frac: f32, color: Hsla) -> impl IntoElement {
         0.
     };
     let track = cur().text;
-    let track = c(track).opacity(0.14);
+    let track = c(track).opacity(0.18);
     gpui::canvas(
         |_, _, _| {},
         move |b, _, window, _| {
@@ -251,6 +251,39 @@ pub fn tool_icon(sp: &ssh_term_proto::tools::ToolSpec) -> IconName {
 pub fn icon(name: IconName, size: f32, color: Hsla) -> impl IntoElement {
     svg()
         .path(name.path())
+        .size(px(size))
+        .flex_shrink_0()
+        .text_color(color)
+}
+
+/// Continuously rotating icon (static when `reduce_motion` is active).
+pub fn spinning_icon(
+    id: impl Into<ElementId>,
+    name: IconName,
+    size: f32,
+    color: Hsla,
+) -> gpui::AnyElement {
+    let el = svg()
+        .path(name.path())
+        .size(px(size))
+        .flex_shrink_0()
+        .text_color(color);
+    if crate::motion::reduced() {
+        el.into_any_element()
+    } else {
+        use gpui::AnimationExt as _;
+        el.with_animation(
+            id,
+            gpui::Animation::new(std::time::Duration::from_millis(900)).repeat(),
+            |s, delta| s.with_transformation(gpui::Transformation::rotate(gpui::percentage(delta))),
+        )
+        .into_any_element()
+    }
+}
+
+pub fn icon_svg(path: impl Into<SharedString>, size: f32, color: Hsla) -> impl IntoElement {
+    svg()
+        .path(path.into())
         .size(px(size))
         .flex_shrink_0()
         .text_color(color)
@@ -432,7 +465,9 @@ pub fn section_header(
         .items_center()
         .gap(px(4.))
         .rounded(px(R_MD))
-        .when(collapsed.is_some(), |d| d.cursor_pointer())
+        .when(collapsed.is_some(), |d| {
+            d.cursor_pointer().hover(|s| s.bg(hover_bg()))
+        })
         .children(collapsed.map(|c0| {
             icon(
                 if c0 {
@@ -477,7 +512,10 @@ pub fn list_row(id: impl Into<ElementId>, depth: usize, selected: bool) -> State
         .items_center()
         .gap(px(6.))
         .cursor_pointer()
-        .when(selected, |d| d.bg(selected_bg()))
+        .when(selected, |d| {
+            d.bg(selected_bg())
+                .hover(|s| s.bg(c(cur().accent).opacity(0.18)))
+        })
         .when(!selected, |d| d.hover(|s| s.bg(hover_bg())))
 }
 
@@ -584,8 +622,18 @@ fn button_base(
     if enabled {
         btn = btn
             .cursor_pointer()
-            .hover(move |s| s.opacity(0.85))
-            .active(move |s| s.opacity(0.7));
+            .hover(move |s| match kind {
+                1 => s.opacity(0.90),
+                2 => s.bg(c(cur().error).opacity(0.24)).border_color(c(cur().error).opacity(0.6)),
+                3 => s.bg(hover_bg()).text_color(c(cur().text)),
+                _ => s.bg(c(cur().surface1)).border_color(c(cur().surface2)),
+            })
+            .active(move |s| match kind {
+                1 => s.opacity(0.78),
+                2 => s.bg(c(cur().error).opacity(0.32)),
+                3 => s.bg(selected_bg()),
+                _ => s.bg(c(cur().surface2)),
+            });
     } else {
         btn = btn.opacity(0.4).cursor_default();
     }
@@ -896,6 +944,57 @@ pub fn empty_state(
                     .children(actions),
             )
         })
+}
+
+/// 通用定高虚拟化列表（封装 `gpui::uniform_list` + 滚动句柄），适用于数千条会话历史、命令面板或目录项。
+pub fn virtual_list<R: IntoElement>(
+    id: impl Into<ElementId>,
+    item_count: usize,
+    handle: &gpui::UniformListScrollHandle,
+    render: impl 'static + Fn(std::ops::Range<usize>, &mut gpui::Window, &mut gpui::App) -> Vec<R>,
+) -> gpui::UniformList {
+    gpui::uniform_list(id, item_count, render)
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .track_scroll(handle)
+}
+
+/// 骨架占位行：首次扫描或异步加载时平滑占位，避免突兀纯文字切换。
+#[allow(dead_code)]
+pub fn skeleton_rows(n: usize) -> Div {
+    let mut col = div().flex().flex_col().gap(px(SP_1)).py(px(SP_2));
+    for i in 0..n {
+        let w = match i % 3 {
+            0 => 0.72,
+            1 => 0.56,
+            _ => 0.64,
+        };
+        col = col.child(
+            div()
+                .h(px(row_h()))
+                .mx(px(LIST_INSET))
+                .px(px(ROW_PX))
+                .rounded(px(R_MD))
+                .flex()
+                .items_center()
+                .gap(px(SP_2))
+                .child(
+                    div()
+                        .size(px(IC_MD))
+                        .rounded(px(R_SM))
+                        .bg(hover_bg()),
+                )
+                .child(
+                    div()
+                        .h(px(12.))
+                        .w(gpui::relative(w))
+                        .rounded(px(R_SM))
+                        .bg(hover_bg()),
+                ),
+        );
+    }
+    col
 }
 
 /// 行内提示条的类别。

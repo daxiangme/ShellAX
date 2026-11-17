@@ -76,6 +76,7 @@ impl Root {
                 layout,
                 focused,
                 name,
+                task: None,
             },
         );
         self.active = at;
@@ -109,6 +110,14 @@ impl Root {
             active: 0,
             tabs: vec![Self::save_node(&tab.layout, cx)],
             names: vec![tab.name.clone()],
+            tasks: vec![tab.task.clone()],
+            agent_tabs: vec![Self::tab_module(tab, cx) == crate::activity::Tool::Agents],
+            pane_ids: vec![tab
+                .layout
+                .leaves()
+                .iter()
+                .map(|p| p.read(cx).pane_id.clone())
+                .collect()],
         };
         let dir = crate::data_dir().join("windows");
         let file = dir.join(format!(
@@ -180,6 +189,13 @@ impl Root {
         self.tab_rename = None;
         if let (Some(v), Some(tab)) = (v, self.tabs.get_mut(i)) {
             tab.name = (!v.is_empty()).then_some(v.clone());
+            let auto = v.is_empty();
+            for p in tab.layout.leaves() {
+                p.update(cx, |tv, _| {
+                    tv.auto_title =
+                        auto && (tv.ws == Some(crate::activity::Tool::Agents) || tv.agent.is_some());
+                });
+            }
             self.log("tab.rename", format!("index={i} name={v:?}"));
             self.save_layout(cx);
         }
@@ -609,6 +625,23 @@ impl Root {
                     .move_to_window(i, w, cx)
             ))
             .child(ui::menu_sep())
+            .when(
+                self.tabs
+                    .get(i)
+                    .and_then(|t| t.task.as_ref())
+                    .and_then(|tk| tk.worktree.as_ref())
+                    .is_some(),
+                |d| {
+                    d.child(item!(
+                        IconName::CheckCheck,
+                        t("ag.finish_task"),
+                        true,
+                        move |this: &mut Root, _w: &mut Window, cx: &mut Context<Root>| {
+                            this.open_finish_task_dialog(i, cx)
+                        }
+                    ))
+                },
+            )
             .child(item!(
                 IconName::X,
                 t("tab.close"),
@@ -700,9 +733,9 @@ impl Root {
             .border_1()
             .border_color(crate::theme::divider())
             .shadow(chrome::soft_shadow(false))
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
-                btn(0, IconName::Columns2, t("ui.split_left_right")).on_mouse_down(
-                    gpui::MouseButton::Left,
+                btn(0, IconName::Columns2, t("ui.split_left_right")).on_click(
                     cx.listener(move |this, _, w, cx| {
                         cx.stop_propagation();
                         focus(this, &a, w, cx);
@@ -712,8 +745,7 @@ impl Root {
                 ),
             )
             .child(
-                btn(1, IconName::Rows2, t("ui.split_top_bottom")).on_mouse_down(
-                    gpui::MouseButton::Left,
+                btn(1, IconName::Rows2, t("ui.split_top_bottom")).on_click(
                     cx.listener(move |this, _, w, cx| {
                         cx.stop_propagation();
                         focus(this, &b, w, cx);
@@ -722,15 +754,20 @@ impl Root {
                     }),
                 ),
             )
-            .child(btn(2, IconName::X, t("ui.close_pane")).on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(move |this, _, w, cx| {
+            .child(
+                ui::icon_button_state(
+                    (gpui::SharedString::from(format!("ph-{}", p.entity_id())), 2usize),
+                    IconName::X,
+                    ui::IconBtn::Md,
+                    t("ui.close_pane"),
+                    false,
+                    true,
+                )
+                .on_click(cx.listener(move |this, _, w, cx| {
                     cx.stop_propagation();
-                    focus(this, &d, w, cx);
-                    this.close_pane(w, cx);
-                    cx.notify();
-                }),
-            ))
+                    this.close_pane_entity(&d, w, cx);
+                })),
+            )
             .into_any_element()
     }
 }

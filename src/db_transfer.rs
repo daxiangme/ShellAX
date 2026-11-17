@@ -313,7 +313,7 @@ impl Root {
                                 div()
                                     .size(px(14.))
                                     .flex_shrink_0()
-                                    .rounded(px(3.))
+                                    .rounded(px(ui::R_SM))
                                     .border_1()
                                     .border_color(if on { c(th.accent) } else { c(th.surface1) })
                                     .bg(if on { c(th.accent) } else { c(th.base) })

@@ -429,6 +429,7 @@ impl Root {
             layout: Node::Leaf(pane.clone()),
             focused: pane,
             name: None,
+            task: None,
         });
         self.active = self.tabs.len() - 1;
         self.leave_settings();

@@ -7,11 +7,13 @@ use crate::i18n::t;
 use regex::Regex;
 use serde::Deserialize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentState {
     Idle,
     Working,
     Blocked,
+    Done,
     Unknown,
 }
 
@@ -21,10 +23,25 @@ impl AgentState {
             Self::Idle => t("agent.idle"),
             Self::Working => t("agent.working"),
             Self::Blocked => t("agent.blocked"),
+            Self::Done => t("agent.done"),
             Self::Unknown => t("agent.unknown"),
         }
     }
+
+    pub fn parse_word(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "idle" => Some(Self::Idle),
+            "working" => Some(Self::Working),
+            "blocked" => Some(Self::Blocked),
+            "done" => Some(Self::Done),
+            "unknown" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
 }
+
+pub const MANIFEST_ENGINE_VERSION: u32 = 3;
+pub const DEFAULT_MANIFEST_CATALOG_URL: &str = "https://herdr.dev/agent-detection/index.toml";
 
 /// Screen snapshot plus OSC-derived strings. [3p]
 #[derive(Debug, Clone, Copy)]
@@ -133,9 +150,11 @@ fn default_region() -> String {
 }
 
 /// A loaded, compiled manifest.
+#[derive(Clone)]
 pub struct Manifest {
     pub id: String,
     pub aliases: Vec<String>,
+    pub version: Option<String>,
     rules: Vec<(ManifestRule, CompiledGate)>,
 }
 
@@ -150,6 +169,14 @@ pub struct Detection {
 impl Manifest {
     pub fn parse(src: &str) -> Result<Self, String> {
         let m: AgentManifest = toml::from_str(src).map_err(|e| e.to_string())?;
+        if let Some(min_v) = m.min_engine_version {
+            if min_v > MANIFEST_ENGINE_VERSION {
+                return Err(format!(
+                    "manifest {} requires engine {min_v}, current is {MANIFEST_ENGINE_VERSION}",
+                    m.id
+                ));
+            }
+        }
         let rules = m
             .rules
             .into_iter()
@@ -162,6 +189,7 @@ impl Manifest {
         Ok(Self {
             id: m.id,
             aliases: m.aliases,
+            version: m.version,
             rules,
         })
     }
@@ -215,6 +243,25 @@ pub fn bundled() -> Vec<Manifest> {
         include_str!("../agents/claude.toml"),
         include_str!("../agents/codex.toml"),
         include_str!("../agents/grok.toml"),
+        include_str!("../agents/amp.toml"),
+        include_str!("../agents/antigravity.toml"),
+        include_str!("../agents/cline.toml"),
+        include_str!("../agents/cursor.toml"),
+        include_str!("../agents/devin.toml"),
+        include_str!("../agents/droid.toml"),
+        include_str!("../agents/gemini.toml"),
+        include_str!("../agents/github-copilot.toml"),
+        include_str!("../agents/hermes.toml"),
+        include_str!("../agents/kilo.toml"),
+        include_str!("../agents/kimi.toml"),
+        include_str!("../agents/kiro.toml"),
+        include_str!("../agents/letta.toml"),
+        include_str!("../agents/maki.toml"),
+        include_str!("../agents/muse.toml"),
+        include_str!("../agents/opencode.toml"),
+        include_str!("../agents/pi.toml"),
+        include_str!("../agents/qodercli.toml"),
+        include_str!("../agents/qwen.toml"),
     ]
     .iter()
     .filter_map(|s| {
@@ -225,13 +272,383 @@ pub fn bundled() -> Vec<Manifest> {
     .collect()
 }
 
+/// Load bundled manifests and overlay downloaded (`<data_dir>/agent-detection/*.toml`) and
+/// user-supplied (`<data_dir>/agents/*.toml`) rules when their dotted version is newer.
+pub fn load_manifests(data_dir: &std::path::Path) -> Vec<Manifest> {
+    let mut out = bundled();
+    for (dir, user_override) in [
+        (data_dir.join("agent-detection"), false),
+        (data_dir.join("agents"), true),
+    ] {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for ent in rd.flatten() {
+            let p = ent.path();
+            if p.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            let Ok(src) = std::fs::read_to_string(&p) else {
+                continue;
+            };
+            let Ok(m) = Manifest::parse(&src) else {
+                continue;
+            };
+            if let Some(existing) = out.iter_mut().find(|x| x.id == m.id) {
+                if user_override
+                    || version_newer(m.version.as_deref(), existing.version.as_deref())
+                {
+                    *existing = m;
+                }
+            } else {
+                out.push(m);
+            }
+        }
+    }
+    out
+}
+
+fn version_newer(candidate: Option<&str>, current: Option<&str>) -> bool {
+    let Some(cand) = candidate else { return false };
+    let Some(cur) = current else { return true };
+    let parse = |s: &str| -> Vec<u64> {
+        s.trim()
+            .split('.')
+            .map(|seg| seg.parse::<u64>().unwrap_or(0))
+            .collect()
+    };
+    let (a, b) = (parse(cand), parse(cur));
+    let n = a.len().max(b.len());
+    for i in 0..n {
+        let av = a.get(i).copied().unwrap_or(0);
+        let bv = b.get(i).copied().unwrap_or(0);
+        if av != bv {
+            return av > bv;
+        }
+    }
+    false
+}
+
+/// Fetch updated detection manifests from `catalog_url` (defaults to herdr catalog) into
+/// `<data_dir>/agent-detection/`. Never panics; network errors return `Err`.
+pub fn refresh_remote_manifests(
+    data_dir: &std::path::Path,
+    catalog_url: Option<&str>,
+) -> Result<usize, String> {
+    #[derive(Deserialize)]
+    struct Catalog {
+        #[allow(dead_code)]
+        schema_version: Option<u32>,
+        #[serde(default)]
+        agents: Vec<CatalogEntry>,
+    }
+    #[derive(Deserialize)]
+    struct CatalogEntry {
+        id: String,
+        path: String,
+        #[serde(default)]
+        sha256: Option<String>,
+    }
+
+    let url = catalog_url
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_MANIFEST_CATALOG_URL);
+    let agent = crate::proxy::ureq_builder(
+        url,
+        ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(10)),
+    )
+    .map_err(|e| e.to_string())?
+    .build();
+    let index_body = agent
+        .get(url)
+        .call()
+        .map_err(|e| e.to_string())?
+        .into_string()
+        .map_err(|e| e.to_string())?;
+    let cat: Catalog = toml::from_str(&index_body).map_err(|e| e.to_string())?;
+    let base = url.rsplit_once('/').map(|(b, _)| b).unwrap_or(url);
+    let dest = data_dir.join("agent-detection");
+    std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
+    let current = load_manifests(data_dir);
+    let mut updated = 0usize;
+
+    for item in cat.agents {
+        if item.id.is_empty()
+            || !item
+                .id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            continue;
+        }
+        let rel = item.path.trim_start_matches('/');
+        if rel.contains("..") {
+            continue;
+        }
+        let item_url = if item.path.starts_with("http://") || item.path.starts_with("https://") {
+            item.path.clone()
+        } else {
+            format!("{base}/{rel}")
+        };
+        let Ok(resp) = agent.get(&item_url).call() else {
+            continue;
+        };
+        let Ok(body) = resp.into_string() else {
+            continue;
+        };
+        if body.len() > 256 * 1024 {
+            continue;
+        }
+        if let Some(expected_hex) = item.sha256.as_deref().filter(|s| !s.is_empty()) {
+            use sha2::Digest;
+            let actual = hex::encode(sha2::Sha256::digest(body.as_bytes()));
+            if !actual.eq_ignore_ascii_case(expected_hex.trim()) {
+                continue;
+            }
+        }
+        let Ok(parsed) = Manifest::parse(&body) else {
+            continue;
+        };
+        if parsed.id != item.id {
+            continue;
+        }
+        let cur_ver = current
+            .iter()
+            .find(|m| m.id == parsed.id)
+            .and_then(|m| m.version.as_deref());
+        if !version_newer(parsed.version.as_deref(), cur_ver) {
+            continue;
+        }
+        let target = dest.join(format!("{}.toml", parsed.id));
+        let tmp = dest.join(format!("{}.toml.tmp", parsed.id));
+        if std::fs::write(&tmp, body.as_bytes()).is_ok() && std::fs::rename(&tmp, &target).is_ok() {
+            updated += 1;
+        }
+    }
+    Ok(updated)
+}
+
 pub fn display_name(id: &str) -> &str {
     match id {
-        "claude" => "Claude",
+        "claude" => "Claude Code",
         "codex" => "Codex",
         "grok" => "Grok",
+        "amp" => "Amp",
+        "antigravity" | "agy" => "Antigravity",
+        "cline" => "Cline",
+        "cursor" => "Cursor Agent",
+        "devin" => "Devin",
+        "droid" => "Droid",
+        "gemini" => "Gemini CLI",
+        "github-copilot" | "copilot" => "Copilot CLI",
+        "hermes" => "Hermes",
+        "kilo" => "Kilo",
+        "kimi" => "Kimi",
+        "kiro" => "Kiro",
+        "letta" => "Letta",
+        "maki" => "Maki",
+        "muse" => "Muse",
+        "opencode" => "OpenCode",
+        "pi" => "Pi",
+        "qodercli" => "Qoder",
+        "qwen" => "Qwen Code",
         other => other,
     }
+}
+
+/// Default CLI binary command for launching `id`.
+pub fn default_cli_command(id: &str) -> &str {
+    match id {
+        "claude" => "claude",
+        "codex" => "codex",
+        "grok" => "grok",
+        "amp" => "amp",
+        "antigravity" | "agy" => "agy",
+        "cline" => "cline",
+        "cursor" => "cursor-agent",
+        "devin" => "devin",
+        "droid" => "droid",
+        "gemini" => "gemini",
+        "github-copilot" | "copilot" => "copilot",
+        "hermes" => "hermes",
+        "kilo" => "kilo",
+        "kimi" => "kimi",
+        "kiro" => "kiro-cli",
+        "letta" => "letta",
+        "maki" => "maki",
+        "muse" => "muse",
+        "opencode" => "opencode",
+        "pi" => "pi",
+        "qodercli" => "qodercli",
+        "qwen" => "qwen",
+        other => other,
+    }
+}
+
+/// Detect which known coding-agent CLIs exist on `PATH` (plus standard user bin dirs).
+pub fn installed_agent_clis() -> Vec<(&'static str, &'static str, &'static str)> {
+    const CANDIDATES: &[(&str, &str, &str)] = &[
+        ("claude", "Claude Code", "claude"),
+        ("codex", "Codex", "codex"),
+        ("opencode", "OpenCode", "opencode"),
+        ("gemini", "Gemini CLI", "gemini"),
+        ("cursor", "Cursor Agent", "cursor-agent"),
+        ("grok", "Grok", "grok"),
+        ("github-copilot", "Copilot CLI", "copilot"),
+        ("amp", "Amp", "amp"),
+        ("qwen", "Qwen Code", "qwen"),
+        ("kimi", "Kimi", "kimi"),
+        ("droid", "Droid", "droid"),
+        ("cline", "Cline", "cline"),
+        ("kilo", "Kilo", "kilo"),
+        ("pi", "Pi", "pi"),
+        ("antigravity", "Antigravity", "agy"),
+    ];
+    let mut dirs: Vec<std::path::PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        let h = std::path::PathBuf::from(home);
+        dirs.push(h.join(".local/bin"));
+        dirs.push(h.join(".cargo/bin"));
+        dirs.push(h.join(".npm-global/bin"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        dirs.push(std::path::PathBuf::from("/opt/homebrew/bin"));
+        dirs.push(std::path::PathBuf::from("/usr/local/bin"));
+    }
+    let has_bin = |bin: &str| -> bool {
+        dirs.iter().any(|d| {
+            let p = d.join(bin);
+            if p.is_file() {
+                return true;
+            }
+            #[cfg(windows)]
+            for ext in ["exe", "cmd", "bat"] {
+                if d.join(format!("{bin}.{ext}")).is_file() {
+                    return true;
+                }
+            }
+            false
+        })
+    };
+    CANDIDATES
+        .iter()
+        .copied()
+        .filter(|(_, _, bin)| has_bin(bin))
+        .collect()
+}
+
+fn parse_scaled_number(raw: &str) -> Option<f64> {
+    let clean = raw.trim().replace(',', "");
+    let (num_str, mult) = if let Some(s) = clean.strip_suffix(['k', 'K']) {
+        (s, 1_000.0)
+    } else if let Some(s) = clean.strip_suffix(['m', 'M']) {
+        (s, 1_000_000.0)
+    } else {
+        (clean.as_str(), 1.0)
+    };
+    let v: f64 = num_str.parse().ok()?;
+    (v.is_finite() && v >= 0.0).then_some(v * mult)
+}
+
+/// Scrape context usage from recent terminal screen lines, returning `(optional_0_to_1_fraction, label)`.
+/// Supports percentage (`40% context left`), ratio (`12.4k / 200k tokens`), and token totals (`6.2k tokens`).
+pub fn context_usage_info(screen: &str) -> Option<(Option<f32>, String)> {
+    static RE_PCT: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    static RE_RATIO: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    static RE_TOKENS: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+
+    let re_pct = RE_PCT.get_or_init(|| Regex::new(r"(?i)\b(\d{1,3})(?:\.\d+)?%").unwrap());
+    let re_ratio = RE_RATIO.get_or_init(|| {
+        Regex::new(r"(?i)\b(\d[\d,]*(?:\.\d+)?[km]?)\s*/\s*(\d[\d,]*(?:\.\d+)?[km]?)\b").unwrap()
+    });
+    let re_tokens = RE_TOKENS.get_or_init(|| {
+        Regex::new(r"(?i)\b(\d[\d,]*(?:\.\d+)?[km]?)\s*(?:tokens?|tok)\b").unwrap()
+    });
+
+    let tail: Vec<&str> = screen.lines().rev().take(80).collect();
+
+    for &line in &tail {
+        let lower = line.to_lowercase();
+        if lower.contains("context")
+            || lower.contains("token")
+            || lower.contains("ctx")
+            || lower.contains("usage")
+            || lower.contains("window")
+        {
+            if let Some(cap) = re_pct.captures(line) {
+                if let Ok(n) = cap[1].parse::<u8>() {
+                    if n <= 100 {
+                        return Some((Some(n as f32 / 100.0), format!("{n}%")));
+                    }
+                }
+            }
+        }
+    }
+
+    for &line in &tail {
+        let lower = line.to_lowercase();
+        if lower.contains("context")
+            || lower.contains("token")
+            || lower.contains("ctx")
+            || lower.contains("window")
+        {
+            if let Some(cap) = re_ratio.captures(line) {
+                if let (Some(used), Some(total)) =
+                    (parse_scaled_number(&cap[1]), parse_scaled_number(&cap[2]))
+                {
+                    if total > 0.0 && used <= total * 1.5 {
+                        let frac = (used / total).clamp(0.0, 1.0) as f32;
+                        let pct = (frac * 100.0).round() as u8;
+                        return Some((Some(frac), format!("{pct}%")));
+                    }
+                }
+            }
+        }
+    }
+
+    let lower_screen = screen.to_ascii_lowercase();
+    let mut est_window = if lower_screen.contains("[1m]")
+        || lower_screen.contains("gemini")
+        || lower_screen.contains("opus-5")
+        || lower_screen.contains("opus-4.6")
+        || lower_screen.contains("opus-4-6")
+        || lower_screen.contains("sonnet-5")
+        || lower_screen.contains("sonnet-4.6")
+        || lower_screen.contains("sonnet-4-6")
+    {
+        1_000_000.0
+    } else {
+        200_000.0
+    };
+    for &line in &tail {
+        if let Some(cap) = re_tokens.captures(line) {
+            if let Some(val) = parse_scaled_number(&cap[1]) {
+                if val > 0.0 {
+                    while val > est_window {
+                        est_window = if est_window < 1_000_000.0 {
+                            1_000_000.0
+                        } else {
+                            est_window * 2.0
+                        };
+                    }
+                    let raw = cap[1].trim().replace(',', "");
+                    let frac = (val / est_window).clamp(0.05, 1.0) as f32;
+                    return Some((Some(frac), format!("{raw} tok")));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Scrape context window percentage or token usage printed on screen.
+pub fn context_usage(screen: &str) -> Option<String> {
+    context_usage_info(screen).map(|(_, label)| label)
 }
 
 /// Identify which agent (manifest index) is running. Original shellax logic:
@@ -1169,10 +1586,14 @@ Completed
     #[test]
     fn bundled_manifests_compile() {
         let m = bundled();
+        assert_eq!(m.len(), 22);
         assert_eq!(
-            m.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            &m.iter().map(|m| m.id.as_str()).collect::<Vec<_>>()[..3],
             ["claude", "codex", "grok"]
         );
+        // Reject future engine versions cleanly without panicking.
+        let future = "id = \"x\"\nmin_engine_version = 99\n[[rules]]\nid = \"r\"\nstate = \"idle\"\ncontains = [\"ok\"]\n";
+        assert!(Manifest::parse(future).is_err());
     }
     #[test]
     fn identify_by_process_command_and_title() {
@@ -1304,5 +1725,23 @@ Completed
         assert_eq!(format_tokens(53_338), "53k");
         assert_eq!(format_tokens(1_000_000), "1M");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn antigravity_states_and_context_usage_formats() {
+        let m = bundled();
+        let agy = m.iter().find(|x| x.id == "agy").expect("agy manifest");
+        assert_eq!(display_name("agy"), "Antigravity");
+        assert_eq!(agy.detect(inp("─────────────\nesc to cancel\n", "")).state, AgentState::Working);
+        assert_eq!(agy.detect(inp("─────────────\n> \n─────────────\n? for shortcuts\n", "")).state, AgentState::Idle);
+        assert_eq!(agy.detect(inp("─────────────\n> \n", "")).state, AgentState::Idle);
+
+        assert_eq!(context_usage("context left 40%").as_deref(), Some("40%"));
+        assert_eq!(context_usage("Thought for 40s, 6.2k tokens\n你好").as_deref(), Some("6.2k tok"));
+        let (frac_opt, tok_lbl) =
+            context_usage_info("Model Gemini\nThought for 40s, 6.2k tokens\n你好").expect("tok info");
+        assert!(frac_opt.is_some_and(|f| f >= 0.04));
+        assert_eq!(tok_lbl, "6.2k tok");
+        assert_eq!(context_usage_info("tokens: 12.4k / 200k"), Some((Some(0.062), "6%".into())));
     }
 }

@@ -175,6 +175,7 @@ fn follow_cwd_and_restore_against_sshd() {
                 }),
             },
         ],
+        ..Default::default()
     };
     let p = std::env::temp_dir().join(format!("stp-sm-layout-{}.json", std::process::id()));
     session_store::save(&p, &l).unwrap();

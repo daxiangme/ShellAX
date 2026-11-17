@@ -430,16 +430,53 @@ pub struct Agents {
     pub detect_claude: bool,
     pub detect_codex: bool,
     pub detect_grok: bool,
+    /// Per-agent detection toggle map (`id -> enabled`); falls back to `detect_*` / `true`.
+    #[serde(default)]
+    pub detect: std::collections::BTreeMap<String, bool>,
+    /// Periodically fetch updated agent detection manifests.
+    #[serde(default = "t")]
+    pub manifest_update: bool,
+    /// Optional custom manifest catalog URL (empty = default herdr catalog).
+    #[serde(default)]
+    pub manifest_catalog_url: String,
     pub notify_state: bool,
     pub approval_timeout_secs: u64,
     pub on_timeout: String,
     pub policy_port: u16,
     /// AI typing into a pane running an external agent: ask | ask_first | allow | deny
     pub write_to_pty: String,
+    /// Agent API spawning child panes/agents: allow | ask | deny
+    #[serde(default = "s_allow")]
+    pub api_spawn: String,
+    /// Root directory for agent git worktrees (empty = `~/.shellax/worktrees`).
+    #[serde(default)]
+    pub worktree_root: String,
+    /// Collapsed section IDs in the Agent workbench left panel.
+    #[serde(default)]
+    pub ui_collapsed: Vec<String>,
+    /// Recently used project directories in the Agent workbench.
+    #[serde(default)]
+    pub recent_projects: Vec<String>,
     /// Agent quick launch entries (palette, AI / Agent panel): name + command typed into a new pane
     pub quick_launch: Vec<QuickLaunch>,
     /// Host sidebar Agents card. Off until the user turns it on.
     pub show_panel: bool,
+}
+fn s_allow() -> String {
+    "allow".into()
+}
+impl Agents {
+    pub fn is_detect_enabled(&self, id: &str) -> bool {
+        if let Some(&v) = self.detect.get(id) {
+            return v;
+        }
+        match id {
+            "claude" => self.detect_claude,
+            "codex" => self.detect_codex,
+            "grok" => self.detect_grok,
+            _ => true,
+        }
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
@@ -466,11 +503,18 @@ impl Default for Agents {
             detect_claude: t(),
             detect_codex: t(),
             detect_grok: t(),
+            detect: Default::default(),
+            manifest_update: t(),
+            manifest_catalog_url: String::new(),
             notify_state: t(),
             approval_timeout_secs: u_120(),
             on_timeout: s_deny(),
             policy_port: 0,
             write_to_pty: "ask".into(),
+            api_spawn: s_allow(),
+            worktree_root: String::new(),
+            ui_collapsed: Vec::new(),
+            recent_projects: Vec::new(),
             quick_launch: default_quick_launch(),
             show_panel: false,
         }
@@ -1381,6 +1425,12 @@ impl Settings {
                 self.agents.approval_timeout_secs.clamp(5, 3600),
             ),
             timeout_deny: self.agents.on_timeout != "ask",
+            write_to_pty: ssh_term_proto::managed::get()
+                .map(|m| m.cap_pty_write(&self.agents.write_to_pty))
+                .unwrap_or_else(|| self.agents.write_to_pty.clone()),
+            api_spawn: ssh_term_proto::managed::get()
+                .map(|m| m.cap_agent_api_spawn(&self.agents.api_spawn))
+                .unwrap_or_else(|| self.agents.api_spawn.clone()),
         }
     }
 }

@@ -25,6 +25,9 @@ pub struct Palette {
     query: Entity<InputState>,
     hosts: Vec<(String, String)>,
     selected: usize,
+    scroll: gpui::UniformListScrollHandle,
+    cached: Vec<(i32, Item)>,
+    cached_query: Option<String>,
     _subs: Vec<Subscription>,
 }
 
@@ -40,6 +43,8 @@ impl Palette {
             |this: &mut Self, _, ev: &InputEvent, _, cx| match ev {
                 InputEvent::Change => {
                     this.selected = 0;
+                    this.cached_query = None;
+                    this.scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
                     cx.notify();
                 }
                 InputEvent::PressEnter { .. } => this.run_selected(cx),
@@ -51,12 +56,18 @@ impl Palette {
             query,
             hosts,
             selected: 0,
+            scroll: gpui::UniformListScrollHandle::new(),
+            cached: Vec::new(),
+            cached_query: None,
             _subs: subs,
         }
     }
 
-    fn items(&self, cx: &Context<Self>) -> Vec<(i32, Item)> {
+    fn ensure_items(&mut self, cx: &gpui::App) {
         let q = self.query.read(cx).value().to_string();
+        if self.cached_query.as_deref() == Some(q.as_str()) {
+            return;
+        }
         let mut v: Vec<(i32, Item)> = Action::ALL
             .iter()
             .filter(|a| a.shown())
@@ -79,11 +90,13 @@ impl Palette {
         if !q.trim().is_empty() {
             v.sort_by_key(|x| std::cmp::Reverse(x.0));
         }
-        v
+        self.cached = v;
+        self.cached_query = Some(q);
     }
 
     fn run_selected(&mut self, cx: &mut Context<Self>) {
-        if let Some((_, it)) = self.items(cx).into_iter().nth(self.selected) {
+        self.ensure_items(cx);
+        if let Some((_, it)) = self.cached.get(self.selected).cloned() {
             cx.emit(PaletteEvent::Run(it));
         }
     }
@@ -92,87 +105,106 @@ impl Palette {
 impl Render for Palette {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th = cur();
-        let items = self.items(cx);
-        if self.selected >= items.len().max(1) {
-            self.selected = items.len().saturating_sub(1);
+        self.ensure_items(cx);
+        if self.selected >= self.cached.len().max(1) {
+            self.selected = self.cached.len().saturating_sub(1);
         }
-        let n = items.len();
-        let mut list = div()
-            .id("palette-list")
-            .flex()
-            .flex_col()
-            .p_2()
-            .max_h(px(420.))
-            .overflow_y_scroll();
-        let mut last_group = "";
-        for (i, (_, it)) in items.iter().enumerate().take(60) {
-            let (ic, label, group, binding) = match it {
-                Item::Act(a) => {
-                    let inf = a.info();
-                    (inf.icon, inf.label.to_string(), inf.group, a.binding())
-                }
-                Item::Host(_, name, detail) => (
-                    IconName::Server,
-                    tf("palette.connect", &[("name", name), ("detail", detail)]),
-                    t("ui.host"),
-                    String::new(),
-                ),
-            };
-            if group != last_group && self.query.read(cx).value().is_empty() {
-                list = list.child(ui::menu_label(group).flex_shrink_0());
-                last_group = group;
-            }
-            let sel = i == self.selected;
-            // 选中行：menu_sel_bg + 常规文字
-            list = list.child(
-                div()
-                    .id(("pal", i))
-                    .flex_shrink_0()
-                    .h(px(ui::H_LARGE))
-                    .px(px(10.))
-                    .rounded(px(ui::R_MD))
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .cursor_pointer()
-                    .bg(if sel {
-                        crate::theme::menu_sel_bg()
-                    } else {
-                        gpui::transparent_black()
-                    })
-                    .when(!sel, |d| d.hover(|d| d.bg(crate::theme::menu_sel_bg())))
-                    .on_click(cx.listener(move |this, _, _w, cx| {
-                        this.selected = i;
-                        this.run_selected(cx);
-                    }))
-                    .child(icon(ic, ui::IC_MD, c(th.overlay1)))
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(ui::fs_body()))
-                            .text_color(c(th.text))
-                            .child(label),
-                    )
-                    .when(!self.query.read(cx).value().is_empty(), |d| {
-                        d.child(
-                            div()
-                                .text_size(px(ui::fs_small()))
-                                .text_color(c(th.overlay0))
-                                .child(group),
-                        )
-                    })
-                    .when(!binding.is_empty(), |d| d.child(ui::kbd(&binding))),
-            );
-        }
-        if n == 0 {
-            list = list.child(
-                div()
-                    .p_4()
-                    .text_size(px(ui::fs_body()))
-                    .text_color(c(th.overlay1))
-                    .child(t("ui.no_matching_commands")),
-            );
-        }
+        let n = self.cached.len();
+        let selected = self.selected;
+        let query_non_empty = !self.query.read(cx).value().is_empty();
+        let items_snapshot = std::rc::Rc::new(self.cached.clone());
+        let entity = cx.entity().downgrade();
+
+        let list = if n == 0 {
+            div()
+                .p_4()
+                .text_size(px(ui::fs_body()))
+                .text_color(c(th.overlay1))
+                .child(t("ui.no_matching_commands"))
+                .into_any_element()
+        } else {
+            let list_h = ((n as f32) * ui::H_LARGE + 16.).min(420.);
+            div()
+                .h(px(list_h))
+                .p_2()
+                .flex()
+                .flex_col()
+                .child(ui::virtual_list(
+                    "palette-list",
+                    n,
+                    &self.scroll,
+                    move |range, _w, _cx| {
+                        let th = cur();
+                        let mut rows = Vec::with_capacity(range.len());
+                        for i in range {
+                            let (_, it) = &items_snapshot[i];
+                            let (ic, label, group, binding) = match it {
+                                Item::Act(a) => {
+                                    let inf = a.info();
+                                    (inf.icon, inf.label.to_string(), inf.group, a.binding())
+                                }
+                                Item::Host(_, name, detail) => (
+                                    IconName::Server,
+                                    tf("palette.connect", &[("name", name), ("detail", detail)]),
+                                    t("ui.host"),
+                                    String::new(),
+                                ),
+                            };
+                            let sel = i == selected;
+                            let ent = entity.clone();
+                            rows.push(
+                                div()
+                                    .id(("pal", i))
+                                    .w_full()
+                                    .h(px(ui::H_LARGE))
+                                    .px(px(10.))
+                                    .rounded(px(ui::R_MD))
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .cursor_pointer()
+                                    .bg(if sel {
+                                        crate::theme::menu_sel_bg()
+                                    } else {
+                                        gpui::transparent_black()
+                                    })
+                                    .when(!sel, |d| d.hover(|d| d.bg(crate::theme::hover_bg())))
+                                    .on_click(move |_, _w, cx| {
+                                        if let Some(e) = ent.upgrade() {
+                                            e.update(cx, |this, cx| {
+                                                this.selected = i;
+                                                this.run_selected(cx);
+                                            });
+                                        }
+                                    })
+                                    .child(icon(ic, ui::IC_MD, c(th.overlay1)))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .whitespace_nowrap()
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .text_size(px(ui::fs_body()))
+                                            .text_color(c(th.text))
+                                            .child(label),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_size(px(ui::fs_small()))
+                                            .text_color(c(th.overlay0))
+                                            .when(!query_non_empty && i > 0, |d| d.opacity(0.75))
+                                            .child(group),
+                                    )
+                                    .when(!binding.is_empty(), |d| d.child(ui::kbd(&binding))),
+                            );
+                        }
+                        rows
+                    },
+                ))
+                .into_any_element()
+        };
         div()
             .absolute()
             .top_0()
@@ -198,16 +230,21 @@ impl Render for Palette {
                     .overflow_hidden()
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, _w, cx| {
-                        let n = this.items(cx).len();
+                        this.ensure_items(cx);
+                        let n = this.cached.len();
                         match ev.keystroke.key.as_str() {
                             "down" => {
                                 if n > 0 {
                                     this.selected = (this.selected + 1) % n;
+                                    this.scroll
+                                        .scroll_to_item(this.selected, gpui::ScrollStrategy::Nearest);
                                 }
                             }
                             "up" => {
                                 if n > 0 {
                                     this.selected = (this.selected + n - 1) % n;
+                                    this.scroll
+                                        .scroll_to_item(this.selected, gpui::ScrollStrategy::Nearest);
                                 }
                             }
                             "escape" => cx.emit(PaletteEvent::Close),

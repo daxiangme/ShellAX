@@ -410,6 +410,45 @@ impl Session {
         self.fg_probe.lock().unwrap().as_ref().and_then(|f| f())
     }
 
+    /// True once shell integration emitted OSC 133;B or OSC 7/9;9 (prompt is ready for input).
+    pub fn is_shell_prompt_ready(&self) -> bool {
+        self.prompt_mark.lock().unwrap().is_some() || self.osc7_cwd.lock().unwrap().is_some()
+    }
+
+    /// Plain-text dump of up to `max_lines` from scrollback + visible screen.
+    pub fn recent_text(&self, max_lines: usize) -> String {
+        let t = self.term.lock().unwrap();
+        let g = t.grid();
+        let hist = g.history_size();
+        let screen = g.screen_lines();
+        let total = hist + screen;
+        let take = max_lines.min(total.max(1));
+        let start_idx = total.saturating_sub(take);
+        let first_line = (start_idx as i32) - (hist as i32);
+        let end_line = screen as i32;
+        let mut lines = Vec::new();
+        for l in first_line..end_line {
+            let row = &g[Line(l)];
+            let mut line = String::new();
+            for col in 0..g.columns() {
+                let cell = &row[Column(col)];
+                if cell
+                    .flags
+                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                {
+                    continue;
+                }
+                line.push(if cell.c == '\0' { ' ' } else { cell.c });
+            }
+            lines.push(line.trim_end().to_string());
+        }
+        // Trim trailing blank screen rows while keeping at least one line.
+        while lines.len() > 1 && lines.last().is_some_and(|s| s.is_empty()) {
+            lines.pop();
+        }
+        lines.join("\n")
+    }
+
     /// Plain-text dump of the visible screen (used by headless tests and agent detection).
     pub fn screen_text(&self) -> String {
         let t = self.term.lock().unwrap();

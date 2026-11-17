@@ -36,7 +36,7 @@ fn home() -> PathBuf {
 }
 
 fn usage() -> ! {
-    eprintln!("usage:\n  shellax-cli status\n  shellax-cli check [--host H] [--principal P] -- <command…>\n  shellax-cli hook <claude|codex|grok> [event]\n  shellax-cli install <claude|codex|grok|all> [--uninstall] [--dry-run] [--home DIR]\n  shellax-cli serve [--bind ADDR]\n  shellax-cli hosts [--json]\n  shellax-cli exec <host> [--timeout S] -- <command…>\n  shellax-cli upload <host> <local> <remote>\n  shellax download <host> <remote> <local>\n  shellax-cli play <file.cast> [--speed N] [--idle S]");
+    eprintln!("usage:\n  shellax-cli status\n  shellax-cli check [--host H] [--principal P] -- <command…>\n  shellax-cli hook <claude|codex|grok> [event]\n  shellax-cli install <claude|codex|grok|all> [--uninstall] [--dry-run] [--home DIR]\n  shellax-cli serve [--bind ADDR]\n  shellax-cli hosts [--json]\n  shellax-cli exec <host> [--timeout S] -- <command…>\n  shellax-cli upload <host> <local> <remote>\n  shellax-cli download <host> <remote> <local>\n  shellax-cli pane <list|split|send|keys|read|close> [args…]\n  shellax-cli agent <start|wait|prompt> [args…]\n  shellax-cli skill\n  shellax-cli play <file.cast> [--speed N] [--idle S]");
     std::process::exit(64)
 }
 
@@ -91,6 +91,11 @@ fn main() {
         }
         "serve" => serve(args, settings),
         "hosts" | "exec" | "upload" | "download" => remote(&cmd, args),
+        "pane" => pane_cmd(args),
+        "agent" => agent_cmd(args),
+        "skill" => {
+            print!("{}", include_str!("../../assets/skills/shellax/SKILL.md"));
+        }
         "play" => std::process::exit(play(args)),
         "-h" | "--help" | "help" => usage(),
         _ => usage(),
@@ -243,6 +248,12 @@ fn hook(mut args: Vec<String>, _s: &config::Settings) {
     }
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
+    let state_only = hooks::is_state_only_event(&event);
+    let timeout = if state_only {
+        Duration::from_secs(2)
+    } else {
+        Duration::from_secs(3600)
+    };
     let res = ps::read_endpoint(&data_dir())
         .ok_or_else(|| anyhow::anyhow!("shellax policy service is not running"))
         .and_then(|ep| {
@@ -257,7 +268,7 @@ fn hook(mut args: Vec<String>, _s: &config::Settings) {
                 &ep.token,
                 host.as_deref(),
                 &input,
-                Duration::from_secs(3600),
+                timeout,
             )
         });
     match res {
@@ -266,6 +277,10 @@ fn hook(mut args: Vec<String>, _s: &config::Settings) {
             std::process::exit(exit.unwrap_or(0));
         }
         other => {
+            if state_only {
+                // Lifecycle state hooks must never block an agent when GUI is offline.
+                std::process::exit(0);
+            }
             let why = match other {
                 Ok((code, b, _)) => format!("policy service answered {code}: {b}"),
                 Err(e) => e.to_string(),
@@ -527,4 +542,257 @@ fn play(args: Vec<String>) -> i32 {
     }
     let _ = writeln!(out, "\r\n\x1b[2m[playback finished: {}]\x1b[0m", cast.title);
     0
+}
+
+fn api_call(method: &str, path: &str, body: &str, timeout: Duration) -> (u16, serde_json::Value) {
+    let Some(ep) = ps::read_endpoint(&data_dir()) else {
+        eprintln!("shellax-cli: policy service is not running");
+        std::process::exit(3);
+    };
+    let host = std::env::var("SHELLAX_HOST")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .or_else(|| (!ep.host.is_empty()).then(|| ep.host.clone()));
+    let pane = std::env::var("SHELLAX_PANE").ok().filter(|s| !s.is_empty());
+    match ps::request(
+        method,
+        &ep.url,
+        path,
+        &ep.token,
+        host.as_deref(),
+        pane.as_deref(),
+        body,
+        timeout,
+    ) {
+        Ok((code, text, _)) => {
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+            (code, v)
+        }
+        Err(e) => {
+            eprintln!("shellax-cli: {e:#}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn exit_for_status(code: u16, v: &serde_json::Value) -> ! {
+    let err = v
+        .get("error")
+        .and_then(|x| x.as_str())
+        .unwrap_or("request failed");
+    eprintln!("shellax-cli: {err} (HTTP {code})");
+    std::process::exit(match code {
+        408 | 504 => 1,
+        401 | 403 => 2,
+        404 => 3,
+        _ => 1,
+    });
+}
+
+fn pane_cmd(mut args: Vec<String>) {
+    let json_out = flag(&mut args, "--json");
+    if args.is_empty() {
+        usage();
+    }
+    let sub = args.remove(0);
+    match sub.as_str() {
+        "list" | "ls" => {
+            let (code, v) = api_call("GET", "/v1/pane/list", "", Duration::from_secs(10));
+            if code != 200 {
+                exit_for_status(code, &v);
+            }
+            if json_out {
+                println!("{v}");
+                return;
+            }
+            if let Some(arr) = v.get("panes").and_then(|x| x.as_array()) {
+                for p in arr {
+                    println!(
+                        "{}\ttab:{}\t{}\t{}\t{}",
+                        p["pane_id"].as_str().unwrap_or(""),
+                        p["tab"].as_u64().unwrap_or(0),
+                        p["agent"].as_str().unwrap_or("-"),
+                        p["state"].as_str().unwrap_or("-"),
+                        p["cwd"].as_str().unwrap_or("")
+                    );
+                }
+            }
+        }
+        "split" => {
+            let from = opt(&mut args, "--from");
+            let dir = opt(&mut args, "--dir").unwrap_or_else(|| "right".into());
+            let cwd = opt(&mut args, "--cwd");
+            let focus = flag(&mut args, "--focus");
+            let cmd_str = if let Some(pos) = args.iter().position(|a| a == "--") {
+                let tail: Vec<String> = args.drain(pos + 1..).collect();
+                args.pop();
+                (!tail.is_empty()).then(|| tail.join(" "))
+            } else {
+                opt(&mut args, "--cmd")
+            };
+            let body = serde_json::json!({
+                "from": from,
+                "dir": dir,
+                "cwd": cwd,
+                "cmd": cmd_str,
+                "focus": focus,
+            })
+            .to_string();
+            let (code, v) = api_call("POST", "/v1/pane/split", &body, Duration::from_secs(15));
+            if code != 200 {
+                exit_for_status(code, &v);
+            }
+            if json_out {
+                println!("{v}");
+            } else {
+                println!("{}", v["pane_id"].as_str().unwrap_or(""));
+            }
+        }
+        "send" => {
+            let enter = flag(&mut args, "--enter");
+            if args.len() < 2 {
+                usage();
+            }
+            let pane_id = args.remove(0);
+            let text = args.join(" ");
+            let body = serde_json::json!({"pane_id": pane_id, "text": text, "enter": enter}).to_string();
+            let (code, v) = api_call("POST", "/v1/pane/send_text", &body, Duration::from_secs(120));
+            if code != 200 {
+                exit_for_status(code, &v);
+            }
+            if json_out {
+                println!("{v}");
+            }
+        }
+        "keys" => {
+            if args.len() < 2 {
+                usage();
+            }
+            let pane_id = args.remove(0);
+            let body = serde_json::json!({"pane_id": pane_id, "keys": args}).to_string();
+            let (code, v) = api_call("POST", "/v1/pane/send_keys", &body, Duration::from_secs(120));
+            if code != 200 {
+                exit_for_status(code, &v);
+            }
+            if json_out {
+                println!("{v}");
+            }
+        }
+        "read" => {
+            let lines: usize = opt(&mut args, "--lines")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(200);
+            let Some(pane_id) = args.first().cloned() else {
+                usage();
+            };
+            let path = format!(
+                "/v1/pane/read?pane_id={}&lines={lines}",
+                percent_encoding::utf8_percent_encode(&pane_id, percent_encoding::NON_ALPHANUMERIC)
+            );
+            let (code, v) = api_call("GET", &path, "", Duration::from_secs(10));
+            if code != 200 {
+                exit_for_status(code, &v);
+            }
+            if json_out {
+                println!("{v}");
+            } else {
+                let text = v["text"].as_str().unwrap_or("");
+                print!("{text}");
+                if !text.ends_with('\n') {
+                    println!();
+                }
+            }
+        }
+        "close" => {
+            let Some(pane_id) = args.first().cloned() else {
+                usage();
+            };
+            let body = serde_json::json!({"pane_id": pane_id}).to_string();
+            let (code, v) = api_call("POST", "/v1/pane/close", &body, Duration::from_secs(120));
+            if code != 200 {
+                exit_for_status(code, &v);
+            }
+            if json_out {
+                println!("{v}");
+            }
+        }
+        _ => usage(),
+    }
+}
+
+fn agent_cmd(mut args: Vec<String>) {
+    let json_out = flag(&mut args, "--json");
+    if args.is_empty() {
+        usage();
+    }
+    let sub = args.remove(0);
+    match sub.as_str() {
+        "start" | "spawn" => {
+            let cwd = opt(&mut args, "--cwd");
+            let prompt = opt(&mut args, "--prompt");
+            let task = opt(&mut args, "--task");
+            let agent = opt(&mut args, "--agent")
+                .or_else(|| args.first().cloned())
+                .unwrap_or_else(|| usage());
+            let body = serde_json::json!({
+                "agent": agent,
+                "cwd": cwd,
+                "prompt": prompt,
+                "task": task,
+            })
+            .to_string();
+            let (code, v) = api_call("POST", "/v1/agent/start", &body, Duration::from_secs(120));
+            if code != 200 {
+                exit_for_status(code, &v);
+            }
+            if json_out {
+                println!("{v}");
+            } else {
+                println!("{}", v["pane_id"].as_str().unwrap_or(""));
+            }
+        }
+        "wait" => {
+            let until = opt(&mut args, "--until").unwrap_or_else(|| "done,blocked".into());
+            let timeout: u64 = opt(&mut args, "--timeout")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(600);
+            let Some(pane_id) = args.first().cloned() else {
+                usage();
+            };
+            let path = format!(
+                "/v1/agent/wait?pane_id={}&until={}&timeout={timeout}",
+                percent_encoding::utf8_percent_encode(&pane_id, percent_encoding::NON_ALPHANUMERIC),
+                percent_encoding::utf8_percent_encode(&until, percent_encoding::NON_ALPHANUMERIC),
+            );
+            let (code, v) = api_call("GET", &path, "", Duration::from_secs(timeout + 15));
+            if code != 200 {
+                exit_for_status(code, &v);
+            }
+            if json_out {
+                println!("{v}");
+            } else {
+                println!(
+                    "{}\t{}",
+                    v["pane_id"].as_str().unwrap_or(&pane_id),
+                    v["state"].as_str().unwrap_or("unknown")
+                );
+            }
+        }
+        "prompt" => {
+            if args.len() < 2 {
+                usage();
+            }
+            let pane_id = args.remove(0);
+            let prompt = args.join(" ");
+            let body = serde_json::json!({"pane_id": pane_id, "prompt": prompt}).to_string();
+            let (code, v) = api_call("POST", "/v1/agent/prompt", &body, Duration::from_secs(120));
+            if code != 200 {
+                exit_for_status(code, &v);
+            }
+            if json_out {
+                println!("{v}");
+            }
+        }
+        _ => usage(),
+    }
 }

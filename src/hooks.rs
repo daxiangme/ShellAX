@@ -42,7 +42,7 @@ impl Agent {
 /// A normalised hook request.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct HookReq {
-    /// "PreToolUse" or "PermissionRequest"
+    /// "PreToolUse", "PermissionRequest", "SessionStart", "UserPromptSubmit", "Notification", "Stop"
     pub event: String,
     pub tool: String,
     /// Shell command for Bash-like tools, otherwise a short JSON of the tool input.
@@ -51,6 +51,27 @@ pub struct HookReq {
     pub action: String,
     pub cwd: String,
     pub session: String,
+    pub transcript_path: String,
+    pub is_subagent: bool,
+}
+
+/// True for lifecycle hooks that only report session/state (never block tool execution).
+pub fn is_state_only_event(event: &str) -> bool {
+    matches!(
+        event,
+        "SessionStart" | "UserPromptSubmit" | "Notification" | "Stop" | "SessionEnd"
+    )
+}
+
+pub fn state_for_event(event: &str) -> Option<crate::agent::AgentState> {
+    use crate::agent::AgentState;
+    match event {
+        "UserPromptSubmit" => Some(AgentState::Working),
+        "Notification" => Some(AgentState::Blocked),
+        "Stop" => Some(AgentState::Done),
+        "SessionStart" => Some(AgentState::Idle),
+        _ => None,
+    }
 }
 
 fn s(v: &Value, keys: &[&str]) -> String {
@@ -64,11 +85,19 @@ fn s(v: &Value, keys: &[&str]) -> String {
 
 /// Parse the JSON a hook receives (stdin for command hooks, body for HTTP hooks).
 pub fn parse_request(body: &str) -> Result<HookReq> {
-    let v: Value = serde_json::from_str(body).context("hook input is not JSON")?;
+    let v: Value = if body.trim().is_empty() {
+        json!({})
+    } else {
+        serde_json::from_str(body).context("hook input is not JSON")?
+    };
     let event_raw = s(&v, &["hook_event_name", "hookEventName", "event"]);
     let event = match event_raw.as_str() {
         "pre_tool_use" | "preToolUse" | "" => "PreToolUse".to_string(),
         "permission_request" | "permissionRequest" => "PermissionRequest".into(),
+        "session_start" => "SessionStart".into(),
+        "user_prompt_submit" => "UserPromptSubmit".into(),
+        "notification" => "Notification".into(),
+        "stop" => "Stop".into(),
         e => e.to_string(),
     };
     let tool = s(&v, &["tool_name", "toolName", "tool"]);
@@ -145,6 +174,10 @@ pub fn parse_request(body: &str) -> Result<HookReq> {
         action: action.into(),
         cwd: s(&v, &["cwd"]),
         session: s(&v, &["session_id", "sessionId"]),
+        transcript_path: s(&v, &["transcript_path", "transcriptPath"]),
+        is_subagent: v
+            .get("agent_id")
+            .is_some_and(|a| !a.is_null() && a.as_str() != Some("")),
     })
 }
 
@@ -190,6 +223,9 @@ pub const MARKER: &str = "shellax-cli hook";
 
 fn handler(agent: Agent, cli: &str, event: &str, timeout: u64) -> Value {
     let cmd = format!("{} hook {} {}", shell_quote(cli), agent.id(), event);
+    if is_state_only_event(event) {
+        return json!({"type": "command", "command": cmd, "timeout": 5});
+    }
     match agent {
         Agent::Claude => {
             json!({"type": "command", "command": cmd, "timeout": timeout, "onFailure": "block", "statusMessage": "ShellAX policy check"})
@@ -256,15 +292,26 @@ pub fn merge(agent: Agent, existing: Option<&str>, cli: &str, timeout: u64) -> R
         .ok_or_else(|| anyhow!("`hooks` is not an object"))?;
     strip_ours(hooks);
     let events: &[&str] = match agent {
-        Agent::Claude | Agent::Grok => &["PreToolUse"],
-        Agent::Codex => &["PreToolUse", "PermissionRequest"],
+        Agent::Claude => &[
+            "PreToolUse",
+            "SessionStart",
+            "UserPromptSubmit",
+            "Notification",
+            "Stop",
+        ],
+        Agent::Codex => &["PreToolUse", "PermissionRequest", "SessionStart", "Stop"],
+        Agent::Grok => &["PreToolUse"],
     };
     for ev in events {
         let list = hooks.entry(ev.to_string()).or_insert_with(|| json!([]));
         let list = list
             .as_array_mut()
             .ok_or_else(|| anyhow!("hooks.{ev} is not an array"))?;
-        list.push(json!({"matcher": "Bash", "hooks": [handler(agent, cli, ev, timeout)]}));
+        if is_state_only_event(ev) {
+            list.push(json!({"hooks": [handler(agent, cli, ev, timeout)]}));
+        } else {
+            list.push(json!({"matcher": "Bash", "hooks": [handler(agent, cli, ev, timeout)]}));
+        }
     }
     Ok(serde_json::to_string_pretty(&doc)? + "\n")
 }
