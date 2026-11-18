@@ -62,23 +62,42 @@ pub fn cmd_prompt(existing: Option<&str>) -> String {
 /// 本地 shell 进程的当前工作目录：使用 `proc_info::process_cwd`（Linux `/proc`、Mac `proc_pidinfo`、Windows `sysinfo`），
 /// 非 Linux 下缓存约一秒，因为路径栏会高频读取。
 fn process_cwd_probe(pid: u32) -> crate::term::FgProbe {
-    let cache: Mutex<Option<(std::time::Instant, Option<String>)>> = Mutex::new(None);
+    let cache: std::sync::Arc<Mutex<Option<(std::time::Instant, Option<String>)>>> =
+        std::sync::Arc::new(Mutex::new(None));
+    let busy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     Box::new(move || {
         if cfg!(unix) {
             return crate::proc_info::process_cwd(pid)
                 .map(|p| p.display().to_string())
                 .filter(|s| !s.is_empty());
         }
-        let mut g = cache.lock().ok()?;
-        if let Some((at, v)) = g.as_ref() {
-            if at.elapsed() < std::time::Duration::from_millis(1000) {
-                return v.clone();
+        if let Ok(g) = cache.lock() {
+            if let Some((at, ref v)) = *g {
+                let out = v.clone();
+                if at.elapsed() >= std::time::Duration::from_millis(2000)
+                    && !busy.swap(true, std::sync::atomic::Ordering::AcqRel)
+                {
+                    let cache_bg = cache.clone();
+                    let busy_bg = busy.clone();
+                    std::thread::spawn(move || {
+                        let fresh = crate::proc_info::process_cwd(pid)
+                            .map(|p| p.display().to_string())
+                            .filter(|s| !s.is_empty());
+                        if let Ok(mut w) = cache_bg.lock() {
+                            *w = Some((std::time::Instant::now(), fresh));
+                        }
+                        busy_bg.store(false, std::sync::atomic::Ordering::Release);
+                    });
+                }
+                return out;
             }
         }
         let v = crate::proc_info::process_cwd(pid)
             .map(|p| p.display().to_string())
             .filter(|s| !s.is_empty());
-        *g = Some((std::time::Instant::now(), v.clone()));
+        if let Ok(mut g) = cache.lock() {
+            *g = Some((std::time::Instant::now(), v.clone()));
+        }
         v
     })
 }

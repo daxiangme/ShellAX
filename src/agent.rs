@@ -488,7 +488,21 @@ pub fn default_cli_command(id: &str) -> &str {
 
 /// Detect which known coding-agent CLIs exist on `PATH` (plus standard user bin dirs).
 pub fn installed_agent_clis() -> Vec<(&'static str, &'static str, &'static str)> {
-    const CANDIDATES: &[(&str, &str, &str)] = &[
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+
+    type CliTuple = (&'static str, &'static str, &'static str);
+    static CACHE: OnceLock<Mutex<Option<(Instant, Vec<CliTuple>)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(g) = cache.lock() {
+        if let Some((at, ref list)) = *g {
+            if at.elapsed() < Duration::from_secs(30) {
+                return list.clone();
+            }
+        }
+    }
+
+    const CANDIDATES: &[CliTuple] = &[
         ("claude", "Claude Code", "claude"),
         ("codex", "Codex", "codex"),
         ("opencode", "OpenCode", "opencode"),
@@ -534,11 +548,15 @@ pub fn installed_agent_clis() -> Vec<(&'static str, &'static str, &'static str)>
             false
         })
     };
-    CANDIDATES
+    let found: Vec<CliTuple> = CANDIDATES
         .iter()
         .copied()
         .filter(|(_, _, bin)| has_bin(bin))
-        .collect()
+        .collect();
+    if let Ok(mut g) = cache.lock() {
+        *g = Some((Instant::now(), found.clone()));
+    }
+    found
 }
 
 fn parse_scaled_number(raw: &str) -> Option<f64> {

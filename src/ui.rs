@@ -164,75 +164,71 @@ pub fn field_row() -> Div {
 
 /// 进度环直径：与行内小图标同档，放得进 28px 高的状态条。
 pub const RING: f32 = 14.;
-const RING_STROKE: f32 = 2.;
 
-/// 紧凑进度环：淡色底环加一段按 `frac`（0–1）从 12 点顺时针画出的弧。
+const RING_TRACK_SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="6" stroke="black" stroke-width="2"/></svg>"#;
+
+fn ring_arc_svg_bytes(pct: usize) -> &'static [u8] {
+    static ARCS: std::sync::OnceLock<Box<[Vec<u8>; 101]>> = std::sync::OnceLock::new();
+    let table = ARCS.get_or_init(|| {
+        let vecs: Vec<Vec<u8>> = (0..=100)
+            .map(|p| {
+                if p == 0 {
+                    Vec::new()
+                } else if p >= 100 {
+                    RING_TRACK_SVG.to_vec()
+                } else {
+                    let a = (p as f32 / 100.0) * std::f32::consts::TAU;
+                    let ex = 7.0 + 6.0 * a.sin();
+                    let ey = 7.0 - 6.0 * a.cos();
+                    let large = if p > 50 { 1 } else { 0 };
+                    format!(
+                        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14" fill="none"><path d="M7 1A6 6 0 {large} 1 {ex:.3} {ey:.3}" stroke="black" stroke-width="2" stroke-linecap="butt"/></svg>"#
+                    )
+                    .into_bytes()
+                }
+            })
+            .collect();
+        vecs.into_boxed_slice().try_into().unwrap()
+    });
+    &table[pct.min(100)]
+}
+
+/// 紧凑进度环：使用 GPU Sprite Atlas 缓存的矢量单色遮罩绘制，避免 `paint_path` 在 Windows wgpu/DX12
+/// 下打断主渲染通道并触发全屏 4x-MSAA 中间纹理清空与解析。
 pub fn ring(frac: f32, color: Hsla) -> impl IntoElement {
     let frac = if frac.is_finite() {
         frac.clamp(0., 1.)
     } else {
         0.
     };
-    let track = cur().text;
-    let track = c(track).opacity(0.18);
-    gpui::canvas(
-        |_, _, _| {},
-        move |b, _, window, _| {
-            if !window.content_mask().bounds.intersects(&b) {
-                return;
-            }
-            let size = f32::from(b.size.width.min(b.size.height));
-            let r = size / 2. - RING_STROKE / 2.;
-            let (cx, cy) = (
-                f32::from(b.origin.x) + f32::from(b.size.width) / 2.,
-                f32::from(b.origin.y) + f32::from(b.size.height) / 2.,
-            );
-            arc(window, (cx, cy), r, 1., track);
-            if frac > 0.004 {
-                arc(window, (cx, cy), r, frac, color);
-            }
-        },
-    )
-    .size(px(RING))
-    .flex_shrink_0()
-}
-
-/// 以 (cx, cy) 为圆心、半径 r，从 12 点起顺时针画 `frac` 圈的描边弧。
-fn arc(window: &mut gpui::Window, (cx, cy): (f32, f32), r: f32, frac: f32, color: Hsla) {
-    if !r.is_finite() || r < 0.5 || !cx.is_finite() || !cy.is_finite() {
-        return;
-    }
-    let frac = if frac.is_finite() {
-        frac.clamp(0., 1.)
+    let pct = if frac > 0.004 {
+        ((frac * 100.0).round() as usize).clamp(1, 100)
     } else {
-        return;
+        0
     };
-    let mut pb = gpui::PathBuilder::stroke(px(RING_STROKE));
-    let radii = gpui::point(px(r), px(r));
-    pb.move_to(gpui::point(px(cx), px(cy - r)));
-    let a = frac * std::f32::consts::TAU;
-    let (ex, ey) = (cx + r * a.sin(), cy - r * a.cos());
-    let (dx, dy) = (ex - cx, ey - (cy - r));
-    // A nearly closed arc puts the end point on the start point. Lyon's SVG
-    // arc rejects that and can abort while the context ring is painting.
-    let almost_closed = frac >= 0.999 || (frac > 0.75 && dx * dx + dy * dy < 1.);
-    if almost_closed {
-        pb.arc_to(radii, px(0.), false, true, gpui::point(px(cx), px(cy + r)));
-        pb.arc_to(radii, px(0.), false, true, gpui::point(px(cx), px(cy - r)));
-    } else if frac > 0.004 {
-        pb.arc_to(
-            radii,
-            px(0.),
-            a > std::f32::consts::PI,
-            true,
-            gpui::point(px(ex), px(ey)),
-        );
-    } else {
-        return;
-    }
-    if let Ok(path) = pb.build() {
-        window.paint_path(path, color);
-    }
+    let track = c(cur().text).opacity(0.18);
+    div()
+        .relative()
+        .size(px(RING))
+        .flex_shrink_0()
+        .child(
+            svg()
+                .data(RING_TRACK_SVG)
+                .size(px(RING))
+                .flex_shrink_0()
+                .text_color(track),
+        )
+        .when(pct > 0, |d| {
+            d.child(
+                div().absolute().top_0().left_0().size(px(RING)).child(
+                    svg()
+                        .data(ring_arc_svg_bytes(pct))
+                        .size(px(RING))
+                        .flex_shrink_0()
+                        .text_color(color),
+                ),
+            )
+        })
 }
 
 /// 按 Lucide 文件名（如 `qr-code`）找内置图标；找不到返回 `None`。

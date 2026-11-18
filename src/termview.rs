@@ -3936,17 +3936,22 @@ fn clip_caption(s: &str) -> String {
     pub fn shell_cwd(&self) -> Option<String> {
         let s = self.session.as_ref()?;
         let osc = s.osc7_cwd.lock().unwrap().clone();
+        let from_osc = ssh_term_proto::session_store::pick_saved_cwd(osc.as_deref(), None, None);
+        if !from_osc.is_empty() {
+            return Some(from_osc);
+        }
         let process = s.cwd_probe.lock().unwrap().as_ref().and_then(|f| f());
+        let from_proc =
+            ssh_term_proto::session_store::pick_saved_cwd(None, process.as_deref(), None);
+        if !from_proc.is_empty() {
+            return Some(from_proc);
+        }
         let prompt = {
             let t = s.term.lock().unwrap();
             let g = t.grid();
             ssh_term_proto::ctxmenu::prompt_cwd(&row_chars(g, g.cursor.point.line.0))
         };
-        let c = ssh_term_proto::session_store::pick_saved_cwd(
-            osc.as_deref(),
-            process.as_deref(),
-            prompt.as_deref(),
-        );
+        let c = ssh_term_proto::session_store::pick_saved_cwd(None, None, prompt.as_deref());
         (!c.is_empty()).then_some(c)
     }
     /// Enter `path` in this shell. Clears a half-typed line first.

@@ -271,8 +271,17 @@ fn home_dir() -> Option<PathBuf> {
 }
 
 pub fn resolve_project_name_for_dir(cwd: &str) -> String {
-    let mut cache = HashMap::new();
-    resolve_project_name(cwd, &mut cache)
+    use std::sync::{Mutex, OnceLock};
+    static GLOBAL_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    let global = GLOBAL_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut map) = global.lock() {
+        if map.len() > 1024 {
+            map.clear();
+        }
+        return resolve_project_name(cwd, &mut map);
+    }
+    let mut fallback = HashMap::new();
+    resolve_project_name(cwd, &mut fallback)
 }
 
 fn resolve_project_name(cwd: &str, cache: &mut HashMap<String, String>) -> String {

@@ -3,8 +3,11 @@
 //! Portions (marked [3p]) Copyright (c) herdr contributors. Licensed under the Apache License,
 //! Version 2.0; modified by ShellAX. See THIRD_PARTY_NOTICES.md.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 const DEFAULT_WORKTREE_PREFIX: &str = "agent";
 
@@ -120,6 +123,89 @@ pub fn git_current_branch(dir: &Path) -> Option<String> {
         (!h.is_empty()).then_some(h)
     } else {
         Some(b)
+    }
+}
+
+/// Zero-subprocess git toplevel lookup for UI render paths (walks `.git` ancestors + 10s TTL cache).
+/// Avoids `CreateProcessW("git.exe")` stalls on Windows during scrolling/rendering.
+pub fn fast_git_toplevel(dir: &Path) -> Option<PathBuf> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, (Instant, Option<PathBuf>)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(g) = cache.lock() {
+        if let Some((at, res)) = g.get(dir) {
+            if at.elapsed() < Duration::from_secs(10) {
+                return res.clone();
+            }
+        }
+    }
+    let found = find_dot_git_toplevel(dir);
+    if let Ok(mut g) = cache.lock() {
+        if g.len() > 512 {
+            g.clear();
+        }
+        g.insert(dir.to_path_buf(), (Instant::now(), found.clone()));
+    }
+    found
+}
+
+/// Zero-subprocess git branch/short-HEAD reader for UI render paths (reads `.git/HEAD` directly + 3s TTL cache).
+/// Supports both standard `.git/HEAD` directories and linked worktree `.git` gitfiles (`gitdir: ...`).
+pub fn fast_git_branch(dir: &Path) -> Option<String> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, (Instant, Option<String>)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(g) = cache.lock() {
+        if let Some((at, res)) = g.get(dir) {
+            if at.elapsed() < Duration::from_secs(3) {
+                return res.clone();
+            }
+        }
+    }
+    let found = read_head_branch_no_spawn(dir);
+    if let Ok(mut g) = cache.lock() {
+        if g.len() > 512 {
+            g.clear();
+        }
+        g.insert(dir.to_path_buf(), (Instant::now(), found.clone()));
+    }
+    found
+}
+
+fn find_dot_git_toplevel(dir: &Path) -> Option<PathBuf> {
+    let mut cur = Some(dir);
+    while let Some(d) = cur {
+        if d.join(".git").exists() {
+            return Some(d.to_path_buf());
+        }
+        cur = d.parent();
+    }
+    None
+}
+
+fn read_head_branch_no_spawn(dir: &Path) -> Option<String> {
+    let top = find_dot_git_toplevel(dir)?;
+    let dot_git = top.join(".git");
+    let git_dir = if dot_git.is_file() {
+        let raw = std::fs::read_to_string(&dot_git).ok()?;
+        let line = raw.lines().find_map(|l| l.trim().strip_prefix("gitdir:"))?.trim();
+        let p = Path::new(line);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            top.join(p)
+        }
+    } else {
+        dot_git
+    };
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let line = head.lines().next()?.trim();
+    if let Some(rest) = line.strip_prefix("ref:") {
+        let r = rest.trim();
+        let name = r.strip_prefix("refs/heads/").unwrap_or(r).trim();
+        (!name.is_empty()).then(|| name.to_string())
+    } else if line.len() >= 7 && line.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(line[..7].to_string())
+    } else {
+        None
     }
 }
 
@@ -479,5 +565,42 @@ mod tests {
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].branch.as_deref(), Some("master"));
         assert_eq!(list[1].branch.as_deref(), Some("agent/a"));
+    }
+
+    #[test]
+    fn fast_git_readers_handle_repo_and_worktree_file() {
+        let tmp = std::env::temp_dir().join(format!("shellax-wt-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let main_repo = tmp.join("repo");
+        let sub_dir = main_repo.join("src/nested");
+        let wt_gitdir = main_repo.join(".git/worktrees/feat-x");
+        let linked_wt = tmp.join("wt-feat-x");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+        std::fs::create_dir_all(&wt_gitdir).unwrap();
+        std::fs::create_dir_all(&linked_wt).unwrap();
+
+        std::fs::write(main_repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(wt_gitdir.join("HEAD"), "ref: refs/heads/agent/feat-x\n").unwrap();
+        std::fs::write(
+            linked_wt.join(".git"),
+            format!("gitdir: {}\n", wt_gitdir.display()),
+        )
+        .unwrap();
+
+        assert_eq!(find_dot_git_toplevel(&sub_dir).as_deref(), Some(main_repo.as_path()));
+        assert_eq!(read_head_branch_no_spawn(&sub_dir).as_deref(), Some("main"));
+        assert_eq!(
+            read_head_branch_no_spawn(&linked_wt).as_deref(),
+            Some("agent/feat-x")
+        );
+
+        std::fs::write(
+            main_repo.join(".git/HEAD"),
+            "0123456789abcdef0123456789abcdef01234567\n",
+        )
+        .unwrap();
+        assert_eq!(read_head_branch_no_spawn(&main_repo).as_deref(), Some("0123456"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
