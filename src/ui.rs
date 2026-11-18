@@ -178,6 +178,9 @@ pub fn ring(frac: f32, color: Hsla) -> impl IntoElement {
     gpui::canvas(
         |_, _, _| {},
         move |b, _, window, _| {
+            if !window.content_mask().bounds.intersects(&b) {
+                return;
+            }
             let size = f32::from(b.size.width.min(b.size.height));
             let r = size / 2. - RING_STROKE / 2.;
             let (cx, cy) = (
@@ -274,7 +277,9 @@ pub fn spinning_icon(
         use gpui::AnimationExt as _;
         el.with_animation(
             id,
-            gpui::Animation::new(std::time::Duration::from_millis(900)).repeat(),
+            gpui::Animation::new(std::time::Duration::from_millis(900))
+                .repeat()
+                .with_max_fps(30.0),
             |s, delta| s.with_transformation(gpui::Transformation::rotate(gpui::percentage(delta))),
         )
         .into_any_element()
@@ -1704,9 +1709,10 @@ pub fn mid_ellipsis_tokens(text: &str) -> String {
 pub fn tip(
     text: impl Into<SharedString>,
 ) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
-    let text: SharedString = mid_ellipsis_tokens(&text.into()).into();
+    let raw: SharedString = text.into();
     move |w, cx| {
-        let text = text.clone();
+        // Compute mid-ellipsis only when the tooltip actually opens instead of on every list row render.
+        let text: SharedString = mid_ellipsis_tokens(&raw).into();
         gpui_component::tooltip::Tooltip::element(move |_, _| {
             div()
                 .max_w(px(TIP_MAX_W))

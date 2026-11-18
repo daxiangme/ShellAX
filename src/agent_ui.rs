@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use gpui::{
     div, prelude::*, px, AnyElement, App, ClipboardItem, Context, Entity, FontWeight, Hsla,
-    KeyDownEvent, Point, Pixels, ScrollHandle, SharedString, Window,
+    KeyDownEvent, ListAlignment, ListOffset, ListSizingBehavior, ListState, Point, Pixels,
+    SharedString, Window,
 };
 use gpui_component::input::{InputEvent, InputState};
 use ssh_term_proto::agent::{self, AgentState};
@@ -118,7 +119,11 @@ pub(crate) struct AgentHub {
     pub group_limits: HashMap<(String, SessionGroupStatus), usize>,
     pub archive: ArchiveState,
     pub kbd_active: bool,
-    pub scroll: ScrollHandle,
+    pub list_state: ListState,
+    pub(crate) cached_list: Option<Arc<AgentListSnapshot>>,
+    pub(crate) sessions_rev: u64,
+    pub(crate) layout_rev: u64,
+    pub(crate) reset_scroll_pending: bool,
     pub selected_session_idx: usize,
     pub menu: Option<(AgentMenuTarget, Point<Pixels>)>,
     pub new_task: Option<NewTaskDialog>,
@@ -128,6 +133,22 @@ pub(crate) struct AgentHub {
 }
 
 impl AgentHub {
+    pub(crate) fn invalidate_sessions(&mut self) {
+        self.sessions_rev = self.sessions_rev.wrapping_add(1);
+    }
+
+    pub(crate) fn invalidate_layout(&mut self) {
+        self.layout_rev = self.layout_rev.wrapping_add(1);
+    }
+
+    pub(crate) fn scroll_to_top_reset(&mut self) {
+        self.reset_scroll_pending = true;
+        self.list_state.scroll_to(ListOffset {
+            item_ix: 0,
+            offset_in_item: px(0.),
+        });
+    }
+
     pub(crate) fn is_group_collapsed(&self, proj_key: &str, status: SessionGroupStatus) -> bool {
         if status == SessionGroupStatus::Archived {
             !self.expanded_archived_projects.contains(proj_key)
@@ -148,6 +169,7 @@ impl AgentHub {
                 self.collapsed_proj_groups.insert(k);
             }
         }
+        self.invalidate_layout();
     }
 }
 
@@ -167,7 +189,12 @@ impl Default for AgentHub {
             group_limits: HashMap::new(),
             archive: ArchiveState::default(),
             kbd_active: false,
-            scroll: ScrollHandle::new(),
+            list_state: ListState::new(0, ListAlignment::Top, px(240.))
+                .with_uniform_item_height(px(50.)),
+            cached_list: None,
+            sessions_rev: 0,
+            layout_rev: 0,
+            reset_scroll_pending: false,
             selected_session_idx: 0,
             menu: None,
             new_task: None,
@@ -292,7 +319,9 @@ fn working_pulse_dot(id: impl Into<gpui::ElementId>, color: Hsla) -> AnyElement 
             .border_color(color)
             .with_animation(
                 id,
-                gpui::Animation::new(crate::motion::ms(crate::motion::BREATHE_MS)).repeat(),
+                gpui::Animation::new(crate::motion::ms(crate::motion::BREATHE_MS))
+                    .repeat()
+                    .with_max_fps(30.0),
                 |d, t| {
                     let sz = 6. + 6. * t;
                     d.size(px(sz)).opacity(0.72 * (1. - t))
@@ -415,6 +444,7 @@ impl Root {
         self.agent_hub.archive = load_archive_state();
         // Fast <10ms synchronous load from cache for instant first paint.
         self.agent_hub.sessions = agent_history::load_cached(&cache_file_path());
+        self.agent_hub.invalidate_sessions();
         self.refresh_agent_history(cx);
 
         // Periodic background refresh (every 15s while open) + manifest auto-update.
@@ -476,10 +506,17 @@ impl Root {
                 })
                 .await;
             let _ = this.update(cx, |r, cx| {
-                r.agent_hub.sessions = list;
+                let changed = r.agent_hub.sessions != list;
+                let was_empty = r.agent_hub.sessions.is_empty();
+                if changed {
+                    r.agent_hub.sessions = list;
+                    r.agent_hub.invalidate_sessions();
+                }
                 r.agent_hub.scanning = false;
                 r.agent_hub.last_auto_scan = Some(std::time::Instant::now());
-                cx.notify();
+                if changed || was_empty {
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -1328,6 +1365,7 @@ impl Root {
             self.agent_hub.archive.unarchived.remove(&key);
             self.agent_hub.archive.archived.insert(key);
         }
+        self.agent_hub.invalidate_layout();
         save_archive_state(&self.agent_hub.archive);
         let title_short: String = meta.display_title().chars().take(28).collect();
         if !currently {
@@ -1374,7 +1412,8 @@ impl Root {
                 this.agent_hub.menu = None;
                 this.agent_hub.selected_session_idx = 0;
                 this.agent_hub.kbd_active = false;
-                this.agent_hub.scroll.scroll_to_item(0);
+                this.agent_hub.invalidate_layout();
+                this.agent_hub.scroll_to_top_reset();
                 cx.notify();
             });
         })
@@ -1409,24 +1448,16 @@ impl Root {
         .detach();
     }
 
-    fn filtered_by_agent_and_query(&self, cx: &App) -> Vec<SessionMeta> {
-        let query = self
-            .agent_hub
-            .search
-            .as_ref()
-            .map(|s| s.read(cx).value().trim().to_lowercase())
-            .unwrap_or_default();
-        let filter = self.agent_hub.filter.as_str();
-        self.agent_hub
-            .sessions
-            .iter()
-            .filter(|m| (filter == "all" || m.agent == filter) && m.matches_query(&query))
-            .cloned()
-            .collect()
-    }
-
     /// Collect `(total_count, [(agent_id, count)])` across disk history and unbound live panes.
     fn agent_filter_summary(&self, cx: &App) -> (usize, Vec<(String, usize)>) {
+        if let Some(ref snap) = self.agent_hub.cached_list {
+            return (snap.filter_total, snap.filter_counts.clone());
+        }
+        let running = self.collect_running_agent_rows(cx);
+        self.agent_filter_summary_from(&running)
+    }
+
+    fn agent_filter_summary_from(&self, running: &[RunningRow]) -> (usize, Vec<(String, usize)>) {
         let mut counts: HashMap<String, usize> = HashMap::new();
         let mut total = self.agent_hub.sessions.len();
         let known_sids: HashSet<&str> = self
@@ -1438,7 +1469,7 @@ impl Root {
         for m in &self.agent_hub.sessions {
             *counts.entry(m.agent.clone()).or_insert(0) += 1;
         }
-        for row in self.collect_running_agent_rows(cx) {
+        for row in running {
             if row
                 .session_id
                 .as_deref()
@@ -1494,7 +1525,13 @@ impl Root {
         }
     }
 
-    fn build_project_buckets(&self, cx: &App) -> Vec<ProjectBucket> {
+    fn build_project_buckets_from(
+        &self,
+        running: &[RunningRow],
+        query: &str,
+        now_secs: i64,
+        cx: &App,
+    ) -> Vec<ProjectBucket> {
         struct Accum {
             name: String,
             cwd: String,
@@ -1506,9 +1543,8 @@ impl Root {
             buckets: HashMap<SessionGroupStatus, Vec<GroupedItem>>,
         }
 
-        let running = self.collect_running_agent_rows(cx);
         let mut pane_by_sid: HashMap<String, LivePaneInfo> = HashMap::new();
-        for row in &running {
+        for row in running {
             if let Some(ref sid) = row.session_id {
                 let entry = pane_by_sid.entry(sid.clone()).or_insert_with(|| LivePaneInfo {
                     state: row.state,
@@ -1539,14 +1575,7 @@ impl Root {
             .iter()
             .map(|m| m.id.as_str())
             .collect();
-        let query = self
-            .agent_hub
-            .search
-            .as_ref()
-            .map(|s| s.read(cx).value().trim().to_lowercase())
-            .unwrap_or_default();
         let filter = self.agent_hub.filter.as_str();
-        let now_secs = agent_history::now_unix_secs();
 
         let mut by_proj: HashMap<String, Accum> = HashMap::new();
 
@@ -1562,12 +1591,12 @@ impl Root {
                 continue;
             }
             if !query.is_empty() {
-                let hit = row.title.to_lowercase().contains(&query)
-                    || row.sub.to_lowercase().contains(&query)
+                let hit = row.title.to_lowercase().contains(query)
+                    || row.sub.to_lowercase().contains(query)
                     || row
                         .cwd
                         .as_deref()
-                        .is_some_and(|c| c.to_lowercase().contains(&query));
+                        .is_some_and(|c| c.to_lowercase().contains(query));
                 if !hit {
                     continue;
                 }
@@ -1601,7 +1630,7 @@ impl Root {
                 .buckets
                 .entry(status)
                 .or_default()
-                .push(GroupedItem::LiveOnly(row));
+                .push(GroupedItem::LiveOnly(row.clone()));
         }
 
         let focused_sid: Option<String> = self
@@ -1610,7 +1639,12 @@ impl Root {
             .filter(|t| Self::tab_module(t, cx) == Tool::Agents)
             .and_then(|t| t.focused.read(cx).agent_session_id.clone());
 
-        for meta in self.filtered_by_agent_and_query(cx) {
+        for meta in self
+            .agent_hub
+            .sessions
+            .iter()
+            .filter(|m| (filter == "all" || m.agent == filter) && m.matches_query(query))
+        {
             let proj_name = if meta.project.trim().is_empty() {
                 "Local".to_string()
             } else {
@@ -1628,7 +1662,7 @@ impl Root {
             });
             Self::prefer_primary_cwd(&mut entry.cwd, meta.cwd.as_deref());
 
-            let archived = self.is_meta_archived(&meta);
+            let archived = self.is_meta_archived(meta);
             let live = pane_by_sid.get(&meta.id);
             let active_open = focused_sid.as_deref() == Some(meta.id.as_str())
                 || live.is_some_and(|l| l.selected);
@@ -1649,7 +1683,7 @@ impl Root {
             entry.most_recent = entry.most_recent.max(meta.updated);
             entry.total_count += 1;
             entry.buckets.entry(status).or_default().push(GroupedItem::Session {
-                meta,
+                meta: meta.clone(),
                 live_state,
                 active_open,
                 archived,
@@ -1740,31 +1774,234 @@ impl Root {
         out
     }
 
-    fn visible_nav_sessions(&self, cx: &App) -> Vec<SessionMeta> {
-        let projects = self.build_project_buckets(cx);
-        let mut out = Vec::new();
-        for proj in projects {
-            if self.agent_hub.collapsed_projects.contains(&proj.key) {
+    fn search_query_lower(&self, cx: &App) -> String {
+        self.agent_hub
+            .search
+            .as_ref()
+            .map(|s| s.read(cx).value().trim().to_lowercase())
+            .unwrap_or_default()
+    }
+
+    fn ensure_agent_list_snapshot(&mut self, cx: &App) -> Arc<AgentListSnapshot> {
+        let running = self.collect_running_agent_rows(cx);
+        let query = self.search_query_lower(cx);
+        let focused_sid: Option<String> = self
+            .tabs
+            .get(self.active)
+            .filter(|t| Self::tab_module(t, cx) == Tool::Agents)
+            .and_then(|t| t.focused.read(cx).agent_session_id.clone());
+        let now_secs = agent_history::now_unix_secs();
+        let live_sig: Vec<LiveRowSig> = running
+            .iter()
+            .map(|r| LiveRowSig {
+                pane_id: r.pane.entity_id(),
+                agent_id: r.agent_id.clone(),
+                state: r.state,
+                selected: r.selected,
+                session_id: r.session_id.clone(),
+                title: r.title.clone(),
+                ctx_label: r.ctx_label.clone(),
+                ctx_permille: r.ctx_frac.map(|f| (f * 1000.0) as i32),
+                cwd: r.cwd.clone(),
+            })
+            .collect();
+        let key = AgentListCacheKey {
+            sessions_rev: self.agent_hub.sessions_rev,
+            layout_rev: self.agent_hub.layout_rev,
+            query: query.clone(),
+            filter: self.agent_hub.filter.clone(),
+            focused_sid,
+            time_minute: now_secs / 60,
+            recent_projects: config::get().agents.recent_projects.clone(),
+            live: live_sig,
+        };
+
+        if let Some(ref existing) = self.agent_hub.cached_list {
+            if existing.key == key {
+                return existing.clone();
+            }
+        }
+
+        let (filter_total, filter_counts) = self.agent_filter_summary_from(&running);
+        let running_active_count = running
+            .iter()
+            .filter(|r| matches!(r.state, AgentState::Working | AgentState::Blocked))
+            .count();
+        let archived_total = self
+            .agent_hub
+            .sessions
+            .iter()
+            .filter(|m| self.is_meta_archived(m))
+            .count();
+        let active_total = self.agent_hub.sessions.len().saturating_sub(archived_total);
+
+        let project_buckets = self.build_project_buckets_from(&running, &query, now_secs, cx);
+        let mut projects: Vec<ProjectHeaderMeta> = Vec::with_capacity(project_buckets.len());
+        let mut rows: Vec<AgentFlatRow> = Vec::new();
+        let mut shape: Vec<u8> = Vec::new();
+        let mut nav_row_indices: Vec<usize> = Vec::new();
+        let mut nav_sessions: Vec<SessionMeta> = Vec::new();
+        let mut nav_cursor: usize = 0;
+        let mut run_idx: usize = 0;
+
+        for (p_idx, proj) in project_buckets.into_iter().enumerate() {
+            let proj_collapsed = self.agent_hub.collapsed_projects.contains(&proj.key);
+            let hdr_ix = rows.len();
+            let hdr_meta = ProjectHeaderMeta {
+                key: proj.key.clone(),
+                name: proj.name,
+                cwd: proj.cwd.clone(),
+                total_count: proj.total_count,
+                has_attention: proj.has_attention,
+                has_running: proj.has_running,
+                collapsed: proj_collapsed,
+                hdr_ix,
+            };
+            projects.push(hdr_meta);
+            rows.push(AgentFlatRow::ProjectHeader { proj_idx: p_idx });
+            shape.push(if p_idx == 0 { 1 } else { 2 });
+
+            if proj_collapsed {
                 continue;
             }
+
+            if proj.groups.is_empty() {
+                let launch_dir = (!proj.cwd.is_empty()).then_some(proj.cwd);
+                rows.push(AgentFlatRow::EmptyProject {
+                    proj_idx: p_idx,
+                    cwd: launch_dir,
+                });
+                shape.push(3);
+                continue;
+            }
+
             for (status, items) in proj.groups {
-                if self.agent_hub.is_group_collapsed(&proj.key, status) {
+                let count = items.len();
+                let grp_collapsed = self.agent_hub.is_group_collapsed(&proj.key, status);
+                rows.push(AgentFlatRow::StatusHeader {
+                    proj_idx: p_idx,
+                    proj_key: proj.key.clone(),
+                    status,
+                    count,
+                    collapsed: grp_collapsed,
+                });
+                shape.push(4);
+
+                if grp_collapsed {
                     continue;
                 }
+
                 let limit = self
                     .agent_hub
                     .group_limits
                     .get(&(proj.key.clone(), status))
                     .copied()
                     .unwrap_or(80);
+                let visible_count = items.len().min(limit);
+                let remaining = items.len().saturating_sub(visible_count);
+
                 for item in items.into_iter().take(limit) {
-                    if let GroupedItem::Session { meta, .. } = item {
-                        out.push(meta);
+                    match item {
+                        GroupedItem::LiveOnly(row) => {
+                            rows.push(AgentFlatRow::Running {
+                                proj_idx: p_idx,
+                                run_idx,
+                                row,
+                            });
+                            shape.push(5);
+                            run_idx += 1;
+                        }
+                        GroupedItem::Session {
+                            meta,
+                            live_state,
+                            active_open,
+                            archived,
+                            ctx_frac,
+                            ctx_label,
+                            live_title,
+                        } => {
+                            let row_ix = rows.len();
+                            nav_row_indices.push(row_ix);
+                            nav_sessions.push(meta.clone());
+                            rows.push(AgentFlatRow::Session {
+                                proj_idx: p_idx,
+                                nav_idx: nav_cursor,
+                                active_open,
+                                archived,
+                                live_state,
+                                ctx_frac,
+                                ctx_label,
+                                live_title,
+                                meta,
+                            });
+                            shape.push(6);
+                            nav_cursor += 1;
+                        }
                     }
+                }
+
+                if remaining > 0 {
+                    rows.push(AgentFlatRow::LoadMore {
+                        proj_idx: p_idx,
+                        proj_key: proj.key.clone(),
+                        status,
+                        remaining,
+                    });
+                    shape.push(7);
                 }
             }
         }
-        out
+
+        let snap = Arc::new(AgentListSnapshot {
+            key,
+            now_secs,
+            filter_total,
+            filter_counts,
+            running_active_count,
+            archived_total,
+            active_total,
+            projects,
+            rows,
+            shape,
+            nav_row_indices,
+            nav_sessions,
+        });
+
+        let structure_changed = self
+            .agent_hub
+            .cached_list
+            .as_ref()
+            .is_none_or(|old| old.shape != snap.shape);
+        let reset_scroll = std::mem::take(&mut self.agent_hub.reset_scroll_pending);
+        self.agent_hub.cached_list = Some(snap.clone());
+
+        if structure_changed {
+            let prev = self.agent_hub.list_state.logical_scroll_top();
+            let new_len = snap.rows.len();
+            self.agent_hub
+                .list_state
+                .reset_with_uniform_height(new_len, px(50.));
+            if !reset_scroll
+                && new_len > 0
+                && (prev.item_ix > 0 || f32::from(prev.offset_in_item) > 0.0)
+            {
+                self.agent_hub.list_state.scroll_to(ListOffset {
+                    item_ix: prev.item_ix.min(new_len.saturating_sub(1)),
+                    offset_in_item: prev.offset_in_item,
+                });
+            }
+        } else if reset_scroll {
+            self.agent_hub.list_state.scroll_to(ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.),
+            });
+        }
+
+        snap
+    }
+
+    fn visible_nav_sessions(&mut self, cx: &App) -> Vec<SessionMeta> {
+        self.ensure_agent_list_snapshot(cx).nav_sessions.clone()
     }
 
     /// Left tool window when `self.tool == Tool::Agents`.
@@ -1785,7 +2022,7 @@ impl Root {
                     InputEvent::Change => {
                         this.agent_hub.selected_session_idx = 0;
                         this.agent_hub.kbd_active = false;
-                        this.agent_hub.scroll.scroll_to_item(0);
+                        this.agent_hub.scroll_to_top_reset();
                         cx.notify();
                     }
                     InputEvent::PressEnter { .. } => {
@@ -1853,8 +2090,10 @@ impl Root {
             ],
         );
 
-        // 2. Search + scalable agent type filter dropdown button
-        let (all_count, filter_counts) = self.agent_filter_summary(cx);
+        // 2. Build/reuse cached flattened session snapshot once per render, then feed filter/list/footer.
+        let snap = self.ensure_agent_list_snapshot(cx);
+        let all_count = snap.filter_total;
+        let filter_counts = &snap.filter_counts;
         let cur_filter = self.agent_hub.filter.clone();
         let active_filter_count = if cur_filter == "all" {
             all_count
@@ -1957,43 +2196,19 @@ impl Root {
             }
         }
 
-        // 4. Per-project collapsible session tree (grouped by status under each project folder)
-        let project_buckets = self.build_project_buckets(cx);
-        let total_sessions_in_view: usize = project_buckets
-            .iter()
-            .filter(|p| !self.agent_hub.collapsed_projects.contains(&p.key))
-            .flat_map(|p| {
-                p.groups.iter().filter_map(|(st, v)| {
-                    if self.agent_hub.is_group_collapsed(&p.key, *st) {
-                        None
-                    } else {
-                        let lim = self
-                            .agent_hub
-                            .group_limits
-                            .get(&(p.key.clone(), *st))
-                            .copied()
-                            .unwrap_or(80);
-                        Some(
-                            v.iter()
-                                .take(lim)
-                                .filter(|g| matches!(g, GroupedItem::Session { .. }))
-                                .count(),
-                        )
-                    }
-                })
-            })
-            .sum();
+        // 4. Per-project collapsible virtualized session tree (grouped by status under each project folder)
+        let total_sessions_in_view = snap.nav_row_indices.len();
         if self.agent_hub.selected_session_idx >= total_sessions_in_view.max(1) {
             self.agent_hub.selected_session_idx = total_sessions_in_view.saturating_sub(1);
         }
 
-        let mut nav_scroll_indices: Vec<usize> = Vec::new();
-        let list_body: AnyElement = if self.agent_hub.scanning && project_buckets.is_empty() {
+        let root_ent = cx.entity();
+        let list_body: AnyElement = if self.agent_hub.scanning && snap.rows.is_empty() {
             div()
                 .flex_1()
                 .child(ui::skeleton_rows(6))
                 .into_any_element()
-        } else if project_buckets.is_empty() {
+        } else if snap.rows.is_empty() {
             let msg = if self.agent_hub.sessions.is_empty() {
                 t("ag.empty_history")
             } else {
@@ -2010,207 +2225,194 @@ impl Root {
             )
             .into_any_element()
         } else {
-            let now_secs = agent_history::now_unix_secs();
-            let sel_idx = self.agent_hub.selected_session_idx;
-            let kbd_active = self.agent_hub.kbd_active;
-            let mut scroll_col = div()
-                .id("ag-groups-scroll")
-                .track_scroll(&self.agent_hub.scroll)
-                .on_scroll_wheel(cx.listener(|_, _, _, cx| {
-                    cx.notify();
-                }))
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .pb(px(ui::SP_2))
-                .flex()
-                .flex_col()
-                .gap(px(2.));
-
-            let mut child_idx: usize = 0;
-            let mut nav_cursor: usize = 0;
-            let mut run_idx: usize = 0;
-            let mut proj_headers: Vec<(usize, usize, ProjectHeaderMeta)> = Vec::new();
-
-            for (p_idx, proj) in project_buckets.into_iter().enumerate() {
-                let proj_collapsed = self.agent_hub.collapsed_projects.contains(&proj.key);
-                let hdr_meta = ProjectHeaderMeta {
-                    key: proj.key.clone(),
-                    name: proj.name,
-                    cwd: proj.cwd,
-                    total_count: proj.total_count,
-                    has_attention: proj.has_attention,
-                    has_running: proj.has_running,
-                    collapsed: proj_collapsed,
+            let list_snap = snap.clone();
+            let list_root = root_ent.clone();
+            let virtual_list = gpui::list(self.agent_hub.list_state.clone(), move |ix, window, cx| {
+                let Some(item) = list_snap.rows.get(ix) else {
+                    return div().into_any_element();
                 };
-                let hdr_child_ix = child_idx;
-                scroll_col = scroll_col.child(self.render_project_header_card(
-                    "ag-proj-hdr",
-                    p_idx,
-                    hdr_child_ix,
-                    &hdr_meta,
-                    false,
-                    cx,
-                ));
-                proj_headers.push((p_idx, hdr_child_ix, hdr_meta));
-                child_idx += 1;
-
-                if proj_collapsed {
-                    continue;
-                }
-
-                if proj.groups.is_empty() {
-                    let ld = (!proj_headers.last().map(|(_, _, m)| m.cwd.is_empty()).unwrap_or(true))
-                        .then(|| proj_headers.last().unwrap().2.cwd.clone());
-                    scroll_col = scroll_col.child(
+                match item {
+                    AgentFlatRow::ProjectHeader { proj_idx } => {
+                        let meta = &list_snap.projects[*proj_idx];
+                        Self::render_project_header_card_el(
+                            &list_root,
+                            "ag-proj-hdr",
+                            *proj_idx,
+                            meta,
+                            false,
+                            window,
+                            cx,
+                        )
+                    }
+                    AgentFlatRow::EmptyProject { proj_idx, cwd } => {
+                        let ld = cwd.clone();
                         div()
-                            .id(("ag-proj-empty", p_idx))
-                            .h(px(ui::H_DEFAULT))
-                            .mx(px(ui::LIST_INSET))
-                            .px(px(ui::ROW_PX))
-                            .rounded(px(ui::R_MD))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(crate::theme::hover_bg()))
-                            .flex()
-                            .items_center()
-                            .gap(px(ui::SP_1))
-                            .on_click(cx.listener(move |this, _, w, cx| {
-                                this.open_new_task_dialog_in(ld.clone(), w, cx);
-                            }))
-                            .child(icon(IconName::Plus, ui::IC_XS, c(th.overlay1)))
-                            .child(ui::row_meta(t("ag.start_in_project"))),
-                    );
-                    child_idx += 1;
-                    continue;
-                }
-
-                for (status, items) in proj.groups {
-                    let count = items.len();
-                    let grp_collapsed = self.agent_hub.is_group_collapsed(&proj.key, status);
-                    scroll_col = scroll_col.child(self.render_status_group_header(
-                        p_idx,
-                        proj.key.clone(),
+                            .w_full()
+                            .px(px(ui::LIST_INSET))
+                            .pb(px(2.))
+                            .child(
+                                div()
+                                    .id(("ag-proj-empty", *proj_idx))
+                                    .w_full()
+                                    .h(px(ui::H_DEFAULT))
+                                    .px(px(ui::ROW_PX))
+                                    .rounded(px(ui::R_MD))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(crate::theme::hover_bg()))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(ui::SP_1))
+                                    .on_click(window.listener_for(&list_root, move |this, _, w, cx| {
+                                        this.open_new_task_dialog_in(ld.clone(), w, cx);
+                                    }))
+                                    .child(icon(IconName::Plus, ui::IC_XS, c(cur().overlay1)))
+                                    .child(ui::row_meta(t("ag.start_in_project"))),
+                            )
+                            .into_any_element()
+                    }
+                    AgentFlatRow::StatusHeader {
+                        proj_idx,
+                        proj_key,
                         status,
                         count,
-                        grp_collapsed,
+                        collapsed,
+                    } => Self::render_status_group_header_el(
+                        &list_root,
+                        *proj_idx,
+                        proj_key.clone(),
+                        *status,
+                        *count,
+                        *collapsed,
+                        window,
                         cx,
-                    ));
-                    child_idx += 1;
-
-                    if grp_collapsed {
-                        continue;
+                    ),
+                    AgentFlatRow::Running { run_idx, row, .. } => {
+                        Self::render_running_row_el(&list_root, *run_idx, row.clone(), window, cx)
                     }
-
-                    let limit = self
-                        .agent_hub
-                        .group_limits
-                        .get(&(proj.key.clone(), status))
-                        .copied()
-                        .unwrap_or(80);
-                    let visible_count = items.len().min(limit);
-                    let remaining = items.len().saturating_sub(visible_count);
-
-                    for item in items.into_iter().take(limit) {
-                        match item {
-                            GroupedItem::LiveOnly(row) => {
-                                scroll_col =
-                                    scroll_col.child(self.render_running_row(run_idx, row, cx));
-                                run_idx += 1;
-                                child_idx += 1;
-                            }
-                            GroupedItem::Session {
-                                meta,
-                                live_state,
-                                active_open,
-                                archived,
-                                ctx_frac,
-                                ctx_label,
-                                live_title,
-                            } => {
-                                let kbd_sel = kbd_active && nav_cursor == sel_idx && !active_open;
-                                scroll_col = scroll_col.child(self.render_grouped_session_row(
-                                    nav_cursor,
-                                    meta,
-                                    live_state,
-                                    active_open,
-                                    archived,
-                                    ctx_frac,
-                                    ctx_label,
-                                    live_title,
-                                    kbd_sel,
-                                    false,
-                                    now_secs,
-                                    cx,
-                                ));
-                                nav_scroll_indices.push(child_idx);
-                                nav_cursor += 1;
-                                child_idx += 1;
-                            }
-                        }
+                    AgentFlatRow::Session {
+                        nav_idx,
+                        meta,
+                        live_state,
+                        active_open,
+                        archived,
+                        ctx_frac,
+                        ctx_label,
+                        live_title,
+                        ..
+                    } => {
+                        let kbd_sel = {
+                            let hub = &list_root.read(cx).agent_hub;
+                            hub.kbd_active
+                                && *nav_idx == hub.selected_session_idx
+                                && !*active_open
+                        };
+                        Self::render_grouped_session_row_el(
+                            &list_root,
+                            *nav_idx,
+                            meta.clone(),
+                            *live_state,
+                            *active_open,
+                            *archived,
+                            *ctx_frac,
+                            ctx_label.clone(),
+                            live_title.clone(),
+                            kbd_sel,
+                            false,
+                            list_snap.now_secs,
+                            window,
+                            cx,
+                        )
                     }
-
-                    if remaining > 0 {
-                        let pkey = proj.key.clone();
-                        scroll_col = scroll_col.child(
-                            div()
-                                .id(("ag-grp-more", p_idx * 16 + status as usize))
-                                .h(px(ui::SECTION_H))
-                                .mx(px(ui::LIST_INSET))
-                                .px(px(ui::ROW_PX))
-                                .rounded(px(ui::R_MD))
-                                .cursor_pointer()
-                                .hover(|s| s.bg(crate::theme::hover_bg()))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_size(px(ui::fs_caption()))
-                                .text_color(c(th.accent))
-                                .child(tf("ag.load_more", &[("n", &remaining)]))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    let entry = this
-                                        .agent_hub
-                                        .group_limits
-                                        .entry((pkey.clone(), status))
-                                        .or_insert(80);
-                                    *entry += 80;
-                                    cx.notify();
-                                })),
-                        );
-                        child_idx += 1;
+                    AgentFlatRow::LoadMore {
+                        proj_idx,
+                        proj_key,
+                        status,
+                        remaining,
+                    } => {
+                        let pkey = proj_key.clone();
+                        let st = *status;
+                        div()
+                            .w_full()
+                            .px(px(ui::LIST_INSET))
+                            .pb(px(2.))
+                            .child(
+                                div()
+                                    .id(("ag-grp-more", *proj_idx * 16 + *status as usize))
+                                    .w_full()
+                                    .h(px(ui::SECTION_H))
+                                    .px(px(ui::ROW_PX))
+                                    .rounded(px(ui::R_MD))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(crate::theme::hover_bg()))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_size(px(ui::fs_caption()))
+                                    .text_color(c(cur().accent))
+                                    .child(tf("ag.load_more", &[("n", remaining)]))
+                                    .on_click(window.listener_for(&list_root, move |this, _, _, cx| {
+                                        let entry = this
+                                            .agent_hub
+                                            .group_limits
+                                            .entry((pkey.clone(), st))
+                                            .or_insert(80);
+                                        *entry += 80;
+                                        this.agent_hub.invalidate_layout();
+                                        cx.notify();
+                                    })),
+                            )
+                            .into_any_element()
                     }
                 }
-            }
+            })
+            .with_sizing_behavior(ListSizingBehavior::Auto)
+            .size_full()
+            .pb(px(ui::SP_2));
 
-            let sticky_hdr: Option<AnyElement> = {
-                let vp = self.agent_hub.scroll.bounds();
-                let off_y = f32::from(self.agent_hub.scroll.offset().y);
-                if vp.size.height > px(0.) && off_y < -0.5 {
-                    let vp_top = f32::from(vp.top());
-                    let rel_y = |cix: usize| -> Option<f32> {
-                        self.agent_hub
-                            .scroll
-                            .bounds_for_item(cix)
-                            .map(|b| f32::from(b.top()) + off_y - vp_top)
+            let sticky_hdr: Option<AnyElement> = if !snap.projects.is_empty() {
+                let vp = self.agent_hub.list_state.viewport_bounds();
+                let scroll_top = self.agent_hub.list_state.logical_scroll_top();
+                let off_y = f32::from(scroll_top.offset_in_item);
+                let scrolled = scroll_top.item_ix > 0 || off_y > 0.5;
+                if vp.size.height > px(0.) && scrolled {
+                    let top_proj_idx = snap
+                        .rows
+                        .get(scroll_top.item_ix)
+                        .map(|r| r.proj_idx())
+                        .unwrap_or(0);
+                    let cur_hdr_ix = snap.projects[top_proj_idx].hdr_ix;
+                    // While still scrolling across project `top_proj_idx`'s 8px top gap, keep
+                    // showing the previous project's sticky header sliding cleanly upward.
+                    let active_pos = if scroll_top.item_ix == cur_hdr_ix
+                        && top_proj_idx > 0
+                        && off_y <= ui::SP_2 + 0.5
+                    {
+                        Some(top_proj_idx - 1)
+                    } else {
+                        Some(top_proj_idx)
                     };
-                    let mut active_pos: Option<usize> = None;
-                    for (pos, &(_, cix, _)) in proj_headers.iter().enumerate() {
-                        if let Some(ry) = rel_y(cix) {
-                            if ry < -0.5 {
-                                active_pos = Some(pos);
-                            }
-                        }
-                    }
                     active_pos.and_then(|pos| {
-                        let (p_idx, cix, ref meta) = proj_headers[pos];
+                        let meta = &snap.projects[pos];
                         if meta.collapsed {
                             return None;
                         }
-                        let push_y = proj_headers
-                            .get(pos + 1)
-                            .and_then(|&(_, next_cix, _)| rel_y(next_cix))
-                            .filter(|&nry| nry > 0.0 && nry < 34.0)
-                            .map(|nry| nry - 34.0)
-                            .unwrap_or(0.0);
+                        let push_y = if pos + 1 < snap.projects.len() {
+                            let next_hdr_ix = snap.projects[pos + 1].hdr_ix;
+                            if scroll_top.item_ix == next_hdr_ix {
+                                let nry = ui::SP_2 - off_y;
+                                if nry < 34.0 { nry - 34.0 } else { 0.0 }
+                            } else {
+                                self.agent_hub
+                                    .list_state
+                                    .bounds_for_item(next_hdr_ix)
+                                    .map(|b| f32::from(b.top()) + ui::SP_2 - f32::from(vp.top()))
+                                    .filter(|&nry| nry > 0.0 && nry < 34.0)
+                                    .map(|nry| nry - 34.0)
+                                    .unwrap_or(0.0)
+                            }
+                        } else {
+                            0.0
+                        };
                         Some(
                             div()
                                 .id("ag-proj-sticky-wrap")
@@ -2218,15 +2420,18 @@ impl Root {
                                 .top(px(push_y))
                                 .left_0()
                                 .right_0()
+                                .flex()
+                                .flex_col()
                                 .bg(crate::theme::card_bg())
                                 .pb(px(3.))
                                 .occlude()
-                                .child(self.render_project_header_card(
+                                .child(Self::render_project_header_card_el(
+                                    &root_ent,
                                     "ag-proj-sticky",
-                                    p_idx,
-                                    cix,
+                                    pos,
                                     meta,
                                     true,
+                                    window,
                                     cx,
                                 ))
                                 .into_any_element(),
@@ -2235,6 +2440,8 @@ impl Root {
                 } else {
                     None
                 }
+            } else {
+                None
             };
 
             div()
@@ -2242,26 +2449,15 @@ impl Root {
                 .flex_1()
                 .min_h_0()
                 .overflow_hidden()
-                .flex()
-                .flex_col()
-                .child(scroll_col)
+                .child(virtual_list)
                 .children(sticky_hdr)
                 .into_any_element()
         };
 
         // 5. Footer summary bar
-        let running_live = self.collect_running_agent_rows(cx);
-        let running_count = running_live
-            .iter()
-            .filter(|r| matches!(r.state, AgentState::Working | AgentState::Blocked))
-            .count();
-        let archived_total = self
-            .agent_hub
-            .sessions
-            .iter()
-            .filter(|m| self.is_meta_archived(m))
-            .count();
-        let active_total = self.agent_hub.sessions.len().saturating_sub(archived_total);
+        let running_count = snap.running_active_count;
+        let archived_total = snap.archived_total;
+        let active_total = snap.active_total;
         let footer_text = if att_count > 0 || running_count > 0 {
             tf(
                 "ag.summary",
@@ -2311,7 +2507,8 @@ impl Root {
                     .child(footer_text),
             );
 
-        let nav_total = nav_scroll_indices.len();
+        let nav_total = snap.nav_row_indices.len();
+        let nav_snap = snap.clone();
         div()
             .id("agents-left-panel")
             .flex_1()
@@ -2327,10 +2524,11 @@ impl Root {
                         this.agent_hub.kbd_active = true;
                         this.agent_hub.selected_session_idx =
                             (this.agent_hub.selected_session_idx + 1) % nav_total;
-                        if let Some(&scroll_idx) =
-                            nav_scroll_indices.get(this.agent_hub.selected_session_idx)
+                        if let Some(&list_ix) = nav_snap
+                            .nav_row_indices
+                            .get(this.agent_hub.selected_session_idx)
                         {
-                            this.agent_hub.scroll.scroll_to_item(scroll_idx);
+                            this.agent_hub.list_state.scroll_to_reveal_item(list_ix);
                         }
                         cx.stop_propagation();
                         cx.notify();
@@ -2339,10 +2537,11 @@ impl Root {
                         this.agent_hub.kbd_active = true;
                         this.agent_hub.selected_session_idx =
                             (this.agent_hub.selected_session_idx + nav_total - 1) % nav_total;
-                        if let Some(&scroll_idx) =
-                            nav_scroll_indices.get(this.agent_hub.selected_session_idx)
+                        if let Some(&list_ix) = nav_snap
+                            .nav_row_indices
+                            .get(this.agent_hub.selected_session_idx)
                         {
-                            this.agent_hub.scroll.scroll_to_item(scroll_idx);
+                            this.agent_hub.list_state.scroll_to_reveal_item(list_ix);
                         }
                         cx.stop_propagation();
                         cx.notify();
@@ -2371,496 +2570,515 @@ impl Root {
             .into_any_element()
     }
 
-    fn render_project_header_card(
-        &self,
-        id_prefix: &'static str,
-        p_idx: usize,
-        hdr_child_ix: usize,
-        meta: &ProjectHeaderMeta,
-        is_sticky: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let th = cur();
-        let short_cwd = if meta.cwd.is_empty() {
-            String::new()
+fn render_project_header_card_el(
+    root: &Entity<Root>,
+    id_prefix: &'static str,
+    p_idx: usize,
+    meta: &ProjectHeaderMeta,
+    is_sticky: bool,
+    window: &Window,
+    cx: &App,
+) -> AnyElement {
+    let _ = cx;
+    let th = cur();
+    let short_cwd = if meta.cwd.is_empty() {
+        String::new()
+    } else {
+        abbreviate_home(&meta.cwd)
+    };
+    let has_short = !short_cwd.is_empty();
+    let launch_dir = (!meta.cwd.is_empty()).then(|| meta.cwd.clone());
+    let toggle_key = meta.key.clone();
+    let hdr_ix = meta.hdr_ix;
+    let toggle_tip = {
+        let action = if meta.collapsed {
+            t("ag.expand_sessions")
         } else {
-            abbreviate_home(&meta.cwd)
+            t("ag.collapse_sessions")
         };
-        let has_short = !short_cwd.is_empty();
-        let launch_dir = (!meta.cwd.is_empty()).then(|| meta.cwd.clone());
-        let toggle_key = meta.key.clone();
-        let toggle_tip = {
-            let action = if meta.collapsed {
-                t("ag.expand_sessions")
-            } else {
-                t("ag.collapse_sessions")
-            };
-            if has_short {
-                format!("{short_cwd}\n{action}")
-            } else {
-                action.to_string()
-            }
-        };
+        if has_short {
+            format!("{short_cwd}\n{action}")
+        } else {
+            action.to_string()
+        }
+    };
 
-        div()
-            .id((id_prefix, p_idx))
-            .flex_shrink_0()
-            .mx(px(ui::LIST_INSET))
-            .mt(px(if !is_sticky && p_idx > 0 {
-                ui::SP_2
-            } else {
-                0.
-            }))
-            .pl(px(ui::SP_2))
-            .pr(px(ui::SP_1))
-            .h(px(30.))
-            .rounded(px(ui::R_MD))
-            .bg(crate::theme::sub_bg())
-            .border_1()
-            .border_color(crate::theme::divider())
-            .flex()
-            .items_center()
-            .gap(px(ui::SP_1))
-            .cursor_pointer()
-            .hover(|s| s.bg(crate::theme::hover_bg()))
-            .tooltip(ui::tip(toggle_tip))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                cx.stop_propagation();
-                this.agent_hub.agent_menu = false;
-                this.agent_hub.menu = None;
-                if !this.agent_hub.collapsed_projects.remove(&toggle_key) {
-                    this.agent_hub
-                        .collapsed_projects
-                        .insert(toggle_key.clone());
-                    if is_sticky {
-                        this.agent_hub.scroll.scroll_to_top_of_item(hdr_child_ix);
-                    }
+    let card = div()
+        .id((id_prefix, p_idx))
+        .w_full()
+        .flex_shrink_0()
+        .pl(px(ui::SP_2))
+        .pr(px(ui::SP_1))
+        .h(px(30.))
+        .rounded(px(ui::R_MD))
+        .bg(crate::theme::sub_bg())
+        .border_1()
+        .border_color(crate::theme::divider())
+        .flex()
+        .items_center()
+        .gap(px(ui::SP_1))
+        .cursor_pointer()
+        .hover(|s| s.bg(crate::theme::hover_bg()))
+        .tooltip(ui::tip(toggle_tip))
+        .on_click(window.listener_for(root, move |this, _, _, cx| {
+            cx.stop_propagation();
+            this.agent_hub.agent_menu = false;
+            this.agent_hub.menu = None;
+            if !this.agent_hub.collapsed_projects.remove(&toggle_key) {
+                this.agent_hub
+                    .collapsed_projects
+                    .insert(toggle_key.clone());
+                if is_sticky {
+                    this.agent_hub.list_state.scroll_to(ListOffset {
+                        item_ix: hdr_ix,
+                        offset_in_item: px(0.),
+                    });
                 }
-                cx.notify();
-            }))
-            .child(icon(
-                if meta.collapsed {
-                    IconName::ChevronRight
-                } else {
-                    IconName::ChevronDown
-                },
-                ui::IC_XS,
-                c(th.overlay1),
-            ))
-            .child(icon(IconName::FolderGit, ui::IC_SM, c(th.accent)))
-            .child(
+            }
+            this.agent_hub.invalidate_layout();
+            cx.notify();
+        }))
+        .child(icon(
+            if meta.collapsed {
+                IconName::ChevronRight
+            } else {
+                IconName::ChevronDown
+            },
+            ui::IC_XS,
+            c(th.overlay1),
+        ))
+        .child(icon(IconName::FolderGit, ui::IC_SM, c(th.accent)))
+        .child(
+            div()
+                .min_w_0()
+                .whitespace_nowrap()
+                .overflow_hidden()
+                .text_ellipsis()
+                .text_size(px(ui::fs_small()))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(c(th.text))
+                .child(meta.name.clone()),
+        )
+        .when(has_short, |d| {
+            d.child(
                 div()
+                    .flex_1()
                     .min_w_0()
                     .whitespace_nowrap()
                     .overflow_hidden()
                     .text_ellipsis()
-                    .text_size(px(ui::fs_small()))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(c(th.text))
-                    .child(meta.name.clone()),
+                    .text_size(px(ui::fs_caption()))
+                    .text_color(c(th.overlay0))
+                    .child(short_cwd),
             )
-            .when(has_short, |d| {
-                d.child(
+        })
+        .when(!has_short, |d| d.child(div().flex_1()))
+        .when(meta.collapsed && (meta.has_running || meta.has_attention), |d| {
+            let dot_col = if meta.has_attention {
+                c(th.error)
+            } else {
+                c(th.accent)
+            };
+            d.child(working_pulse_dot(("ag-proj-dot", p_idx), dot_col))
+        })
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_size(px(ui::fs_caption()))
+                .text_color(c(th.overlay0))
+                .child(meta.total_count.to_string()),
+        )
+        .child(
+            ui::icon_button(
+                (
+                    if is_sticky {
+                        "ag-proj-new-sticky"
+                    } else {
+                        "ag-proj-new"
+                    },
+                    p_idx,
+                ),
+                IconName::Plus,
+                ui::IconBtn::Sm,
+                t("ag.start_in_project"),
+            )
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(window.listener_for(root, move |this, _, w, cx| {
+                cx.stop_propagation();
+                this.open_new_task_dialog_in(launch_dir.clone(), w, cx);
+            })),
+        );
+
+    div()
+        .w_full()
+        .px(px(ui::LIST_INSET))
+        .when(!is_sticky && p_idx > 0, |d| d.pt(px(ui::SP_2)))
+        .when(!is_sticky, |d| d.pb(px(2.)))
+        .child(card)
+        .into_any_element()
+}
+
+fn render_status_group_header_el(
+    root: &Entity<Root>,
+    proj_idx: usize,
+    proj_key: String,
+    status: SessionGroupStatus,
+    count: usize,
+    collapsed: bool,
+    window: &Window,
+    cx: &App,
+) -> AnyElement {
+    let _ = cx;
+    let th = cur();
+    let badge: AnyElement = match status {
+        SessionGroupStatus::NeedsAttention => {
+            icon(IconName::CircleAlert, ui::IC_XS, c(th.error)).into_any_element()
+        }
+        SessionGroupStatus::Running => {
+            working_pulse_dot(("ag-grp-run-dot", proj_idx), c(th.accent))
+        }
+        SessionGroupStatus::Done => {
+            icon(IconName::CircleCheck, ui::IC_XS, c(th.success)).into_any_element()
+        }
+        SessionGroupStatus::Open => div()
+            .size(px(6.))
+            .flex_shrink_0()
+            .rounded_full()
+            .bg(c(th.success))
+            .into_any_element(),
+        SessionGroupStatus::Idle => div()
+            .size(px(6.))
+            .flex_shrink_0()
+            .rounded_full()
+            .bg(c(th.overlay0))
+            .into_any_element(),
+        SessionGroupStatus::Archived => {
+            icon(IconName::Archive, ui::IC_XS, c(th.overlay0)).into_any_element()
+        }
+    };
+
+    div()
+        .w_full()
+        .px(px(ui::LIST_INSET))
+        .pb(px(2.))
+        .child(
+            div()
+                .id(("ag-grp-hdr", proj_idx * 16 + status as usize))
+                .w_full()
+                .h(px(ui::SECTION_H))
+                .flex_shrink_0()
+                .px(px(ui::ROW_PX))
+                .rounded(px(ui::R_MD))
+                .cursor_pointer()
+                .hover(|s| s.bg(crate::theme::hover_bg()))
+                .flex()
+                .items_center()
+                .gap(px(ui::SP_1))
+                .on_click(window.listener_for(root, move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.agent_hub.toggle_group_collapsed(&proj_key, status);
+                    cx.notify();
+                }))
+                .child(icon(
+                    if collapsed {
+                        IconName::ChevronRight
+                    } else {
+                        IconName::ChevronDown
+                    },
+                    ui::IC_XS,
+                    c(th.overlay1),
+                ))
+                .child(badge)
+                .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .whitespace_nowrap()
                         .overflow_hidden()
                         .text_ellipsis()
+                        .text_size(px(ui::fs_small()))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(c(th.subtext))
+                        .child(status.label()),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
                         .text_size(px(ui::fs_caption()))
                         .text_color(c(th.overlay0))
-                        .child(short_cwd),
-                )
-            })
-            .when(!has_short, |d| d.child(div().flex_1()))
-            .when(meta.collapsed && (meta.has_running || meta.has_attention), |d| {
-                let dot_col = if meta.has_attention {
-                    c(th.error)
-                } else {
-                    c(th.accent)
-                };
-                d.child(working_pulse_dot(("ag-proj-dot", p_idx), dot_col))
-            })
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .text_size(px(ui::fs_caption()))
-                    .text_color(c(th.overlay0))
-                    .child(meta.total_count.to_string()),
-            )
-            .child(
-                ui::icon_button(
-                    (
-                        if is_sticky {
-                            "ag-proj-new-sticky"
-                        } else {
-                            "ag-proj-new"
-                        },
-                        p_idx,
-                    ),
-                    IconName::Plus,
-                    ui::IconBtn::Sm,
-                    t("ag.start_in_project"),
-                )
-                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(move |this, _, w, cx| {
-                    cx.stop_propagation();
-                    this.open_new_task_dialog_in(launch_dir.clone(), w, cx);
-                })),
-            )
-            .into_any_element()
+                        .child(count.to_string()),
+                ),
+        )
+        .into_any_element()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_grouped_session_row_el(
+    root: &Entity<Root>,
+    nav_idx: usize,
+    meta: SessionMeta,
+    live_state: Option<AgentState>,
+    active_open: bool,
+    archived: bool,
+    ctx_frac: Option<f32>,
+    ctx_label: Option<String>,
+    live_title: Option<String>,
+    kbd_sel: bool,
+    show_proj_in_row: bool,
+    now_secs: i64,
+    window: &Window,
+    cx: &App,
+) -> AnyElement {
+    let _ = cx;
+    let th = cur();
+    let live = live_state.is_some();
+    let meta_click = meta.clone();
+    let meta_wt = meta.clone();
+    let meta_arch = meta.clone();
+    let meta_ctx = meta.clone();
+    let age = agent_history::relative_time_short(meta.updated, now_secs);
+    let title_text = if meta.title.is_some() || meta.first_prompt.is_some() {
+        meta.display_title().to_string()
+    } else if let Some(lt) = live_title.filter(|s| !s.is_empty()) {
+        lt
+    } else {
+        meta.display_title().to_string()
+    };
+
+    let mut sub_parts = Vec::new();
+    if let Some(st) = live_state {
+        sub_parts.push(st.label().to_string());
     }
+    if show_proj_in_row && !meta.project.is_empty() {
+        sub_parts.push(meta.project.clone());
+    }
+    if let Some(b) = meta.branch.as_deref().filter(|s| !s.is_empty()) {
+        sub_parts.push(b.to_string());
+    }
+    if meta.messages > 0 {
+        sub_parts.push(tf("ag.msgs", &[("n", &meta.messages)]));
+    } else {
+        sub_parts.push(agent::display_name(&meta.agent).to_string());
+    }
+    let sub_line = sub_parts.join(" · ");
 
-    fn render_status_group_header(
-        &mut self,
-        proj_idx: usize,
-        proj_key: String,
-        status: SessionGroupStatus,
-        count: usize,
-        collapsed: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let th = cur();
-        let badge: AnyElement = match status {
-            SessionGroupStatus::NeedsAttention => {
-                icon(IconName::CircleAlert, ui::IC_XS, c(th.error)).into_any_element()
-            }
-            SessionGroupStatus::Running => {
-                working_pulse_dot(("ag-grp-run-dot", proj_idx), c(th.accent))
-            }
-            SessionGroupStatus::Done => {
-                icon(IconName::CircleCheck, ui::IC_XS, c(th.success)).into_any_element()
-            }
-            SessionGroupStatus::Open => div()
-                .size(px(6.))
-                .flex_shrink_0()
-                .rounded_full()
-                .bg(c(th.success))
-                .into_any_element(),
-            SessionGroupStatus::Idle => div()
-                .size(px(6.))
-                .flex_shrink_0()
-                .rounded_full()
-                .bg(c(th.overlay0))
-                .into_any_element(),
-            SessionGroupStatus::Archived => {
-                icon(IconName::Archive, ui::IC_XS, c(th.overlay0)).into_any_element()
-            }
-        };
+    let (eff_ctx_frac, eff_ctx_label) = if let Some(lbl) = ctx_label {
+        (ctx_frac, Some(lbl))
+    } else if let Some((frac, lbl)) = meta.context_ring_info() {
+        (Some(frac), Some(lbl))
+    } else {
+        (None, None)
+    };
+    let cwd_short = meta
+        .cwd
+        .as_deref()
+        .map(abbreviate_home)
+        .unwrap_or_else(|| "-".into());
+    let short_id: String = meta.id.chars().take(12).collect();
+    let ctx_tip = eff_ctx_label
+        .as_deref()
+        .map(|l| format!("  ·  ctx {l}"))
+        .unwrap_or_default();
+    let tip_text = format!(
+        "{}\n{}  ·  {sub_line}{ctx_tip}  ·  {age}  ({short_id}…)",
+        title_text,
+        cwd_short,
+    );
+    let row_gid = SharedString::from(format!("ag-hrg-{}-{}", meta.agent, meta.id));
+    let row_id = SharedString::from(format!("ag-hs-{}-{}", meta.agent, meta.id));
+    let wt_id = SharedString::from(format!("ag-h-wt-{}-{}", meta.agent, meta.id));
+    let arch_id = SharedString::from(format!("ag-h-ar-{}-{}", meta.agent, meta.id));
 
-        div()
-            .id(("ag-grp-hdr", proj_idx * 16 + status as usize))
-            .h(px(ui::SECTION_H))
+    let status_badge: Option<AnyElement> = live_state.map(|st| match st {
+        AgentState::Working => ui::spinning_icon(
+            SharedString::from(format!("ag-hspin-{}-{}", meta.agent, meta.id)),
+            IconName::LoaderCircle,
+            ui::IC_XS,
+            c(th.accent),
+        ),
+        AgentState::Blocked => div()
+            .size(px(6.))
             .flex_shrink_0()
-            .mx(px(ui::LIST_INSET))
-            .px(px(ui::ROW_PX))
-            .rounded(px(ui::R_MD))
-            .cursor_pointer()
-            .hover(|s| s.bg(crate::theme::hover_bg()))
-            .flex()
-            .items_center()
-            .gap(px(ui::SP_1))
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .rounded_full()
+            .bg(c(th.error))
+            .into_any_element(),
+        AgentState::Done | AgentState::Idle | AgentState::Unknown => div()
+            .size(px(6.))
+            .flex_shrink_0()
+            .rounded_full()
+            .bg(c(th.success))
+            .into_any_element(),
+    });
+
+    let card = div()
+        .id(row_id)
+        .group(row_gid.clone())
+        .w_full()
+        .h_full()
+        .px(px(ui::SP_2))
+        .rounded(px(ui::R_MD))
+        .border_1()
+        .flex()
+        .items_center()
+        .gap(px(ui::SP_2))
+        .cursor_pointer()
+        .when(archived && !active_open, |d| d.opacity(0.76))
+        .when(active_open, |d| {
+            d.bg(crate::theme::selected_bg())
+                .border_color(c(th.accent).opacity(0.45))
+                .hover(|s| s.bg(c(cur().accent).opacity(0.18)))
+        })
+        .when(!active_open && live, |d| {
+            let tone = match live_state {
+                Some(AgentState::Blocked) => c(th.error),
+                Some(AgentState::Working) => c(th.accent),
+                _ => c(th.success),
+            };
+            d.bg(tone.opacity(0.08))
+                .border_color(tone.opacity(0.24))
+                .hover(|s| s.bg(crate::theme::hover_bg()))
+        })
+        .when(kbd_sel && !live && !active_open, |d| {
+            d.bg(crate::theme::hover_bg())
+                .border_color(c(th.accent).opacity(0.40))
+        })
+        .when(!active_open && !live && !kbd_sel, |d| {
+            d.border_color(gpui::transparent_black())
+                .hover(|s| s.bg(crate::theme::hover_bg()))
+        })
+        .tooltip(ui::tip(tip_text))
+        .on_click(window.listener_for(root, move |this, _, w, cx| {
+            this.agent_hub.selected_session_idx = nav_idx;
+            this.agent_hub.kbd_active = false;
+            this.resume_history_session(&meta_click, false, w, cx);
+        }))
+        .on_mouse_down(
+            gpui::MouseButton::Right,
+            window.listener_for(root, move |this, ev: &gpui::MouseDownEvent, _, cx| {
                 cx.stop_propagation();
-                this.agent_hub.toggle_group_collapsed(&proj_key, status);
+                this.agent_hub.menu = Some((
+                    AgentMenuTarget::History(meta_ctx.clone()),
+                    ev.position,
+                ));
                 cx.notify();
-            }))
-            .child(icon(
-                if collapsed {
-                    IconName::ChevronRight
-                } else {
-                    IconName::ChevronDown
-                },
-                ui::IC_XS,
-                c(th.overlay1),
-            ))
-            .child(badge)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .text_size(px(ui::fs_small()))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(c(th.subtext))
-                    .child(status.label()),
-            )
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .text_size(px(ui::fs_caption()))
-                    .text_color(c(th.overlay0))
-                    .child(count.to_string()),
-            )
-            .into_any_element()
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn render_grouped_session_row(
-        &mut self,
-        nav_idx: usize,
-        meta: SessionMeta,
-        live_state: Option<AgentState>,
-        active_open: bool,
-        archived: bool,
-        ctx_frac: Option<f32>,
-        ctx_label: Option<String>,
-        live_title: Option<String>,
-        kbd_sel: bool,
-        show_proj_in_row: bool,
-        now_secs: i64,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let th = cur();
-        let live = live_state.is_some();
-        let meta_click = meta.clone();
-        let meta_wt = meta.clone();
-        let meta_arch = meta.clone();
-        let meta_ctx = meta.clone();
-        let age = agent_history::relative_time_short(meta.updated, now_secs);
-        let title_text = if meta.title.is_some() || meta.first_prompt.is_some() {
-            meta.display_title().to_string()
-        } else if let Some(lt) = live_title.filter(|s| !s.is_empty()) {
-            lt
-        } else {
-            meta.display_title().to_string()
-        };
-
-        let mut sub_parts = Vec::new();
-        if let Some(st) = live_state {
-            sub_parts.push(st.label().to_string());
-        }
-        if show_proj_in_row && !meta.project.is_empty() {
-            sub_parts.push(meta.project.clone());
-        }
-        if let Some(b) = meta.branch.as_deref().filter(|s| !s.is_empty()) {
-            sub_parts.push(b.to_string());
-        }
-        if meta.messages > 0 {
-            sub_parts.push(tf("ag.msgs", &[("n", &meta.messages)]));
-        } else {
-            sub_parts.push(agent::display_name(&meta.agent).to_string());
-        }
-        let sub_line = sub_parts.join(" · ");
-
-        let (eff_ctx_frac, eff_ctx_label) = if let Some(lbl) = ctx_label {
-            (ctx_frac, Some(lbl))
-        } else if let Some((frac, lbl)) = meta.context_ring_info() {
-            (Some(frac), Some(lbl))
-        } else {
-            (None, None)
-        };
-        let cwd_short = meta
-            .cwd
-            .as_deref()
-            .map(abbreviate_home)
-            .unwrap_or_else(|| "-".into());
-        let short_id: String = meta.id.chars().take(12).collect();
-        let ctx_tip = eff_ctx_label
-            .as_deref()
-            .map(|l| format!("  ·  ctx {l}"))
-            .unwrap_or_default();
-        let tip_text = format!(
-            "{}\n{}  ·  {sub_line}{ctx_tip}  ·  {age}  ({short_id}…)",
-            title_text,
-            cwd_short,
-        );
-        let row_gid = SharedString::from(format!("ag-hrg-{}-{}", meta.agent, meta.id));
-        let row_id = SharedString::from(format!("ag-hs-{}-{}", meta.agent, meta.id));
-        let wt_id = SharedString::from(format!("ag-h-wt-{}-{}", meta.agent, meta.id));
-        let arch_id = SharedString::from(format!("ag-h-ar-{}-{}", meta.agent, meta.id));
-
-        let status_badge: Option<AnyElement> = live_state.map(|st| match st {
-            AgentState::Working => ui::spinning_icon(
-                SharedString::from(format!("ag-hspin-{}-{}", meta.agent, meta.id)),
-                IconName::LoaderCircle,
-                ui::IC_XS,
-                c(th.accent),
-            ),
-            AgentState::Blocked => div()
-                .size(px(6.))
-                .flex_shrink_0()
-                .rounded_full()
-                .bg(c(th.error))
-                .into_any_element(),
-            AgentState::Done | AgentState::Idle | AgentState::Unknown => div()
-                .size(px(6.))
-                .flex_shrink_0()
-                .rounded_full()
-                .bg(c(th.success))
-                .into_any_element(),
-        });
-
-        let card = div()
-            .id(row_id)
-            .group(row_gid.clone())
-            .w_full()
-            .h_full()
-            .px(px(ui::SP_2))
-            .rounded(px(ui::R_MD))
-            .border_1()
-            .flex()
-            .items_center()
-            .gap(px(ui::SP_2))
-            .cursor_pointer()
-            .when(archived && !active_open, |d| d.opacity(0.76))
-            .when(active_open, |d| {
-                d.bg(crate::theme::selected_bg())
-                    .border_color(c(th.accent).opacity(0.45))
-                    .hover(|s| s.bg(c(cur().accent).opacity(0.18)))
-            })
-            .when(!active_open && live, |d| {
-                let tone = match live_state {
-                    Some(AgentState::Blocked) => c(th.error),
-                    Some(AgentState::Working) => c(th.accent),
-                    _ => c(th.success),
-                };
-                d.bg(tone.opacity(0.08))
-                    .border_color(tone.opacity(0.24))
-                    .hover(|s| s.bg(crate::theme::hover_bg()))
-            })
-            .when(kbd_sel && !live && !active_open, |d| {
-                d.bg(crate::theme::hover_bg())
-                    .border_color(c(th.accent).opacity(0.40))
-            })
-            .when(!active_open && !live && !kbd_sel, |d| {
-                d.border_color(gpui::transparent_black())
-                    .hover(|s| s.bg(crate::theme::hover_bg()))
-            })
-            .tooltip(ui::tip(tip_text))
-            .on_click(cx.listener(move |this, _, w, cx| {
-                this.agent_hub.selected_session_idx = nav_idx;
-                this.agent_hub.kbd_active = false;
-                this.resume_history_session(&meta_click, false, w, cx);
-            }))
-            .on_mouse_down(
-                gpui::MouseButton::Right,
-                cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| {
-                    cx.stop_propagation();
-                    this.agent_hub.menu = Some((
-                        AgentMenuTarget::History(meta_ctx.clone()),
-                        ev.position,
-                    ));
-                    cx.notify();
-                }),
-            )
-            .child(agent_mark_tile(&meta.agent))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .justify_center()
-                    .gap(px(2.))
-                    .child(
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .flex()
-                            .items_center()
-                            .gap(px(ui::SP_1))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .whitespace_nowrap()
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .text_size(px(ui::fs_body()))
-                                    .font_weight(if active_open || live {
-                                        FontWeight::SEMIBOLD
-                                    } else {
-                                        FontWeight::MEDIUM
-                                    })
-                                    .text_color(c(th.text))
-                                    .child(title_text),
-                            )
-                            .children(status_badge)
-                            .when_some(eff_ctx_label.as_ref(), |d, lbl| {
-                                d.child(render_ctx_ring(eff_ctx_frac, lbl, false))
-                            })
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .text_size(px(ui::fs_caption()))
-                                    .text_color(c(th.overlay0))
-                                    .child(age),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .flex()
-                            .items_center()
-                            .gap(px(ui::SP_1))
-                            .child(icon(IconName::GitBranch, ui::IC_XS, c(th.overlay0)))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .whitespace_nowrap()
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .text_size(px(ui::fs_caption()))
-                                    .text_color(c(th.overlay1))
-                                    .child(sub_line),
-                            )
-                            .child(
-                                ui::row_actions(row_gid)
-                                    .child(
-                                        ui::icon_button(
-                                            arch_id,
-                                            if archived {
-                                                IconName::RotateCcw
-                                            } else {
-                                                IconName::Archive
-                                            },
-                                            ui::IconBtn::Sm,
-                                            if archived {
-                                                t("ag.unarchive")
-                                            } else {
-                                                t("ag.archive")
-                                            },
-                                        )
-                                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation();
-                                        })
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            cx.stop_propagation();
-                                            this.toggle_archive_session(&meta_arch, cx);
-                                        })),
+            }),
+        )
+        .child(agent_mark_tile(&meta.agent))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .justify_center()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(ui::SP_1))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .text_size(px(ui::fs_body()))
+                                .font_weight(if active_open || live {
+                                    FontWeight::SEMIBOLD
+                                } else {
+                                    FontWeight::MEDIUM
+                                })
+                                .text_color(c(th.text))
+                                .child(title_text),
+                        )
+                        .children(status_badge)
+                        .when_some(eff_ctx_label.as_ref(), |d, lbl| {
+                            d.child(render_ctx_ring(eff_ctx_frac, lbl, false))
+                        })
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(ui::fs_caption()))
+                                .text_color(c(th.overlay0))
+                                .child(age),
+                        ),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(ui::SP_1))
+                        .child(icon(IconName::GitBranch, ui::IC_XS, c(th.overlay0)))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .text_size(px(ui::fs_caption()))
+                                .text_color(c(th.overlay1))
+                                .child(sub_line),
+                        )
+                        .child(
+                            ui::row_actions(row_gid)
+                                .child(
+                                    ui::icon_button(
+                                        arch_id,
+                                        if archived {
+                                            IconName::RotateCcw
+                                        } else {
+                                            IconName::Archive
+                                        },
+                                        ui::IconBtn::Sm,
+                                        if archived {
+                                            t("ag.unarchive")
+                                        } else {
+                                            t("ag.archive")
+                                        },
                                     )
-                                    .child(
-                                        ui::icon_button(
-                                            wt_id,
-                                            IconName::FolderGit,
-                                            ui::IconBtn::Sm,
-                                            t("ag.resume_worktree"),
-                                        )
-                                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation();
-                                        })
-                                        .on_click(cx.listener(move |this, _, w, cx| {
-                                            cx.stop_propagation();
-                                            this.resume_history_session(&meta_wt, true, w, cx);
-                                        })),
-                                    ),
-                            ),
-                    ),
-            );
+                                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation();
+                                    })
+                                    .on_click(window.listener_for(root, move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.toggle_archive_session(&meta_arch, cx);
+                                    })),
+                                )
+                                .child(
+                                    ui::icon_button(
+                                        wt_id,
+                                        IconName::FolderGit,
+                                        ui::IconBtn::Sm,
+                                        t("ag.resume_worktree"),
+                                    )
+                                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation();
+                                    })
+                                    .on_click(window.listener_for(root, move |this, _, w, cx| {
+                                        cx.stop_propagation();
+                                        this.resume_history_session(&meta_wt, true, w, cx);
+                                    })),
+                                ),
+                        ),
+                ),
+        );
 
-        div()
-            .w_full()
-            .h(px(50.))
-            .px(px(ui::LIST_INSET))
-            .py(px(2.))
-            .child(card)
-            .into_any_element()
-    }
+    div()
+        .w_full()
+        .h(px(52.))
+        .px(px(ui::LIST_INSET))
+        .pt(px(2.))
+        .pb(px(4.))
+        .child(card)
+        .into_any_element()
+}
 
     fn render_attention_row(
         &mut self,
@@ -3070,195 +3288,198 @@ impl Root {
         out
     }
 
-    fn render_running_row(
-        &mut self,
-        idx: usize,
-        row: RunningRow,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let th = cur();
-        let (_, col) = state_icon_and_color(row.state);
-        let tone = match row.state {
-            AgentState::Blocked => c(th.error),
-            AgentState::Working => c(th.accent),
-            AgentState::Done | AgentState::Idle => c(th.success),
-            AgentState::Unknown => c(th.overlay1),
-        };
-        let pane_click = row.pane.clone();
-        let pane_ctx = row.pane.clone();
-        let tab_idx = row.tab;
-        let has_wt = row.has_worktree;
-        let sid = row.session_id.clone();
-        let pane_close = row.pane.clone();
-        let gid = SharedString::from(format!("ag-rrg-{idx}"));
+fn render_running_row_el(
+    root: &Entity<Root>,
+    idx: usize,
+    row: RunningRow,
+    window: &Window,
+    cx: &App,
+) -> AnyElement {
+    let _ = cx;
+    let th = cur();
+    let (_, col) = state_icon_and_color(row.state);
+    let tone = match row.state {
+        AgentState::Blocked => c(th.error),
+        AgentState::Working => c(th.accent),
+        AgentState::Done | AgentState::Idle => c(th.success),
+        AgentState::Unknown => c(th.overlay1),
+    };
+    let pane_click = row.pane.clone();
+    let pane_ctx = row.pane.clone();
+    let tab_idx = row.tab;
+    let has_wt = row.has_worktree;
+    let sid = row.session_id.clone();
+    let pane_close = row.pane.clone();
+    let gid = SharedString::from(format!("ag-rrg-{idx}"));
 
-        let left_tile = if let Some(ref aid) = row.agent_id {
-            agent_mark_tile(aid)
-        } else {
-            div()
-                .size(px(26.))
-                .flex_shrink_0()
-                .rounded(px(ui::R_MD))
-                .bg(col.opacity(0.13))
-                .border_1()
-                .border_color(col.opacity(0.24))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(icon(IconName::Terminal, ui::IC_SM, col))
-                .into_any_element()
-        };
-
-        let is_working = row.state == AgentState::Working;
-        let status_badge: AnyElement = if is_working {
-            ui::spinning_icon(
-                ("ag-rspin", idx),
-                IconName::LoaderCircle,
-                ui::IC_XS,
-                tone,
-            )
-        } else {
-            div()
-                .size(px(6.))
-                .flex_shrink_0()
-                .rounded_full()
-                .bg(tone)
-                .into_any_element()
-        };
-
-        let sub_text = format!("{} · {}", row.state.label(), row.sub);
-        let ctx_tip = row
-            .ctx_label
-            .as_deref()
-            .map(|l| format!("  ·  ctx {l}"))
-            .unwrap_or_default();
-        let tip_text = format!("{}\n{}{}", row.title, sub_text, ctx_tip);
-
-        let card = div()
-            .id(("ag-run", idx))
-            .group(gid.clone())
-            .w_full()
-            .h_full()
-            .px(px(ui::SP_2))
+    let left_tile = if let Some(ref aid) = row.agent_id {
+        agent_mark_tile(aid)
+    } else {
+        div()
+            .size(px(26.))
+            .flex_shrink_0()
             .rounded(px(ui::R_MD))
+            .bg(col.opacity(0.13))
             .border_1()
+            .border_color(col.opacity(0.24))
             .flex()
             .items_center()
-            .gap(px(ui::SP_2))
-            .cursor_pointer()
-            .when(row.selected, |d| {
-                d.bg(crate::theme::selected_bg())
-                    .border_color(c(th.accent).opacity(0.45))
-                    .hover(|s| s.bg(c(cur().accent).opacity(0.18)))
-            })
-            .when(!row.selected, |d| {
-                d.bg(tone.opacity(0.08))
-                    .border_color(tone.opacity(0.24))
-                    .hover(|s| s.bg(crate::theme::hover_bg()))
-            })
-            .tooltip(ui::tip(tip_text))
-            .on_click(cx.listener(move |this, _, w, cx| {
-                this.focus_pane_anywhere(&pane_click, w, cx);
-            }))
-            .on_mouse_down(
-                gpui::MouseButton::Right,
-                cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| {
-                    cx.stop_propagation();
-                    this.agent_hub.menu = Some((
-                        AgentMenuTarget::Running {
-                            pane: pane_ctx.clone(),
-                            tab: tab_idx,
-                            has_worktree: has_wt,
-                            session_id: sid.clone(),
-                        },
-                        ev.position,
-                    ));
-                    cx.notify();
-                }),
-            )
-            .child(left_tile)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .justify_center()
-                    .gap(px(2.))
-                    .child(
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .flex()
-                            .items_center()
-                            .gap(px(ui::SP_1))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .whitespace_nowrap()
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .text_size(px(ui::fs_body()))
-                                    .font_weight(if row.selected {
-                                        FontWeight::SEMIBOLD
-                                    } else {
-                                        FontWeight::MEDIUM
-                                    })
-                                    .text_color(c(th.text))
-                                    .child(row.title),
-                            )
-                            .child(status_badge)
-                            .when_some(row.ctx_label.as_ref(), |d, lbl| {
-                                d.child(render_ctx_ring(row.ctx_frac, lbl, false))
-                            }),
-                    )
-                    .child(
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .flex()
-                            .items_center()
-                            .gap(px(ui::SP_1))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .whitespace_nowrap()
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .text_size(px(ui::fs_caption()))
-                                    .text_color(c(th.overlay1))
-                                    .child(sub_text),
-                            )
-                            .child(
-                                ui::row_actions(gid).child(
-                                    ui::icon_button(
-                                        ("ag-r-x", idx),
-                                        IconName::X,
-                                        ui::IconBtn::Sm,
-                                        t("ag.close_pane"),
-                                    )
-                                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation();
-                                    })
-                                    .on_click(cx.listener(move |this, _, w, cx| {
-                                        cx.stop_propagation();
-                                        this.close_pane_entity(&pane_close, w, cx);
-                                    })),
-                                ),
-                            ),
-                    ),
-            );
-
-        div()
-            .w_full()
-            .h(px(50.))
-            .px(px(ui::LIST_INSET))
-            .py(px(2.))
-            .child(card)
+            .justify_center()
+            .child(icon(IconName::Terminal, ui::IC_SM, col))
             .into_any_element()
-    }
+    };
+
+    let is_working = row.state == AgentState::Working;
+    let status_badge: AnyElement = if is_working {
+        ui::spinning_icon(
+            ("ag-rspin", idx),
+            IconName::LoaderCircle,
+            ui::IC_XS,
+            tone,
+        )
+    } else {
+        div()
+            .size(px(6.))
+            .flex_shrink_0()
+            .rounded_full()
+            .bg(tone)
+            .into_any_element()
+    };
+
+    let sub_text = format!("{} · {}", row.state.label(), row.sub);
+    let ctx_tip = row
+        .ctx_label
+        .as_deref()
+        .map(|l| format!("  ·  ctx {l}"))
+        .unwrap_or_default();
+    let tip_text = format!("{}\n{}{}", row.title, sub_text, ctx_tip);
+
+    let card = div()
+        .id(("ag-run", idx))
+        .group(gid.clone())
+        .w_full()
+        .h_full()
+        .px(px(ui::SP_2))
+        .rounded(px(ui::R_MD))
+        .border_1()
+        .flex()
+        .items_center()
+        .gap(px(ui::SP_2))
+        .cursor_pointer()
+        .when(row.selected, |d| {
+            d.bg(crate::theme::selected_bg())
+                .border_color(c(th.accent).opacity(0.45))
+                .hover(|s| s.bg(c(cur().accent).opacity(0.18)))
+        })
+        .when(!row.selected, |d| {
+            d.bg(tone.opacity(0.08))
+                .border_color(tone.opacity(0.24))
+                .hover(|s| s.bg(crate::theme::hover_bg()))
+        })
+        .tooltip(ui::tip(tip_text))
+        .on_click(window.listener_for(root, move |this, _, w, cx| {
+            this.focus_pane_anywhere(&pane_click, w, cx);
+        }))
+        .on_mouse_down(
+            gpui::MouseButton::Right,
+            window.listener_for(root, move |this, ev: &gpui::MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.agent_hub.menu = Some((
+                    AgentMenuTarget::Running {
+                        pane: pane_ctx.clone(),
+                        tab: tab_idx,
+                        has_worktree: has_wt,
+                        session_id: sid.clone(),
+                    },
+                    ev.position,
+                ));
+                cx.notify();
+            }),
+        )
+        .child(left_tile)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .justify_center()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(ui::SP_1))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .text_size(px(ui::fs_body()))
+                                .font_weight(if row.selected {
+                                    FontWeight::SEMIBOLD
+                                } else {
+                                    FontWeight::MEDIUM
+                                })
+                                .text_color(c(th.text))
+                                .child(row.title),
+                        )
+                        .child(status_badge)
+                        .when_some(row.ctx_label.as_ref(), |d, lbl| {
+                            d.child(render_ctx_ring(row.ctx_frac, lbl, false))
+                        }),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(ui::SP_1))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .text_size(px(ui::fs_caption()))
+                                .text_color(c(th.overlay1))
+                                .child(sub_text),
+                        )
+                        .child(
+                            ui::row_actions(gid).child(
+                                ui::icon_button(
+                                    ("ag-r-x", idx),
+                                    IconName::X,
+                                    ui::IconBtn::Sm,
+                                    t("ag.close_pane"),
+                                )
+                                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .on_click(window.listener_for(root, move |this, _, w, cx| {
+                                    cx.stop_propagation();
+                                    this.close_pane_entity(&pane_close, w, cx);
+                                })),
+                            ),
+                        ),
+                ),
+        );
+
+    div()
+        .w_full()
+        .h(px(52.))
+        .px(px(ui::LIST_INSET))
+        .pt(px(2.))
+        .pb(px(4.))
+        .child(card)
+        .into_any_element()
+}
 
     /// Empty state in the center area when `Tool::Agents` has no open tabs.
     pub(crate) fn agents_ws_empty(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -3333,11 +3554,19 @@ impl Root {
             .child(launch_btns);
 
         let now_secs = agent_history::now_unix_secs();
+        let query = self.search_query_lower(cx);
+        let filter = self.agent_hub.filter.as_str();
         let recents: Vec<SessionMeta> = self
-            .filtered_by_agent_and_query(cx)
-            .into_iter()
-            .filter(|m| !self.is_meta_archived(m))
+            .agent_hub
+            .sessions
+            .iter()
+            .filter(|m| {
+                (filter == "all" || m.agent == filter)
+                    && m.matches_query(&query)
+                    && !self.is_meta_archived(m)
+            })
             .take(6)
+            .cloned()
             .collect();
         let has_recents = !recents.is_empty();
         let mut recent_col = div().flex().flex_col().gap(px(ui::SP_1)).w_full();
@@ -3548,7 +3777,8 @@ impl Root {
                 this.agent_hub.agent_menu = false;
                 this.agent_hub.selected_session_idx = 0;
                 this.agent_hub.kbd_active = false;
-                this.agent_hub.scroll.scroll_to_item(0);
+                this.agent_hub.invalidate_layout();
+                this.agent_hub.scroll_to_top_reset();
                 cx.notify();
             })),
         );
@@ -3587,7 +3817,8 @@ impl Root {
                     this.agent_hub.agent_menu = false;
                     this.agent_hub.selected_session_idx = 0;
                     this.agent_hub.kbd_active = false;
-                    this.agent_hub.scroll.scroll_to_item(0);
+                    this.agent_hub.invalidate_layout();
+                    this.agent_hub.scroll_to_top_reset();
                     cx.notify();
                 }));
                 list = list.child(item);
@@ -4209,11 +4440,25 @@ impl Root {
         .into_any_element()
     }
 
+    /// Lightweight count of agent/workbench panes for center footer (avoids screen text extraction).
+    fn count_running_agent_panes(&self, cx: &App) -> usize {
+        let mut count = 0usize;
+        for tab in &self.tabs {
+            for pane in tab.layout.leaves() {
+                let v = pane.read(cx);
+                if v.agent_label().is_some() || v.ws == Some(Tool::Agents) {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
     /// Bottom bar inside the center editor card when `self.tool == Tool::Agents`.
     pub(crate) fn agent_center_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
         let (att_count, att_urgent) = attention::summary_and_sync_badge(self, cx);
-        let run_count = self.collect_running_agent_rows(cx).len();
+        let run_count = self.count_running_agent_panes(cx);
         let total_hist = self.agent_hub.sessions.len();
 
         let (focus_label, focus_working, branch_label, ctx_info, has_wt_tab, active_tab_idx) = self
@@ -4348,7 +4593,99 @@ impl Root {
     }
 }
 
-struct ProjectHeaderMeta {
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct LiveRowSig {
+    pane_id: gpui::EntityId,
+    agent_id: Option<String>,
+    state: AgentState,
+    selected: bool,
+    session_id: Option<String>,
+    title: String,
+    ctx_label: Option<String>,
+    ctx_permille: Option<i32>,
+    cwd: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct AgentListCacheKey {
+    sessions_rev: u64,
+    layout_rev: u64,
+    query: String,
+    filter: String,
+    focused_sid: Option<String>,
+    time_minute: i64,
+    recent_projects: Vec<String>,
+    live: Vec<LiveRowSig>,
+}
+
+pub(crate) enum AgentFlatRow {
+    ProjectHeader {
+        proj_idx: usize,
+    },
+    EmptyProject {
+        proj_idx: usize,
+        cwd: Option<String>,
+    },
+    StatusHeader {
+        proj_idx: usize,
+        proj_key: String,
+        status: SessionGroupStatus,
+        count: usize,
+        collapsed: bool,
+    },
+    Running {
+        proj_idx: usize,
+        run_idx: usize,
+        row: RunningRow,
+    },
+    Session {
+        proj_idx: usize,
+        nav_idx: usize,
+        meta: SessionMeta,
+        live_state: Option<AgentState>,
+        active_open: bool,
+        archived: bool,
+        ctx_frac: Option<f32>,
+        ctx_label: Option<String>,
+        live_title: Option<String>,
+    },
+    LoadMore {
+        proj_idx: usize,
+        proj_key: String,
+        status: SessionGroupStatus,
+        remaining: usize,
+    },
+}
+
+impl AgentFlatRow {
+    fn proj_idx(&self) -> usize {
+        match self {
+            Self::ProjectHeader { proj_idx }
+            | Self::EmptyProject { proj_idx, .. }
+            | Self::StatusHeader { proj_idx, .. }
+            | Self::Running { proj_idx, .. }
+            | Self::Session { proj_idx, .. }
+            | Self::LoadMore { proj_idx, .. } => *proj_idx,
+        }
+    }
+}
+
+pub(crate) struct AgentListSnapshot {
+    key: AgentListCacheKey,
+    now_secs: i64,
+    filter_total: usize,
+    filter_counts: Vec<(String, usize)>,
+    running_active_count: usize,
+    archived_total: usize,
+    active_total: usize,
+    projects: Vec<ProjectHeaderMeta>,
+    rows: Vec<AgentFlatRow>,
+    shape: Vec<u8>,
+    nav_row_indices: Vec<usize>,
+    nav_sessions: Vec<SessionMeta>,
+}
+
+pub(crate) struct ProjectHeaderMeta {
     key: String,
     name: String,
     cwd: String,
@@ -4356,6 +4693,7 @@ struct ProjectHeaderMeta {
     has_attention: bool,
     has_running: bool,
     collapsed: bool,
+    hdr_ix: usize,
 }
 
 struct ProjectBucket {
@@ -4391,7 +4729,8 @@ enum GroupedItem {
     LiveOnly(RunningRow),
 }
 
-struct RunningRow {
+#[derive(Clone)]
+pub(crate) struct RunningRow {
     pane: Entity<TermView>,
     tab: usize,
     #[allow(dead_code)]
@@ -4428,5 +4767,61 @@ fn reveal_in_file_manager(path: &Path) {
         if let Some(parent) = path.parent() {
             let _ = std::process::Command::new("xdg-open").arg(parent).spawn();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_hub_revs_and_group_collapse() {
+        let mut hub = AgentHub::default();
+        assert_eq!(hub.sessions_rev, 0);
+        assert_eq!(hub.layout_rev, 0);
+
+        hub.invalidate_sessions();
+        assert_eq!(hub.sessions_rev, 1);
+
+        // Regular groups default to expanded, Archived defaults to collapsed.
+        assert!(!hub.is_group_collapsed("proj", SessionGroupStatus::Idle));
+        assert!(hub.is_group_collapsed("proj", SessionGroupStatus::Archived));
+
+        hub.toggle_group_collapsed("proj", SessionGroupStatus::Idle);
+        assert!(hub.is_group_collapsed("proj", SessionGroupStatus::Idle));
+        assert_eq!(hub.layout_rev, 1);
+
+        hub.toggle_group_collapsed("proj", SessionGroupStatus::Archived);
+        assert!(!hub.is_group_collapsed("proj", SessionGroupStatus::Archived));
+        assert_eq!(hub.layout_rev, 2);
+
+        hub.scroll_to_top_reset();
+        assert!(hub.reset_scroll_pending);
+    }
+
+    #[test]
+    fn flat_row_proj_idx_reports_owner() {
+        let h = AgentFlatRow::ProjectHeader { proj_idx: 2 };
+        let e = AgentFlatRow::EmptyProject {
+            proj_idx: 3,
+            cwd: None,
+        };
+        let s = AgentFlatRow::StatusHeader {
+            proj_idx: 4,
+            proj_key: "k".into(),
+            status: SessionGroupStatus::Idle,
+            count: 1,
+            collapsed: false,
+        };
+        let m = AgentFlatRow::LoadMore {
+            proj_idx: 5,
+            proj_key: "k".into(),
+            status: SessionGroupStatus::Idle,
+            remaining: 10,
+        };
+        assert_eq!(h.proj_idx(), 2);
+        assert_eq!(e.proj_idx(), 3);
+        assert_eq!(s.proj_idx(), 4);
+        assert_eq!(m.proj_idx(), 5);
     }
 }
