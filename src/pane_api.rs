@@ -389,7 +389,8 @@ impl Root {
                 task,
                 reply,
             } => {
-                let cli = agent::default_cli_command(&agent_name).to_string();
+                let raw_cli = agent::default_cli_command(&agent_name);
+                let (cli, pre_sid) = agent::prepare_fresh_launch(&agent_name, raw_cli);
                 let caller_loc = caller_pane
                     .as_deref()
                     .and_then(|id| self.pane_by_id(id, cx));
@@ -408,9 +409,15 @@ impl Root {
                     cx,
                 );
                 let new_id = pane.read(cx).pane_id.clone();
+                let auto_t = task.is_none();
                 pane.update(cx, |v, _| {
                     v.parent_pane_id = caller_pane;
                     v.ws = Some(Tool::Agents);
+                    v.auto_title = auto_t;
+                    v.set_launched_agent(&agent_name);
+                    if let Some(sid) = pre_sid {
+                        v.agent_session_id = Some(sid);
+                    }
                 });
 
                 if let (Some((ti, target)), None) = (caller_loc, task.as_ref()) {

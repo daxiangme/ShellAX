@@ -938,6 +938,8 @@ pub struct TermView {
     pub hook_state: Option<(String, AgentState, Instant)>,
     pub agent_session_id: Option<String>,
     pub agent_transcript_path: Option<String>,
+    pub launched_agent_id: Option<String>,
+    launched_agent_seen_live: bool,
     pub auto_title: bool,
     pub agent_started_unix: i64,
     last_agent_sig: Option<(String, AgentState, String, Option<String>)>,
@@ -1055,6 +1057,7 @@ pub struct StepOutput {
 pub enum TermEvent {
     Keyword(String, String),
     Explain,
+    Focused,
     Agent(String, AgentState),
     AgentRefresh,
     LongDone(String, u64, i32),
@@ -1350,6 +1353,7 @@ impl TermView {
                     }
                 }
                 v.kick_blink(w, cx);
+                cx.emit(TermEvent::Focused);
                 cx.notify();
             }),
             cx.on_blur(&focus, window, |v, _w, cx| {
@@ -1386,6 +1390,8 @@ impl TermView {
             hook_state: None,
             agent_session_id: None,
             agent_transcript_path: None,
+            launched_agent_id: None,
+            launched_agent_seen_live: false,
             auto_title: false,
             agent_started_unix: 0,
             last_agent_sig: None,
@@ -1708,6 +1714,33 @@ impl TermView {
         }
     }
 
+    /// Record the intended agent identity when launching/resuming a pane so its icon and label
+    /// match immediately before process detection finishes (and stay stable on Windows ConPTY).
+    pub fn set_launched_agent(&mut self, agent_id: &str) {
+        let norm = agent::normalize_id(agent_id);
+        if norm.is_empty() {
+            return;
+        }
+        self.launched_agent_id = Some(norm.clone());
+        self.launched_agent_seen_live = false;
+        if let Some(idx) = self
+            .manifests
+            .iter()
+            .position(|m| m.id == norm || m.aliases.iter().any(|a| a == &norm))
+        {
+            if self.agent.is_none() {
+                self.agent = Some((idx, AgentState::Unknown));
+            }
+            if self.agent_started.is_none() {
+                self.agent_started = Some(Instant::now());
+            }
+            if self.agent_started_unix == 0 {
+                self.agent_started_unix = now_unix_secs();
+            }
+            self.last_agent = Some(agent::display_name(&self.manifests[idx].id).to_string());
+        }
+    }
+
     fn detect_agent(&mut self, cx: &mut Context<Self>) {
         self.last_detect = Instant::now();
         let Some(s) = &self.session else { return };
@@ -1716,25 +1749,49 @@ impl TermView {
         let progress = s.shared.progress.lock().unwrap().clone();
         let screen = s.screen_text();
         let board = agent::parse_claude_agents(&screen);
+        let launched_idx = self.launched_agent_id.as_deref().and_then(|aid| {
+            self.manifests
+                .iter()
+                .position(|m| m.id == aid || m.aliases.iter().any(|a| a == aid))
+        });
         let is_shell = fg
             .as_deref()
             .is_some_and(|p| matches!(p, "bash" | "zsh" | "sh" | "fish" | "dash"))
             && board.is_none();
+        let mut fg_match: Option<usize> = None;
         let idx = if is_shell {
-            None
+            let boot_expired = self
+                .agent_started
+                .is_some_and(|t| t.elapsed() >= Duration::from_secs(15));
+            if launched_idx.is_none() || self.launched_agent_seen_live || boot_expired {
+                self.launched_agent_id = None;
+                self.launched_agent_seen_live = false;
+                None
+            } else {
+                launched_idx
+            }
         } else {
-            // local: fg process is authoritative; ssh: last submitted command / title
+            // local: fg process is authoritative; ssh/windows: last submitted command / title / launched hint
             let cmd = if fg.is_some() {
                 None
             } else {
                 self.last_command.as_deref()
             };
+            fg_match = fg
+                .as_deref()
+                .and_then(|p| agent::identify(&self.manifests, Some(p), None, ""));
+            if let (Some(fgi), Some(li)) = (fg_match, launched_idx) {
+                if fgi != li {
+                    self.launched_agent_id = Some(self.manifests[fgi].id.clone());
+                }
+            }
             agent::identify(&self.manifests, fg.as_deref(), cmd, &title)
                 .or_else(|| {
-                    board.as_ref().and_then(|_| {
-                        self.manifests.iter().position(|m| m.id == "claude")
-                    })
+                    board
+                        .as_ref()
+                        .and_then(|_| self.manifests.iter().position(|m| m.id == "claude"))
                 })
+                .or(launched_idx)
                 .filter(|i| config::get().agents.is_detect_enabled(&self.manifests[*i].id))
         };
         let hook_override = self.hook_state.as_ref().and_then(|(hid, hst, at)| {
@@ -1767,6 +1824,7 @@ impl TermView {
         let new = match new {
             Some((i, st)) if st != AgentState::Unknown => {
                 self.agent_seen = Instant::now();
+                self.launched_agent_seen_live = true;
                 let prev_st = self.agent.filter(|(p, _)| *p == i).map(|(_, s)| s);
                 let focused = self.st.borrow().focused;
                 let final_st = match st {
@@ -1798,7 +1856,11 @@ impl TermView {
                 Some((i, final_st))
             }
             Some((i, st)) => {
-                if self.agent_seen.elapsed() < Duration::from_secs(10) {
+                let persistent = fg_match == Some(i) || (!is_shell && launched_idx == Some(i));
+                if fg_match == Some(i) {
+                    self.launched_agent_seen_live = true;
+                }
+                if persistent || self.agent_seen.elapsed() < Duration::from_secs(10) {
                     Some((i, st))
                 } else {
                     self.agent_unread = false;
@@ -1889,14 +1951,13 @@ impl TermView {
         }
     }
 
-    /// Short name for the sidebar: the terminal title, else the first command, else the agent.
+    /// Short name for the sidebar: meaningful prompt/title, else detected agent, else first command.
     pub fn agent_caption(&self) -> String {
-        if let Some(s) = &self.session {
-            let title = s.title();
-            let title = title.trim();
-            if !title.is_empty() && !Self::shellish_title(title) {
-                return Self::clip_caption(title);
-            }
+        if let Some(m) = self.meaningful_agent_caption() {
+            return m;
+        }
+        if let Some((n, _)) = self.agent_label() {
+            return n;
         }
         if let Some(cmd) = &self.last_command {
             let one = cmd.lines().next().unwrap_or("").trim();
@@ -1904,9 +1965,7 @@ impl TermView {
                 return Self::clip_caption(one);
             }
         }
-        self.agent_label()
-            .map(|(n, _)| n)
-            .unwrap_or_default()
+        String::new()
     }
 
     pub fn agent_started(&self) -> Option<Instant> {
@@ -5678,13 +5737,18 @@ fn now_unix_secs() -> i64 {
 fn is_status_glyph(ch: char) -> bool {
     matches!(
         ch,
-        '⠋'..='⠏'
+        '\u{2800}'..='\u{28FF}'
+            | '\u{25D0}'..='\u{25D3}'
+            | '✢'
             | '✳'
-            | '⠐'
+            | '✶'
+            | '✻'
+            | '✽'
             | '●'
             | '◉'
             | '○'
             | '•'
+            | '·'
             | '▸'
             | '▪'
             | '✓'
@@ -5705,67 +5769,7 @@ fn truncate_caption(s: &str, max_chars: usize) -> String {
     }
 }
 
-fn is_generic_title(candidate: &str, cwd_name: Option<&str>) -> bool {
-    let trimmed = candidate.trim();
-    if trimmed.is_empty() {
-        return true;
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    if matches!(
-        lower.as_str(),
-        "shellax"
-            | "zsh"
-            | "bash"
-            | "sh"
-            | "fish"
-            | "nu"
-            | "pwsh"
-            | "cmd"
-            | "-zsh"
-            | "-bash"
-            | "agy"
-            | "antigravity"
-            | "antigravity cli"
-            | "claude"
-            | "claude code"
-            | "claude-code"
-            | "codex"
-            | "codex cli"
-            | "gemini"
-            | "gemini cli"
-            | "gemini-cli"
-            | "grok"
-            | "opencode"
-            | "aider"
-    ) {
-        return true;
-    }
-    if trimmed.starts_with('/')
-        || trimmed.starts_with("~/")
-        || trimmed.starts_with("http://")
-        || trimmed.starts_with("https://")
-    {
-        return true;
-    }
-    if trimmed.contains('@') && !trimmed.contains(' ') {
-        return true;
-    }
-    if trimmed.contains(':') && (trimmed.contains('/') || trimmed.contains('~')) {
-        return true;
-    }
-    if let Some(cwd) = cwd_name {
-        if !cwd.is_empty() && trimmed.eq_ignore_ascii_case(cwd) {
-            return true;
-        }
-    }
-    false
-}
-
-fn extract_meaningful_caption(
-    osc_title: &str,
-    cwd_name: Option<&str>,
-    screen: Option<&str>,
-) -> Option<String> {
+pub(crate) fn clean_osc_agent_title(osc_title: &str) -> String {
     let mut t = osc_title
         .trim_start_matches(|c: char| is_status_glyph(c) || c.is_whitespace())
         .trim();
@@ -5787,8 +5791,82 @@ fn extract_meaningful_caption(
             break;
         }
     }
-    if !is_generic_title(t, cwd_name) {
-        return Some(truncate_caption(t, 36));
+    t.to_string()
+}
+
+pub(crate) fn is_generic_title(candidate: &str, cwd_name: Option<&str>) -> bool {
+    let trimmed = candidate.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "shellax"
+            | "zsh"
+            | "bash"
+            | "sh"
+            | "fish"
+            | "nu"
+            | "pwsh"
+            | "pwsh.exe"
+            | "cmd"
+            | "cmd.exe"
+            | "powershell"
+            | "windows powershell"
+            | "-zsh"
+            | "-bash"
+            | "agy"
+            | "antigravity"
+            | "antigravity cli"
+            | "claude"
+            | "claude code"
+            | "claude-code"
+            | "codex"
+            | "codex cli"
+            | "gemini"
+            | "gemini cli"
+            | "gemini-cli"
+            | "grok"
+            | "opencode"
+            | "aider"
+    ) {
+        return true;
+    }
+    if trimmed.starts_with('/')
+        || trimmed.starts_with("~/")
+        || trimmed.starts_with("~\\")
+        || trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+        || (trimmed.len() >= 3
+            && trimmed.as_bytes()[0].is_ascii_alphabetic()
+            && trimmed.as_bytes()[1] == b':'
+            && matches!(trimmed.as_bytes()[2], b'\\' | b'/'))
+    {
+        return true;
+    }
+    if trimmed.contains('@') && !trimmed.contains(' ') {
+        return true;
+    }
+    if trimmed.contains(':') && (trimmed.contains('/') || trimmed.contains('~') || trimmed.contains('\\')) {
+        return true;
+    }
+    if let Some(cwd) = cwd_name {
+        if !cwd.is_empty() && trimmed.eq_ignore_ascii_case(cwd) {
+            return true;
+        }
+    }
+    false
+}
+
+fn extract_meaningful_caption(
+    osc_title: &str,
+    cwd_name: Option<&str>,
+    screen: Option<&str>,
+) -> Option<String> {
+    let t = clean_osc_agent_title(osc_title);
+    if !is_generic_title(&t, cwd_name) {
+        return Some(truncate_caption(&t, 36));
     }
 
     let screen = screen?;

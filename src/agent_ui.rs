@@ -520,14 +520,26 @@ impl Root {
                     });
                 }
             }
+            let mut tick: u32 = 0;
             loop {
                 cx.background_executor()
-                    .timer(Duration::from_secs(15))
+                    .timer(Duration::from_secs(3))
                     .await;
+                tick = tick.wrapping_add(1);
                 let active = this
                     .update(cx, |r, cx| {
                         if r.tool == Tool::Agents && !r.agent_hub.scanning {
-                            r.refresh_agent_history(cx);
+                            let has_active_turn = r.tabs.iter().any(|t| {
+                                Root::tab_module(t, cx) == Tool::Agents
+                                    && t.layout.leaves().iter().any(|p| {
+                                        let v = p.read(cx);
+                                        v.agent.is_some_and(|(_, st)| st == AgentState::Working)
+                                            || (v.agent.is_some() && v.agent_session_id.is_none())
+                                    })
+                            });
+                            if has_active_turn || tick.is_multiple_of(5) {
+                                r.refresh_agent_history(cx);
+                            }
                         }
                     })
                     .is_ok();
@@ -563,7 +575,8 @@ impl Root {
                 }
                 r.agent_hub.scanning = false;
                 r.agent_hub.last_auto_scan = Some(std::time::Instant::now());
-                if changed || was_empty {
+                let bound = r.sync_live_agent_sessions(cx);
+                if changed || was_empty || bound {
                     cx.notify();
                 }
             });
@@ -581,7 +594,10 @@ impl Root {
         }
         if let Some(sid) = v.agent_session_id.as_deref() {
             if let Some(meta) = self.agent_hub.sessions.iter().find(|m| m.id == sid) {
-                if meta.title.is_some() || meta.first_prompt.is_some() {
+                if meta.title.is_some()
+                    || meta.first_prompt.is_some()
+                    || meta.last_prompt.is_some()
+                {
                     return Some(truncate_tab_title(meta.display_title(), 36));
                 }
             }
@@ -593,11 +609,25 @@ impl Root {
     pub(crate) fn resolve_auto_tab_title(&self, tab: &Tab, cx: &App) -> Option<String> {
         let v = tab.focused.read(cx);
         let allow_auto = tab.name.is_none() || v.auto_title;
-        self.resolve_pane_auto_title(v, allow_auto)
+        if let Some(t) = self.resolve_pane_auto_title(v, allow_auto) {
+            return Some(t);
+        }
+        if tab.name.is_none() {
+            for leaf in tab.layout.leaves() {
+                if leaf.entity_id() == tab.focused.entity_id() {
+                    continue;
+                }
+                let lv = leaf.read(cx);
+                if let Some(t) = self.resolve_pane_auto_title(lv, true) {
+                    return Some(t);
+                }
+            }
+        }
+        None
     }
 
     /// Trigger a throttled background scan on agent state changes and schedule one follow-up
-    /// scan so delayed AI summary titles (e.g. `agy` SQLite updates) appear automatically.
+    /// scan so delayed AI summary titles / newly created JSONL logs appear automatically.
     pub(crate) fn maybe_auto_refresh_agent_history(
         &mut self,
         urgent: bool,
@@ -621,32 +651,42 @@ impl Root {
 
         if urgent && !self.agent_hub.follow_up_scan_scheduled {
             let needs_summary = self.tabs.iter().any(|t| {
-                let v = t.focused.read(cx);
-                let is_auto = t.name.is_none() || v.auto_title;
-                if !is_auto || v.agent.is_none() {
-                    return false;
-                }
-                match v.agent_session_id.as_deref() {
-                    Some(sid) => !self
-                        .agent_hub
-                        .sessions
-                        .iter()
-                        .any(|m| m.id == sid && m.title.is_some()),
-                    None => true,
-                }
+                t.layout.leaves().iter().any(|p| {
+                    let v = p.read(cx);
+                    let is_auto = t.name.is_none() || v.auto_title;
+                    if v.agent.is_none() {
+                        return false;
+                    }
+                    if matches!(v.agent, Some((_, AgentState::Working))) {
+                        return true;
+                    }
+                    if !is_auto {
+                        return false;
+                    }
+                    match v.agent_session_id.as_deref() {
+                        Some(sid) => !self
+                            .agent_hub
+                            .sessions
+                            .iter()
+                            .any(|m| m.id == sid && m.title.is_some()),
+                        None => true,
+                    }
+                })
             });
             if needs_summary {
                 self.agent_hub.follow_up_scan_scheduled = true;
                 cx.spawn(async move |this, cx| {
                     cx.background_executor()
-                        .timer(Duration::from_millis(1800))
+                        .timer(Duration::from_millis(1400))
                         .await;
                     let _ = this.update(cx, |r, cx| {
                         r.agent_hub.follow_up_scan_scheduled = false;
-                        r.sync_live_agent_sessions(cx);
+                        let bound = r.sync_live_agent_sessions(cx);
                         if !r.agent_hub.scanning {
                             r.agent_hub.last_auto_scan = Some(std::time::Instant::now());
                             r.refresh_agent_history(cx);
+                        } else if bound {
+                            cx.notify();
                         }
                     });
                 })
@@ -655,21 +695,40 @@ impl Root {
         }
     }
 
-    /// Bind unbound live `agy` / `antigravity` panes to their active conversation ID from
-    /// `~/.gemini/antigravity-cli/history.jsonl` so DB titles & resume links stay in sync.
-    pub(crate) fn sync_live_agent_sessions(&mut self, cx: &mut Context<Self>) {
+    /// Bind unbound live agent panes (`claude`, `codex`, `agy`, etc.) to their active
+    /// history session ID so live panes merge with disk history and titles stay in sync.
+    /// Returns `true` if any pane received a new session ID binding.
+    pub(crate) fn sync_live_agent_sessions(&mut self, cx: &mut Context<Self>) -> bool {
+        fn norm_cwd(p: &str) -> String {
+            let t = p.trim().trim_end_matches(['/', '\\']);
+            if cfg!(windows) {
+                t.replace('/', "\\").to_ascii_lowercase()
+            } else {
+                t.to_string()
+            }
+        }
+        fn compact_lower(s: &str) -> String {
+            s.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_lowercase()
+        }
+
         struct UnboundPane {
             pane: Entity<TermView>,
+            agent_id: String,
             cwd: Option<String>,
             started_unix: i64,
-            screen: String,
+            screen_compact: String,
+            osc_clean: String,
         }
         struct Cand {
+            agent_id: String,
             cid: String,
             workspace: Option<String>,
             first_ts: i64,
             last_ts: i64,
-            prompts: Vec<String>,
+            hints: Vec<String>,
         }
 
         let mut bound_sids: HashSet<String> = HashSet::new();
@@ -686,71 +745,146 @@ impl Root {
                     bound_sids.insert(sid.clone());
                     continue;
                 }
-                if matches!(v.agent_id().as_deref(), Some("agy" | "antigravity")) {
+                if let Some(raw_aid) = v.agent_id() {
+                    let agent_id = agent::normalize_id(&raw_aid);
                     let cwd = v
                         .shell_cwd()
                         .or_else(|| task_repo.clone())
-                        .map(|d| d.trim_end_matches(['/', '\\']).to_string());
-                    let screen = v
+                        .map(|d| norm_cwd(&d))
+                        .filter(|s| !s.is_empty());
+                    let screen_compact = v
                         .session
                         .as_ref()
-                        .map(|s| s.screen_text())
+                        .map(|s| compact_lower(&s.screen_text()))
+                        .unwrap_or_default();
+                    let osc_clean = v
+                        .session
+                        .as_ref()
+                        .map(|s| crate::termview::clean_osc_agent_title(&s.title()))
+                        .filter(|t| !crate::termview::is_generic_title(t, None))
+                        .map(|t| compact_lower(&t))
                         .unwrap_or_default();
                     unbound.push(UnboundPane {
                         pane: pane.clone(),
+                        agent_id,
                         cwd,
                         started_unix: v.agent_started_unix,
-                        screen,
+                        screen_compact,
+                        osc_clean,
                     });
                 }
             }
         }
         if unbound.is_empty() {
-            return;
+            return false;
         }
 
-        let tail = agent_history::lookup_antigravity_history_tail();
-        if tail.is_empty() {
-            return;
-        }
-        let mut by_cid: HashMap<String, Cand> = HashMap::new();
-        for (cid, display, workspace, ts) in tail {
-            if bound_sids.contains(&cid) {
+        let now_secs = agent_history::now_unix_secs();
+        let min_pane_start = unbound
+            .iter()
+            .filter_map(|u| (u.started_unix > 0).then_some(u.started_unix))
+            .min()
+            .unwrap_or(now_secs)
+            .saturating_sub(30);
+
+        let mut by_key: HashMap<(String, String), Cand> = HashMap::new();
+        for m in &self.agent_hub.sessions {
+            if bound_sids.contains(&m.id) || m.updated < min_pane_start {
                 continue;
             }
-            let norm_ws = workspace.map(|w| w.trim_end_matches(['/', '\\']).to_string());
-            let entry = by_cid.entry(cid.clone()).or_insert_with(|| Cand {
-                cid,
-                workspace: norm_ws.clone(),
-                first_ts: ts,
-                last_ts: ts,
-                prompts: Vec::new(),
-            });
-            entry.first_ts = entry.first_ts.min(ts);
-            entry.last_ts = entry.last_ts.max(ts);
-            if entry.workspace.is_none() {
-                entry.workspace = norm_ws;
+            let aid = agent::normalize_id(&m.agent);
+            let ws = m.cwd.as_deref().map(norm_cwd).filter(|s| !s.is_empty());
+            let mut hints = Vec::new();
+            for cand in [
+                m.title.as_deref(),
+                m.first_prompt.as_deref(),
+                m.last_prompt.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let c = cand.trim();
+                if !c.is_empty() && !hints.iter().any(|x| x == c) {
+                    hints.push(c.to_string());
+                }
             }
-            let p = display.trim();
-            if !p.is_empty() && !p.starts_with('/') && !entry.prompts.iter().any(|x| x == p) {
-                entry.prompts.push(p.to_string());
+            by_key.insert(
+                (aid.clone(), m.id.clone()),
+                Cand {
+                    agent_id: aid,
+                    cid: m.id.clone(),
+                    workspace: ws,
+                    first_ts: m.started,
+                    last_ts: m.updated,
+                    hints,
+                },
+            );
+        }
+
+        if unbound.iter().any(|u| u.agent_id == "agy") {
+            for (cid, display, workspace, ts) in agent_history::lookup_antigravity_history_tail() {
+                if bound_sids.contains(&cid) {
+                    continue;
+                }
+                let norm_ws = workspace
+                    .as_deref()
+                    .map(norm_cwd)
+                    .filter(|s| !s.is_empty());
+                let entry = by_key
+                    .entry(("agy".to_string(), cid.clone()))
+                    .or_insert_with(|| Cand {
+                        agent_id: "agy".to_string(),
+                        cid,
+                        workspace: norm_ws.clone(),
+                        first_ts: ts,
+                        last_ts: ts,
+                        hints: Vec::new(),
+                    });
+                entry.first_ts = entry.first_ts.min(ts);
+                entry.last_ts = entry.last_ts.max(ts);
+                if entry.workspace.is_none() {
+                    entry.workspace = norm_ws;
+                }
+                let p = display.trim();
+                if !p.is_empty() && !p.starts_with('/') && !entry.hints.iter().any(|x| x == p) {
+                    entry.hints.push(p.to_string());
+                }
             }
         }
 
-        let mut cands: Vec<Cand> = by_cid.into_values().collect();
+        let mut cands: Vec<Cand> = by_key.into_values().collect();
+        if cands.is_empty() {
+            return false;
+        }
         cands.sort_by_key(|c| std::cmp::Reverse(c.last_ts));
 
-        let mut used: HashSet<String> = HashSet::new();
-        let mut need_scan = false;
-        let unbound_total = unbound.len();
+        let mut group_counts: HashMap<(String, Option<String>), usize> = HashMap::new();
+        for up in &unbound {
+            *group_counts
+                .entry((up.agent_id.clone(), up.cwd.clone()))
+                .or_insert(0) += 1;
+        }
 
-        for up in unbound {
-            let mut best: Option<(i32, i64, String)> = None;
+        let mut used: HashSet<(String, String)> = HashSet::new();
+        let mut need_scan = false;
+        let mut bound_count = 0usize;
+
+        for up in &unbound {
+            let ref_ts = if up.started_unix > 0 {
+                up.started_unix
+            } else {
+                now_secs
+            };
+            let same_group = group_counts
+                .get(&(up.agent_id.clone(), up.cwd.clone()))
+                .copied()
+                .unwrap_or(1);
+            let mut matching_cands = 0usize;
             for cand in &cands {
-                if used.contains(&cand.cid) {
-                    continue;
-                }
-                if up.started_unix > 0 && cand.last_ts < up.started_unix.saturating_sub(15) {
+                if cand.agent_id != up.agent_id
+                    || used.contains(&(cand.agent_id.clone(), cand.cid.clone()))
+                    || cand.last_ts < ref_ts.saturating_sub(15)
+                {
                     continue;
                 }
                 if let (Some(pc), Some(cw)) = (up.cwd.as_deref(), cand.workspace.as_deref()) {
@@ -758,18 +892,58 @@ impl Root {
                         continue;
                     }
                 }
+                if cand.first_ts >= ref_ts.saturating_sub(25) && !cand.hints.is_empty() {
+                    matching_cands += 1;
+                }
+            }
+
+            let mut best: Option<(i32, i64, String)> = None;
+            for cand in &cands {
+                if cand.agent_id != up.agent_id
+                    || used.contains(&(cand.agent_id.clone(), cand.cid.clone()))
+                    || cand.last_ts < ref_ts.saturating_sub(15)
+                {
+                    continue;
+                }
+                if let (Some(pc), Some(cw)) = (up.cwd.as_deref(), cand.workspace.as_deref()) {
+                    if pc != cw {
+                        continue;
+                    }
+                }
+                let osc_hit = !up.osc_clean.is_empty()
+                    && cand.hints.iter().any(|h| {
+                        let hc = compact_lower(h);
+                        hc.chars().count() >= 2
+                            && (hc == up.osc_clean
+                                || hc.contains(&up.osc_clean)
+                                || up.osc_clean.contains(&hc))
+                    });
                 let prompt_hit = cand
-                    .prompts
+                    .hints
                     .iter()
-                    .filter(|p| p.chars().count() >= 2 && up.screen.contains(p.as_str()))
-                    .map(|p| p.chars().count() as i32)
+                    .filter_map(|h| {
+                        let hc = compact_lower(h);
+                        let n = hc.chars().count();
+                        if n < 3 {
+                            return None;
+                        }
+                        if up.screen_compact.contains(&hc) {
+                            Some(n as i32)
+                        } else if n > 24 {
+                            let head: String = hc.chars().take(24).collect();
+                            up.screen_compact.contains(&head).then_some(24)
+                        } else {
+                            None
+                        }
+                    })
                     .max();
-                let score = if let Some(len) = prompt_hit {
+                let score = if osc_hit {
+                    2000 + up.osc_clean.chars().count() as i32
+                } else if let Some(len) = prompt_hit {
                     1000 + len
-                } else if up.started_unix > 0
-                    && cand.first_ts >= up.started_unix.saturating_sub(5)
-                    && unbound_total == 1
-                    && !cand.prompts.is_empty()
+                } else if cand.first_ts >= ref_ts.saturating_sub(25)
+                    && same_group == 1
+                    && matching_cands == 1
                 {
                     100
                 } else {
@@ -784,7 +958,8 @@ impl Root {
                 }
             }
             if let Some((_, _, cid)) = best {
-                used.insert(cid.clone());
+                used.insert((up.agent_id.clone(), cid.clone()));
+                bound_count += 1;
                 let has_titled_meta = self
                     .agent_hub
                     .sessions
@@ -798,8 +973,14 @@ impl Root {
                 });
             }
         }
-        if need_scan {
-            self.maybe_auto_refresh_agent_history(true, cx);
+        if bound_count > 0 {
+            if need_scan {
+                self.maybe_auto_refresh_agent_history(true, cx);
+            }
+            cx.notify();
+            true
+        } else {
+            false
         }
     }
 
@@ -914,12 +1095,14 @@ impl Root {
         let sid = meta.id.clone();
         let tp = meta.path.display().to_string();
         let auto_t = meta.title.is_none();
+        let agent_name = meta.agent.clone();
         pane.update(cx, |v, _| {
             v.ws = Some(Tool::Agents);
             v.agent_session_id = Some(sid);
             v.agent_transcript_path = Some(tp);
             v.auto_title = auto_t;
             v.agent_started_unix = agent_history::now_unix_secs();
+            v.set_launched_agent(&agent_name);
         });
         let tab_title: String = meta.display_title().chars().take(28).collect();
         if task_meta.is_none() {
@@ -967,6 +1150,7 @@ impl Root {
         if let Some(ref d) = dir {
             remember_recent_project(d);
         }
+        let (launch_cmd, pre_sid) = agent::prepare_fresh_launch(agent_id, cmd);
         let pane = self.open_pane_with(
             Spec::Local,
             PaneInit {
@@ -980,26 +1164,25 @@ impl Root {
             v.ws = Some(Tool::Agents);
             v.auto_title = true;
             v.agent_started_unix = agent_history::now_unix_secs();
+            v.set_launched_agent(agent_id);
+            if let Some(sid) = pre_sid {
+                v.agent_session_id = Some(sid);
+            }
         });
-        let proj = dir
-            .as_deref()
-            .and_then(|d| d.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next())
-            .unwrap_or("local");
-        let label = format!("{} · {proj}", agent::display_name(agent_id));
         let fh = pane.read(cx).focus.clone();
         self.tool = Tool::Agents;
         let _ = config::update(|s| s.sidebar.tool = Tool::Agents.id().into());
         self.tabs.push(Tab {
             layout: Node::Leaf(pane.clone()),
             focused: pane.clone(),
-            name: Some(label),
+            name: None,
             task: None,
         });
         self.active = self.tabs.len() - 1;
         self.leave_settings();
         self.overlay = crate::Overlay::None;
         window.focus(&fh, cx);
-        send_when_shell_ready(pane, cmd.to_string(), cx);
+        send_when_shell_ready(pane, launch_cmd, cx);
         cx.notify();
     }
 
@@ -1049,8 +1232,6 @@ impl Root {
             .filter(|d| !d.trim().is_empty() && Path::new(d).is_dir())
             .or_else(|| self.default_agent_project_dir(cx))
             .unwrap_or_default();
-        let is_git = Path::new(&init_dir).is_dir()
-            && worktree::git_toplevel(Path::new(&init_dir)).is_some();
         let choices = available_agent_choices();
         let first_agent = choices
             .first()
@@ -1073,7 +1254,7 @@ impl Root {
             name_input,
             base_input,
             prompt_input,
-            use_worktree: is_git,
+            use_worktree: false,
             companion_shell: false,
             selected_agents: first_agent,
             available_agents: choices,
@@ -1123,14 +1304,21 @@ impl Root {
                 .unwrap_or_else(|| "HEAD".into())
         };
         let is_auto_name = raw_name.is_empty();
+        let will_create_wt = use_wt && repo_top.is_some();
         let base_branch_name = worktree::branch_for_task(&raw_name, seed);
-        let display_task_name = if is_auto_name {
+        let display_task_name = if !is_auto_name {
+            raw_name.clone()
+        } else if will_create_wt {
             base_branch_name
                 .strip_prefix("agent/")
                 .unwrap_or(&base_branch_name)
                 .to_string()
         } else {
-            raw_name.clone()
+            selected
+                .iter()
+                .map(|id| agent::display_name(id))
+                .collect::<Vec<_>>()
+                .join(" + ")
         };
 
         let fan_out = selected.len() > 1;
@@ -1139,11 +1327,12 @@ impl Root {
         let mut first_branch: Option<String> = None;
 
         for aid in &selected {
-            let cmd = choices
+            let raw_cmd = choices
                 .iter()
                 .find(|(id, _, _)| id == aid)
                 .map(|(_, _, c)| c.clone())
                 .unwrap_or_else(|| agent::default_cli_command(aid).to_string());
+            let (cmd, pre_sid) = agent::prepare_fresh_launch(aid, &raw_cmd);
 
             let (pane_cwd, wt_opt, br_opt) = if use_wt {
                 if let Some(ref repo) = repo_top {
@@ -1204,6 +1393,10 @@ impl Root {
                 v.ws = Some(Tool::Agents);
                 v.auto_title = is_auto_name;
                 v.agent_started_unix = seed as i64;
+                v.set_launched_agent(aid);
+                if let Some(sid) = pre_sid.clone() {
+                    v.agent_session_id = Some(sid);
+                }
             });
             send_when_shell_ready(pane.clone(), cmd, cx);
             if !raw_prompt.is_empty() {
@@ -1279,7 +1472,7 @@ impl Root {
         self.tabs.push(Tab {
             layout,
             focused: first_pane,
-            name: Some(display_task_name),
+            name: (!is_auto_name).then_some(raw_name),
             task: Some(task_meta),
         });
         self.active = self.tabs.len() - 1;
@@ -1485,7 +1678,9 @@ impl Root {
                 remember_recent_project(&dir);
                 if let Some(d) = this.agent_hub.new_task.as_mut() {
                     let ri = d.repo_input.clone();
-                    d.use_worktree = worktree::git_toplevel(Path::new(&dir)).is_some();
+                    if worktree::fast_git_toplevel(Path::new(&dir)).is_none() {
+                        d.use_worktree = false;
+                    }
                     ri.update(cx, |inp, cx| inp.set_value(dir, window, cx));
                 }
                 cx.notify();
@@ -3950,7 +4145,9 @@ fn render_running_row_el(
                         let rp2 = rp_c.clone();
                         ri_inp.update(cx, |inp, cx| inp.set_value(rp2, w, cx));
                         if let Some(d) = this.agent_hub.new_task.as_mut() {
-                            d.use_worktree = worktree::git_toplevel(Path::new(&rp_c)).is_some();
+                            if worktree::fast_git_toplevel(Path::new(&rp_c)).is_none() {
+                                d.use_worktree = false;
+                            }
                         }
                         cx.notify();
                     })),
@@ -4519,10 +4716,13 @@ fn prepare_session_row(
     }
     let sub_str = sub_parts.join(" · ");
 
-    let (eff_ctx_frac, eff_ctx_label_str) = if let Some(lbl) = ctx_label {
-        (ctx_frac, Some(lbl))
+    let live_pct = ctx_label.as_deref().is_some_and(|l| l.ends_with('%'));
+    let (eff_ctx_frac, eff_ctx_label_str) = if live_pct {
+        (ctx_frac, ctx_label)
     } else if let Some((frac, lbl)) = meta.context_ring_info() {
         (Some(frac), Some(lbl))
+    } else if let Some(lbl) = ctx_label {
+        (ctx_frac, Some(lbl))
     } else {
         (None, None)
     };

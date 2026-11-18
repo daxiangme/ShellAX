@@ -1,5 +1,5 @@
 # Copyright (c) herdr contributors. Licensed under the Apache License, Version 2.0.
-# Unmodified. See THIRD_PARTY_NOTICES.md.
+# Modified by ShellAX. See THIRD_PARTY_NOTICES.md.
 id = "claude"
 version = "2026.10.11.1"
 min_engine_version = 2
@@ -23,7 +23,7 @@ region = "bottom_non_empty_lines(12)"
 visible_working = true
 any = [
   { line_regex = ['^\s*[⏸⏵].*esc to interrupt(?:\s|·|$)'] },
-  { line_regex = ['^\s*[\x{002A}\x{00B7}\x{2722}\x{2733}\x{2736}\x{273B}\x{273D}]\s+\S.*…(?:\s+\(\d+[smh](?:\s|·)|\s*$)'] },
+  { line_regex = ['^\s*[\x{002A}\x{00B7}\x{2722}-\x{274B}]\s+\S.*(?:…|\.{2,3})(?:\s+\((?:\d+[smh](?:[\s·\)]|$)|esc to interrupt)|$)'] },
 ]
 
 [[rules]]
@@ -226,6 +226,25 @@ any = [
 ]
 not = [
   { regex = ['(?m)^\s*❯\s*$'] },
+]
+
+[[rules]]
+id = "live_prompt_bottom"
+state = "idle"
+priority = 260
+region = "bottom_non_empty_lines(4)"
+visible_idle = true
+line_regex = ['^\s*❯(?:\s|$)']
+not = [
+  { contains = ["enter to select"] },
+  { contains = ["esc to cancel"] },
+  { contains = ["esc to interrupt"] },
+  { contains = ["tab to amend"] },
+  { contains = ["tab/arrow keys"] },
+  { contains = ["arrow keys to navigate"] },
+  { contains = ["↑/↓ to navigate"] },
+  { contains = ["↑↓ to navigate"] },
+  { contains = ["do you want to proceed?"] },
 ]
 
 [[rules]]

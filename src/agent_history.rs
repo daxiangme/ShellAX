@@ -503,6 +503,15 @@ impl HistoryProvider for ClaudeProvider {
                 }
             }
             match v.get("type").and_then(Value::as_str) {
+                Some("custom-title") => {
+                    if let Some(t) = v
+                        .get("customTitle")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.trim().is_empty())
+                    {
+                        title = Some(t.trim().to_string());
+                    }
+                }
                 Some("ai-title") => {
                     if let Some(t) = v.get("aiTitle").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
                         title = Some(t.trim().to_string());

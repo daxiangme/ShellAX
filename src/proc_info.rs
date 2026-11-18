@@ -165,6 +165,60 @@ pub fn process_cwd(pid: u32) -> Option<PathBuf> {
     }
 }
 
+fn looks_like_version(name: &str) -> bool {
+    let trimmed = name.trim();
+    let body = trimmed.strip_prefix('v').unwrap_or(trimmed);
+    !body.is_empty()
+        && body.bytes().next().is_some_and(|b| b.is_ascii_digit())
+        && body
+            .bytes()
+            .all(|b| b.is_ascii_digit() || matches!(b, b'.' | b'-' | b'_'))
+}
+
+/// Infer the effective CLI tool name from an executable path (e.g.
+/// `~/.local/share/claude/versions/2.1.318` -> `"claude"`).
+pub fn infer_command_from_exec_path(path: &str) -> Option<String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = trimmed
+        .split(['/', '\\'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    let file = *parts.last()?;
+    let clean_file = file
+        .strip_suffix(".exe")
+        .or_else(|| file.strip_suffix(".EXE"))
+        .or_else(|| file.strip_suffix(".cmd"))
+        .or_else(|| file.strip_suffix(".bat"))
+        .unwrap_or(file);
+    if !looks_like_version(clean_file) {
+        return Some(clean_file.to_string());
+    }
+    // Match `/.../<tool>/versions/<ver>` (and `releases` / `current` layouts).
+    for (idx, seg) in parts.iter().enumerate() {
+        if idx > 0
+            && matches!(
+                seg.to_ascii_lowercase().as_str(),
+                "versions" | "releases" | "current"
+            )
+        {
+            let parent = parts[idx - 1];
+            if !looks_like_version(parent)
+                && !matches!(
+                    parent.to_ascii_lowercase().as_str(),
+                    "bin" | "lib" | "libexec" | "share" | "local" | "usr" | "opt"
+                )
+            {
+                return Some(parent.to_string());
+            }
+        }
+    }
+    None
+}
+
 fn is_wrapper_shell(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
@@ -286,7 +340,36 @@ mod macos {
         }
         let comm = comm_from_bsdinfo(&info);
         let argv = process_argv(pid).unwrap_or_default();
-        effective_command_name(comm.as_deref(), &argv)
+        let effective = effective_command_name(comm.as_deref(), &argv);
+        if argv.is_empty()
+            && effective
+                .as_deref()
+                .is_none_or(|n| super::looks_like_version(n) || n.len() >= 14)
+        {
+            if let Some(hint) = process_path(pid)
+                .as_deref()
+                .and_then(super::infer_command_from_exec_path)
+            {
+                return Some(hint);
+            }
+        }
+        effective
+    }
+
+    fn process_path(pid: u32) -> Option<String> {
+        let mut buf = vec![0u8; 4096];
+        let ret = unsafe {
+            libc::proc_pidpath(
+                pid as libc::c_int,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.len() as u32,
+            )
+        };
+        if ret <= 0 {
+            return None;
+        }
+        let n = (ret as usize).min(buf.len());
+        String::from_utf8(buf[..n].to_vec()).ok()
     }
 
     /// Read `e_tpgid` (foreground process group of the controlling terminal) for `pid`. [3p]
@@ -413,7 +496,7 @@ mod macos {
         let mut argv = Vec::with_capacity(argc as usize);
         for _ in 0..argc {
             if current >= rest.len() {
-                return None;
+                break;
             }
             let end = rest[current..]
                 .iter()
@@ -421,12 +504,12 @@ mod macos {
                 .map(|off| current + off)
                 .unwrap_or(rest.len());
             if end == current {
-                return None;
+                break;
             }
             argv.push(String::from_utf8_lossy(&rest[current..end]).into_owned());
             current = end + 1;
         }
-        Some(argv)
+        (!argv.is_empty()).then_some(argv)
     }
 
     /// Read current working directory via `proc_pidinfo(PROC_PIDVNODEPATHINFO)`. [3p]
@@ -509,5 +592,21 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
         assert_eq!(name.as_deref(), Some("sleep"));
+    }
+
+    #[test]
+    fn infers_versioned_claude_binary_from_exec_path() {
+        assert_eq!(
+            infer_command_from_exec_path("/Users/afeng/.local/share/claude/versions/2.1.318"),
+            Some("claude".into())
+        );
+        assert_eq!(
+            infer_command_from_exec_path("/Users/afeng/.local/bin/agy"),
+            Some("agy".into())
+        );
+        assert_eq!(
+            infer_command_from_exec_path(r"C:\Users\u\AppData\Local\claude\versions\2.1.318.exe"),
+            Some("claude".into())
+        );
     }
 }

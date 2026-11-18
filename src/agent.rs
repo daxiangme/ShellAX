@@ -486,6 +486,59 @@ pub fn default_cli_command(id: &str) -> &str {
     }
 }
 
+/// Normalize alias agent IDs (`"antigravity"` -> `"agy"`, `"claude-code"` -> `"claude"`).
+pub fn normalize_id(agent_id: &str) -> String {
+    match agent_id.trim().to_ascii_lowercase().as_str() {
+        "antigravity" | "antigravity-cli" => "agy".into(),
+        "claude-code" => "claude".into(),
+        "github-copilot" => "copilot".into(),
+        "cursor-agent" => "cursor".into(),
+        other => other.into(),
+    }
+}
+
+/// Prepare a fresh CLI launch command, injecting `--session-id <uuid>` for plain `claude`
+/// launches so live panes deterministically bind to their on-disk JSONL session from turn 0.
+pub fn prepare_fresh_launch(agent_id: &str, cmd: &str) -> (String, Option<String>) {
+    let trimmed = cmd.trim();
+    if trimmed.is_empty() {
+        return (String::new(), None);
+    }
+    if normalize_id(agent_id) != "claude" {
+        return (trimmed.to_string(), None);
+    }
+    let mut parts = trimmed.split_whitespace();
+    let Some(first) = parts.next() else {
+        return (trimmed.to_string(), None);
+    };
+    let stem = first
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(first)
+        .to_ascii_lowercase();
+    let stem = stem
+        .strip_suffix(".exe")
+        .or_else(|| stem.strip_suffix(".cmd"))
+        .or_else(|| stem.strip_suffix(".bat"))
+        .unwrap_or(&stem);
+    if stem != "claude" {
+        return (trimmed.to_string(), None);
+    }
+    let already_bound = parts.any(|t| {
+        t == "--session-id"
+            || t.starts_with("--session-id=")
+            || matches!(
+                t,
+                "--resume" | "-r" | "--continue" | "-c" | "--print" | "-p" | "attach"
+            )
+    });
+    if already_bound {
+        return (trimmed.to_string(), None);
+    }
+    let sid = uuid::Uuid::new_v4().to_string();
+    (format!("{trimmed} --session-id {sid}"), Some(sid))
+}
+
 /// Detect which known coding-agent CLIs exist on `PATH` (plus standard user bin dirs).
 pub fn installed_agent_clis() -> Vec<(&'static str, &'static str, &'static str)> {
     use std::sync::{Mutex, OnceLock};
@@ -679,7 +732,14 @@ pub fn identify(
     last_command: Option<&str>,
     title: &str,
 ) -> Option<usize> {
-    let norm = |s: &str| s.rsplit('/').next().unwrap_or(s).to_ascii_lowercase();
+    let norm = |s: &str| {
+        let base = s.rsplit(['/', '\\']).next().unwrap_or(s).to_ascii_lowercase();
+        base.strip_suffix(".exe")
+            .or_else(|| base.strip_suffix(".cmd"))
+            .or_else(|| base.strip_suffix(".bat"))
+            .unwrap_or(&base)
+            .to_string()
+    };
     let by_name = |name: &str| manifests.iter().position(|m| m.names().any(|n| n == name));
     if let Some(p) = fg_process {
         if let Some(i) = by_name(&norm(p)) {
@@ -1652,6 +1712,22 @@ Completed
         let blocked = "Bash command\n  rm -rf build\nDo you want to proceed?\n❯ 1. Yes\n  2. No\n";
         assert_eq!(c.detect(inp(blocked, "")).state, AgentState::Blocked);
         assert_eq!(c.detect(inp("", "✳ Claude Code")).state, AgentState::Idle);
+        let working_dots = "────────────────────────────────\n✻ Fulling.. (28s · ↓ 2.5k tokens · thinking with high effort)\n  Tip: Hit shift+tab\n────────────────────────────────\n❯ \n";
+        assert_eq!(c.detect(inp(working_dots, "")).state, AgentState::Working);
+        let single_rule_idle = "────────────────────────────────\n❯ \n";
+        assert_eq!(c.detect(inp(single_rule_idle, "")).state, AgentState::Idle);
+        let (cmd, sid) = prepare_fresh_launch("claude", "claude");
+        let sid = sid.expect("claude fresh launch generates uuid");
+        assert_eq!(sid.len(), 36);
+        assert_eq!(cmd, format!("claude --session-id {sid}"));
+        assert_eq!(
+            prepare_fresh_launch("claude", "claude --resume abc"),
+            ("claude --resume abc".into(), None)
+        );
+        assert_eq!(
+            prepare_fresh_launch("agy", "agy"),
+            ("agy".into(), None)
+        );
     }
 
     #[test]

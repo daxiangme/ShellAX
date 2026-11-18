@@ -1212,6 +1212,23 @@ impl Root {
             window,
             |this, pane, ev: &termview::TermEvent, w, cx| {
                 match ev {
+                    termview::TermEvent::Focused => {
+                        for tab in &mut this.tabs {
+                            if tab
+                                .layout
+                                .leaves()
+                                .iter()
+                                .any(|p| p.entity_id() == pane.entity_id())
+                            {
+                                if tab.focused.entity_id() != pane.entity_id() {
+                                    tab.focused = pane.clone();
+                                    cx.notify();
+                                }
+                                break;
+                            }
+                        }
+                        return;
+                    }
                     termview::TermEvent::AgentRefresh => {
                         this.sync_live_agent_sessions(cx);
                         this.maybe_auto_refresh_agent_history(false, cx);
@@ -1222,7 +1239,10 @@ impl Root {
                         this.sync_live_agent_sessions(cx);
                         if matches!(
                             st,
-                            AgentState::Done | AgentState::Idle | AgentState::Blocked
+                            AgentState::Working
+                                | AgentState::Done
+                                | AgentState::Idle
+                                | AgentState::Blocked
                         ) {
                             this.maybe_auto_refresh_agent_history(true, cx);
                         }
@@ -4390,7 +4410,15 @@ impl Render for Root {
                 match &t.name {
                     Some(n) => n.clone().into(),
                     None => {
-                        let first = pane_label(panes[0].read(cx), cx);
+                        let first = if Self::tab_module(t, cx) == activity::Tool::Agents {
+                            t.focused
+                                .read(cx)
+                                .agent_label()
+                                .map(|(n, _)| SharedString::from(n))
+                                .unwrap_or_else(|| pane_label(panes[0].read(cx), cx))
+                        } else {
+                            pane_label(panes[0].read(cx), cx)
+                        };
                         if panes.len() > 1 {
                             format!("{first} +{}", panes.len() - 1).into()
                         } else {
@@ -4422,16 +4450,6 @@ impl Render for Root {
                 Spec::Ssh(st) => Some(st.label()),
                 _ => None,
             };
-            let agent = panes
-                .iter()
-                .filter_map(|p| p.read(cx).agent_label())
-                .max_by_key(|(_, st)| match st {
-                    AgentState::Blocked => 4,
-                    AgentState::Done => 3,
-                    AgentState::Working => 2,
-                    AgentState::Idle => 1,
-                    _ => 0,
-                });
             // hairline separator only between two inactive tabs
             if shown > 1 {
                 tabbar = tabbar.child(gap(!active && (settings_on || i != self.active + 1)));
@@ -4541,10 +4559,6 @@ impl Render for Root {
                             _ => title.clone().into_any_element(),
                         }),
                 );
-            if let Some((name, st)) = agent {
-                let col = state_color(st, &th);
-                tabel = tabel.child(ui::tag(format!("● {name} {}", st.label()), col));
-            }
             let drag = TabDrag {
                 idx: i,
                 title: title.clone(),

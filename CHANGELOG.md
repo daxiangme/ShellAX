@@ -4,6 +4,21 @@
 
 新版本加在最上方。节标题与 `Cargo.toml` 的版本号相同，写成 `## 1.3.7`；Git 标签在版本号前加 `v`，写成 `v1.3.7`。条目有对应的 GitHub issue 时，在末尾写上编号，例如 `#12`。
 
+## 1.3.11
+
+### 修复与优化
+
+- **修复多选 Agent 创建时的图标错配、会话标题不更新与列表合并问题**：
+  - 为每个 Agent 分屏持久化启动目标身份（`launched_agent_id`），并在 macOS 原生 Hardened Runtime / 版本号软链进程（如 `~/.local/share/claude/versions/2.1.318`）中通过 `proc_pidpath` 回退识别真实 CLI 名称，修复多选创建后 Claude Code 图标退化为终端符号、停顿或滚动后图标丢失的问题（同步兼容 Windows ConPTY）。
+  - 为新建的 `claude` 会话自动注入 `--session-id <uuid>` 实现零延迟确定性关联，并将实时会话绑定（`sync_live_agent_sessions`）扩展至 Claude Code、Codex、Antigravity 等全部 Agent；同时移除未填任务名时向 `Tab.name` 写入随机分支词（如 `brave-cloud-0a08`）的逻辑，对话开始后侧边栏、历史列表与标签页立即合并并更新为真实提问/生成标题，补全 Claude `custom-title` 历史解析。
+  - 修复 Claude Code 2.1.x 双点动画（`✻ Fulling..`）及单分割线底部输入框（`───` + `❯`）的状态识别，提升对话进行中的后台历史增量同步与左侧列表刷新及时性，并支持左右分屏点击切换焦点时同步侧边栏选中高亮与标签标题。
+  - 完善上下文圆环优先级（优先采用 JSONL 精确计算的总上下文百分比，不被屏幕单轮输出 Token 数覆盖），并扩展 OSC 状态旋转前缀清洗字符。
+
+### 调整
+
+- 顶部标签栏不再显示冗余的运行状态标签（如 `● Antigravity 运行中`），保留完整宽度展示会话标题。
+- 新建 Agent 任务弹窗不再默认勾选 Git Worktree（仅在手动勾选后按需启用）。
+
 ## 1.3.10
 
 ### 优化
