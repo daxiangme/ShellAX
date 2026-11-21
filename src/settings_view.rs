@@ -591,7 +591,7 @@ impl SettingsView {
                 Appearance,
                 t("ui.window_opacity"),
                 "0.5–1.0",
-                Ctl::Text("appearance.opacity", "1.0"),
+                Ctl::Text("appearance.opacity", "0.90"),
             ),
             r(
                 Appearance,
@@ -4151,7 +4151,8 @@ impl Render for SettingsView {
             c(th.base)
         } else {
             c(th.mantle)
-        };
+        }
+        .opacity(crate::theme::card_alpha());
         let query = self.search.read(cx).value().to_string().to_lowercase();
         let mut rows = self.rows();
         // light / dark theme pickers only matter when following the system appearance
@@ -4179,7 +4180,7 @@ impl Render for SettingsView {
             .flex_col()
             .gap(px(1.))
             .p(px(10.))
-            .bg(sheet)
+            .bg(crate::theme::sub_bg())
             .border_r_1()
             .border_color(crate::theme::divider())
             .child(div().pb_2().child(ui::search_field(&self.search, false)));
@@ -4349,7 +4350,6 @@ impl Render for SettingsView {
                     .min_h_0()
                     .flex()
                     .flex_row()
-                    .bg(sheet)
                     .child(nav)
                     .child(
                         div()

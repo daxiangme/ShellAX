@@ -283,9 +283,9 @@ impl Render for GridLayer {
             move |bounds, session, window, cx| {
                 GRID_PAINTS.fetch_add(1, Ordering::Relaxed);
                 let lh = line_h();
-                // appearance.opacity: the grid background carries the window alpha
-                let base = c(sc.bg).opacity(config::get().appearance.opacity.clamp(0.5, 1.0));
-                window.paint_quad(fill(bounds, base));
+                // 仅在独立使用（非标准半透卡片）或有需要时才画背景；默认底色由外层 content_card 的 theme::card_bg()
+                // 统一绘制一次，避免三层 alpha 叠涂把半透背景变成实心。
+                let _ = bounds;
                 let Some(s) = session else { return };
                 let st = st2.borrow();
                 let (cw, origin, sel, block, hover) =
@@ -5764,7 +5764,6 @@ impl Render for TermView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(c(scheme().bg).opacity(config::get().appearance.opacity.clamp(0.5, 1.0)))
             .overflow_hidden()
             .child(body)
     }

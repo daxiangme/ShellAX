@@ -3963,7 +3963,6 @@ impl Root {
         if self.tool != activity::Tool::Hosts || !self.active_in_ws(cx) {
             return None;
         }
-        let th = cur();
         let pane = self.focused_pane(window, cx);
         if pane.as_ref().is_some_and(|p| p.read(cx).embedded()) {
             return None;
@@ -4001,8 +4000,8 @@ impl Root {
             .flex()
             .items_center()
             .gap(px(ui::SP_2))
-            // 与终端内容之间一条细分隔线，底色略深一层
-            .bg(c(th.mantle))
+            // 与终端内容之间一条细分隔线，底色略深一层且保持半透一致
+            .bg(theme::bar_bg())
             .border_t_1()
             .border_color(crate::theme::divider())
             .rounded_bl(px(card_layout::CARD_RADIUS))
@@ -4291,14 +4290,14 @@ impl Render for Root {
             self.save_dock_split();
         }
         self.probe_os(cx);
-        // appearance.opacity: transparent window background, terminal area drawn with alpha
-        let op = s.appearance.opacity.clamp(0.5, 1.0);
-        let want = if chrome::NATIVE_LIGHTS {
-            gpui::WindowBackgroundAppearance::Blurred
-        } else if op < 0.999 {
-            gpui::WindowBackgroundAppearance::Transparent
-        } else {
+        // appearance.opacity: frosted/translucent window backdrop with legible card surfaces
+        let op = theme::window_opacity();
+        let want = if op >= 0.999 {
             gpui::WindowBackgroundAppearance::Opaque
+        } else if chrome::NATIVE_LIGHTS {
+            gpui::WindowBackgroundAppearance::Blurred
+        } else {
+            gpui::WindowBackgroundAppearance::Transparent
         };
         if self.bg_seen != Some(want) {
             self.bg_seen = Some(want);
@@ -5156,7 +5155,7 @@ impl Render for Root {
             .relative()
             .flex()
             .flex_col()
-            .bg(theme::chrome_bg().opacity(if chrome::NATIVE_LIGHTS { 0.72 } else { op }))
+            .bg(theme::chrome_bg())
             .font_family(theme::ui_font())
             .text_size(px(s.appearance.ui_font_size.clamp(10., 20.)))
             .text_color(c(th.text))
@@ -5180,7 +5179,8 @@ impl Render for Root {
                 }
                 if ev.keystroke.key == "escape" {
                     let closed_agent_menu = std::mem::take(&mut this.agent_hub.agent_menu);
-                    if this.agent_hub.menu.take().is_some()
+                    if this.agent_hub.ctx_popover.take().is_some()
+                        || this.agent_hub.menu.take().is_some()
                         || closed_agent_menu
                         || this.agent_hub.finish_task.take().is_some()
                         || this.agent_hub.new_task.take().is_some()

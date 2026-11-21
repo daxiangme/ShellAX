@@ -13,7 +13,9 @@ use gpui::{
 };
 use gpui_component::input::{InputEvent, InputState};
 use ssh_term_proto::agent::{self, AgentState};
-use ssh_term_proto::agent_history::{self, SessionMeta};
+use ssh_term_proto::agent_history::{
+    self, ContextBreakdown, ContextCategoryKind, SessionMeta,
+};
 use ssh_term_proto::agent_resume::{self, AgentSessionRef};
 use ssh_term_proto::i18n::{t, tf};
 use ssh_term_proto::layout::{Dir, Node};
@@ -62,6 +64,22 @@ pub(crate) struct FinishTaskDialog {
     pub diff_stat: String,
     pub force: bool,
     pub error: Option<String>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ContextPopover {
+    pub pos: Point<Pixels>,
+    pub anchor_bottom: bool,
+    pub agent: String,
+    pub session_id: Option<String>,
+    pub path: Option<PathBuf>,
+    pub title: String,
+    pub fallback_used: Option<u64>,
+    pub fallback_window: Option<u64>,
+    pub fallback_frac: f32,
+    pub fallback_label: String,
+    pub loading: bool,
+    pub breakdown: Option<ContextBreakdown>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -128,6 +146,7 @@ pub(crate) struct AgentHub {
     pub menu: Option<(AgentMenuTarget, Point<Pixels>)>,
     pub new_task: Option<NewTaskDialog>,
     pub finish_task: Option<FinishTaskDialog>,
+    pub ctx_popover: Option<ContextPopover>,
     pub last_auto_scan: Option<std::time::Instant>,
     pub follow_up_scan_scheduled: bool,
     pub active_file_stamps: HashMap<PathBuf, (i64, u64)>,
@@ -197,6 +216,7 @@ impl Default for AgentHub {
             menu: None,
             new_task: None,
             finish_task: None,
+            ctx_popover: None,
             last_auto_scan: None,
             follow_up_scan_scheduled: false,
             active_file_stamps: HashMap::new(),
@@ -335,6 +355,8 @@ struct ResolvedContext {
     short_label: String,
     bar_label: String,
     tooltip: String,
+    used_tokens: Option<u64>,
+    window_tokens: Option<u64>,
 }
 
 fn resolve_context(
@@ -348,6 +370,8 @@ fn resolve_context(
                 short_label: d.short_label,
                 bar_label: d.bar_label,
                 tooltip: d.tooltip,
+                used_tokens: Some(d.used),
+                window_tokens: Some(d.window),
             });
         }
         // If the transcript explicitly recorded a `/compact` or `/clear` boundary without a
@@ -361,7 +385,63 @@ fn resolve_context(
         short_label: s.short_label.clone(),
         bar_label: s.bar_label.clone(),
         tooltip: format!("ctx {}", s.bar_label),
+        used_tokens: s.used_tokens,
+        window_tokens: s.window_tokens,
     })
+}
+
+/// Compute non-overflowing pixel widths for each segment inside a fixed `bar_w` capsule.
+fn segmented_bar_widths(tokens: &[u64], window: u64, bar_w: f32, gap: f32) -> Vec<f32> {
+    let n = tokens.len();
+    if n == 0 || window == 0 || bar_w <= 0.0 {
+        return Vec::new();
+    }
+    let gap_total = gap * (n.saturating_sub(1) as f32);
+    let avail = (bar_w - gap_total).max(0.0);
+    let sum_tok: u64 = tokens.iter().sum();
+    let total_fill = ((sum_tok as f64 / window as f64).clamp(0.0, 1.0) as f32) * avail;
+    if total_fill <= 0.0 {
+        return vec![0.0; n];
+    }
+    let mut widths: Vec<f32> = tokens
+        .iter()
+        .map(|&t| {
+            if t == 0 {
+                0.0
+            } else {
+                ((t as f64 / window as f64) as f32 * avail).max(3.0)
+            }
+        })
+        .collect();
+    let cur_sum: f32 = widths.iter().sum();
+    if cur_sum > total_fill && cur_sum > 0.0 {
+        // Trim excess proportionally from segments larger than the 3px floor so the total fill
+        // stays faithful while keeping tiny categories visible.
+        let excess = cur_sum - total_fill;
+        let slack: f32 = widths.iter().map(|&w| (w - 3.0).max(0.0)).sum();
+        if slack > 0.0 {
+            for w in &mut widths {
+                let s = (*w - 3.0).max(0.0);
+                if s > 0.0 {
+                    let take = (excess * (s / slack)).min(s);
+                    *w -= take;
+                }
+            }
+        } else {
+            let scale = total_fill / cur_sum;
+            for w in &mut widths {
+                *w *= scale;
+            }
+        }
+    }
+    let final_sum: f32 = widths.iter().sum();
+    if final_sum > avail && final_sum > 0.0 {
+        let scale = avail / final_sum;
+        for w in &mut widths {
+            *w *= scale;
+        }
+    }
+    widths
 }
 
 fn render_ctx_ring(ctx_frac: Option<f32>, ctx_label: &str, in_bar: bool) -> AnyElement {
@@ -721,11 +801,224 @@ impl Root {
                         .sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| a.id.cmp(&b.id)));
                     r.agent_hub.invalidate_sessions();
                     r.sync_live_agent_sessions(cx);
+                    r.refresh_open_context_popover(cx);
                     cx.notify();
                 }
             });
         })
         .detach();
+    }
+
+    fn refresh_open_context_popover(&mut self, cx: &mut Context<Self>) {
+        let Some(ref pop) = self.agent_hub.ctx_popover else {
+            return;
+        };
+        let Some(path) = pop.path.clone() else {
+            return;
+        };
+        let agent = pop.agent.clone();
+        let sid = pop.session_id.clone();
+        cx.spawn(async move |this, cx| {
+            let bd = cx
+                .background_executor()
+                .spawn(async move { agent_history::analyze_context_breakdown(&agent, &path) })
+                .await;
+            let _ = this.update(cx, |r, cx| {
+                if let Some(ref mut cur_pop) = r.agent_hub.ctx_popover {
+                    if cur_pop.session_id == sid {
+                        cur_pop.breakdown = bd;
+                        cur_pop.loading = false;
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_context_popover(
+        &mut self,
+        pos: Point<Pixels>,
+        anchor_bottom: bool,
+        agent: String,
+        session_id: Option<String>,
+        path: Option<PathBuf>,
+        title: String,
+        fallback_used: Option<u64>,
+        fallback_window: Option<u64>,
+        fallback_frac: f32,
+        fallback_label: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.agent_hub.menu = None;
+        self.agent_hub.agent_menu = false;
+        let has_path = path.is_some();
+        self.agent_hub.ctx_popover = Some(ContextPopover {
+            pos,
+            anchor_bottom,
+            agent: agent.clone(),
+            session_id: session_id.clone(),
+            path: path.clone(),
+            title,
+            fallback_used,
+            fallback_window,
+            fallback_frac,
+            fallback_label,
+            loading: has_path,
+            breakdown: None,
+        });
+        cx.notify();
+        if let Some(p) = path {
+            cx.spawn(async move |this, cx| {
+                let bd = cx
+                    .background_executor()
+                    .spawn(async move { agent_history::analyze_context_breakdown(&agent, &p) })
+                    .await;
+                let _ = this.update(cx, |r, cx| {
+                    if let Some(ref mut cur_pop) = r.agent_hub.ctx_popover {
+                        if cur_pop.session_id == session_id {
+                            cur_pop.breakdown = bd;
+                            cur_pop.loading = false;
+                            cx.notify();
+                        }
+                    }
+                });
+            })
+            .detach();
+        }
+    }
+
+    fn toggle_context_popover_from_bar(
+        &mut self,
+        pos: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        let v = tab.focused.read(cx);
+        let sid = v.agent_session_id.clone();
+        let bound_meta = sid
+            .as_deref()
+            .and_then(|id| self.agent_hub.sessions.iter().find(|m| m.id == id))
+            .cloned();
+        let agent = bound_meta
+            .as_ref()
+            .map(|m| m.agent.clone())
+            .or_else(|| v.agent_id().map(|a| agent::normalize_id(&a)))
+            .unwrap_or_else(|| "claude".into());
+        let path = v
+            .agent_transcript_path
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| bound_meta.as_ref().map(|m| m.path.clone()));
+        if let Some(ref existing) = self.agent_hub.ctx_popover {
+            if existing.anchor_bottom && existing.session_id == sid && existing.path == path {
+                self.agent_hub.ctx_popover = None;
+                cx.notify();
+                return;
+            }
+        }
+        let screen_ctx = v
+            .session
+            .as_ref()
+            .and_then(|s| agent::screen_context_usage(&s.screen_text()));
+        let rc = resolve_context(bound_meta.as_ref(), screen_ctx.as_ref());
+        let title = bound_meta
+            .as_ref()
+            .map(|m| m.display_title().to_string())
+            .or_else(|| self.resolve_pane_auto_title(v, true))
+            .unwrap_or_else(|| agent::display_name(&agent).to_string());
+        let (fu, fw, ff, fl) = match rc {
+            Some(r) => (r.used_tokens, r.window_tokens, r.frac, r.bar_label),
+            None => (None, None, 0.0, "0%".into()),
+        };
+        self.open_context_popover(
+            gpui::point(pos.x, pos.y - px(12.)),
+            true,
+            agent,
+            sid,
+            path,
+            title,
+            fu,
+            fw,
+            ff,
+            fl,
+            cx,
+        );
+    }
+
+    fn open_context_popover_for_meta(
+        &mut self,
+        meta: &SessionMeta,
+        pos: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let d = meta.context_detail();
+        let (fu, fw, ff, fl) = match d {
+            Some(det) => (
+                Some(det.used),
+                Some(det.window),
+                det.frac,
+                det.bar_label,
+            ),
+            None => (meta.ctx_used, meta.ctx_window, 0.0, "0%".into()),
+        };
+        self.open_context_popover(
+            pos,
+            false,
+            meta.agent.clone(),
+            Some(meta.id.clone()),
+            Some(meta.path.clone()),
+            meta.display_title().to_string(),
+            fu,
+            fw,
+            ff,
+            fl,
+            cx,
+        );
+    }
+
+    fn open_context_popover_for_running_pane(
+        &mut self,
+        pane: &Entity<TermView>,
+        pos: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let v = pane.read(cx);
+        let sid = v.agent_session_id.clone();
+        let bound_meta = sid
+            .as_deref()
+            .and_then(|id| self.agent_hub.sessions.iter().find(|m| m.id == id))
+            .cloned();
+        if let Some(ref meta) = bound_meta {
+            self.open_context_popover_for_meta(meta, pos, cx);
+            return;
+        }
+        let agent = v
+            .agent_id()
+            .map(|a| agent::normalize_id(&a))
+            .unwrap_or_else(|| "claude".into());
+        let path = v
+            .agent_transcript_path
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from);
+        let screen_ctx = v
+            .session
+            .as_ref()
+            .and_then(|s| agent::screen_context_usage(&s.screen_text()));
+        let rc = resolve_context(None, screen_ctx.as_ref());
+        let title = self
+            .resolve_pane_auto_title(v, true)
+            .unwrap_or_else(|| agent::display_name(&agent).to_string());
+        let (fu, fw, ff, fl) = match rc {
+            Some(r) => (r.used_tokens, r.window_tokens, r.frac, r.bar_label),
+            None => (None, None, 0.0, "0%".into()),
+        };
+        self.open_context_popover(pos, false, agent, sid, path, title, fu, fw, ff, fl, cx);
     }
 
     /// Resolve a pane's auto-generated title from its bound history summary or visible prompt.
@@ -3095,6 +3388,7 @@ fn render_grouped_session_row_el(
     let meta_wt = row.meta.clone();
     let meta_arch = row.meta.clone();
     let meta_ctx = row.meta.clone();
+    let meta_ring = row.meta.clone();
 
     let status_badge: Option<AnyElement> = row.live_state.map(|st| match st {
         AgentState::Working => ui::spinning_icon(
@@ -3204,7 +3498,32 @@ fn render_grouped_session_row_el(
                         )
                         .children(status_badge)
                         .when_some(row.eff_ctx_label.as_ref(), |d, lbl| {
-                            d.child(render_ctx_ring(row.eff_ctx_frac, lbl.as_ref(), false))
+                            let mr = meta_ring.clone();
+                            let frac = row.eff_ctx_frac;
+                            d.child(
+                                div()
+                                    .id(("ag-s-ctx", nav_idx))
+                                    .px(px(3.))
+                                    .py(px(1.))
+                                    .rounded(px(ui::R_SM))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(crate::theme::hover_bg()))
+                                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation();
+                                    })
+                                    .on_click(window.listener_for(
+                                        root,
+                                        move |this, ev: &gpui::ClickEvent, _, cx| {
+                                            cx.stop_propagation();
+                                            this.open_context_popover_for_meta(
+                                                &mr,
+                                                ev.position(),
+                                                cx,
+                                            );
+                                        },
+                                    ))
+                                    .child(render_ctx_ring(frac, lbl.as_ref(), false)),
+                            )
                         })
                         .child(
                             div()
@@ -3519,6 +3838,7 @@ fn render_running_row_el(
     };
     let pane_click = row.pane.clone();
     let pane_ctx = row.pane.clone();
+    let pane_ring = row.pane.clone();
     let tab_idx = row.tab;
     let has_wt = row.has_worktree;
     let sid = row.session_id.clone();
@@ -3643,7 +3963,32 @@ fn render_running_row_el(
                         )
                         .child(status_badge)
                         .when_some(row.ctx_label.as_ref(), |d, lbl| {
-                            d.child(render_ctx_ring(row.ctx_frac, lbl, false))
+                            let pr = pane_ring.clone();
+                            let frac = row.ctx_frac;
+                            d.child(
+                                div()
+                                    .id(("ag-r-ctx", idx))
+                                    .px(px(3.))
+                                    .py(px(1.))
+                                    .rounded(px(ui::R_SM))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(crate::theme::hover_bg()))
+                                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation();
+                                    })
+                                    .on_click(window.listener_for(
+                                        root,
+                                        move |this, ev: &gpui::ClickEvent, _, cx| {
+                                            cx.stop_propagation();
+                                            this.open_context_popover_for_running_pane(
+                                                &pr,
+                                                ev.position(),
+                                                cx,
+                                            );
+                                        },
+                                    ))
+                                    .child(render_ctx_ring(frac, lbl, false)),
+                            )
                         }),
                 )
                 .child(
@@ -3920,7 +4265,6 @@ fn render_running_row_el(
             .flex_1()
             .size_full()
             .overflow_y_scroll()
-            .bg(c(th.base))
             .px(px(ui::SP_6))
             .py(px(ui::SP_6))
             .flex()
@@ -3948,7 +4292,457 @@ fn render_running_row_el(
         if self.agent_hub.finish_task.is_some() {
             out.push(self.render_finish_task_modal(cx));
         }
+        if self.agent_hub.ctx_popover.is_some() {
+            out.push(self.render_context_popover(cx));
+        }
         out
+    }
+
+    fn render_context_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let th = cur();
+        let pop = self.agent_hub.ctx_popover.clone().unwrap();
+        let dark = th.appearance == crate::theme::Appearance::Dark;
+        let cat_color = |kind: ContextCategoryKind| -> Hsla {
+            match kind {
+                ContextCategoryKind::SystemPrompt => c(th.overlay1),
+                ContextCategoryKind::ToolDefinitions => gpui::hsla(
+                    264. / 360.,
+                    0.66,
+                    if dark { 0.64 } else { 0.52 },
+                    1.0,
+                ),
+                ContextCategoryKind::Rules => c(th.success),
+                ContextCategoryKind::Skills => c(th.warning),
+                ContextCategoryKind::McpTools => gpui::hsla(
+                    330. / 360.,
+                    0.72,
+                    if dark { 0.58 } else { 0.48 },
+                    1.0,
+                ),
+                ContextCategoryKind::Subagents => c(th.info),
+                ContextCategoryKind::Conversation => gpui::hsla(
+                    14. / 360.,
+                    0.82,
+                    if dark { 0.56 } else { 0.48 },
+                    1.0,
+                ),
+                ContextCategoryKind::Other => c(th.subtext),
+            }
+        };
+        let cat_label = |kind: ContextCategoryKind| -> &'static str {
+            match kind {
+                ContextCategoryKind::SystemPrompt => t("ag.ctx_system_prompt"),
+                ContextCategoryKind::ToolDefinitions => t("ag.ctx_tool_defs"),
+                ContextCategoryKind::Rules => t("ag.ctx_rules"),
+                ContextCategoryKind::Skills => t("ag.ctx_skills"),
+                ContextCategoryKind::McpTools => t("ag.ctx_mcp_tools"),
+                ContextCategoryKind::Subagents => t("ag.ctx_subagents"),
+                ContextCategoryKind::Conversation => t("ag.ctx_conversation"),
+                ContextCategoryKind::Other => t("ag.ctx_other"),
+            }
+        };
+
+        let (used_opt, win_opt, model_opt, is_est, cleared, compacted_only, categories, auto_buf) =
+            match pop.breakdown.as_ref() {
+                Some(bd) => (
+                    Some(bd.used_tokens),
+                    Some(bd.window_tokens),
+                    bd.model.clone(),
+                    bd.is_estimated,
+                    bd.cleared,
+                    bd.compacted_summary_only,
+                    bd.categories.clone(),
+                    bd.autocompact_buffer,
+                ),
+                None => (
+                    pop.fallback_used,
+                    pop.fallback_window,
+                    None,
+                    false,
+                    false,
+                    false,
+                    Vec::new(),
+                    None,
+                ),
+            };
+
+        let ratio = match (used_opt, win_opt) {
+            (Some(u), Some(w)) if w > 0 => (u as f64 / w as f64).clamp(0.0, 1.0) as f32,
+            _ => pop.fallback_frac.clamp(0.0, 1.0),
+        };
+        let pct = (ratio * 100.0).round().min(100.0) as u32;
+        let pct_tone = if pct >= 85 {
+            c(th.error)
+        } else if pct >= 65 {
+            c(th.warning)
+        } else {
+            c(th.text)
+        };
+
+        let total_right = match (used_opt, win_opt) {
+            (Some(u), Some(w)) if w > 0 => {
+                let prefix = if is_est && u > 0 { "~" } else { "" };
+                format!(
+                    "{prefix}{} / {} {}",
+                    agent::format_tokens_precise(u),
+                    agent::format_tokens(w),
+                    t("ag.ctx_tokens")
+                )
+            }
+            _ => pop.fallback_label.clone(),
+        };
+
+        let card_w = 344.0_f32;
+        let inner_w = card_w - 28.0; // px(14.) * 2
+        let gap_w = 1.5_f32;
+
+        // Build segmented progress bar items: either detailed categories or single active fill.
+        let mut bar_segs: Vec<(Hsla, f32, String)> = Vec::new();
+        if !categories.is_empty() {
+            let win = win_opt.unwrap_or(1_000_000).max(1);
+            let toks: Vec<u64> = categories.iter().map(|c| c.tokens).collect();
+            let widths = segmented_bar_widths(&toks, win, inner_w, gap_w);
+            for (cat, w) in categories.iter().zip(widths.into_iter()) {
+                if w > 0.0 {
+                    let lbl = cat_label(cat.kind);
+                    let p_pct = (cat.tokens as f64 / win as f64) * 100.0;
+                    let tip = format!(
+                        "{lbl}: {} ({p_pct:.1}%)",
+                        agent::format_tokens_precise(cat.tokens)
+                    );
+                    bar_segs.push((cat_color(cat.kind), w, tip));
+                }
+            }
+        } else if ratio > 0.0 {
+            let w = (inner_w * ratio).clamp(4.0, inner_w);
+            bar_segs.push((c(th.accent), w, total_right.clone()));
+        }
+
+        let mut bar = div()
+            .w(px(inner_w))
+            .h(px(8.))
+            .rounded_full()
+            .bg(c(th.text).opacity(0.11))
+            .overflow_hidden()
+            .flex()
+            .items_center()
+            .gap(px(gap_w));
+        for (i, (col, w, tip)) in bar_segs.into_iter().enumerate() {
+            bar = bar.child(
+                div()
+                    .id(("ag-ctx-seg", i))
+                    .h_full()
+                    .w(px(w))
+                    .flex_shrink_0()
+                    .bg(col)
+                    .tooltip(ui::tip(tip)),
+            );
+        }
+
+        let mut rows_col = div().w_full().flex().flex_col().gap(px(6.));
+        if !categories.is_empty() {
+            let win = win_opt.unwrap_or(1_000_000).max(1);
+            for (i, cat) in categories.iter().enumerate() {
+                let col = cat_color(cat.kind);
+                let name = cat_label(cat.kind);
+                let val_str = agent::format_tokens_precise(cat.tokens);
+                let p_pct = (cat.tokens as f64 / win as f64) * 100.0;
+                let tip = format!("{name}: {} tokens ({p_pct:.1}%)", cat.tokens);
+                rows_col = rows_col.child(
+                    div()
+                        .id(("ag-ctx-row", i))
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap(px(ui::SP_2))
+                        .tooltip(ui::tip(tip))
+                        .child(
+                            div()
+                                .size(px(10.))
+                                .flex_shrink_0()
+                                .rounded(px(3.))
+                                .bg(col),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .items_baseline()
+                                .gap(px(6.))
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .text_size(px(ui::fs_small()))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(c(th.text))
+                                        .child(name),
+                                )
+                                .when_some(cat.detail.as_ref(), |d, det| {
+                                    d.child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .whitespace_nowrap()
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .text_size(px(ui::fs_caption()))
+                                            .text_color(c(th.overlay1))
+                                            .child(det.clone()),
+                                    )
+                                }),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(ui::fs_small()))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(c(th.subtext))
+                                .child(val_str),
+                        ),
+                );
+            }
+        } else if cleared || used_opt == Some(0) {
+            rows_col = rows_col.child(
+                div()
+                    .py_1()
+                    .text_size(px(ui::fs_small()))
+                    .text_color(c(th.overlay1))
+                    .child(t("ag.ctx_empty")),
+            );
+        } else if let Some(u) = used_opt.filter(|&u| u > 0) {
+            rows_col = rows_col.child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(ui::SP_2))
+                    .child(
+                        div()
+                            .size(px(10.))
+                            .flex_shrink_0()
+                            .rounded(px(3.))
+                            .bg(c(th.accent)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(ui::fs_small()))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(c(th.text))
+                            .child(t("ag.ctx_active")),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(ui::fs_small()))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(c(th.subtext))
+                            .child(agent::format_tokens_precise(u)),
+                    ),
+            );
+        }
+
+        let mut footer_notes = Vec::new();
+        if let (Some(u), Some(w)) = (used_opt, win_opt) {
+            let free = w.saturating_sub(u).saturating_sub(auto_buf.unwrap_or(0));
+            if free > 0 && w > 0 {
+                footer_notes.push(format!(
+                    "{}: {}",
+                    t("ag.ctx_free"),
+                    agent::format_tokens_precise(free)
+                ));
+            }
+        }
+        if let Some(buf) = auto_buf {
+            footer_notes.push(format!(
+                "{}: {}",
+                t("ag.ctx_buffer"),
+                agent::format_tokens_precise(buf)
+            ));
+        }
+        let sub_note = if pop.loading {
+            None
+        } else if pop.breakdown.is_none() && !cleared && pop.path.is_none() {
+            Some(t("ag.ctx_screen_note").to_string())
+        } else if compacted_only {
+            Some(t("ag.ctx_compacted").to_string())
+        } else if is_est && !categories.is_empty() {
+            Some(t("ag.ctx_est_note").to_string())
+        } else {
+            None
+        };
+
+        let card = div()
+            .id("ag-ctx-pop-card")
+            .w(px(card_w))
+            .occlude()
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .rounded(px(ui::R_LG))
+            .bg(c(th.base).opacity(0.97))
+            .border_1()
+            .border_color(crate::theme::divider())
+            .shadow(crate::chrome::soft_shadow(true))
+            .p(px(14.))
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            // Header row
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .gap(px(ui::SP_2))
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(px(ui::fs_body()))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(c(th.text))
+                                    .child(t("ag.ctx_title")),
+                            )
+                            .when_some(model_opt, |d, m| {
+                                d.child(
+                                    div()
+                                        .px(px(6.))
+                                        .py(px(1.))
+                                        .rounded(px(ui::R_SM))
+                                        .bg(crate::theme::sub_bg())
+                                        .border_1()
+                                        .border_color(crate::theme::divider())
+                                        .text_size(px(ui::fs_caption()))
+                                        .text_color(c(th.overlay1))
+                                        .child(m),
+                                )
+                            })
+                            .child(div().flex_1())
+                            .child(
+                                ui::icon_button(
+                                    "ag-ctx-pop-x",
+                                    IconName::X,
+                                    ui::IconBtn::Sm,
+                                    t("ui.cancel"),
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.agent_hub.ctx_popover = None;
+                                    cx.notify();
+                                })),
+                            ),
+                    )
+                    .when(!pop.title.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .text_size(px(ui::fs_caption()))
+                                .text_color(c(th.overlay1))
+                                .child(pop.title.clone()),
+                        )
+                    }),
+            )
+            // Summary row: "27% Full"  +  "~273.0K / 1M Tokens"
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_baseline()
+                    .justify_between()
+                    .gap(px(ui::SP_2))
+                    .child(
+                        div()
+                            .text_size(px(ui::fs_page() - 2.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(pct_tone)
+                            .child(tf("ag.ctx_full", &[("p", &pct)])),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(ui::fs_small()))
+                            .text_color(c(th.subtext))
+                            .child(total_right),
+                    ),
+            )
+            // Segmented bar
+            .child(bar)
+            // Category rows
+            .child(rows_col)
+            // Optional footer
+            .when(!footer_notes.is_empty() || sub_note.is_some(), |d| {
+                d.child(
+                    div()
+                        .w_full()
+                        .pt(px(6.))
+                        .border_t_1()
+                        .border_color(crate::theme::divider())
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .when(!footer_notes.is_empty(), |d| {
+                            d.child(
+                                div()
+                                    .text_size(px(ui::fs_caption()))
+                                    .text_color(c(th.subtext))
+                                    .child(footer_notes.join("  ·  ")),
+                            )
+                        })
+                        .when_some(sub_note, |d, sn| {
+                            d.child(
+                                div()
+                                    .text_size(px(ui::fs_caption()))
+                                    .text_color(c(th.overlay0))
+                                    .child(sn),
+                            )
+                        }),
+                )
+            });
+
+        let anchor = if pop.anchor_bottom {
+            gpui::Anchor::BottomRight
+        } else {
+            gpui::Anchor::TopLeft
+        };
+        div()
+            .id("ag-ctx-pop-backdrop")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .occlude()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.agent_hub.ctx_popover = None;
+                    cx.notify();
+                }),
+            )
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(|this, _, _, cx| {
+                    this.agent_hub.ctx_popover = None;
+                    cx.notify();
+                }),
+            )
+            .child(
+                gpui::deferred(
+                    gpui::anchored()
+                        .anchor(anchor)
+                        .position(pop.pos)
+                        .snap_to_window_with_margin(px(ui::EDGE_MARGIN))
+                        .child(crate::chrome::pop_in("ag-ctx-pop-anim", card)),
+                )
+                .with_priority(4),
+            )
+            .into_any_element()
     }
 
     fn render_agent_filter_popover(
@@ -4074,7 +4868,8 @@ fn render_running_row_el(
         match target {
             AgentMenuTarget::History(meta) => {
                 let is_archived = self.is_meta_archived(&meta);
-                let (m1, m2, m3, m4, m5, m6) = (
+                let (m1, m2, m3, m4, m5, m6, m7) = (
+                    meta.clone(),
                     meta.clone(),
                     meta.clone(),
                     meta.clone(),
@@ -4101,6 +4896,19 @@ fn render_running_row_el(
                         .on_click(cx.listener(move |this, _, w, cx| {
                             this.agent_hub.menu = None;
                             this.resume_history_session(&m2, true, w, cx);
+                        })),
+                    )
+                    .child(
+                        ui::menu_item(
+                            "ag-m-ctx",
+                            Some(IconName::Gauge),
+                            t("ag.ctx_view"),
+                            true,
+                            false,
+                        )
+                        .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _, cx| {
+                            this.agent_hub.menu = None;
+                            this.open_context_popover_for_meta(&m7, ev.position(), cx);
                         })),
                     )
                     .child(
@@ -4188,7 +4996,7 @@ fn render_running_row_el(
                 has_worktree,
                 session_id,
             } => {
-                let (p1, p2) = (pane.clone(), pane.clone());
+                let (p1, p2, p3) = (pane.clone(), pane.clone(), pane.clone());
                 menu = menu
                     .child(
                         ui::menu_item(
@@ -4204,6 +5012,19 @@ fn render_running_row_el(
                                 s.write(b"\x1b".to_vec());
                             }
                             cx.notify();
+                        })),
+                    )
+                    .child(
+                        ui::menu_item(
+                            "ag-m-rctx",
+                            Some(IconName::Gauge),
+                            t("ag.ctx_view"),
+                            true,
+                            false,
+                        )
+                        .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _, cx| {
+                            this.agent_hub.menu = None;
+                            this.open_context_popover_for_running_pane(&p3, ev.position(), cx);
                         })),
                     )
                     .when_some(session_id, |d, sid| {
@@ -4727,7 +5548,7 @@ fn render_running_row_el(
             .w_full()
             .flex_shrink_0()
             .px(px(ui::SP_3))
-            .bg(c(th.mantle))
+            .bg(crate::theme::bar_bg())
             .border_t_1()
             .border_color(crate::theme::divider())
             .rounded_bl(px(crate::card_layout::CARD_RADIUS))
@@ -4782,10 +5603,19 @@ fn render_running_row_el(
                 )
             })
             .when_some(ctx_info.as_ref(), |d, rc| {
+                let tip = format!("{} · {}", rc.tooltip, t("ag.ctx_view"));
                 d.child(
                     div()
                         .id("ag-bar-ctx")
-                        .tooltip(ui::tip(rc.tooltip.clone()))
+                        .cursor_pointer()
+                        .px(px(ui::SP_1 + 2.))
+                        .py(px(2.))
+                        .rounded(px(ui::R_SM))
+                        .hover(|s| s.bg(crate::theme::hover_bg()))
+                        .tooltip(ui::tip(tip))
+                        .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _, cx| {
+                            this.toggle_context_popover_from_bar(ev.position(), cx);
+                        }))
                         .child(render_ctx_ring(Some(rc.frac), &rc.bar_label, true)),
                 )
             })
@@ -5157,7 +5987,7 @@ impl gpui::Render for AgentListView {
                                 .right_0()
                                 .flex()
                                 .flex_col()
-                                .bg(crate::theme::card_bg())
+                                .bg(crate::theme::solid_card_bg())
                                 .pb(px(3.))
                                 .occlude()
                                 .child(Root::render_project_header_card_el(
@@ -5475,5 +6305,13 @@ mod tests {
         let rs = resolve_context(None, Some(&noisy_screen)).expect("screen fallback");
         assert_eq!(rs.short_label, "15%");
         assert_eq!(rs.bar_label, "15%");
+
+        // 5. Segmented bar widths stay within total bar width even with multiple tiny segments.
+        let segs = vec![2_000, 4_400, 6_100, 4_800, 7_900, 1_500, 473_300];
+        let widths = segmented_bar_widths(&segs, 500_000, 312.0, 1.5);
+        assert_eq!(widths.len(), segs.len());
+        let sum_w: f32 = widths.iter().sum();
+        assert!(sum_w + 1.5 * 6.0 <= 312.1, "bar must not overflow: {sum_w}");
+        assert!(widths.iter().all(|&w| w >= 2.5), "tiny segments stay visible: {widths:?}");
     }
 }

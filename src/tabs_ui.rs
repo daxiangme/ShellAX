@@ -729,7 +729,7 @@ impl Root {
             .invisible()
             .group_hover(group.clone(), |s| s.visible())
             .hover(|s| s.visible())
-            .bg(crate::theme::card_bg())
+            .bg(crate::theme::solid_card_bg())
             .border_1()
             .border_color(crate::theme::divider())
             .shadow(chrome::soft_shadow(false))

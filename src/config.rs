@@ -35,7 +35,7 @@ d!(s_auditdir, String, "~/.local/share/shellax/audit".into());
 d!(f_size, f32, 13.5);
 d!(f_lh, f32, 1.0);
 d!(f_pad, f32, 8.0);
-d!(f_one, f32, 1.0);
+d!(f_opacity, f32, 0.90);
 d!(f_ui, f32, 13.0);
 d!(u_scroll, usize, 10_000);
 d!(u_22, u16, 22);
@@ -120,7 +120,7 @@ impl Default for Appearance {
             scheme: s_system(),
             light_scheme: "Catppuccin Latte".into(),
             dark_scheme: "Catppuccin Mocha".into(),
-            opacity: f_one(),
+            opacity: f_opacity(),
             ui_font_size: f_ui(),
             reduce_motion: false,
         }

@@ -721,7 +721,7 @@ fn segmented_with(
                 .text_size(px(fs_small()))
                 .when(fill, |d| d.flex_1().justify_center())
                 .when(active, |d| {
-                    d.bg(crate::theme::card_bg())
+                    d.bg(crate::theme::solid_card_bg())
                         .shadow_sm()
                         .font_weight(FontWeight::MEDIUM)
                 })

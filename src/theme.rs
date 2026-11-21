@@ -957,13 +957,51 @@ mod iterm_tests {
 
 // ---- 统一的三层背景：外层框架 / 卡片 / 悬停与选中。界面各处只用这几个，不再各自调深浅。
 
-/// 卡片层：左侧面板、中间内容卡片、右侧卡片（与终端背景一致）。
-pub fn card_bg() -> gpui::Hsla {
+/// 当前配置的窗口不透明度（0.5–1.0）；1.0 表示完全不透明。
+pub fn window_opacity() -> f32 {
+    crate::config::get().appearance.opacity.clamp(0.5, 1.0)
+}
+/// 卡片层实际不透明度：在开启半透模式时，macOS 依靠原生磨砂模糊可直接使用 `window_opacity()`；
+/// 非 macOS 无系统高斯模糊时略微抬高基底以保证文字锐利可读。
+pub fn card_alpha() -> f32 {
+    let op = window_opacity();
+    if op >= 0.999 {
+        1.0
+    } else if cfg!(target_os = "macos") {
+        op
+    } else {
+        (op + 0.03).clamp(0.55, 0.98)
+    }
+}
+/// 实心卡片底色：用于虚拟列表吸顶标题、悬浮按钮条、分段控件选中态等需要遮挡下方滚动文字的元素。
+pub fn solid_card_bg() -> gpui::Hsla {
     c(scheme().bg)
+}
+/// 卡片层：左侧面板、中间内容卡片、右侧卡片（随全局透明度呈现柔和半透，同时保证文字清晰）。
+pub fn card_bg() -> gpui::Hsla {
+    c(scheme().bg).opacity(card_alpha())
+}
+/// 卡片内底栏（如 Agent 底部状态栏、终端路径栏）：在半透模式下使用柔和层次叠层，不堵死卡片底部圆角。
+pub fn bar_bg() -> gpui::Hsla {
+    if window_opacity() >= 0.999 {
+        c(cur().mantle)
+    } else if cur().appearance == Appearance::Dark {
+        gpui::black().opacity(0.20)
+    } else {
+        gpui::black().opacity(0.045)
+    }
 }
 /// 外层框架：窗口、标题栏、两侧图标栏、标签栏、状态栏。
 pub fn chrome_bg() -> gpui::Hsla {
-    outer_bg()
+    let op = window_opacity();
+    let base = outer_bg();
+    if op >= 0.999 {
+        base
+    } else if cfg!(target_os = "macos") {
+        base.opacity((op - 0.16).clamp(0.42, 0.92))
+    } else {
+        base.opacity((op - 0.06).clamp(0.45, 0.94))
+    }
 }
 /// 悬停行：卡片上叠一层很淡的前景色。
 pub fn hover_bg() -> gpui::Hsla {
@@ -981,7 +1019,7 @@ pub fn muted_text() -> gpui::Hsla {
 pub fn menu_sel_bg() -> gpui::Hsla {
     let (a, b) = (
         gpui::Rgba::from(c(cur().accent)),
-        gpui::Rgba::from(card_bg()),
+        gpui::Rgba::from(solid_card_bg()),
     );
     let mix = |x: f32, y: f32| x * 0.3 + y * 0.7;
     gpui::Rgba {
@@ -1067,7 +1105,7 @@ pub fn host_accent(id: Option<&str>) -> gpui::Hsla {
 pub fn entity_body() -> gpui::Hsla {
     let (a, b) = (
         gpui::Rgba::from(c(cur().overlay1)),
-        gpui::Rgba::from(card_bg()),
+        gpui::Rgba::from(solid_card_bg()),
     );
     gpui::Rgba {
         r: (a.r + b.r) / 2.,

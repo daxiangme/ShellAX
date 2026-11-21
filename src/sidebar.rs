@@ -664,7 +664,7 @@ impl Root {
             .size(px(7.))
             .rounded_full()
             .border_1()
-            .border_color(crate::theme::card_bg())
+            .border_color(crate::theme::solid_card_bg())
             .bg(match st {
                 2 => c(th.success),
                 1 => c(th.warning),

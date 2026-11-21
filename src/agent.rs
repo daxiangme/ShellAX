@@ -1502,6 +1502,24 @@ pub fn format_tokens(n: u64) -> String {
     }
 }
 
+/// One-decimal uppercase token count for detailed context breakdown popovers (`2.0K`, `337.6K`, `1.0M`).
+pub fn format_tokens_precise(n: u64) -> String {
+    if n >= 1_000_000 {
+        let v = n as f64 / 1_000_000.0;
+        if (v - v.round()).abs() < 0.005 {
+            format!("{}M", v.round() as u64)
+        } else {
+            let s = format!("{v:.2}");
+            let s = s.trim_end_matches('0').trim_end_matches('.');
+            format!("{s}M")
+        }
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
 fn cached_records() -> Vec<ClaudeRecord> {
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
@@ -1934,6 +1952,10 @@ Completed
         assert_eq!(rows[0].status, "已回复问候");
         assert_eq!(format_tokens(53_338), "53k");
         assert_eq!(format_tokens(1_000_000), "1M");
+        assert_eq!(format_tokens_precise(2_000), "2.0K");
+        assert_eq!(format_tokens_precise(337_600), "337.6K");
+        assert_eq!(format_tokens_precise(1_000_000), "1M");
+        assert_eq!(format_tokens_precise(1_500_000), "1.5M");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -33,10 +33,15 @@ pub fn window_options(bounds: Bounds<Pixels>, title: Option<String>) -> WindowOp
                 WindowDecorations::Client
             },
         ),
-        window_background: if cfg!(target_os = "macos") {
-            gpui::WindowBackgroundAppearance::Blurred
-        } else {
-            gpui::WindowBackgroundAppearance::Opaque
+        window_background: {
+            let op = crate::theme::window_opacity();
+            if op >= 0.999 {
+                gpui::WindowBackgroundAppearance::Opaque
+            } else if cfg!(target_os = "macos") {
+                gpui::WindowBackgroundAppearance::Blurred
+            } else {
+                gpui::WindowBackgroundAppearance::Transparent
+            }
         },
         ..Default::default()
     }

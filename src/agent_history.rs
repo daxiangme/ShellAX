@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1878,6 +1878,999 @@ pub fn refresh_single_session(
     }
 }
 
+/// Semantic category inside a session's context window (for segmented bar & breakdown popover).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextCategoryKind {
+    SystemPrompt,
+    ToolDefinitions,
+    Rules,
+    Skills,
+    McpTools,
+    Subagents,
+    Conversation,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextCategory {
+    pub kind: ContextCategoryKind,
+    /// Optional concise qualifier (`"15 tools"`, `"2 files"`, `"21 skills"`, `"12 turns · tool I/O ~180K"`).
+    pub detail: Option<String>,
+    pub tokens: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextBreakdown {
+    pub agent: String,
+    pub model: Option<String>,
+    pub used_tokens: u64,
+    pub window_tokens: u64,
+    pub is_estimated: bool,
+    pub cleared: bool,
+    pub compacted_summary_only: bool,
+    pub categories: Vec<ContextCategory>,
+    pub autocompact_buffer: Option<u64>,
+}
+
+/// Fast CJK-aware token estimator (`~3.5` ASCII bytes/tok, `~1.25` tokens per non-ASCII char).
+pub fn estimate_text_tokens(text: &str) -> u64 {
+    if text.is_empty() {
+        return 0;
+    }
+    let mut ascii = 0u64;
+    let mut non_ascii_chars = 0u64;
+    for &b in text.as_bytes() {
+        if b < 0x80 {
+            ascii += 1;
+        } else if (b & 0xC0) != 0x80 {
+            non_ascii_chars += 1;
+        }
+    }
+    ((ascii as f64 / 3.5) + (non_ascii_chars as f64 * 1.25)).ceil() as u64
+}
+
+fn estimate_json_tokens(v: &Value) -> u64 {
+    match v {
+        Value::Null => 0,
+        Value::String(s) => estimate_text_tokens(s),
+        _ => serde_json::to_string(v)
+            .map(|s| estimate_text_tokens(&s))
+            .unwrap_or(0),
+    }
+}
+
+fn calibrate_breakdown_categories(
+    fixed: Vec<(ContextCategoryKind, Option<String>, u64)>,
+    conv_raw: u64,
+    conv_detail: Option<String>,
+    used_tokens: u64,
+) -> Vec<ContextCategory> {
+    if used_tokens == 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let fixed_sum: u64 = fixed.iter().map(|(_, _, t)| *t).sum();
+    if fixed_sum == 0 {
+        out.push(ContextCategory {
+            kind: ContextCategoryKind::Conversation,
+            detail: conv_detail,
+            tokens: used_tokens,
+        });
+        return out;
+    }
+    if fixed_sum <= used_tokens {
+        for (kind, detail, tokens) in fixed {
+            if tokens > 0 {
+                out.push(ContextCategory {
+                    kind,
+                    detail,
+                    tokens,
+                });
+            }
+        }
+        let conv_tokens = used_tokens.saturating_sub(fixed_sum);
+        if conv_tokens > 0 {
+            out.push(ContextCategory {
+                kind: ContextCategoryKind::Conversation,
+                detail: conv_detail,
+                tokens: conv_tokens,
+            });
+        }
+        return out;
+    }
+
+    // If raw estimation slightly overshoots `used_tokens` (e.g. turn 1 or right after compaction),
+    // proportionally scale all non-zero buckets so the sum equals `used_tokens` exactly.
+    let total_raw = fixed_sum.saturating_add(conv_raw).max(1);
+    let mut allocated = 0u64;
+    let mut items: Vec<(ContextCategoryKind, Option<String>, u64)> = fixed
+        .into_iter()
+        .filter(|(_, _, t)| *t > 0)
+        .collect();
+    if conv_raw > 0 {
+        items.push((ContextCategoryKind::Conversation, conv_detail, conv_raw));
+    }
+    let last_idx = items.len().saturating_sub(1);
+    for (idx, (kind, detail, raw)) in items.into_iter().enumerate() {
+        let tok = if idx == last_idx {
+            used_tokens.saturating_sub(allocated)
+        } else {
+            let scaled = ((raw as f64 / total_raw as f64) * used_tokens as f64).round() as u64;
+            scaled.min(used_tokens.saturating_sub(allocated))
+        };
+        allocated = allocated.saturating_add(tok);
+        if tok > 0 {
+            out.push(ContextCategory {
+                kind,
+                detail,
+                tokens: tok,
+            });
+        }
+    }
+    out
+}
+
+fn format_conv_detail(turns: u32, tool_io_share: u64) -> Option<String> {
+    let mut parts = Vec::new();
+    if turns > 0 {
+        parts.push(crate::i18n::tf("ag.ctx_turns_n", &[("n", &turns)]));
+    }
+    if tool_io_share >= 1_000 {
+        let tok_s = crate::agent::format_tokens_precise(tool_io_share);
+        parts.push(crate::i18n::tf("ag.ctx_tool_io", &[("t", &tok_s)]));
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+fn normalize_window_for_used(used: u64, win_opt: Option<u64>) -> u64 {
+    let mut win = win_opt.unwrap_or(200_000).max(1);
+    while used > win {
+        win = if win < 1_000_000 {
+            1_000_000
+        } else {
+            win.saturating_mul(2)
+        };
+    }
+    win
+}
+
+/// On-demand, `(mtime, size)`-cached detailed context breakdown for one session transcript.
+/// Never called during background list scans so idle/scroll performance stays O(1).
+pub fn analyze_context_breakdown(agent: &str, path: &Path) -> Option<ContextBreakdown> {
+    use std::sync::{Mutex, OnceLock};
+    type Entry = (i64, u64, Option<ContextBreakdown>);
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Entry>>> = OnceLock::new();
+
+    let aid = crate::agent::normalize_id(agent);
+    let effective_path = if aid == "agy" && path.file_name().and_then(|n| n.to_str()) == Some("transcript.jsonl") {
+        let full = path.with_file_name("transcript_full.jsonl");
+        if full.is_file() {
+            full
+        } else {
+            path.to_path_buf()
+        }
+    } else {
+        path.to_path_buf()
+    };
+
+    let (mtime, size) = file_stamp(&effective_path)?;
+    if size == 0 {
+        return None;
+    }
+
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(g) = cache.lock() {
+        if let Some((cm, cs, res)) = g.get(&effective_path) {
+            if *cm == mtime && *cs == size {
+                return res.clone();
+            }
+        }
+    }
+
+    let res = match aid.as_str() {
+        "claude" => parse_claude_context_breakdown(&effective_path),
+        "agy" => parse_agy_context_breakdown(&effective_path),
+        "codex" => parse_codex_context_breakdown(&effective_path),
+        _ => None,
+    };
+
+    if let Ok(mut g) = cache.lock() {
+        if g.len() > 64 {
+            g.clear();
+        }
+        g.insert(effective_path, (mtime, size, res.clone()));
+    }
+    res
+}
+
+fn parse_claude_context_breakdown(path: &Path) -> Option<ContextBreakdown> {
+    let f = File::open(path).ok()?;
+    let reader = BufReader::with_capacity(64 * 1024, f);
+
+    #[derive(Default, Clone, Copy)]
+    struct ShapeCounts {
+        system: u64,
+        builtin_tools: u64,
+        builtin_count: usize,
+        mcp_tools: u64,
+        mcp_count: usize,
+    }
+
+    let mut shapes: HashMap<String, ShapeCounts> = HashMap::new();
+    let mut last_shape_hash: Option<String> = None;
+    let mut instructions: HashMap<String, u64> = HashMap::new();
+    let mut skills_toks = 0u64;
+    let mut skills_count = 0usize;
+    let mut subagents_toks = 0u64;
+    let mut deferred_mcp_toks = 0u64;
+    let mut env_att_toks: HashMap<String, u64> = HashMap::new();
+
+    let mut conv_user_text = 0u64;
+    let mut conv_asst_text = 0u64;
+    let mut conv_tool_io = 0u64;
+    let mut conv_att = 0u64;
+    let mut turns = 0u32;
+
+    let mut last_model: Option<String> = None;
+    let mut last_window: Option<u64> = None;
+    let mut last_used: Option<u64> = None;
+    let mut cleared = false;
+    let mut compacted_only = false;
+
+    for line_res in reader.lines() {
+        let Ok(line) = line_res else {
+            break;
+        };
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        match v.get("type").and_then(Value::as_str) {
+            Some("api-request-shape") => {
+                let Some(hash) = v.get("shapeHash").and_then(Value::as_str) else {
+                    continue;
+                };
+                if shapes.contains_key(hash) {
+                    continue;
+                }
+                let Some(sh) = v.get("shape") else {
+                    continue;
+                };
+                let mut sc = ShapeCounts::default();
+                if let Some(sys_arr) = sh.get("system").and_then(Value::as_array) {
+                    for item in sys_arr {
+                        if let Some(txt) = item.get("text").and_then(Value::as_str) {
+                            sc.system += estimate_text_tokens(txt);
+                        } else {
+                            sc.system += estimate_json_tokens(item);
+                        }
+                    }
+                }
+                if let Some(tools) = sh.get("tools").and_then(Value::as_array) {
+                    for tool in tools {
+                        let name = tool.get("name").and_then(Value::as_str).unwrap_or("");
+                        let toks = estimate_json_tokens(tool);
+                        if name.starts_with("mcp__") {
+                            sc.mcp_tools += toks;
+                            sc.mcp_count += 1;
+                        } else {
+                            sc.builtin_tools += toks;
+                            sc.builtin_count += 1;
+                        }
+                    }
+                }
+                shapes.insert(hash.to_string(), sc);
+            }
+            Some("api-request") => {
+                if let Some(h) = v.get("shapeHash").and_then(Value::as_str) {
+                    last_shape_hash = Some(h.to_string());
+                }
+            }
+            Some("attachment") => {
+                let Some(att) = v.get("attachment") else {
+                    continue;
+                };
+                let at = att.get("type").and_then(Value::as_str).unwrap_or("");
+                let rendered_toks = v.get("rendered").map(estimate_json_tokens).unwrap_or(0);
+                match at {
+                    "instructions" => {
+                        if let Some(files) = att.get("files").and_then(Value::as_array) {
+                            for (idx, fi) in files.iter().enumerate() {
+                                let key = fi
+                                    .get("path")
+                                    .or_else(|| fi.get("filePath"))
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string)
+                                    .unwrap_or_else(|| format!("rule-{idx}"));
+                                let t = fi
+                                    .get("content")
+                                    .and_then(Value::as_str)
+                                    .map(estimate_text_tokens)
+                                    .unwrap_or(0);
+                                if t > 0 {
+                                    instructions.insert(key, t);
+                                }
+                            }
+                        } else if rendered_toks > 0 {
+                            instructions.insert("instructions".into(), rendered_toks);
+                        }
+                    }
+                    "skill_listing" => {
+                        if rendered_toks > 0 {
+                            skills_toks = rendered_toks;
+                        }
+                        if let Some(n) = att.get("skillCount").and_then(Value::as_u64) {
+                            skills_count = n as usize;
+                        }
+                    }
+                    "agent_listing_delta" => {
+                        if rendered_toks > 0 {
+                            subagents_toks = rendered_toks;
+                        }
+                    }
+                    "deferred_tools_delta" | "deferred_tools_record" => {
+                        if rendered_toks > 0 {
+                            deferred_mcp_toks = deferred_mcp_toks.saturating_add(rendered_toks);
+                        }
+                    }
+                    "environment" | "session_context" | "date" | "model" | "auto_mode" => {
+                        if rendered_toks > 0 {
+                            env_att_toks.insert(at.to_string(), rendered_toks);
+                        }
+                    }
+                    "edited_text_file"
+                    | "task_reminder"
+                    | "hook_additional_context"
+                    | "queued_command"
+                    | "silent_turn_reminder" => {
+                        conv_att = conv_att.saturating_add(rendered_toks);
+                    }
+                    _ => {}
+                }
+            }
+            Some("system") => {
+                let sub = v.get("subtype").and_then(Value::as_str);
+                match sub {
+                    Some("compact_boundary" | "microcompact_boundary") => {
+                        conv_user_text = 0;
+                        conv_asst_text = 0;
+                        conv_tool_io = 0;
+                        conv_att = 0;
+                        turns = 0;
+                        last_used = v
+                            .get("compactMetadata")
+                            .and_then(|m| {
+                                m.get("postTokens")
+                                    .or_else(|| m.get("post_tokens"))
+                                    .and_then(Value::as_u64)
+                            })
+                            .filter(|&n| n > 0);
+                        compacted_only = true;
+                        cleared = false;
+                    }
+                    Some("local_command") => {
+                        let cmd = v
+                            .get("commandRun")
+                            .and_then(|c| c.get("command"))
+                            .and_then(Value::as_str);
+                        let content = v.get("content").and_then(Value::as_str).unwrap_or("");
+                        if cmd == Some("clear")
+                            || content.contains("<command-name>/clear</command-name>")
+                        {
+                            conv_user_text = 0;
+                            conv_asst_text = 0;
+                            conv_tool_io = 0;
+                            conv_att = 0;
+                            turns = 0;
+                            instructions.clear();
+                            skills_toks = 0;
+                            skills_count = 0;
+                            subagents_toks = 0;
+                            deferred_mcp_toks = 0;
+                            env_att_toks.clear();
+                            last_used = Some(0);
+                            cleared = true;
+                            compacted_only = false;
+                        } else if cmd == Some("compact")
+                            || content.contains("<command-name>/compact</command-name>")
+                        {
+                            conv_user_text = 0;
+                            conv_asst_text = 0;
+                            conv_tool_io = 0;
+                            conv_att = 0;
+                            turns = 0;
+                            last_used = None;
+                            compacted_only = true;
+                            cleared = false;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Some("user") => {
+                if v.get("isCompactSummary").and_then(Value::as_bool) == Some(true) {
+                    if !compacted_only {
+                        conv_user_text = 0;
+                        conv_asst_text = 0;
+                        conv_tool_io = 0;
+                        conv_att = 0;
+                        turns = 0;
+                        last_used = None;
+                        compacted_only = true;
+                    }
+                    if let Some(msg) = v.get("message") {
+                        if let Some(c) = msg.get("content") {
+                            conv_user_text = conv_user_text.saturating_add(estimate_json_tokens(c));
+                        }
+                    }
+                    continue;
+                }
+                if let Some(raw) = extract_claude_message_text(&v) {
+                    if raw.contains("<command-name>/clear</command-name>") {
+                        conv_user_text = 0;
+                        conv_asst_text = 0;
+                        conv_tool_io = 0;
+                        conv_att = 0;
+                        turns = 0;
+                        instructions.clear();
+                        skills_toks = 0;
+                        skills_count = 0;
+                        subagents_toks = 0;
+                        deferred_mcp_toks = 0;
+                        env_att_toks.clear();
+                        last_used = Some(0);
+                        cleared = true;
+                        compacted_only = false;
+                        continue;
+                    }
+                    if raw.contains("<command-name>/compact</command-name>") {
+                        conv_user_text = 0;
+                        conv_asst_text = 0;
+                        conv_tool_io = 0;
+                        conv_att = 0;
+                        turns = 0;
+                        last_used = None;
+                        compacted_only = true;
+                        cleared = false;
+                        continue;
+                    }
+                    if is_claude_local_cmd_wrapper(&raw) {
+                        continue;
+                    }
+                }
+                if let Some(c) = v.get("message").and_then(|m| m.get("content")) {
+                    match c {
+                        Value::String(s) => {
+                            conv_user_text = conv_user_text.saturating_add(estimate_text_tokens(s));
+                            if v.get("isMeta").and_then(Value::as_bool) != Some(true) {
+                                turns += 1;
+                            }
+                        }
+                        Value::Array(arr) => {
+                            let mut has_user_text = false;
+                            for item in arr {
+                                if item.get("type").and_then(Value::as_str) == Some("tool_result") {
+                                    conv_tool_io = conv_tool_io.saturating_add(
+                                        item.get("content").map(estimate_json_tokens).unwrap_or(0),
+                                    );
+                                } else {
+                                    has_user_text = true;
+                                    conv_user_text =
+                                        conv_user_text.saturating_add(estimate_json_tokens(item));
+                                }
+                            }
+                            if has_user_text && v.get("isMeta").and_then(Value::as_bool) != Some(true)
+                            {
+                                turns += 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Some("assistant") => {
+                let Some(msg) = v.get("message") else {
+                    continue;
+                };
+                let model = msg.get("model").and_then(Value::as_str);
+                if model == Some("<synthetic>") {
+                    continue;
+                }
+                if let Some(m) = model.filter(|s| !s.is_empty()) {
+                    last_model = Some(m.to_string());
+                    last_window = Some(claude_model_context_window(m));
+                }
+                if let Some(c) = msg.get("content") {
+                    match c {
+                        Value::String(s) => {
+                            conv_asst_text = conv_asst_text.saturating_add(estimate_text_tokens(s));
+                        }
+                        Value::Array(arr) => {
+                            for item in arr {
+                                match item.get("type").and_then(Value::as_str) {
+                                    Some("tool_use") => {
+                                        let name_tok = item
+                                            .get("name")
+                                            .and_then(Value::as_str)
+                                            .map(estimate_text_tokens)
+                                            .unwrap_or(0);
+                                        let inp_tok =
+                                            item.get("input").map(estimate_json_tokens).unwrap_or(0);
+                                        conv_tool_io = conv_tool_io
+                                            .saturating_add(name_tok)
+                                            .saturating_add(inp_tok);
+                                    }
+                                    Some("thinking") => {
+                                        let t = item
+                                            .get("thinking")
+                                            .and_then(Value::as_str)
+                                            .map(estimate_text_tokens)
+                                            .unwrap_or(0);
+                                        conv_asst_text = conv_asst_text.saturating_add(t);
+                                    }
+                                    Some("text") => {
+                                        let t = item
+                                            .get("text")
+                                            .and_then(Value::as_str)
+                                            .map(estimate_text_tokens)
+                                            .unwrap_or(0);
+                                        conv_asst_text = conv_asst_text.saturating_add(t);
+                                    }
+                                    _ => {
+                                        conv_asst_text = conv_asst_text
+                                            .saturating_add(estimate_json_tokens(item));
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(u) = msg.get("usage").or_else(|| v.get("usage")) {
+                    let input = u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                    let create = u
+                        .get("cache_creation_input_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    let read = u
+                        .get("cache_read_input_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    let sum = input.saturating_add(create).saturating_add(read);
+                    if sum > 0 {
+                        last_used = Some(sum);
+                        cleared = false;
+                        compacted_only = false;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let used_tokens = last_used.unwrap_or(0);
+    let window_tokens = normalize_window_for_used(used_tokens, last_window);
+    if cleared || used_tokens == 0 {
+        return Some(ContextBreakdown {
+            agent: "claude".into(),
+            model: last_model,
+            used_tokens: 0,
+            window_tokens,
+            is_estimated: true,
+            cleared,
+            compacted_summary_only: compacted_only,
+            categories: Vec::new(),
+            autocompact_buffer: None,
+        });
+    }
+
+    let shape = last_shape_hash
+        .as_deref()
+        .and_then(|h| shapes.get(h))
+        .copied()
+        .unwrap_or_default();
+    let inst_toks: u64 = instructions.values().sum();
+    let env_toks: u64 = env_att_toks.values().sum();
+    let rules_toks = inst_toks.saturating_add(env_toks);
+    let mcp_toks = shape.mcp_tools.saturating_add(deferred_mcp_toks);
+
+    let mut fixed = Vec::new();
+    if shape.system > 0 {
+        fixed.push((ContextCategoryKind::SystemPrompt, None, shape.system));
+    }
+    if shape.builtin_tools > 0 {
+        let d = (shape.builtin_count > 0).then(|| {
+            crate::i18n::tf("ag.ctx_tools_n", &[("n", &shape.builtin_count)])
+        });
+        fixed.push((ContextCategoryKind::ToolDefinitions, d, shape.builtin_tools));
+    }
+    if rules_toks > 0 {
+        let d = (!instructions.is_empty()).then(|| {
+            crate::i18n::tf("ag.ctx_files_n", &[("n", &instructions.len())])
+        });
+        fixed.push((ContextCategoryKind::Rules, d, rules_toks));
+    }
+    if skills_toks > 0 {
+        let d = (skills_count > 0)
+            .then(|| crate::i18n::tf("ag.ctx_skills_n", &[("n", &skills_count)]));
+        fixed.push((ContextCategoryKind::Skills, d, skills_toks));
+    }
+    if mcp_toks > 0 {
+        let d = (shape.mcp_count > 0)
+            .then(|| crate::i18n::tf("ag.ctx_tools_n", &[("n", &shape.mcp_count)]));
+        fixed.push((ContextCategoryKind::McpTools, d, mcp_toks));
+    }
+    if subagents_toks > 0 {
+        fixed.push((ContextCategoryKind::Subagents, None, subagents_toks));
+    }
+
+    let conv_raw = conv_user_text
+        .saturating_add(conv_asst_text)
+        .saturating_add(conv_tool_io)
+        .saturating_add(conv_att);
+    let fixed_sum: u64 = fixed.iter().map(|(_, _, t)| *t).sum();
+    let eff_conv = if fixed_sum < used_tokens {
+        used_tokens.saturating_sub(fixed_sum)
+    } else {
+        conv_raw
+    };
+    let tool_io_share = if conv_raw > 0 && conv_tool_io > 0 {
+        ((conv_tool_io as f64 / conv_raw as f64) * eff_conv as f64).round() as u64
+    } else {
+        0
+    };
+    let conv_detail = if compacted_only {
+        Some(crate::i18n::t("ag.ctx_compacted").to_string())
+    } else {
+        format_conv_detail(turns, tool_io_share)
+    };
+    let categories = calibrate_breakdown_categories(fixed, conv_raw, conv_detail, used_tokens);
+
+    let autocompact_buffer = (window_tokens >= 200_000).then(|| {
+        // Claude Code reserves ~3.3% (e.g. ~33k on 1M, ~13k-33k) for autocompact buffer.
+        ((window_tokens as f64 * 0.033).round() as u64).min(45_000)
+    });
+
+    Some(ContextBreakdown {
+        agent: "claude".into(),
+        model: last_model,
+        used_tokens,
+        window_tokens,
+        is_estimated: true,
+        cleared: false,
+        compacted_summary_only: compacted_only,
+        categories,
+        autocompact_buffer,
+    })
+}
+
+fn parse_agy_context_breakdown(path: &Path) -> Option<ContextBreakdown> {
+    let f = File::open(path).ok()?;
+    let reader = BufReader::with_capacity(64 * 1024, f);
+
+    let mut first_sys_tools_overhead: Option<u64> = None;
+    let mut pre_first_visible = 0u64;
+    let mut saw_first_pr = false;
+
+    let mut sys_msg_toks = 0u64;
+    let mut conv_user_toks = 0u64;
+    let mut conv_asst_toks = 0u64;
+    let mut conv_tool_io = 0u64;
+    let mut turns = 0u32;
+
+    let mut last_model: Option<String> = None;
+    let mut last_window: Option<u64> = None;
+    let mut last_used: Option<u64> = None;
+    let mut compacted_only = false;
+
+    for line_res in reader.lines() {
+        let Ok(line) = line_res else {
+            break;
+        };
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        match v.get("type").and_then(Value::as_str) {
+            Some("CHECKPOINT") => {
+                sys_msg_toks = 0;
+                conv_user_toks = 0;
+                conv_asst_toks = 0;
+                conv_tool_io = 0;
+                turns = 0;
+                let out = v
+                    .get("output_tokens")
+                    .and_then(Value::as_u64)
+                    .filter(|&n| n > 0);
+                last_used = out;
+                compacted_only = true;
+                if let Some(o) = out {
+                    conv_asst_toks = o;
+                }
+            }
+            Some("SYSTEM_MESSAGE") => {
+                let t = v
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .map(estimate_text_tokens)
+                    .unwrap_or(0);
+                sys_msg_toks = sys_msg_toks.saturating_add(t);
+                if !saw_first_pr {
+                    pre_first_visible = pre_first_visible.saturating_add(t);
+                }
+            }
+            Some("USER_INPUT") => {
+                let t = v
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .map(estimate_text_tokens)
+                    .unwrap_or(0);
+                conv_user_toks = conv_user_toks.saturating_add(t);
+                turns += 1;
+                if !saw_first_pr {
+                    pre_first_visible = pre_first_visible.saturating_add(t);
+                }
+            }
+            Some("GENERIC") => {
+                let t = v
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .map(estimate_text_tokens)
+                    .unwrap_or(0);
+                conv_tool_io = conv_tool_io.saturating_add(t);
+                if !saw_first_pr {
+                    pre_first_visible = pre_first_visible.saturating_add(t);
+                }
+            }
+            Some("PLANNER_RESPONSE") => {
+                if let Some(m) = v.get("model").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                    last_model = Some(m.to_string());
+                    last_window = Some(agy_model_context_window(m));
+                }
+                let input = v.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                let cache_read = v
+                    .get("cache_read_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let sum = input.saturating_add(cache_read);
+                if sum > 0 {
+                    if !saw_first_pr {
+                        saw_first_pr = true;
+                        first_sys_tools_overhead = Some(sum.saturating_sub(pre_first_visible));
+                    }
+                    last_used = Some(sum);
+                    compacted_only = false;
+                }
+                let txt_tok = v
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .map(estimate_text_tokens)
+                    .unwrap_or(0);
+                let think_tok = v
+                    .get("thinking")
+                    .and_then(Value::as_str)
+                    .map(estimate_text_tokens)
+                    .unwrap_or(0);
+                let tc_tok = v.get("tool_calls").map(estimate_json_tokens).unwrap_or(0);
+                conv_asst_toks = conv_asst_toks
+                    .saturating_add(txt_tok)
+                    .saturating_add(think_tok);
+                conv_tool_io = conv_tool_io.saturating_add(tc_tok);
+            }
+            _ => {}
+        }
+    }
+
+    let used_tokens = last_used.unwrap_or(0);
+    let window_tokens = normalize_window_for_used(used_tokens, last_window.or(Some(1_000_000)));
+    if used_tokens == 0 {
+        return None;
+    }
+
+    let mut fixed = Vec::new();
+    let base_overhead = first_sys_tools_overhead.unwrap_or(0);
+    if !compacted_only && base_overhead > 0 {
+        fixed.push((ContextCategoryKind::SystemPrompt, None, base_overhead));
+    }
+    if sys_msg_toks > 0 {
+        fixed.push((ContextCategoryKind::Rules, None, sys_msg_toks));
+    }
+    let conv_raw = conv_user_toks
+        .saturating_add(conv_asst_toks)
+        .saturating_add(conv_tool_io);
+    let fixed_sum: u64 = fixed.iter().map(|(_, _, t)| *t).sum();
+    let eff_conv = if fixed_sum < used_tokens {
+        used_tokens.saturating_sub(fixed_sum)
+    } else {
+        conv_raw
+    };
+    let tool_io_share = if conv_raw > 0 && conv_tool_io > 0 {
+        ((conv_tool_io as f64 / conv_raw as f64) * eff_conv as f64).round() as u64
+    } else {
+        0
+    };
+    let conv_detail = if compacted_only {
+        Some(crate::i18n::t("ag.ctx_compacted").to_string())
+    } else {
+        format_conv_detail(turns, tool_io_share)
+    };
+    let categories = calibrate_breakdown_categories(fixed, conv_raw, conv_detail, used_tokens);
+
+    Some(ContextBreakdown {
+        agent: "agy".into(),
+        model: last_model,
+        used_tokens,
+        window_tokens,
+        is_estimated: true,
+        cleared: false,
+        compacted_summary_only: compacted_only,
+        categories,
+        autocompact_buffer: None,
+    })
+}
+
+fn parse_codex_context_breakdown(path: &Path) -> Option<ContextBreakdown> {
+    let f = File::open(path).ok()?;
+    let reader = BufReader::with_capacity(64 * 1024, f);
+
+    let mut sys_rules_toks = 0u64;
+    let mut conv_msg_toks = 0u64;
+    let mut conv_tool_io = 0u64;
+    let mut turns = 0u32;
+    let mut last_window: Option<u64> = None;
+    let mut last_used: Option<u64> = None;
+    let mut compacted_only = false;
+
+    for line_res in reader.lines() {
+        let Ok(line) = line_res else {
+            break;
+        };
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        match v.get("type").and_then(Value::as_str) {
+            Some("compacted") => {
+                sys_rules_toks = 0;
+                conv_msg_toks = 0;
+                conv_tool_io = 0;
+                turns = 0;
+                last_used = None;
+                compacted_only = true;
+            }
+            Some("event_msg") => {
+                if let Some(p) = v.get("payload") {
+                    match p.get("type").and_then(Value::as_str) {
+                        Some("context_compacted") => {
+                            sys_rules_toks = 0;
+                            conv_msg_toks = 0;
+                            conv_tool_io = 0;
+                            turns = 0;
+                            last_used = None;
+                            compacted_only = true;
+                        }
+                        Some("token_count") => {
+                            if let Some(info) = p.get("info").filter(|x| !x.is_null()) {
+                                if let Some(win) = info
+                                    .get("model_context_window")
+                                    .and_then(Value::as_u64)
+                                    .filter(|&w| w > 0)
+                                {
+                                    last_window = Some(win);
+                                }
+                                if let Some(u) = info
+                                    .get("last_token_usage")
+                                    .and_then(|t| {
+                                        t.get("input_tokens")
+                                            .or_else(|| t.get("total_tokens"))
+                                            .and_then(Value::as_u64)
+                                    })
+                                    .filter(|&n| n > 0)
+                                {
+                                    last_used = Some(u);
+                                    compacted_only = false;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Some("response_item") => {
+                if let Some(p) = v.get("payload") {
+                    let ptype = p.get("type").and_then(Value::as_str).unwrap_or("");
+                    if matches!(
+                        ptype,
+                        "function_call" | "function_call_output" | "custom_tool_call" | "custom_tool_call_output"
+                    ) {
+                        conv_tool_io = conv_tool_io.saturating_add(estimate_json_tokens(p));
+                        continue;
+                    }
+                    let role = p.get("role").and_then(Value::as_str);
+                    if matches!(role, Some("developer" | "system")) {
+                        sys_rules_toks = sys_rules_toks.saturating_add(
+                            p.get("content").map(estimate_json_tokens).unwrap_or(0),
+                        );
+                    } else if role == Some("user") {
+                        if let Some(arr) = p.get("content").and_then(Value::as_array) {
+                            let mut has_user = false;
+                            for item in arr {
+                                if let Some(t) = item.get("text").and_then(Value::as_str) {
+                                    let trimmed = t.trim_start();
+                                    let tok = estimate_text_tokens(t);
+                                    if trimmed.starts_with("<environment_context>")
+                                        || trimmed.starts_with("# AGENTS.md")
+                                        || trimmed.starts_with("<INSTRUCTIONS>")
+                                    {
+                                        sys_rules_toks = sys_rules_toks.saturating_add(tok);
+                                    } else {
+                                        has_user = true;
+                                        conv_msg_toks = conv_msg_toks.saturating_add(tok);
+                                    }
+                                } else {
+                                    has_user = true;
+                                    conv_msg_toks =
+                                        conv_msg_toks.saturating_add(estimate_json_tokens(item));
+                                }
+                            }
+                            if has_user {
+                                turns += 1;
+                            }
+                        }
+                    } else if role == Some("assistant") {
+                        conv_msg_toks = conv_msg_toks.saturating_add(
+                            p.get("content").map(estimate_json_tokens).unwrap_or(0),
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let used_tokens = last_used.filter(|&u| u > 0)?;
+    let window_tokens = normalize_window_for_used(used_tokens, last_window);
+    let mut fixed = Vec::new();
+    if sys_rules_toks > 0 {
+        fixed.push((ContextCategoryKind::Rules, None, sys_rules_toks));
+    }
+    let conv_raw = conv_msg_toks.saturating_add(conv_tool_io);
+    let fixed_sum: u64 = fixed.iter().map(|(_, _, t)| *t).sum();
+    let eff_conv = if fixed_sum < used_tokens {
+        used_tokens.saturating_sub(fixed_sum)
+    } else {
+        conv_raw
+    };
+    let tool_io_share = if conv_raw > 0 && conv_tool_io > 0 {
+        ((conv_tool_io as f64 / conv_raw as f64) * eff_conv as f64).round() as u64
+    } else {
+        0
+    };
+    let conv_detail = format_conv_detail(turns, tool_io_share);
+    let categories = calibrate_breakdown_categories(fixed, conv_raw, conv_detail, used_tokens);
+
+    Some(ContextBreakdown {
+        agent: "codex".into(),
+        model: None,
+        used_tokens,
+        window_tokens,
+        is_estimated: true,
+        cleared: false,
+        compacted_summary_only: compacted_only,
+        categories,
+        autocompact_buffer: None,
+    })
+}
+
 /// Format a unix timestamp as a compact relative age (`2m`, `3h`, `昨天`, `11-09`).
 pub fn relative_time_short(unix_secs: i64, now_secs: i64) -> String {
     let diff = (now_secs - unix_secs).max(0);
@@ -2141,6 +3134,91 @@ mod tests {
         assert_eq!(xm.ctx_used, None);
         assert!(xm.ctx_reset);
         assert_eq!(xm.ctx_window, Some(200_000));
+
+        // 5. Context breakdown calibration across Claude, Antigravity, and Codex.
+        let bd_file = proj.join("breakdown-claude.jsonl");
+        std::fs::write(
+            &bd_file,
+            concat!(
+                r#"{"type":"api-request-shape","shapeHash":"h1","shape":{"system":[{"type":"text","text":"You are Claude Code."}],"tools":[{"name":"Bash","description":"Run shell"},{"name":"mcp__github__get_issue","description":"Read issue"}]}}"#,
+                "\n",
+                r#"{"type":"api-request","shapeHash":"h1"}"#,
+                "\n",
+                r#"{"type":"attachment","attachment":{"type":"instructions","files":[{"path":"/repo/AGENTS.md","content":"Keep code clean.\n保持代码整洁。"}]},"rendered":[]}"#,
+                "\n",
+                r#"{"type":"attachment","attachment":{"type":"skill_listing","skillCount":3},"rendered":["skill-a","skill-b","skill-c"]}"#,
+                "\n",
+                r#"{"type":"attachment","attachment":{"type":"agent_listing_delta"},"rendered":["subagent-research"]}"#,
+                "\n",
+                r#"{"type":"user","sessionId":"bd1","message":{"role":"user","content":"Analyze the repo"}}"#,
+                "\n",
+                r#"{"type":"assistant","message":{"role":"assistant","model":"claude-opus-5-5","content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}],"usage":{"input_tokens":1000,"cache_read_input_tokens":19000}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let bd = analyze_context_breakdown("claude", &bd_file).expect("claude breakdown");
+        assert_eq!(bd.used_tokens, 20_000);
+        assert_eq!(bd.window_tokens, 1_000_000);
+        assert_eq!(
+            bd.categories.iter().map(|c| c.tokens).sum::<u64>(),
+            bd.used_tokens
+        );
+        assert!(bd
+            .categories
+            .iter()
+            .any(|c| c.kind == ContextCategoryKind::SystemPrompt));
+        assert!(bd
+            .categories
+            .iter()
+            .any(|c| c.kind == ContextCategoryKind::ToolDefinitions));
+        assert!(bd
+            .categories
+            .iter()
+            .any(|c| c.kind == ContextCategoryKind::McpTools));
+        assert!(bd
+            .categories
+            .iter()
+            .any(|c| c.kind == ContextCategoryKind::Rules));
+        assert!(bd
+            .categories
+            .iter()
+            .any(|c| c.kind == ContextCategoryKind::Skills));
+        assert!(bd
+            .categories
+            .iter()
+            .any(|c| c.kind == ContextCategoryKind::Subagents));
+        assert!(bd
+            .categories
+            .iter()
+            .any(|c| c.kind == ContextCategoryKind::Conversation));
+
+        // 6. Antigravity breakdown prefers transcript_full.jsonl and sums exactly to used_tokens.
+        let agy_bd_dir = tmp.join("agy_bd/brain/c9/.system_generated/logs");
+        std::fs::create_dir_all(&agy_bd_dir).unwrap();
+        std::fs::write(agy_bd_dir.join("transcript.jsonl"), "{}\n").unwrap();
+        std::fs::write(
+            agy_bd_dir.join("transcript_full.jsonl"),
+            concat!(
+                r#"{"step_index":0,"type":"USER_INPUT","content":"你好，帮我看下项目"}"#,
+                "\n",
+                r#"{"step_index":1,"type":"PLANNER_RESPONSE","model":"gemini-4-hydrogen","input_tokens":15000,"cache_read_tokens":0,"thinking":"let me inspect","tool_calls":[{"name":"run_command"}]}"#,
+                "\n",
+                r#"{"step_index":2,"type":"GENERIC","content":"src/main.rs\nsrc/agent.rs"}"#,
+                "\n",
+                r#"{"step_index":3,"type":"PLANNER_RESPONSE","model":"gemini-4-hydrogen","input_tokens":3000,"cache_read_tokens":15000,"content":"查看完成"}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let agy_bd =
+            analyze_context_breakdown("agy", &agy_bd_dir.join("transcript.jsonl")).expect("agy bd");
+        assert_eq!(agy_bd.used_tokens, 18_000);
+        assert_eq!(agy_bd.window_tokens, 1_000_000);
+        assert_eq!(
+            agy_bd.categories.iter().map(|c| c.tokens).sum::<u64>(),
+            agy_bd.used_tokens
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
