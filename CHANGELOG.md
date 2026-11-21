@@ -4,6 +4,19 @@
 
 新版本加在最上方。节标题与 `Cargo.toml` 的版本号相同，写成 `## 1.3.7`；Git 标签在版本号前加 `v`，写成 `v1.3.7`。条目有对应的 GitHub issue 时，在末尾写上编号，例如 `#12`。
 
+## 1.3.12
+
+### 修复与优化
+
+- **精准化 Agent 会话列表与底部栏上下文用量（`ctx`）统计，修复压缩与清除不生效问题**：
+  - 统一列表与底部栏（`agent_center_bar`）数据源为同一解析链路（`resolve_context`）：优先采信对应会话 Transcript 的精确 token 账本；仅在无本地记录（如远端 SSH）时回退至严格的底部状态栏抓取，并在压缩/清除后尚无新回合时抑制从旧屏幕滚动输出回填，底部栏同步展示精确占用与窗口比例（如 `ctx 70% · 701k/1M`）。
+  - 完善 Claude Code、Codex 与 Antigravity（`agy`）的压缩与清除边界解析：
+    - Claude Code 识别 `compact_boundary` / `microcompact_boundary`、`isCompactSummary` 及 `local_command`（`/clear`、`/compact`），清除归 `0%`、压缩清空旧峰值并跟随最新模型上下文窗口（忽略 `<synthetic>` 占位模型），同时支持 `continued-in` 会话链自动重绑，并将尾部扫描扩展至最高 `2MB`，避免大文件末尾的 `api-request-blob` / 快照导致回退至第 1 轮上下文；缓存版本号升级至 `4` 自动重建旧缓存。
+    - Codex 识别 `compacted` / `context_compacted` 重置事件并支持动态尾读扩展。
+    - Antigravity（`agy`）新增按 `(mtime, size)` 增量缓存解析 `brain/<id>/.system_generated/logs/transcript.jsonl`，依据 `PLANNER_RESPONSE`（`input_tokens + cache_read_tokens`）与 `CHECKPOINT`（压缩摘要用量）计算实时上下文占用。
+  - 修正屏幕状态栏抓取规则（`screen_context_usage`）：仅扫描末尾 8 行非空状态栏，优先匹配 `used/window` 显式比例，自动将 `context left` / `remaining` / `until auto-compact` 等“剩余比例”换算为实际已用比例（`100 - N`），过滤 `/context` 分类明细与单轮思考/流式输出 token 计数器（如 `↓ 2.5k tokens`、`Thought for ...`）。
+  - 提升实时同步速度与会话重绑能力：活跃分屏每 3 秒按 `(mtime, size)` 轻量单文件刷新；在终端提交 `/clear`、`/new`、`/reset` 或 `/compact` 时立即解除旧绑定或触发刷新；Claude Hook 补充 `PreCompact` / `PostCompact` 生命周期事件并在 `ReportAgent` 到达时即时刷新。
+
 ## 1.3.11
 
 ### 修复与优化

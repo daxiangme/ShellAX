@@ -507,15 +507,27 @@ impl Root {
             PaneCmd::ReportAgent {
                 pane_id,
                 agent: agent_id,
-                event: _,
+                event,
                 session_id,
                 transcript_path,
                 state,
             } => {
                 if let Some((_, pane)) = self.pane_by_id(&pane_id, cx) {
+                    let sid_changed = session_id.as_deref().is_some_and(|s| {
+                        !s.is_empty() && pane.read(cx).agent_session_id.as_deref() != Some(s)
+                    });
                     pane.update(cx, |v, cx| {
                         v.apply_hook_report(&agent_id, session_id, transcript_path, state, cx);
                     });
+                    self.refresh_active_pane_sessions(cx);
+                    if sid_changed
+                        || matches!(
+                            event.as_str(),
+                            "SessionStart" | "PostCompact" | "PreCompact" | "Stop"
+                        )
+                    {
+                        self.maybe_auto_refresh_agent_history(true, cx);
+                    }
                     self.check_pane_waiters(cx);
                     cx.notify();
                 }

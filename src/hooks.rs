@@ -59,17 +59,23 @@ pub struct HookReq {
 pub fn is_state_only_event(event: &str) -> bool {
     matches!(
         event,
-        "SessionStart" | "UserPromptSubmit" | "Notification" | "Stop" | "SessionEnd"
+        "SessionStart"
+            | "UserPromptSubmit"
+            | "Notification"
+            | "Stop"
+            | "SessionEnd"
+            | "PreCompact"
+            | "PostCompact"
     )
 }
 
 pub fn state_for_event(event: &str) -> Option<crate::agent::AgentState> {
     use crate::agent::AgentState;
     match event {
-        "UserPromptSubmit" => Some(AgentState::Working),
+        "UserPromptSubmit" | "PreCompact" => Some(AgentState::Working),
         "Notification" => Some(AgentState::Blocked),
         "Stop" => Some(AgentState::Done),
-        "SessionStart" => Some(AgentState::Idle),
+        "SessionStart" | "PostCompact" => Some(AgentState::Idle),
         _ => None,
     }
 }
@@ -98,6 +104,8 @@ pub fn parse_request(body: &str) -> Result<HookReq> {
         "user_prompt_submit" => "UserPromptSubmit".into(),
         "notification" => "Notification".into(),
         "stop" => "Stop".into(),
+        "pre_compact" | "preCompact" => "PreCompact".into(),
+        "post_compact" | "postCompact" => "PostCompact".into(),
         e => e.to_string(),
     };
     let tool = s(&v, &["tool_name", "toolName", "tool"]);
@@ -298,6 +306,8 @@ pub fn merge(agent: Agent, existing: Option<&str>, cli: &str, timeout: u64) -> R
             "UserPromptSubmit",
             "Notification",
             "Stop",
+            "PreCompact",
+            "PostCompact",
         ],
         Agent::Codex => &["PreToolUse", "PermissionRequest", "SessionStart", "Stop"],
         Agent::Grok => &["PreToolUse"],

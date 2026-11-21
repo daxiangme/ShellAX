@@ -1060,6 +1060,9 @@ pub enum TermEvent {
     Focused,
     Agent(String, AgentState),
     AgentRefresh,
+    /// User submitted a context-mutating slash command (`/clear`, `/new`, `/reset`, `/compact`)
+    /// inside an active coding-agent pane.
+    AgentContextChange,
     LongDone(String, u64, i32),
     Audit(&'static str, String),
     CtxEditor(String),
@@ -2059,6 +2062,28 @@ impl TermView {
             .map(str::to_string)
     }
 
+/// Detect whether the user submitted a context-mutating slash command (`/clear`, `/new`, `/reset`,
+/// `/compact`) at an agent prompt line.
+fn detect_agent_context_slash_cmd(
+    before_cursor: &str,
+    tracked: Option<&str>,
+) -> Option<&'static str> {
+    let classify = |raw: &str| -> Option<&'static str> {
+        let stripped = raw
+            .trim_start_matches(|c: char| {
+                c.is_whitespace() || matches!(c, '❯' | '›' | '>' | '»' | '│' | '┃' | '▎' | '▍')
+            })
+            .trim();
+        let first = stripped.split_whitespace().next()?;
+        match first.to_ascii_lowercase().as_str() {
+            "/clear" | "/new" | "/reset" => Some("clear"),
+            "/compact" => Some("compact"),
+            _ => None,
+        }
+    };
+    tracked.and_then(classify).or_else(|| classify(before_cursor))
+}
+
 fn shellish_title(s: &str) -> bool {
     let s = s.trim().trim_matches(|c: char| c == '"' || c == '\'');
     let base = s.rsplit(['/', '\\']).next().unwrap_or(s);
@@ -2831,7 +2856,40 @@ fn clip_caption(s: &str) -> String {
                             if self.agent.is_none() {
                                 self.cmd_started = Some((Instant::now(), cmd.clone()));
                                 self.last_command = Some(cmd);
+                            } else if let Some(slash) =
+                                Self::detect_agent_context_slash_cmd(&ls.before_cursor, Some(&cmd))
+                            {
+                                if slash == "clear" {
+                                    // `/clear` / `/new` / `/reset` starts a fresh agent session on disk;
+                                    // drop the old binding so live sync attaches to the new session ID.
+                                    self.agent_session_id = None;
+                                    self.agent_transcript_path = None;
+                                    self.agent_started_unix = now_unix_secs();
+                                }
+                                cx.emit(TermEvent::AgentContextChange);
                             }
+                        } else if self.agent.is_some() {
+                            if let Some(slash) =
+                                Self::detect_agent_context_slash_cmd(&ls.before_cursor, None)
+                            {
+                                if slash == "clear" {
+                                    self.agent_session_id = None;
+                                    self.agent_transcript_path = None;
+                                    self.agent_started_unix = now_unix_secs();
+                                }
+                                cx.emit(TermEvent::AgentContextChange);
+                            }
+                        }
+                    } else if self.agent.is_some() {
+                        if let Some(slash) =
+                            Self::detect_agent_context_slash_cmd(&ls.before_cursor, None)
+                        {
+                            if slash == "clear" {
+                                self.agent_session_id = None;
+                                self.agent_transcript_path = None;
+                                self.agent_started_unix = now_unix_secs();
+                            }
+                            cx.emit(TermEvent::AgentContextChange);
                         }
                     }
                 }

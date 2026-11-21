@@ -15,7 +15,23 @@ use serde_json::Value;
 
 const HEAD_BYTES: u64 = 64 * 1024;
 const TAIL_BYTES: u64 = 128 * 1024;
-const CACHE_VERSION: u32 = 3;
+const TAIL_EXPAND_BYTES: [u64; 2] = [512 * 1024, 2 * 1024 * 1024];
+const CACHE_VERSION: u32 = 4;
+
+/// Structured context-window usage derived from a session transcript.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContextDetail {
+    /// Fill fraction (`0.0..=1.0`). `0.0` represents an explicitly cleared session.
+    pub frac: f32,
+    pub used: u64,
+    pub window: u64,
+    /// Compact label for narrow session cards (`"70%"`, `"0%"`, `"6k"`).
+    pub short_label: String,
+    /// Detailed label for the bottom status bar (`"70% · 701k/1M"`, `"0%"`).
+    pub bar_label: String,
+    /// Human-readable tooltip breakdown.
+    pub tooltip: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionMeta {
@@ -40,12 +56,38 @@ pub struct SessionMeta {
     pub ctx_used: Option<u64>,
     #[serde(default)]
     pub ctx_window: Option<u64>,
+    /// True if the latest context-affecting event in the transcript was a `/clear` or `/compact`
+    /// boundary with no subsequent assistant turn yet.
+    #[serde(default)]
+    pub ctx_reset: bool,
+    /// Target session ID if the transcript ended with a `continued-in` handoff.
+    #[serde(default)]
+    pub continued_in: Option<String>,
 }
 
 impl SessionMeta {
-    /// Context window fill `(0.0..=1.0)` and compact label (`"42%"` / `"12k"`), if known.
-    pub fn context_ring_info(&self) -> Option<(f32, String)> {
-        let used = self.ctx_used.filter(|&u| u > 0)?;
+    /// Rich context-window usage detail derived from transcript token accounting.
+    pub fn context_detail(&self) -> Option<ContextDetail> {
+        let used = self.ctx_used?;
+        if used == 0 {
+            if !self.ctx_reset {
+                return None;
+            }
+            let win = self.ctx_window.unwrap_or(200_000).max(1);
+            let tooltip = if let Some(w) = self.ctx_window.filter(|&w| w > 0) {
+                format!("ctx 0% (0 / {} tokens)", crate::agent::format_tokens(w))
+            } else {
+                "ctx 0%".to_string()
+            };
+            return Some(ContextDetail {
+                frac: 0.0,
+                used: 0,
+                window: win,
+                short_label: "0%".into(),
+                bar_label: "0%".into(),
+                tooltip,
+            });
+        }
         let mut win = self.ctx_window.unwrap_or(200_000).max(1);
         while used > win {
             win = if win < 1_000_000 {
@@ -57,12 +99,32 @@ impl SessionMeta {
         let ratio = (used as f64 / win as f64).clamp(0.0, 1.0);
         let frac = ratio.max(0.04) as f32;
         let pct = (ratio * 100.0).round().min(100.0) as u32;
-        let label = if pct >= 1 {
+        let used_s = crate::agent::format_tokens(used);
+        let win_s = crate::agent::format_tokens(win);
+        let short_label = if pct >= 1 {
             format!("{pct}%")
         } else {
-            crate::agent::format_tokens(used)
+            used_s.clone()
         };
-        Some((frac, label))
+        let bar_label = if pct >= 1 {
+            format!("{pct}% · {used_s}/{win_s}")
+        } else {
+            format!("{used_s}/{win_s}")
+        };
+        let tooltip = format!("ctx {pct}% ({used_s} / {win_s} tokens)");
+        Some(ContextDetail {
+            frac,
+            used,
+            window: win,
+            short_label,
+            bar_label,
+            tooltip,
+        })
+    }
+
+    /// Context window fill `(0.0..=1.0)` and compact label (`"42%"` / `"12k"` / `"0%"`), if known.
+    pub fn context_ring_info(&self) -> Option<(f32, String)> {
+        self.context_detail().map(|d| (d.frac, d.short_label))
     }
     /// Best human-readable title for list display.
     pub fn display_title(&self) -> &str {
@@ -338,6 +400,19 @@ fn read_head_tail_lines(path: &Path, size: u64) -> Option<(Vec<String>, Vec<Stri
     ))
 }
 
+/// Read complete JSONL lines from the last `tail_bytes` of `path`.
+fn read_tail_lines(path: &Path, size: u64, tail_bytes: u64) -> Option<Vec<String>> {
+    let mut f = File::open(path).ok()?;
+    let take = size.min(tail_bytes);
+    let skip_first = size > take;
+    if skip_first {
+        f.seek(SeekFrom::Start(size - take)).ok()?;
+    }
+    let mut buf = vec![0u8; take as usize];
+    f.read_exact(&mut buf).ok()?;
+    Some(split_lines_lossy(&buf, skip_first))
+}
+
 fn split_lines_lossy(bytes: &[u8], skip_first_partial: bool) -> Vec<String> {
     let start = if skip_first_partial {
         match bytes.iter().position(|&b| b == b'\n') {
@@ -386,6 +461,163 @@ fn parse_iso_secs(ts: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(ts)
         .ok()
         .map(|dt| dt.timestamp())
+}
+
+#[derive(Default, Clone)]
+struct CtxParseState {
+    used: Option<u64>,
+    window: Option<u64>,
+    reset: bool,
+    continued_in: Option<String>,
+    saw_event: bool,
+}
+
+fn inspect_claude_ctx(v: &Value, st: &mut CtxParseState) {
+    match v.get("type").and_then(Value::as_str) {
+        Some("continued-in") => {
+            if let Some(next_id) = v
+                .get("continuedInSessionId")
+                .or_else(|| v.get("newSessionId"))
+                .or_else(|| v.get("targetSessionId"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                st.continued_in = Some(next_id.to_string());
+            }
+        }
+        Some("system") => {
+            let sub = v.get("subtype").and_then(Value::as_str);
+            match sub {
+                Some("compact_boundary" | "microcompact_boundary") => {
+                    let post = v
+                        .get("compactMetadata")
+                        .and_then(|m| {
+                            m.get("postTokens")
+                                .or_else(|| m.get("post_tokens"))
+                                .and_then(Value::as_u64)
+                        })
+                        .filter(|&n| n > 0);
+                    st.used = post;
+                    st.reset = true;
+                    st.saw_event = true;
+                }
+                Some("local_command") => {
+                    let cmd = v
+                        .get("commandRun")
+                        .and_then(|c| c.get("command"))
+                        .and_then(Value::as_str);
+                    let content = v.get("content").and_then(Value::as_str).unwrap_or("");
+                    if cmd == Some("clear")
+                        || content.contains("<command-name>/clear</command-name>")
+                    {
+                        st.used = Some(0);
+                        st.reset = true;
+                        st.saw_event = true;
+                    } else if cmd == Some("compact")
+                        || content.contains("<command-name>/compact</command-name>")
+                    {
+                        st.used = None;
+                        st.reset = true;
+                        st.saw_event = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Some("user") => {
+            if v.get("isCompactSummary").and_then(Value::as_bool) == Some(true) {
+                st.used = None;
+                st.reset = true;
+                st.saw_event = true;
+            } else if let Some(raw) = extract_claude_message_text(v) {
+                if raw.contains("<command-name>/clear</command-name>") {
+                    st.used = Some(0);
+                    st.reset = true;
+                    st.saw_event = true;
+                } else if raw.contains("<command-name>/compact</command-name>") {
+                    st.used = None;
+                    st.reset = true;
+                    st.saw_event = true;
+                }
+            }
+        }
+        Some("assistant") => {
+            if let Some(msg) = v.get("message") {
+                let model = msg.get("model").and_then(Value::as_str);
+                if model == Some("<synthetic>") {
+                    return;
+                }
+                if let Some(model) = model.filter(|s| !s.is_empty()) {
+                    st.window = Some(claude_model_context_window(model));
+                }
+                if let Some(u) = msg.get("usage").or_else(|| v.get("usage")) {
+                    let input = u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                    let create = u
+                        .get("cache_creation_input_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    let read = u
+                        .get("cache_read_input_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    let sum = input.saturating_add(create).saturating_add(read);
+                    if sum > 0 {
+                        st.used = Some(sum);
+                        st.reset = false;
+                        st.saw_event = true;
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn inspect_codex_ctx(v: &Value, st: &mut CtxParseState) {
+    match v.get("type").and_then(Value::as_str) {
+        Some("compacted") => {
+            st.used = None;
+            st.reset = true;
+            st.saw_event = true;
+        }
+        Some("event_msg") => {
+            if let Some(p) = v.get("payload") {
+                match p.get("type").and_then(Value::as_str) {
+                    Some("context_compacted") => {
+                        st.used = None;
+                        st.reset = true;
+                        st.saw_event = true;
+                    }
+                    Some("token_count") => {
+                        if let Some(info) = p.get("info").filter(|x| !x.is_null()) {
+                            if let Some(win) = info
+                                .get("model_context_window")
+                                .and_then(Value::as_u64)
+                                .filter(|&w| w > 0)
+                            {
+                                st.window = Some(win);
+                            }
+                            if let Some(u) = info
+                                .get("last_token_usage")
+                                .and_then(|t| {
+                                    t.get("input_tokens")
+                                        .or_else(|| t.get("total_tokens"))
+                                        .and_then(Value::as_u64)
+                                })
+                                .filter(|&n| n > 0)
+                            {
+                                st.used = Some(u);
+                                st.reset = false;
+                                st.saw_event = true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 // ============================================================================
@@ -465,128 +697,245 @@ impl HistoryProvider for ClaudeProvider {
         let mut started: Option<i64> = None;
         let mut updated: Option<i64> = None;
         let mut sampled_msgs: u32 = 0;
-        let mut ctx_used: Option<u64> = None;
-        let mut ctx_window: Option<u64> = None;
+        let mut ctx_st = CtxParseState::default();
 
-        let mut inspect = |line: &str| -> bool {
-            let Ok(v) = serde_json::from_str::<Value>(line) else {
-                return true;
-            };
-            if v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
-                return false;
-            }
-            if let Some(sid) = v.get("sessionId").and_then(Value::as_str) {
-                if !sid.is_empty() && sid.len() >= session_id.len() {
-                    session_id = sid.to_string();
+        {
+            let mut inspect = |line: &str| -> bool {
+                let Ok(v) = serde_json::from_str::<Value>(line) else {
+                    return true;
+                };
+                if v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+                    return false;
                 }
-            }
-            if cwd.is_none() {
-                cwd = v
-                    .get("cwd")
+                if let Some(sid) = v.get("sessionId").and_then(Value::as_str) {
+                    if !sid.is_empty() && sid.len() >= session_id.len() {
+                        session_id = sid.to_string();
+                    }
+                }
+                if cwd.is_none() {
+                    cwd = v
+                        .get("cwd")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
+                }
+                if let Some(b) = v
+                    .get("gitBranch")
                     .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string);
-            }
-            if let Some(b) = v
-                .get("gitBranch")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty() && *s != "HEAD")
-            {
-                branch = Some(b.to_string());
-            }
-            if let Some(ts) = v.get("timestamp").and_then(Value::as_str).and_then(parse_iso_secs) {
-                if started.is_none_or(|s| ts < s) {
-                    started = Some(ts);
+                    .filter(|s| !s.is_empty() && *s != "HEAD")
+                {
+                    branch = Some(b.to_string());
                 }
-                if updated.is_none_or(|u| ts > u) {
-                    updated = Some(ts);
-                }
-            }
-            match v.get("type").and_then(Value::as_str) {
-                Some("custom-title") => {
-                    if let Some(t) = v
-                        .get("customTitle")
-                        .and_then(Value::as_str)
-                        .filter(|s| !s.trim().is_empty())
-                    {
-                        title = Some(t.trim().to_string());
+                if let Some(ts) = v.get("timestamp").and_then(Value::as_str).and_then(parse_iso_secs) {
+                    if started.is_none_or(|s| ts < s) {
+                        started = Some(ts);
+                    }
+                    if updated.is_none_or(|u| ts > u) {
+                        updated = Some(ts);
                     }
                 }
-                Some("ai-title") => {
-                    if let Some(t) = v.get("aiTitle").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
-                        title = Some(t.trim().to_string());
+                match v.get("type").and_then(Value::as_str) {
+                    Some("custom-title") => {
+                        if let Some(t) = v
+                            .get("customTitle")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.trim().is_empty())
+                        {
+                            title = Some(t.trim().to_string());
+                        }
                     }
-                }
-                Some("agent-name") if title.is_none() => {
-                    if let Some(t) = v.get("agentName").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
-                        title = Some(t.trim().to_string());
+                    Some("ai-title") => {
+                        if let Some(t) = v.get("aiTitle").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+                            title = Some(t.trim().to_string());
+                        }
                     }
-                }
-                Some("summary") if title.is_none() => {
-                    if let Some(t) = v.get("summary").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
-                        title = Some(t.trim().to_string());
+                    Some("agent-name") if title.is_none() => {
+                        if let Some(t) = v.get("agentName").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+                            title = Some(t.trim().to_string());
+                        }
                     }
-                }
-                Some("last-prompt") => {
-                    if let Some(lp) = v
-                        .get("lastPrompt")
-                        .and_then(Value::as_str)
-                        .and_then(clean_prompt_snippet)
-                    {
-                        last_prompt = Some(lp);
+                    Some("summary") if title.is_none() => {
+                        if let Some(t) = v.get("summary").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+                            title = Some(t.trim().to_string());
+                        }
                     }
-                }
-                Some("user") => {
-                    sampled_msgs += 1;
-                    if v.get("isMeta").and_then(Value::as_bool) != Some(true) {
-                        if let Some(text) = extract_claude_message_text(&v)
-                            .as_deref()
+                    Some("last-prompt") => {
+                        if let Some(lp) = v
+                            .get("lastPrompt")
+                            .and_then(Value::as_str)
                             .and_then(clean_prompt_snippet)
                         {
-                            if first_prompt.is_none() {
-                                first_prompt = Some(text.clone());
-                            }
-                            last_prompt = Some(text);
+                            last_prompt = Some(lp);
                         }
                     }
-                }
-                Some("assistant") => {
-                    sampled_msgs += 1;
-                    if let Some(msg) = v.get("message") {
-                        if let Some(model) = msg.get("model").and_then(Value::as_str) {
-                            let mw = claude_model_context_window(model);
-                            ctx_window = Some(ctx_window.unwrap_or(0).max(mw));
-                        }
-                        if let Some(u) = msg.get("usage").or_else(|| v.get("usage")) {
-                            let input = u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
-                            let create = u
-                                .get("cache_creation_input_tokens")
-                                .and_then(Value::as_u64)
-                                .unwrap_or(0);
-                            let read = u
-                                .get("cache_read_input_tokens")
-                                .and_then(Value::as_u64)
-                                .unwrap_or(0);
-                            let sum = input.saturating_add(create).saturating_add(read);
-                            if sum > 0 {
-                                ctx_used = Some(sum);
+                    Some("user") => {
+                        sampled_msgs += 1;
+                        if v.get("isMeta").and_then(Value::as_bool) != Some(true)
+                            && v.get("isCompactSummary").and_then(Value::as_bool) != Some(true)
+                        {
+                            if let Some(raw) = extract_claude_message_text(&v) {
+                                if !is_claude_local_cmd_wrapper(&raw) {
+                                    if let Some(text) = clean_prompt_snippet(&raw) {
+                                        if first_prompt.is_none() {
+                                            first_prompt = Some(text.clone());
+                                        }
+                                        last_prompt = Some(text);
+                                    }
+                                }
                             }
                         }
                     }
+                    Some("assistant") => {
+                        sampled_msgs += 1;
+                    }
+                    _ => {}
                 }
-                _ => {}
-            }
-            true
-        };
+                inspect_claude_ctx(&v, &mut ctx_st);
+                true
+            };
 
-        for line in &head {
-            if !inspect(line) {
-                return None;
+            for line in &head {
+                if !inspect(line) {
+                    return None;
+                }
             }
         }
-        for line in &tail {
-            if !inspect(line) {
-                return None;
+        ctx_st.saw_event = false;
+        {
+            let mut inspect = |line: &str| -> bool {
+                let Ok(v) = serde_json::from_str::<Value>(line) else {
+                    return true;
+                };
+                if v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+                    return false;
+                }
+                if let Some(sid) = v.get("sessionId").and_then(Value::as_str) {
+                    if !sid.is_empty() && sid.len() >= session_id.len() {
+                        session_id = sid.to_string();
+                    }
+                }
+                if cwd.is_none() {
+                    cwd = v
+                        .get("cwd")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
+                }
+                if let Some(b) = v
+                    .get("gitBranch")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty() && *s != "HEAD")
+                {
+                    branch = Some(b.to_string());
+                }
+                if let Some(ts) = v.get("timestamp").and_then(Value::as_str).and_then(parse_iso_secs) {
+                    if started.is_none_or(|s| ts < s) {
+                        started = Some(ts);
+                    }
+                    if updated.is_none_or(|u| ts > u) {
+                        updated = Some(ts);
+                    }
+                }
+                match v.get("type").and_then(Value::as_str) {
+                    Some("custom-title") => {
+                        if let Some(t) = v
+                            .get("customTitle")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.trim().is_empty())
+                        {
+                            title = Some(t.trim().to_string());
+                        }
+                    }
+                    Some("ai-title") => {
+                        if let Some(t) = v.get("aiTitle").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+                            title = Some(t.trim().to_string());
+                        }
+                    }
+                    Some("agent-name") if title.is_none() => {
+                        if let Some(t) = v.get("agentName").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+                            title = Some(t.trim().to_string());
+                        }
+                    }
+                    Some("summary") if title.is_none() => {
+                        if let Some(t) = v.get("summary").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+                            title = Some(t.trim().to_string());
+                        }
+                    }
+                    Some("last-prompt") => {
+                        if let Some(lp) = v
+                            .get("lastPrompt")
+                            .and_then(Value::as_str)
+                            .and_then(clean_prompt_snippet)
+                        {
+                            last_prompt = Some(lp);
+                        }
+                    }
+                    Some("user") => {
+                        sampled_msgs += 1;
+                        if v.get("isMeta").and_then(Value::as_bool) != Some(true)
+                            && v.get("isCompactSummary").and_then(Value::as_bool) != Some(true)
+                        {
+                            if let Some(raw) = extract_claude_message_text(&v) {
+                                if !is_claude_local_cmd_wrapper(&raw) {
+                                    if let Some(text) = clean_prompt_snippet(&raw) {
+                                        if first_prompt.is_none() {
+                                            first_prompt = Some(text.clone());
+                                        }
+                                        last_prompt = Some(text);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Some("assistant") => {
+                        sampled_msgs += 1;
+                    }
+                    _ => {}
+                }
+                inspect_claude_ctx(&v, &mut ctx_st);
+                true
+            };
+            for line in &tail {
+                if !inspect(line) {
+                    return None;
+                }
+            }
+        }
+        // If a large trailing blob/snapshot pushed the last assistant usage or compact boundary
+        // outside the default 128KB tail slice, expand the tail read so we never fall back to
+        // stale turn-1 context from `head`.
+        if !full && !ctx_st.saw_event {
+            for &win_bytes in &TAIL_EXPAND_BYTES {
+                if size <= TAIL_BYTES {
+                    break;
+                }
+                let Some(expanded) = read_tail_lines(path, size, win_bytes) else {
+                    break;
+                };
+                let mut probe = CtxParseState {
+                    window: ctx_st.window,
+                    continued_in: ctx_st.continued_in.clone(),
+                    ..Default::default()
+                };
+                for line in &expanded {
+                    let Ok(v) = serde_json::from_str::<Value>(line) else {
+                        continue;
+                    };
+                    if v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+                        continue;
+                    }
+                    inspect_claude_ctx(&v, &mut probe);
+                }
+                if probe.saw_event {
+                    ctx_st = probe;
+                    break;
+                }
+                if probe.continued_in.is_some() {
+                    ctx_st.continued_in = probe.continued_in;
+                }
+                if win_bytes >= size {
+                    break;
+                }
             }
         }
 
@@ -621,10 +970,19 @@ impl HistoryProvider for ClaudeProvider {
             started,
             updated,
             messages,
-            ctx_used,
-            ctx_window,
+            ctx_used: ctx_st.used,
+            ctx_window: ctx_st.window,
+            ctx_reset: ctx_st.reset,
+            continued_in: ctx_st.continued_in,
         })
     }
+}
+
+fn is_claude_local_cmd_wrapper(raw: &str) -> bool {
+    let t = raw.trim_start();
+    t.starts_with("<local-command-caveat>")
+        || t.starts_with("<command-name>")
+        || t.starts_with("<local-command-stdout>")
 }
 
 fn extract_claude_message_text(v: &Value) -> Option<String> {
@@ -745,137 +1103,173 @@ impl HistoryProvider for CodexProvider {
         let mut started: Option<i64> = None;
         let mut updated: Option<i64> = None;
         let mut sampled_msgs: u32 = 0;
-        let mut ctx_used: Option<u64> = None;
-        let mut ctx_window: Option<u64> = None;
+        let mut ctx_st = CtxParseState::default();
 
-        let mut inspect = |line: &str| {
-            let Ok(v) = serde_json::from_str::<Value>(line) else {
-                return;
-            };
-            if let Some(ts) = v.get("timestamp").and_then(Value::as_str).and_then(parse_iso_secs) {
-                if started.is_none_or(|s| ts < s) {
-                    started = Some(ts);
-                }
-                if updated.is_none_or(|u| ts > u) {
-                    updated = Some(ts);
-                }
-            }
-            match v.get("type").and_then(Value::as_str) {
-                Some("session_meta") => {
-                    if let Some(p) = v.get("payload") {
-                        if let Some(id) = p.get("id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
-                            session_id = Some(id.to_string());
-                        }
-                        if let Some(c) = p.get("cwd").and_then(Value::as_str).filter(|s| !s.is_empty()) {
-                            cwd = Some(c.to_string());
-                        }
-                        if let Some(b) = p
-                            .get("git")
-                            .and_then(|g| g.get("branch"))
-                            .and_then(Value::as_str)
-                            .filter(|s| !s.is_empty())
-                        {
-                            branch = Some(b.to_string());
-                        }
+        let inspect_slice = |lines: &[String],
+                             session_id: &mut Option<String>,
+                             cwd: &mut Option<String>,
+                             branch: &mut Option<String>,
+                             first_prompt: &mut Option<String>,
+                             last_prompt: &mut Option<String>,
+                             started: &mut Option<i64>,
+                             updated: &mut Option<i64>,
+                             sampled_msgs: &mut u32,
+                             ctx_st: &mut CtxParseState| {
+            for line in lines {
+                let Ok(v) = serde_json::from_str::<Value>(line) else {
+                    continue;
+                };
+                if let Some(ts) = v.get("timestamp").and_then(Value::as_str).and_then(parse_iso_secs)
+                {
+                    if started.is_none_or(|s| ts < s) {
+                        *started = Some(ts);
+                    }
+                    if updated.is_none_or(|u| ts > u) {
+                        *updated = Some(ts);
                     }
                 }
-                Some("event_msg") => {
-                    if let Some(p) = v.get("payload") {
-                        match p.get("type").and_then(Value::as_str) {
-                            Some("user_message") => {
-                                sampled_msgs += 1;
+                match v.get("type").and_then(Value::as_str) {
+                    Some("session_meta") => {
+                        if let Some(p) = v.get("payload") {
+                            if let Some(id) =
+                                p.get("id").and_then(Value::as_str).filter(|s| !s.is_empty())
+                            {
+                                *session_id = Some(id.to_string());
+                            }
+                            if let Some(c) =
+                                p.get("cwd").and_then(Value::as_str).filter(|s| !s.is_empty())
+                            {
+                                *cwd = Some(c.to_string());
+                            }
+                            if let Some(b) = p
+                                .get("git")
+                                .and_then(|g| g.get("branch"))
+                                .and_then(Value::as_str)
+                                .filter(|s| !s.is_empty())
+                            {
+                                *branch = Some(b.to_string());
+                            }
+                        }
+                    }
+                    Some("event_msg") => {
+                        if let Some(p) = v.get("payload") {
+                            if p.get("type").and_then(Value::as_str) == Some("user_message") {
+                                *sampled_msgs += 1;
                                 if let Some(m) = p
                                     .get("message")
                                     .and_then(Value::as_str)
                                     .and_then(clean_prompt_snippet)
                                 {
                                     if first_prompt.is_none() {
-                                        first_prompt = Some(m.clone());
+                                        *first_prompt = Some(m.clone());
                                     }
-                                    last_prompt = Some(m);
+                                    *last_prompt = Some(m);
                                 }
                             }
-                            Some("token_count") => {
-                                if let Some(info) = p.get("info") {
-                                    if let Some(win) = info
-                                        .get("model_context_window")
-                                        .and_then(Value::as_u64)
-                                        .filter(|&w| w > 0)
-                                    {
-                                        ctx_window = Some(win);
-                                    }
-                                    if let Some(u) = info
-                                        .get("last_token_usage")
-                                        .and_then(|t| {
-                                            t.get("input_tokens")
-                                                .or_else(|| t.get("total_tokens"))
-                                                .and_then(Value::as_u64)
-                                        })
-                                        .filter(|&n| n > 0)
-                                    {
-                                        ctx_used = Some(u);
-                                    }
-                                }
-                            }
-                            _ => {}
                         }
                     }
-                }
-                Some("response_item") => {
-                    if let Some(p) = v.get("payload") {
-                        let role = p.get("role").and_then(Value::as_str);
-                        if matches!(role, Some("user" | "assistant")) {
-                            sampled_msgs += 1;
-                        }
-                        if role == Some("user") {
-                            if let Some(arr) = p.get("content").and_then(Value::as_array) {
-                                for item in arr {
-                                    if let Some(t) = item.get("text").and_then(Value::as_str) {
-                                        let trimmed = t.trim_start();
-                                        if trimmed.starts_with("<environment_context>")
-                                            || trimmed.starts_with("# AGENTS.md")
-                                            || trimmed.starts_with("<INSTRUCTIONS>")
-                                        {
-                                            continue;
-                                        }
-                                        if let Some(clean) = clean_prompt_snippet(trimmed) {
-                                            if first_prompt.is_none() {
-                                                first_prompt = Some(clean.clone());
+                    Some("response_item") => {
+                        if let Some(p) = v.get("payload") {
+                            let role = p.get("role").and_then(Value::as_str);
+                            if matches!(role, Some("user" | "assistant")) {
+                                *sampled_msgs += 1;
+                            }
+                            if role == Some("user") {
+                                if let Some(arr) = p.get("content").and_then(Value::as_array) {
+                                    for item in arr {
+                                        if let Some(t) = item.get("text").and_then(Value::as_str) {
+                                            let trimmed = t.trim_start();
+                                            if trimmed.starts_with("<environment_context>")
+                                                || trimmed.starts_with("# AGENTS.md")
+                                                || trimmed.starts_with("<INSTRUCTIONS>")
+                                            {
+                                                continue;
                                             }
-                                            last_prompt = Some(clean);
+                                            if let Some(clean) = clean_prompt_snippet(trimmed) {
+                                                if first_prompt.is_none() {
+                                                    *first_prompt = Some(clean.clone());
+                                                }
+                                                *last_prompt = Some(clean);
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
                     }
-                }
-                None => {
-                    // Legacy flat header `{"id":"...","cwd":"..."}`
-                    if session_id.is_none() {
-                        session_id = v
-                            .get("id")
-                            .and_then(Value::as_str)
-                            .filter(|s| !s.is_empty())
-                            .map(str::to_string);
+                    None => {
+                        // Legacy flat header `{"id":"...","cwd":"..."}`
+                        if session_id.is_none() {
+                            *session_id = v
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_string);
+                        }
+                        if cwd.is_none() {
+                            *cwd = v
+                                .get("cwd")
+                                .and_then(Value::as_str)
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_string);
+                        }
                     }
-                    if cwd.is_none() {
-                        cwd = v
-                            .get("cwd")
-                            .and_then(Value::as_str)
-                            .filter(|s| !s.is_empty())
-                            .map(str::to_string);
-                    }
+                    _ => {}
                 }
-                _ => {}
+                inspect_codex_ctx(&v, ctx_st);
             }
         };
 
-        for line in &head {
-            inspect(line);
-        }
-        for line in &tail {
-            inspect(line);
+        inspect_slice(
+            &head,
+            &mut session_id,
+            &mut cwd,
+            &mut branch,
+            &mut first_prompt,
+            &mut last_prompt,
+            &mut started,
+            &mut updated,
+            &mut sampled_msgs,
+            &mut ctx_st,
+        );
+        ctx_st.saw_event = false;
+        inspect_slice(
+            &tail,
+            &mut session_id,
+            &mut cwd,
+            &mut branch,
+            &mut first_prompt,
+            &mut last_prompt,
+            &mut started,
+            &mut updated,
+            &mut sampled_msgs,
+            &mut ctx_st,
+        );
+        if !full && !ctx_st.saw_event {
+            for &win_bytes in &TAIL_EXPAND_BYTES {
+                if size <= TAIL_BYTES {
+                    break;
+                }
+                let Some(expanded) = read_tail_lines(path, size, win_bytes) else {
+                    break;
+                };
+                let mut probe = CtxParseState {
+                    window: ctx_st.window,
+                    ..Default::default()
+                };
+                for line in &expanded {
+                    if let Ok(v) = serde_json::from_str::<Value>(line) {
+                        inspect_codex_ctx(&v, &mut probe);
+                    }
+                }
+                if probe.saw_event {
+                    ctx_st = probe;
+                    break;
+                }
+                if win_bytes >= size {
+                    break;
+                }
+            }
         }
 
         let id = session_id.or_else(|| {
@@ -922,8 +1316,10 @@ impl HistoryProvider for CodexProvider {
             started,
             updated,
             messages,
-            ctx_used,
-            ctx_window,
+            ctx_used: ctx_st.used,
+            ctx_window: ctx_st.window,
+            ctx_reset: ctx_st.reset,
+            continued_in: None,
         })
     }
 }
@@ -1038,6 +1434,122 @@ struct AgyRawSummary<'a> {
     started_raw: &'a str,
 }
 
+fn agy_model_context_window(model: &str) -> u64 {
+    let ml = model.to_ascii_lowercase();
+    if ml.contains("[2m]") || ml.contains("2m") {
+        2_000_000
+    } else if ml.contains("claude") {
+        claude_model_context_window(model)
+    } else if ml.contains("gpt-4o") || ml.contains("o1") || ml.contains("o3") {
+        200_000
+    } else {
+        // Antigravity Gemini models default to a 1M context window.
+        1_000_000
+    }
+}
+
+fn agy_transcript_path(home: &Path, id: &str) -> PathBuf {
+    home.join("brain")
+        .join(id)
+        .join(".system_generated")
+        .join("logs")
+        .join("transcript.jsonl")
+}
+
+/// Parse context usage `(ctx_used, ctx_window, ctx_reset)` from an Antigravity CLI transcript.
+/// Cached by `(mtime, size)` so repeated history scans incur zero redundant I/O.
+fn parse_antigravity_transcript_ctx(path: &Path) -> (Option<u64>, Option<u64>, bool) {
+    use std::sync::{Mutex, OnceLock};
+    type Entry = (i64, u64, Option<u64>, Option<u64>, bool);
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Entry>>> = OnceLock::new();
+
+    let Ok(md) = std::fs::metadata(path) else {
+        return (None, None, false);
+    };
+    let size = md.len();
+    if size == 0 {
+        return (None, None, false);
+    }
+    let mtime = md
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(g) = cache.lock() {
+        if let Some(&(cm, cs, cu, cw, cr)) = g.get(path) {
+            if cm == mtime && cs == size {
+                return (cu, cw, cr);
+            }
+        }
+    }
+
+    let mut ctx_used: Option<u64> = None;
+    let mut ctx_window: Option<u64> = None;
+    let mut ctx_reset = false;
+
+    for &win_bytes in &[TAIL_BYTES, TAIL_EXPAND_BYTES[0], TAIL_EXPAND_BYTES[1]] {
+        let Some(lines) = read_tail_lines(path, size, win_bytes) else {
+            break;
+        };
+        let mut saw = false;
+        let mut u_cur: Option<u64> = None;
+        let mut w_cur: Option<u64> = None;
+        let mut r_cur = false;
+        for line in &lines {
+            let Ok(v) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            match v.get("type").and_then(Value::as_str) {
+                Some("PLANNER_RESPONSE") => {
+                    if let Some(m) = v.get("model").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                        w_cur = Some(agy_model_context_window(m));
+                    }
+                    let input = v.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                    let cache_read = v
+                        .get("cache_read_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    let sum = input.saturating_add(cache_read);
+                    if sum > 0 {
+                        u_cur = Some(sum);
+                        r_cur = false;
+                        saw = true;
+                    }
+                }
+                Some("CHECKPOINT") => {
+                    // Compaction checkpoint: discard pre-compact prompt tokens and keep the
+                    // compacted summary size (`output_tokens`) until the next planner turn.
+                    let out = v
+                        .get("output_tokens")
+                        .and_then(Value::as_u64)
+                        .filter(|&n| n > 0);
+                    u_cur = out;
+                    r_cur = true;
+                    saw = true;
+                }
+                _ => {}
+            }
+        }
+        if saw || win_bytes >= size {
+            ctx_used = u_cur;
+            ctx_window = w_cur;
+            ctx_reset = r_cur;
+            break;
+        }
+    }
+
+    if let Ok(mut g) = cache.lock() {
+        if g.len() > 1024 {
+            g.clear();
+        }
+        g.insert(path.to_path_buf(), (mtime, size, ctx_used, ctx_window, ctx_reset));
+    }
+    (ctx_used, ctx_window, ctx_reset)
+}
+
 fn build_antigravity_meta(
     home: &Path,
     fallback_path: &Path,
@@ -1060,8 +1572,16 @@ fn build_antigravity_meta(
     if title_clean.is_none() && preview_clean.is_none() && step_count <= 0 {
         return None;
     }
+    let transcript = agy_transcript_path(home, &id);
+    let (ctx_used, ctx_window, ctx_reset) = if transcript.is_file() {
+        parse_antigravity_transcript_ctx(&transcript)
+    } else {
+        (None, None, false)
+    };
     let pb_path = home.join("conversations").join(format!("{id}.pb"));
-    let path = if pb_path.exists() {
+    let path = if transcript.is_file() {
+        transcript
+    } else if pb_path.exists() {
         pb_path
     } else {
         fallback_path.to_path_buf()
@@ -1087,8 +1607,10 @@ fn build_antigravity_meta(
         started,
         updated,
         messages: (step_count.max(1)) as u32,
-        ctx_used: None,
-        ctx_window: None,
+        ctx_used,
+        ctx_window,
+        ctx_reset,
+        continued_in: None,
     })
 }
 
@@ -1305,6 +1827,57 @@ pub fn lookup_antigravity_history_tail() -> Vec<(String, String, Option<String>,
     out
 }
 
+/// Return `(mtime_secs, size_bytes)` for a transcript file on disk, if readable.
+pub fn file_stamp(path: &Path) -> Option<(i64, u64)> {
+    let md = std::fs::metadata(path).ok()?;
+    let mtime = md
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    Some((mtime, md.len()))
+}
+
+/// Fast single-session refresh for an active live pane without scanning all history directories.
+pub fn refresh_single_session(
+    agent: &str,
+    path: &Path,
+    existing: Option<&SessionMeta>,
+) -> Option<SessionMeta> {
+    let (mtime, size) = file_stamp(path)?;
+    if size == 0 {
+        return None;
+    }
+    let aid = crate::agent::normalize_id(agent);
+    match aid.as_str() {
+        "claude" => {
+            let mut m = ClaudeProvider::default().parse_file(path, mtime, size)?;
+            if let Some(cwd) = m.cwd.as_deref() {
+                m.project = resolve_project_name_for_dir(cwd);
+            }
+            Some(m)
+        }
+        "codex" => {
+            let mut m = CodexProvider::default().parse_file(path, mtime, size)?;
+            if let Some(cwd) = m.cwd.as_deref() {
+                m.project = resolve_project_name_for_dir(cwd);
+            }
+            Some(m)
+        }
+        "agy" => {
+            let mut m = existing?.clone();
+            let (cu, cw, cr) = parse_antigravity_transcript_ctx(path);
+            m.ctx_used = cu;
+            m.ctx_window = cw;
+            m.ctx_reset = cr;
+            m.updated = m.updated.max(mtime);
+            Some(m)
+        }
+        _ => None,
+    }
+}
+
 /// Format a unix timestamp as a compact relative age (`2m`, `3h`, `昨天`, `11-09`).
 pub fn relative_time_short(unix_secs: i64, now_secs: i64) -> String {
     let diff = (now_secs - unix_secs).max(0);
@@ -1411,6 +1984,18 @@ mod tests {
 
         let agy_home = tmp.join("agy");
         std::fs::create_dir_all(agy_home.join("cache")).unwrap();
+        let agy_log_dir = agy_home.join("brain/c1/.system_generated/logs");
+        std::fs::create_dir_all(&agy_log_dir).unwrap();
+        std::fs::write(
+            agy_log_dir.join("transcript.jsonl"),
+            concat!(
+                r#"{"step_index":10,"type":"PLANNER_RESPONSE","model":"gemini-4-hydrogen","input_tokens":6000,"cache_read_tokens":510000,"output_tokens":900}"#,
+                "\n",
+                r#"{"step_index":11,"type":"CHECKPOINT","input_tokens":6400,"cache_read_tokens":510858,"output_tokens":12972}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
         std::fs::write(
             agy_home.join("cache/conversation_metadata.json"),
             r#"{"conversations":{"c1":{"summary":{"ID":"c1","Title":"Greeting And Hello","Preview":"你好","NumSteps":4,"UpdatedAt":"2026-11-17T10:43:06Z","WorkspaceURIs":["file:///Users/test/ShellAX"],"AppDataDir":"antigravity-cli"}},"c2":{"summary":{"ID":"c2","Title":"IDE Chat","NumSteps":10,"UpdatedAt":"2026-11-17T10:00:00Z","WorkspaceURIs":["file:///Users/test/ShellAX"],"AppDataDir":"antigravity"}}}}"#,
@@ -1422,6 +2007,140 @@ mod tests {
         assert_eq!(agy_list[0].agent, "agy");
         assert_eq!(agy_list[0].display_title(), "Greeting And Hello");
         assert_eq!(agy_list[0].cwd.as_deref(), Some("/Users/test/ShellAX"));
+        // After CHECKPOINT, context drops from 516k down to the compacted summary output (12,972).
+        assert_eq!(agy_list[0].ctx_used, Some(12_972));
+        assert!(agy_list[0].ctx_reset);
+
+        // Next PLANNER_RESPONSE replaces checkpoint estimate with exact post-compact input+cache.
+        std::fs::write(
+            agy_log_dir.join("transcript.jsonl"),
+            concat!(
+                r#"{"step_index":10,"type":"PLANNER_RESPONSE","model":"gemini-4-hydrogen","input_tokens":6000,"cache_read_tokens":510000,"output_tokens":900}"#,
+                "\n",
+                r#"{"step_index":11,"type":"CHECKPOINT","input_tokens":6400,"cache_read_tokens":510858,"output_tokens":12972}"#,
+                "\n",
+                r#"{"step_index":12,"type":"PLANNER_RESPONSE","model":"gemini-4-hydrogen","input_tokens":24839,"cache_read_tokens":0,"output_tokens":335}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let agy_list2 = agy_provider.extra_sessions();
+        assert_eq!(agy_list2[0].ctx_used, Some(24_839));
+        assert_eq!(agy_list2[0].ctx_window, Some(1_000_000));
+        assert!(!agy_list2[0].ctx_reset);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn claude_and_codex_respect_compact_clear_continued_in_and_large_trailing_blobs() {
+        let tmp = std::env::temp_dir().join(format!(
+            "shellax-hist-ctx-{}-{}",
+            std::process::id(),
+            now_unix_secs()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let proj = tmp.join("projects/p1");
+        std::fs::create_dir_all(&proj).unwrap();
+
+        // 1. Claude compact_boundary clears stale 700k pre-compact usage until next assistant turn.
+        let compact_file = proj.join("compacted-session.jsonl");
+        std::fs::write(
+            &compact_file,
+            concat!(
+                r#"{"type":"user","sessionId":"compacted-session","cwd":"/repo","message":{"role":"user","content":"start"}}"#,
+                "\n",
+                r#"{"type":"assistant","message":{"role":"assistant","model":"claude-opus-5-5","usage":{"input_tokens":10000,"cache_read_input_tokens":690000}}}"#,
+                "\n",
+                r#"{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"manual","preTokens":700000}}"#,
+                "\n",
+                r#"{"type":"assistant","message":{"role":"assistant","model":"<synthetic>","usage":{"input_tokens":0}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let cp = ClaudeProvider::with_root(tmp.join("projects"));
+        let md = std::fs::metadata(&compact_file).unwrap();
+        let m = cp.parse_file(&compact_file, 100, md.len()).unwrap();
+        assert_eq!(m.ctx_used, None);
+        assert!(m.ctx_reset);
+        assert!(m.context_detail().is_none());
+
+        // 2. Claude `/clear` resets usage to 0% (`Some(0)` + `ctx_reset`) and does not pollute prompts.
+        let cleared_file = proj.join("cleared-session.jsonl");
+        std::fs::write(
+            &cleared_file,
+            concat!(
+                r#"{"type":"user","sessionId":"cleared-session","cwd":"/repo","message":{"role":"user","content":"real task"}}"#,
+                "\n",
+                r#"{"type":"assistant","message":{"role":"assistant","model":"claude-opus-5-5","usage":{"input_tokens":50000,"cache_read_input_tokens":450000}}}"#,
+                "\n",
+                r#"{"type":"user","sessionId":"cleared-session","message":{"role":"user","content":"<command-name>/clear</command-name>"}}"#,
+                "\n",
+                r#"{"type":"system","subtype":"local_command","commandRun":{"command":"clear","args":""}}"#,
+                "\n",
+                r#"{"type":"continued-in","sessionId":"cleared-session","continuedInSessionId":"next-session-id"}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let md = std::fs::metadata(&cleared_file).unwrap();
+        let m = cp.parse_file(&cleared_file, 100, md.len()).unwrap();
+        assert_eq!(m.ctx_used, Some(0));
+        assert!(m.ctx_reset);
+        assert_eq!(m.first_prompt.as_deref(), Some("real task"));
+        assert_eq!(m.last_prompt.as_deref(), Some("real task"));
+        assert_eq!(m.continued_in.as_deref(), Some("next-session-id"));
+        let det = m.context_detail().expect("cleared detail");
+        assert_eq!(det.frac, 0.0);
+        assert_eq!(det.short_label, "0%");
+        assert_eq!(det.bar_label, "0%");
+
+        // 3. Large trailing blob (>128KB) must NOT cause fallback to turn-1 `head` usage.
+        let blob_file = proj.join("blob-session.jsonl");
+        let mut body = String::new();
+        body.push_str(r#"{"type":"user","sessionId":"blob-session","cwd":"/repo","message":{"role":"user","content":"big session"}}"#);
+        body.push('\n');
+        body.push_str(r#"{"type":"assistant","message":{"role":"assistant","model":"claude-opus-5-5","usage":{"input_tokens":5000,"cache_read_input_tokens":5000}}}"#);
+        body.push('\n');
+        // Later turn with 420k context
+        body.push_str(r#"{"type":"assistant","message":{"role":"assistant","model":"claude-opus-5-5","usage":{"input_tokens":20000,"cache_read_input_tokens":400000}}}"#);
+        body.push('\n');
+        // >160KB trailing non-assistant blob so 128KB tail misses the 420k assistant line.
+        let huge = format!(r#"{{"type":"api-request-blob","data":"{}"}}"#, "x".repeat(170_000));
+        body.push_str(&huge);
+        body.push('\n');
+        std::fs::write(&blob_file, &body).unwrap();
+        let md = std::fs::metadata(&blob_file).unwrap();
+        let m = cp.parse_file(&blob_file, 100, md.len()).unwrap();
+        assert_eq!(m.ctx_used, Some(420_000));
+        assert_eq!(m.ctx_window, Some(1_000_000));
+        assert!(!m.ctx_reset);
+
+        // 4. Codex `compacted` / `context_compacted` clears stale token_count until next turn.
+        let codex_home = tmp.join("codex");
+        let codex_file = codex_home.join("sessions/rollout-1.jsonl");
+        std::fs::create_dir_all(codex_file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &codex_file,
+            concat!(
+                r#"{"type":"session_meta","payload":{"id":"cx-1","cwd":"/repo"}}"#,
+                "\n",
+                r#"{"type":"event_msg","payload":{"type":"user_message","message":"hello"}}"#,
+                "\n",
+                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"model_context_window":200000,"last_token_usage":{"input_tokens":150000}}}}"#,
+                "\n",
+                r#"{"type":"event_msg","payload":{"type":"context_compacted"}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let xp = CodexProvider::with_home(codex_home);
+        let md = std::fs::metadata(&codex_file).unwrap();
+        let xm = xp.parse_file(&codex_file, 100, md.len()).unwrap();
+        assert_eq!(xm.ctx_used, None);
+        assert!(xm.ctx_reset);
+        assert_eq!(xm.ctx_window, Some(200_000));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

@@ -130,6 +130,7 @@ pub(crate) struct AgentHub {
     pub finish_task: Option<FinishTaskDialog>,
     pub last_auto_scan: Option<std::time::Instant>,
     pub follow_up_scan_scheduled: bool,
+    pub active_file_stamps: HashMap<PathBuf, (i64, u64)>,
 }
 
 impl AgentHub {
@@ -198,6 +199,7 @@ impl Default for AgentHub {
             finish_task: None,
             last_auto_scan: None,
             follow_up_scan_scheduled: false,
+            active_file_stamps: HashMap::new(),
         }
     }
 }
@@ -325,13 +327,57 @@ fn truncate_tab_title(s: &str, max_chars: usize) -> String {
     }
 }
 
+/// Unified context usage resolved across transcript accounting (primary) and bottom-footer
+/// terminal scraping (fallback when no transcript exists yet or over remote SSH).
+#[derive(Debug, Clone, PartialEq)]
+struct ResolvedContext {
+    frac: f32,
+    short_label: String,
+    bar_label: String,
+    tooltip: String,
+}
+
+fn resolve_context(
+    meta: Option<&SessionMeta>,
+    screen: Option<&agent::ScreenContextUsage>,
+) -> Option<ResolvedContext> {
+    if let Some(m) = meta {
+        if let Some(d) = m.context_detail() {
+            return Some(ResolvedContext {
+                frac: d.frac,
+                short_label: d.short_label,
+                bar_label: d.bar_label,
+                tooltip: d.tooltip,
+            });
+        }
+        // If the transcript explicitly recorded a `/compact` or `/clear` boundary without a
+        // subsequent turn yet, do NOT resurrect stale numbers from terminal scrollback.
+        if m.ctx_reset {
+            return None;
+        }
+    }
+    screen.map(|s| ResolvedContext {
+        frac: s.frac,
+        short_label: s.short_label.clone(),
+        bar_label: s.bar_label.clone(),
+        tooltip: format!("ctx {}", s.bar_label),
+    })
+}
+
 fn render_ctx_ring(ctx_frac: Option<f32>, ctx_label: &str, in_bar: bool) -> AnyElement {
     let th = cur();
-    let frac = ctx_frac.unwrap_or(0.06).clamp(0.04, 1.0);
+    let raw = ctx_frac.unwrap_or(0.0);
+    let frac = if !raw.is_finite() || raw <= 0.0 {
+        0.0
+    } else {
+        raw.clamp(0.04, 1.0)
+    };
     let tone = if frac >= 0.85 {
         c(th.error)
     } else if frac >= 0.65 {
         c(th.warning)
+    } else if frac == 0.0 {
+        c(th.overlay1)
     } else {
         c(th.accent)
     };
@@ -528,17 +574,23 @@ impl Root {
                 tick = tick.wrapping_add(1);
                 let active = this
                     .update(cx, |r, cx| {
-                        if r.tool == Tool::Agents && !r.agent_hub.scanning {
-                            let has_active_turn = r.tabs.iter().any(|t| {
-                                Root::tab_module(t, cx) == Tool::Agents
-                                    && t.layout.leaves().iter().any(|p| {
-                                        let v = p.read(cx);
-                                        v.agent.is_some_and(|(_, st)| st == AgentState::Working)
-                                            || (v.agent.is_some() && v.agent_session_id.is_none())
-                                    })
-                            });
-                            if has_active_turn || tick.is_multiple_of(5) {
-                                r.refresh_agent_history(cx);
+                        if r.tool == Tool::Agents {
+                            // Fast single-file stat/re-parse of open live panes so compact/clear
+                            // and live turn token counts update within 1-3s even while idle.
+                            r.refresh_active_pane_sessions(cx);
+                            if !r.agent_hub.scanning {
+                                let has_active_turn = r.tabs.iter().any(|t| {
+                                    Root::tab_module(t, cx) == Tool::Agents
+                                        && t.layout.leaves().iter().any(|p| {
+                                            let v = p.read(cx);
+                                            v.agent.is_some_and(|(_, st)| st == AgentState::Working)
+                                                || (v.agent.is_some()
+                                                    && v.agent_session_id.is_none())
+                                        })
+                                });
+                                if has_active_turn || tick.is_multiple_of(5) {
+                                    r.refresh_agent_history(cx);
+                                }
                             }
                         }
                     })
@@ -577,6 +629,98 @@ impl Root {
                 r.agent_hub.last_auto_scan = Some(std::time::Instant::now());
                 let bound = r.sync_live_agent_sessions(cx);
                 if changed || was_empty || bound {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Lightweight single-file refresh for active live agent panes: stats each bound pane's
+    /// transcript file and re-parses ONLY the files whose `(mtime, size)` actually changed,
+    /// keeping live context rings and the bottom `ctx` readout accurate within 1-3s.
+    pub(crate) fn refresh_active_pane_sessions(&mut self, cx: &mut Context<Self>) {
+        let mut jobs: Vec<(String, PathBuf, (i64, u64), Option<SessionMeta>)> = Vec::new();
+        let mut seen_paths: HashSet<PathBuf> = HashSet::new();
+
+        for tab in &self.tabs {
+            for pane in tab.layout.leaves() {
+                let v = pane.read(cx);
+                let Some(raw_aid) = v.agent_id() else {
+                    continue;
+                };
+                let aid = agent::normalize_id(&raw_aid);
+                let existing = v
+                    .agent_session_id
+                    .as_deref()
+                    .and_then(|sid| self.agent_hub.sessions.iter().find(|m| m.id == sid))
+                    .cloned();
+                let path_opt = v
+                    .agent_transcript_path
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(PathBuf::from)
+                    .or_else(|| existing.as_ref().map(|m| m.path.clone()));
+                let Some(path) = path_opt else {
+                    continue;
+                };
+                if !seen_paths.insert(path.clone()) {
+                    continue;
+                }
+                let Some(stamp) = agent_history::file_stamp(&path) else {
+                    continue;
+                };
+                if self.agent_hub.active_file_stamps.get(&path) == Some(&stamp) {
+                    continue;
+                }
+                self.agent_hub.active_file_stamps.insert(path.clone(), stamp);
+                jobs.push((aid, path, stamp, existing));
+            }
+        }
+        if jobs.is_empty() {
+            return;
+        }
+        if self.agent_hub.active_file_stamps.len() > 256 {
+            self.agent_hub.active_file_stamps.clear();
+        }
+        cx.spawn(async move |this, cx| {
+            let updated: Vec<SessionMeta> = cx
+                .background_executor()
+                .spawn(async move {
+                    jobs.into_iter()
+                        .filter_map(|(aid, path, _stamp, existing)| {
+                            agent_history::refresh_single_session(&aid, &path, existing.as_ref())
+                        })
+                        .collect()
+                })
+                .await;
+            if updated.is_empty() {
+                return;
+            }
+            let _ = this.update(cx, |r, cx| {
+                let mut changed = false;
+                for m in updated {
+                    if let Some(slot) = r
+                        .agent_hub
+                        .sessions
+                        .iter_mut()
+                        .find(|s| s.agent == m.agent && s.id == m.id)
+                    {
+                        if *slot != m {
+                            *slot = m;
+                            changed = true;
+                        }
+                    } else {
+                        r.agent_hub.sessions.push(m);
+                        changed = true;
+                    }
+                }
+                if changed {
+                    r.agent_hub
+                        .sessions
+                        .sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| a.id.cmp(&b.id)));
+                    r.agent_hub.invalidate_sessions();
+                    r.sync_live_agent_sessions(cx);
                     cx.notify();
                 }
             });
@@ -733,6 +877,7 @@ impl Root {
 
         let mut bound_sids: HashSet<String> = HashSet::new();
         let mut unbound: Vec<UnboundPane> = Vec::new();
+        let mut rebound_count = 0usize;
         for tab in &self.tabs {
             let task_repo = tab
                 .task
@@ -740,11 +885,49 @@ impl Root {
                 .map(|t| t.repo.display().to_string())
                 .filter(|s| !s.is_empty());
             for pane in tab.layout.leaves() {
-                let v = pane.read(cx);
-                if let Some(ref sid) = v.agent_session_id {
-                    bound_sids.insert(sid.clone());
+                let (cur_sid, cur_tp) = {
+                    let v = pane.read(cx);
+                    (v.agent_session_id.clone(), v.agent_transcript_path.clone())
+                };
+                if let Some(sid) = cur_sid {
+                    // Follow any `continued-in` handoff chain so a pane automatically tracks the
+                    // successor session after context continuation.
+                    let mut final_sid = sid.clone();
+                    for _ in 0..8 {
+                        let next = self
+                            .agent_hub
+                            .sessions
+                            .iter()
+                            .find(|m| m.id == final_sid)
+                            .and_then(|m| m.continued_in.clone());
+                        match next {
+                            Some(ns) if ns != final_sid => final_sid = ns,
+                            _ => break,
+                        }
+                    }
+                    let matched_path = self
+                        .agent_hub
+                        .sessions
+                        .iter()
+                        .find(|m| m.id == final_sid)
+                        .map(|m| m.path.display().to_string());
+                    if final_sid != sid || (cur_tp.is_none() && matched_path.is_some()) {
+                        let new_sid = final_sid.clone();
+                        let new_tp = matched_path;
+                        pane.update(cx, |v, _| {
+                            v.agent_session_id = Some(new_sid);
+                            if let Some(tp) = new_tp {
+                                v.agent_transcript_path = Some(tp);
+                            }
+                        });
+                        if final_sid != sid {
+                            rebound_count += 1;
+                        }
+                    }
+                    bound_sids.insert(final_sid);
                     continue;
                 }
+                let v = pane.read(cx);
                 if let Some(raw_aid) = v.agent_id() {
                     let agent_id = agent::normalize_id(&raw_aid);
                     let cwd = v
@@ -776,6 +959,10 @@ impl Root {
             }
         }
         if unbound.is_empty() {
+            if rebound_count > 0 {
+                cx.notify();
+                return true;
+            }
             return false;
         }
 
@@ -960,20 +1147,21 @@ impl Root {
             if let Some((_, _, cid)) = best {
                 used.insert((up.agent_id.clone(), cid.clone()));
                 bound_count += 1;
-                let has_titled_meta = self
-                    .agent_hub
-                    .sessions
-                    .iter()
-                    .any(|m| m.id == cid && m.title.is_some());
+                let matched = self.agent_hub.sessions.iter().find(|m| m.id == cid);
+                let has_titled_meta = matched.is_some_and(|m| m.title.is_some());
+                let matched_path = matched.map(|m| m.path.display().to_string());
                 if !has_titled_meta {
                     need_scan = true;
                 }
                 up.pane.update(cx, |v, _| {
                     v.agent_session_id = Some(cid);
+                    if let Some(tp) = matched_path {
+                        v.agent_transcript_path = Some(tp);
+                    }
                 });
             }
         }
-        if bound_count > 0 {
+        if bound_count > 0 || rebound_count > 0 {
             if need_scan {
                 self.maybe_auto_refresh_agent_history(true, cx);
             }
@@ -3266,12 +3454,17 @@ fn render_grouped_session_row_el(
                                 }
                             })
                     });
-                let ctx_info = v
+                let bound_meta = v
+                    .agent_session_id
+                    .as_deref()
+                    .and_then(|sid| self.agent_hub.sessions.iter().find(|m| m.id == sid));
+                let screen_ctx = v
                     .session
                     .as_ref()
-                    .and_then(|s| agent::context_usage_info(&s.screen_text()));
-                let ctx_frac = ctx_info.as_ref().and_then(|(f, _)| *f);
-                let ctx_label = ctx_info.map(|(_, l)| l);
+                    .and_then(|s| agent::screen_context_usage(&s.screen_text()));
+                let resolved_ctx = resolve_context(bound_meta, screen_ctx.as_ref());
+                let ctx_frac = resolved_ctx.as_ref().map(|c| c.frac);
+                let ctx_label = resolved_ctx.map(|c| c.short_label);
                 let cwd_proj = pane_cwd
                     .as_deref()
                     .and_then(|c| {
@@ -4514,10 +4707,15 @@ fn render_running_row_el(
                             .and_then(worktree::fast_git_branch)
                     })
                     .unwrap_or_default();
-                let ctx_info = v
+                let bound_meta = v
+                    .agent_session_id
+                    .as_deref()
+                    .and_then(|sid| self.agent_hub.sessions.iter().find(|m| m.id == sid));
+                let screen_ctx = v
                     .session
                     .as_ref()
-                    .and_then(|s| agent::context_usage_info(&s.screen_text()));
+                    .and_then(|s| agent::screen_context_usage(&s.screen_text()));
+                let ctx_info = resolve_context(bound_meta, screen_ctx.as_ref());
                 let wt = tab.task.as_ref().and_then(|t| t.worktree.as_ref()).is_some();
                 (ag, working, br, ctx_info, wt, self.active)
             })
@@ -4583,12 +4781,12 @@ fn render_running_row_el(
                         .child(ui::mono(branch_label)),
                 )
             })
-            .when_some(ctx_info.as_ref(), |d, (frac, lbl)| {
+            .when_some(ctx_info.as_ref(), |d, rc| {
                 d.child(
                     div()
                         .id("ag-bar-ctx")
-                        .tooltip(ui::tip(format!("ctx {lbl}")))
-                        .child(render_ctx_ring(*frac, lbl, true)),
+                        .tooltip(ui::tip(rc.tooltip.clone()))
+                        .child(render_ctx_ring(Some(rc.frac), &rc.bar_label, true)),
                 )
             })
             .when(focus_working, |d| {
@@ -4716,16 +4914,17 @@ fn prepare_session_row(
     }
     let sub_str = sub_parts.join(" · ");
 
-    let live_pct = ctx_label.as_deref().is_some_and(|l| l.ends_with('%'));
-    let (eff_ctx_frac, eff_ctx_label_str) = if live_pct {
-        (ctx_frac, ctx_label)
-    } else if let Some((frac, lbl)) = meta.context_ring_info() {
-        (Some(frac), Some(lbl))
-    } else if let Some(lbl) = ctx_label {
-        (ctx_frac, Some(lbl))
-    } else {
-        (None, None)
-    };
+    let (eff_ctx_frac, eff_ctx_label_str, eff_ctx_tip_str) =
+        if let Some(d) = meta.context_detail() {
+            (Some(d.frac), Some(d.short_label), Some(d.tooltip))
+        } else if meta.ctx_reset {
+            (None, None, None)
+        } else if let Some(lbl) = ctx_label {
+            let tip = format!("ctx {lbl}");
+            (ctx_frac, Some(lbl), Some(tip))
+        } else {
+            (None, None, None)
+        };
 
     let cwd_short = meta
         .cwd
@@ -4733,9 +4932,9 @@ fn prepare_session_row(
         .map(abbreviate_home)
         .unwrap_or_else(|| "-".into());
     let short_id: String = meta.id.chars().take(12).collect();
-    let ctx_tip = eff_ctx_label_str
+    let ctx_tip = eff_ctx_tip_str
         .as_deref()
-        .map(|l| format!("  ·  ctx {l}"))
+        .map(|l| format!("  ·  {l}"))
         .unwrap_or_default();
     let tip_text = SharedString::from(format!(
         "{title_str}\n{cwd_short}  ·  {sub_str}{ctx_tip}  ·  {age}  ({short_id}…)"
@@ -5222,5 +5421,59 @@ mod tests {
             assert!((top_pad + slice_h + bot_pad - total).abs() < 0.01);
             assert!(e - s <= 26, "rendered slice must stay small, got {}", e - s);
         }
+    }
+
+    #[test]
+    fn resolve_context_prefers_transcript_and_honors_compact_or_clear_reset() {
+        let base_meta = SessionMeta {
+            agent: "claude".into(),
+            id: "s1".into(),
+            path: PathBuf::from("/tmp/s1.jsonl"),
+            cwd: Some("/repo".into()),
+            project: "repo".into(),
+            branch: None,
+            title: None,
+            first_prompt: None,
+            last_prompt: None,
+            started: 1,
+            updated: 2,
+            messages: 4,
+            ctx_used: Some(700_000),
+            ctx_window: Some(1_000_000),
+            ctx_reset: false,
+            continued_in: None,
+        };
+        let noisy_screen = agent::ScreenContextUsage {
+            frac: 0.15,
+            short_label: "15%".into(),
+            bar_label: "15%".into(),
+            used_tokens: None,
+            window_tokens: None,
+        };
+
+        // 1. Transcript always takes priority over screen scraping.
+        let r = resolve_context(Some(&base_meta), Some(&noisy_screen)).expect("resolved");
+        assert_eq!(r.short_label, "70%");
+        assert_eq!(r.bar_label, "70% · 700k/1M");
+
+        // 2. Right after `/compact` (`ctx_used = None, ctx_reset = true`), stale screen text is suppressed.
+        let mut compacted = base_meta.clone();
+        compacted.ctx_used = None;
+        compacted.ctx_reset = true;
+        assert_eq!(resolve_context(Some(&compacted), Some(&noisy_screen)), None);
+
+        // 3. Right after `/clear` (`ctx_used = Some(0), ctx_reset = true`), displays `0%`.
+        let mut cleared = base_meta.clone();
+        cleared.ctx_used = Some(0);
+        cleared.ctx_reset = true;
+        let rc = resolve_context(Some(&cleared), Some(&noisy_screen)).expect("cleared");
+        assert_eq!(rc.frac, 0.0);
+        assert_eq!(rc.short_label, "0%");
+        assert_eq!(rc.bar_label, "0%");
+
+        // 4. Without transcript (e.g. remote SSH), falls back to strict screen footer.
+        let rs = resolve_context(None, Some(&noisy_screen)).expect("screen fallback");
+        assert_eq!(rs.short_label, "15%");
+        assert_eq!(rs.bar_label, "15%");
     }
 }

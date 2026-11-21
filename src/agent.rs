@@ -625,9 +625,56 @@ fn parse_scaled_number(raw: &str) -> Option<f64> {
     (v.is_finite() && v >= 0.0).then_some(v * mult)
 }
 
-/// Scrape context usage from recent terminal screen lines, returning `(optional_0_to_1_fraction, label)`.
-/// Supports percentage (`40% context left`), ratio (`12.4k / 200k tokens`), and token totals (`6.2k tokens`).
-pub fn context_usage_info(screen: &str) -> Option<(Option<f32>, String)> {
+/// Structured context usage scraped from an agent's bottom terminal status footer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScreenContextUsage {
+    /// Fraction of the context window currently USED (`0.0..=1.0`).
+    pub frac: f32,
+    /// Compact label for narrow lists (e.g. `"42%"`, `"0%"`, `"12k"`).
+    pub short_label: String,
+    /// Detailed label for the bottom status bar (e.g. `"42% · 84k/200k"` or `"42%"`).
+    pub bar_label: String,
+    /// Used tokens if an explicit count was visible on screen.
+    pub used_tokens: Option<u64>,
+    /// Context window size if an explicit window was visible on screen.
+    pub window_tokens: Option<u64>,
+}
+
+fn is_non_context_status_line(lower: &str) -> bool {
+    // Reject per-category `/context` breakdown rows and streaming/thinking token readouts
+    // so they are never mistaken for current context-window occupancy.
+    lower.contains("system prompt:")
+        || lower.contains("system tools:")
+        || lower.contains("memory files:")
+        || lower.contains("autocompact buffer:")
+        || lower.contains("free space:")
+        || lower.contains("mcp tools:")
+        || lower.contains("custom agents:")
+        || lower.contains("skills:")
+        || lower.contains("messages:")
+        || lower.contains("reserved:")
+        || lower.contains("thought for")
+        || lower.contains("output tokens")
+        || lower.contains("esc to interrupt")
+        || lower.contains("esc to cancel")
+        || lower.contains("↓ ")
+        || lower.contains("↑ ")
+}
+
+fn is_remaining_context_phrase(lower: &str) -> bool {
+    lower.contains("left")
+        || lower.contains("remaining")
+        || lower.contains("free")
+        || lower.contains("available")
+}
+
+/// Scrape context usage from the bottom status region of a terminal screen.
+///
+/// Only inspects the last 8 non-empty lines so historical chat output cannot pollute the reading,
+/// prefers explicit `used / window` ratios over bare percentages, converts `"N% context left"` /
+/// `"left until auto-compact"` into USED percentage (`100 - N`), and ignores per-turn thinking or
+/// streaming token counters (e.g. `↓ 2.5k tokens`, `Thought for 40s, 6.2k tokens`).
+pub fn screen_context_usage(screen: &str) -> Option<ScreenContextUsage> {
     static RE_PCT: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     static RE_RATIO: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     static RE_TOKENS: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
@@ -640,30 +687,23 @@ pub fn context_usage_info(screen: &str) -> Option<(Option<f32>, String)> {
         Regex::new(r"(?i)\b(\d[\d,]*(?:\.\d+)?[km]?)\s*(?:tokens?|tok)\b").unwrap()
     });
 
-    let tail: Vec<&str> = screen.lines().rev().take(80).collect();
+    // Restrict scanning to the bottom status footer (last 8 non-empty lines).
+    let tail: Vec<&str> = screen
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(8)
+        .collect();
 
+    // 1. Highest precision: explicit `used / window` ratio (e.g. `701k/1m tokens (70%)`, `12.4k / 200k`).
     for &line in &tail {
         let lower = line.to_lowercase();
-        if lower.contains("context")
-            || lower.contains("token")
-            || lower.contains("ctx")
-            || lower.contains("usage")
-            || lower.contains("window")
-        {
-            if let Some(cap) = re_pct.captures(line) {
-                if let Ok(n) = cap[1].parse::<u8>() {
-                    if n <= 100 {
-                        return Some((Some(n as f32 / 100.0), format!("{n}%")));
-                    }
-                }
-            }
+        if is_non_context_status_line(&lower) {
+            continue;
         }
-    }
-
-    for &line in &tail {
-        let lower = line.to_lowercase();
         if lower.contains("context")
             || lower.contains("token")
+            || lower.contains("tok")
             || lower.contains("ctx")
             || lower.contains("window")
         {
@@ -671,16 +711,72 @@ pub fn context_usage_info(screen: &str) -> Option<(Option<f32>, String)> {
                 if let (Some(used), Some(total)) =
                     (parse_scaled_number(&cap[1]), parse_scaled_number(&cap[2]))
                 {
-                    if total > 0.0 && used <= total * 1.5 {
+                    if total >= 8_000.0 && used <= total * 1.5 {
                         let frac = (used / total).clamp(0.0, 1.0) as f32;
-                        let pct = (frac * 100.0).round() as u8;
-                        return Some((Some(frac), format!("{pct}%")));
+                        let pct = (frac * 100.0).round().min(100.0) as u32;
+                        let used_u = used.round() as u64;
+                        let win_u = total.round() as u64;
+                        let used_s = format_tokens(used_u);
+                        let win_s = format_tokens(win_u);
+                        let short_label = if pct >= 1 || used_u == 0 {
+                            format!("{pct}%")
+                        } else {
+                            used_s.clone()
+                        };
+                        let bar_label = if pct >= 1 || used_u == 0 {
+                            format!("{pct}% · {used_s}/{win_s}")
+                        } else {
+                            format!("{used_s}/{win_s}")
+                        };
+                        return Some(ScreenContextUsage {
+                            frac,
+                            short_label,
+                            bar_label,
+                            used_tokens: Some(used_u),
+                            window_tokens: Some(win_u),
+                        });
                     }
                 }
             }
         }
     }
 
+    // 2. Status-bar percentage with `left` / `remaining` -> USED inversion.
+    for &line in &tail {
+        let lower = line.to_lowercase();
+        if is_non_context_status_line(&lower) {
+            continue;
+        }
+        if lower.contains("context")
+            || lower.contains("token")
+            || lower.contains("ctx")
+            || lower.contains("window")
+            || lower.contains("auto-compact")
+            || lower.contains("autocompact")
+        {
+            if let Some(cap) = re_pct.captures(line) {
+                if let Ok(n) = cap[1].parse::<u8>() {
+                    if n <= 100 {
+                        let used_pct = if is_remaining_context_phrase(&lower) {
+                            100u8.saturating_sub(n)
+                        } else {
+                            n
+                        };
+                        let lbl = format!("{used_pct}%");
+                        return Some(ScreenContextUsage {
+                            frac: used_pct as f32 / 100.0,
+                            short_label: lbl.clone(),
+                            bar_label: lbl,
+                            used_tokens: None,
+                            window_tokens: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Conservative fallback: explicit `context`/`ctx` token count (never bare thinking/output tokens).
     let lower_screen = screen.to_ascii_lowercase();
     let mut est_window = if lower_screen.contains("[1m]")
         || lower_screen.contains("gemini")
@@ -696,6 +792,13 @@ pub fn context_usage_info(screen: &str) -> Option<(Option<f32>, String)> {
         200_000.0
     };
     for &line in &tail {
+        let lower = line.to_lowercase();
+        if is_non_context_status_line(&lower) {
+            continue;
+        }
+        if !(lower.contains("context") || lower.contains("ctx")) {
+            continue;
+        }
         if let Some(cap) = re_tokens.captures(line) {
             if let Some(val) = parse_scaled_number(&cap[1]) {
                 if val > 0.0 {
@@ -706,15 +809,28 @@ pub fn context_usage_info(screen: &str) -> Option<(Option<f32>, String)> {
                             est_window * 2.0
                         };
                     }
-                    let raw = cap[1].trim().replace(',', "");
-                    let frac = (val / est_window).clamp(0.05, 1.0) as f32;
-                    return Some((Some(frac), format!("{raw} tok")));
+                    let used_u = val.round() as u64;
+                    let win_u = est_window.round() as u64;
+                    let frac = (val / est_window).clamp(0.0, 1.0) as f32;
+                    let tok = format_tokens(used_u);
+                    return Some(ScreenContextUsage {
+                        frac,
+                        short_label: tok.clone(),
+                        bar_label: format!("{tok} tok"),
+                        used_tokens: Some(used_u),
+                        window_tokens: Some(win_u),
+                    });
                 }
             }
         }
     }
 
     None
+}
+
+/// Scrape context usage from recent terminal status lines, returning `(optional_0_to_1_fraction, label)`.
+pub fn context_usage_info(screen: &str) -> Option<(Option<f32>, String)> {
+    screen_context_usage(screen).map(|u| (Some(u.frac), u.short_label))
 }
 
 /// Scrape context window percentage or token usage printed on screen.
@@ -1830,12 +1946,44 @@ Completed
         assert_eq!(agy.detect(inp("─────────────\n> \n─────────────\n? for shortcuts\n", "")).state, AgentState::Idle);
         assert_eq!(agy.detect(inp("─────────────\n> \n", "")).state, AgentState::Idle);
 
-        assert_eq!(context_usage("context left 40%").as_deref(), Some("40%"));
-        assert_eq!(context_usage("Thought for 40s, 6.2k tokens\n你好").as_deref(), Some("6.2k tok"));
-        let (frac_opt, tok_lbl) =
-            context_usage_info("Model Gemini\nThought for 40s, 6.2k tokens\n你好").expect("tok info");
-        assert!(frac_opt.is_some_and(|f| f >= 0.04));
-        assert_eq!(tok_lbl, "6.2k tok");
-        assert_eq!(context_usage_info("tokens: 12.4k / 200k"), Some((Some(0.062), "6%".into())));
+        // "context left" / "remaining" is inverted into USED percentage.
+        assert_eq!(context_usage("context left 40%").as_deref(), Some("60%"));
+        assert_eq!(
+            context_usage("95% context left · ? for shortcuts").as_deref(),
+            Some("5%")
+        );
+        assert_eq!(
+            context_usage("Context left until auto-compact: 15%").as_deref(),
+            Some("85%")
+        );
+        // Per-turn thinking / streaming token counters must NOT be mistaken for context usage.
+        assert_eq!(context_usage("Thought for 40s, 6.2k tokens\n你好"), None);
+        assert_eq!(
+            context_usage("✻ Fulling.. (28s · ↓ 2.5k tokens · thinking)\n❯ "),
+            None
+        );
+        // Explicit `used / window` ratio takes precedence and formats detailed bar label.
+        assert_eq!(
+            context_usage_info("tokens: 12.4k / 200k"),
+            Some((Some(0.062), "6%".into()))
+        );
+        let ratio = screen_context_usage("701k/1m tokens (70%)").expect("ratio");
+        assert_eq!(ratio.short_label, "70%");
+        assert_eq!(ratio.bar_label, "70% · 701k/1M");
+        assert_eq!(ratio.used_tokens, Some(701_000));
+        assert_eq!(ratio.window_tokens, Some(1_000_000));
+        // `/context` breakdown rows must be ignored in favor of the total line (or None if scrolled out).
+        let breakdown = "701k/1m tokens (70%)\n⛁ System prompt: 3.4k tokens (0.3%)\n⛁ Autocompact buffer: 33k tokens (3.3%)\n⛁ Free space: 266k (26.6%)";
+        assert_eq!(context_usage(breakdown).as_deref(), Some("70%"));
+        // Stale context mentions scrolled more than 8 non-empty lines above the footer are ignored.
+        let mut scrolled = String::from("context: 88%\n");
+        for i in 0..10 {
+            scrolled.push_str(&format!("normal output line {i}\n"));
+        }
+        assert_eq!(context_usage(&scrolled), None);
+        // Explicit `ctx` token readout without ratio still works.
+        let ctx_tok = screen_context_usage("ctx: 45k tokens").expect("ctx tok");
+        assert_eq!(ctx_tok.short_label, "45k");
+        assert_eq!(ctx_tok.bar_label, "45k tok");
     }
 }

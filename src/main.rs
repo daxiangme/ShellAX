@@ -1231,7 +1231,15 @@ impl Root {
                     }
                     termview::TermEvent::AgentRefresh => {
                         this.sync_live_agent_sessions(cx);
+                        this.refresh_active_pane_sessions(cx);
                         this.maybe_auto_refresh_agent_history(false, cx);
+                        cx.notify();
+                        return;
+                    }
+                    termview::TermEvent::AgentContextChange => {
+                        this.sync_live_agent_sessions(cx);
+                        this.refresh_active_pane_sessions(cx);
+                        this.maybe_auto_refresh_agent_history(true, cx);
                         cx.notify();
                         return;
                     }
