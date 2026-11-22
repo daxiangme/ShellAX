@@ -18,6 +18,12 @@ pub enum HostEvent {
     Deleted(String),
     Close,
     OpenProxySettings,
+    Toast {
+        key: Option<&'static str>,
+        kind: crate::ToastKind,
+        msg: String,
+        steps: Vec<crate::ToastStep>,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -80,10 +86,10 @@ pub struct HostDialog {
     /// 暂存的自定义图标 / 颜色（保存时写入，None = 默认）。
     icon: Option<String>,
     icon_color: Option<String>,
-    error: Option<String>,
     prompts: ssh::Prompts,
     rt: tokio::runtime::Handle,
     test: Option<[TestRow; 4]>,
+    test_label: String,
     test_task: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -238,10 +244,10 @@ impl HostDialog {
             tags: e.tags.clone(),
             icon: e.icon.clone(),
             icon_color: e.icon_color.clone(),
-            error: None,
             prompts,
             rt,
             test: None,
+            test_label: String::new(),
             test_task: None,
         }
     }
@@ -262,8 +268,12 @@ impl HostDialog {
         let name = self.val("name", cx);
         let host = self.val("host", cx);
         if name.is_empty() || host.is_empty() {
-            self.error = Some(t("ui.name_and_address_are_required").into());
-            cx.notify();
+            cx.emit(HostEvent::Toast {
+                key: None,
+                kind: crate::ToastKind::Error,
+                msg: t("ui.name_and_address_are_required").into(),
+                steps: Vec::new(),
+            });
             return None;
         }
         let port = self.val("port", cx);
@@ -273,8 +283,12 @@ impl HostDialog {
             match port.parse::<u16>() {
                 Ok(p) if p > 0 => Some(p),
                 _ => {
-                    self.error = Some(t("ui.port_must_be_1_65535").into());
-                    cx.notify();
+                    cx.emit(HostEvent::Toast {
+                        key: None,
+                        kind: crate::ToastKind::Error,
+                        msg: t("ui.port_must_be_1_65535").into(),
+                        steps: Vec::new(),
+                    });
                     return None;
                 }
             }
@@ -327,8 +341,12 @@ impl HostDialog {
         let editing = self.editing.clone();
         let s = config::get();
         if editing.as_deref() != Some(name.as_str()) && s.hosts.iter().any(|h| h.name == name) {
-            self.error = Some(tf("host.exists", &[("name", &name)]));
-            cx.notify();
+            cx.emit(HostEvent::Toast {
+                key: None,
+                kind: crate::ToastKind::Error,
+                msg: tf("host.exists", &[("name", &name)]),
+                steps: Vec::new(),
+            });
             return;
         }
         // secrets first (keychain / secrets.enc), then config.toml without them
@@ -337,8 +355,12 @@ impl HostDialog {
             let pw = Self::v(&self.password, cx);
             if self.methods.contains(&Method::Password) && !pw.is_empty() {
                 if let Err(e) = store.set(&pw_name, &pw) {
-                    self.error = Some(format!("{e:#}"));
-                    cx.notify();
+                    cx.emit(HostEvent::Toast {
+                        key: None,
+                        kind: crate::ToastKind::Error,
+                        msg: format!("{e:#}"),
+                        steps: Vec::new(),
+                    });
                     return;
                 }
             } else if pw.is_empty() {
@@ -361,11 +383,54 @@ impl HostDialog {
             }
             ssh_term_proto::hosttree::ensure_groups(&s.hosts, &mut s.groups);
         }) {
-            self.error = Some(e);
-            cx.notify();
+            cx.emit(HostEvent::Toast {
+                key: None,
+                kind: crate::ToastKind::Error,
+                msg: e,
+                steps: Vec::new(),
+            });
             return;
         }
         cx.emit(HostEvent::Saved(name));
+    }
+
+    fn emit_test_toast(&self, done: bool, cx: &mut Context<Self>) {
+        let Some(rows) = &self.test else { return };
+        let names = [
+            t("host.test_dns"),
+            t("host.test_tcp"),
+            t("host.test_ssh"),
+            t("host.test_auth"),
+        ];
+        let steps: Vec<crate::ToastStep> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, r)| crate::ToastStep {
+                started: r.started,
+                ok: r.ok,
+                label: names[i].to_string(),
+                detail: r.detail.clone(),
+                ms: r.ok.map(|_| r.ms),
+            })
+            .collect();
+        let any_fail = rows.iter().any(|r| r.ok == Some(false));
+        let all_ok = rows.iter().all(|r| r.ok == Some(true));
+        let kind = if any_fail {
+            crate::ToastKind::Error
+        } else if done && all_ok {
+            crate::ToastKind::Success
+        } else if done {
+            crate::ToastKind::Warn
+        } else {
+            crate::ToastKind::Loading
+        };
+        let msg = format!("{} · {}", t("host.test"), self.test_label);
+        cx.emit(HostEvent::Toast {
+            key: Some("conn-test"),
+            kind,
+            msg,
+            steps,
+        });
     }
 
     /// DNS → TCP → SSH handshake (+ host key) → auth with the unsaved form values; 10 s per step.
@@ -374,7 +439,6 @@ impl HostDialog {
             h.abort();
         }
         let Some(entry) = self.entry(cx) else { return };
-        self.error = None;
         let s = config::get();
         let mut tg = ssh_term_proto::hosts::resolve(
             &entry,
@@ -383,8 +447,12 @@ impl HostDialog {
             &s.ssh_opts(),
         );
         if let Some(msg) = tg.proxy_block_message() {
-            self.error = Some(msg);
-            cx.notify();
+            cx.emit(HostEvent::Toast {
+                key: Some("conn-test"),
+                kind: crate::ToastKind::Error,
+                msg,
+                steps: Vec::new(),
+            });
             return;
         }
         tg.auth = entry.auth.clone().unwrap_or_default();
@@ -396,7 +464,11 @@ impl HostDialog {
         if !pp.is_empty() {
             tg.passphrase_override = Some(pp);
         }
-        self.test = Some(Default::default());
+        self.test_label = tg.label();
+        let mut init_rows: [TestRow; 4] = Default::default();
+        init_rows[0].started = true;
+        self.test = Some(init_rows);
+        self.emit_test_toast(false, cx);
         let (tx, rx) = flume::unbounded::<ssh::TestStep>();
         let prompts = self.prompts.clone();
         self.test_task = Some(self.rt.spawn(async move {
@@ -407,13 +479,18 @@ impl HostDialog {
                 if this
                     .update(cx, |this, cx| {
                         if let Some(rows) = this.test.as_mut() {
-                            rows[st.idx as usize] = TestRow {
+                            let idx = st.idx as usize;
+                            rows[idx] = TestRow {
                                 ok: st.ok,
                                 ms: st.ms,
                                 detail: st.detail,
                                 started: true,
                             };
+                            if st.ok == Some(true) && idx + 1 < 4 && !rows[idx + 1].started {
+                                rows[idx + 1].started = true;
+                            }
                         }
+                        this.emit_test_toast(false, cx);
                         cx.notify();
                     })
                     .is_err()
@@ -423,6 +500,7 @@ impl HostDialog {
             }
             let _ = this.update(cx, |this, cx| {
                 this.test_task = None;
+                this.emit_test_toast(true, cx);
                 cx.notify();
             });
         })
@@ -439,6 +517,7 @@ impl HostDialog {
                 r.detail = t("host.test_cancelled").into();
             }
         }
+        self.emit_test_toast(true, cx);
         cx.notify();
     }
 }
@@ -478,7 +557,8 @@ impl Render for HostDialog {
             .flex()
             .flex_col()
             .gap_3()
-            .max_h(px(560.))
+            .flex_1()
+            .min_h_0()
             .id("host-form")
             .overflow_y_scroll();
         for (l, key, e) in self.fields.iter() {
@@ -491,7 +571,7 @@ impl Render for HostDialog {
                     .items_center()
                     .gap_3()
                     .child(label(l))
-                    .child(div().flex_1().child(ui::text_field(e, false))),
+                    .child(div().flex_1().min_w_0().child(ui::text_field(e, false))),
             );
         }
         // ---- credentials card
@@ -942,79 +1022,6 @@ impl Render for HostDialog {
                     .child(div().flex_1().min_w_0().child(picker)),
             );
         }
-        // ---- test results
-        if let Some(rows) = &self.test {
-            let names = [
-                t("host.test_dns"),
-                t("host.test_tcp"),
-                t("host.test_ssh"),
-                t("host.test_auth"),
-            ];
-            let mut box_ = div()
-                .flex()
-                .flex_col()
-                .gap(px(4.))
-                .p_3()
-                .rounded(px(ui::R_SUB))
-                .bg(crate::theme::sub_bg())
-                .border_1()
-                .border_color(crate::theme::divider());
-            for (i, r) in rows.iter().enumerate() {
-                let (ic, col) = match (r.started, r.ok) {
-                    (false, _) => (IconName::Circle, c(th.overlay0)),
-                    (true, None) => (IconName::LoaderCircle, c(th.accent)),
-                    (true, Some(true)) => (IconName::CircleCheck, c(th.success)),
-                    (true, Some(false)) => (IconName::CircleX, c(th.error)),
-                };
-                box_ = box_.child(
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap_2()
-                        .child(icon(ic, ui::IC_SM, col))
-                        .child(
-                            div()
-                                .w(px(110.))
-                                .flex_shrink_0()
-                                .text_size(px(ui::fs_body()))
-                                .text_color(c(th.text))
-                                .child(names[i]),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .whitespace_normal()
-                                .text_size(px(ui::fs_small()))
-                                .text_color(if r.ok == Some(false) {
-                                    c(th.error)
-                                } else {
-                                    c(th.subtext)
-                                })
-                                .child(r.detail.clone()),
-                        )
-                        .when(r.ok.is_some(), |d| {
-                            d.child(
-                                div()
-                                    .flex_shrink_0()
-                                    .text_size(px(ui::fs_small()))
-                                    .text_color(c(th.overlay0))
-                                    .child(format!("{} ms", r.ms)),
-                            )
-                        }),
-                );
-            }
-            form = form.child(box_);
-        }
-        if let Some(e) = &self.error {
-            form = form.child(
-                div()
-                    .text_size(px(ui::fs_body()))
-                    .text_color(c(th.error))
-                    .child(e.clone()),
-            );
-        }
-
         let title = if self.editing.is_some() {
             t("ui.edit_host")
         } else {
@@ -1051,14 +1058,17 @@ impl Render for HostDialog {
                 .into_any_element(),
         );
         let footer = ui::dialog_footer(Some(test_btn.into_any_element()), btns);
+        let me_close = cx.entity().downgrade();
         ui::modal(
-            ui::card(580.)
+            ui::card(600.)
                 .child(ui::dialog_header(
                     Some(IconName::Server),
                     c(cur().accent),
                     title,
                     None,
-                    None,
+                    Some(ui::dialog_close("host-dlg-close", move |_w, cx| {
+                        let _ = me_close.update(cx, |_, cx| cx.emit(HostEvent::Close));
+                    })),
                 ))
                 .child(form)
                 .child(footer),

@@ -11,6 +11,7 @@ use gpui::{
     Subscription, Window,
 };
 use gpui_component::input::{InputEvent, InputState};
+use gpui_component::slider::{Slider, SliderEvent, SliderScale, SliderState};
 use gpui_component::switch::Switch;
 use gpui_component::Sizable;
 use ssh_term_proto::ai::{Kind, Provider};
@@ -134,10 +135,108 @@ impl Cat {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SliderKind {
+    FontSize,
+    LineHeight,
+    UiFontSize,
+    TermPadding,
+    Scrollback,
+    ApprovalTimeout,
+    AiTemperature,
+}
+
+impl SliderKind {
+    fn bounds(self) -> (f32, f32, f32, bool) {
+        match self {
+            SliderKind::FontSize => (8.0, 32.0, 0.5, false),
+            SliderKind::LineHeight => (1.00, 2.00, 0.05, false),
+            SliderKind::UiFontSize => (10.0, 20.0, 1.0, false),
+            SliderKind::TermPadding => (0.0, 40.0, 1.0, false),
+            SliderKind::Scrollback => (100.0, 1_000_000.0, 100.0, true),
+            SliderKind::ApprovalTimeout => (5.0, 3600.0, 5.0, true),
+            SliderKind::AiTemperature => (0.0, 2.0, 0.05, false),
+        }
+    }
+
+    fn normalize(self, raw: f32) -> f32 {
+        match self {
+            SliderKind::FontSize => ((raw * 2.0).round() / 2.0).clamp(8.0, 32.0),
+            SliderKind::LineHeight => ((raw * 20.0).round() / 20.0).clamp(1.0, 2.0),
+            SliderKind::UiFontSize => raw.round().clamp(10.0, 20.0),
+            SliderKind::TermPadding => raw.round().clamp(0.0, 40.0),
+            SliderKind::Scrollback => {
+                let v = raw.clamp(100.0, 1_000_000.0);
+                let step = if v <= 1000.0 {
+                    100.0
+                } else if v <= 10_000.0 {
+                    500.0
+                } else if v <= 100_000.0 {
+                    5_000.0
+                } else {
+                    50_000.0
+                };
+                ((v / step).round() * step).clamp(100.0, 1_000_000.0)
+            }
+            SliderKind::ApprovalTimeout => {
+                let v = raw.clamp(5.0, 3600.0);
+                let step = if v <= 60.0 {
+                    5.0
+                } else if v <= 600.0 {
+                    30.0
+                } else {
+                    60.0
+                };
+                ((v / step).round() * step).clamp(5.0, 3600.0)
+            }
+            SliderKind::AiTemperature => ((raw * 20.0).round() / 20.0).clamp(0.0, 2.0),
+        }
+    }
+
+    fn format(self, v: f32) -> String {
+        match self {
+            SliderKind::FontSize => {
+                if (v - v.round()).abs() < 0.01 {
+                    format!("{:.0} pt", v)
+                } else {
+                    format!("{:.1} pt", v)
+                }
+            }
+            SliderKind::LineHeight | SliderKind::AiTemperature => format!("{v:.2}"),
+            SliderKind::UiFontSize => format!("{:.0} pt", v),
+            SliderKind::TermPadding => format!("{:.0} px", v),
+            SliderKind::Scrollback => format!("{}", v.round() as u64),
+            SliderKind::ApprovalTimeout => format!("{} s", v.round() as u64),
+        }
+    }
+
+    fn to_toml(self, v: f32) -> toml::Value {
+        match self {
+            SliderKind::Scrollback | SliderKind::ApprovalTimeout => {
+                toml::Value::Integer(v.round() as i64)
+            }
+            _ => toml::Value::Float(v as f64),
+        }
+    }
+
+    fn read_config(self, s: &config::Settings) -> f32 {
+        match self {
+            SliderKind::FontSize => s.font.size,
+            SliderKind::LineHeight => s.font.line_height,
+            SliderKind::UiFontSize => s.appearance.ui_font_size,
+            SliderKind::TermPadding => s.terminal.padding,
+            SliderKind::Scrollback => s.terminal.scrollback as f32,
+            SliderKind::ApprovalTimeout => s.agents.approval_timeout_secs as f32,
+            SliderKind::AiTemperature => 0.2,
+        }
+    }
+}
+
 enum Ctl {
     Toggle(&'static str),
     Choice(&'static str, Vec<(String, String)>),
     Text(&'static str, &'static str),
+    Slider(&'static str, SliderKind),
     Font(&'static str),
     Info(String),
 }
@@ -156,17 +255,26 @@ fn opts(v: &[(&str, &str)]) -> Vec<(String, String)> {
 }
 
 pub enum SettingsEvent {
+    Preview(String),
     Changed(String),
     Close,
     OpenAudit,
     ThemesChanged,
     ApplyUpdate(ssh_term_proto::updater::Record),
+    Toast {
+        key: Option<&'static str>,
+        kind: crate::ToastKind,
+        msg: String,
+    },
 }
 
 pub struct SettingsView {
     pub cat: Cat,
     search: Entity<InputState>,
     inputs: HashMap<String, Entity<InputState>>,
+    sliders: HashMap<String, Entity<SliderState>>,
+    slider_save_seq: HashMap<String, u64>,
+    pending_sliders: HashMap<String, (SliderKind, f32)>,
     errors: HashMap<String, String>,
     theme_names: Vec<(String, bool)>,
     /// Theme thumbnails for the appearance card grid: name -> (bg, surface, text, accent).
@@ -216,6 +324,7 @@ pub struct SettingsView {
     font_dropdown: bool,
     font_search: Entity<InputState>,
     font_show_all: bool,
+    font_anchor: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     system_term_font: Option<ssh_term_proto::platform::DetectedTerminalFont>,
     ai_add_dropdown: bool,
     ai_template_dropdown: bool,
@@ -363,6 +472,9 @@ impl SettingsView {
             cat,
             search,
             inputs: HashMap::new(),
+            sliders: HashMap::new(),
+            slider_save_seq: HashMap::new(),
+            pending_sliders: HashMap::new(),
             errors: HashMap::new(),
             theme_swatch: crate::theme::load_all()
                 .iter()
@@ -403,6 +515,7 @@ impl SettingsView {
             font_dropdown: false,
             font_search,
             font_show_all: false,
+            font_anchor: Rc::new(Cell::new(None)),
             system_term_font,
             ai_add_dropdown: false,
             ai_template_dropdown: false,
@@ -573,13 +686,13 @@ impl SettingsView {
                 Appearance,
                 t("ui.font_size"),
                 t("ui.in_pt_8_32"),
-                Ctl::Text("font.size", "13.5"),
+                Ctl::Slider("font.size", SliderKind::FontSize),
             ),
             r(
                 Appearance,
                 t("ui.line_height"),
                 t("ui.multiple_of_the_font_size"),
-                Ctl::Text("font.line_height", "1.4"),
+                Ctl::Slider("font.line_height", SliderKind::LineHeight),
             ),
             r(
                 Appearance,
@@ -590,14 +703,14 @@ impl SettingsView {
             r(
                 Appearance,
                 t("ui.window_opacity"),
-                "0.5–1.0",
-                Ctl::Text("appearance.opacity", "0.90"),
+                t("ui.window_opacity_desc"),
+                Ctl::Toggle("appearance.opacity"),
             ),
             r(
                 Appearance,
                 t("ui.ui_font_size"),
                 t("ui.sidebar_tabs_and_other_ui"),
-                Ctl::Text("appearance.ui_font_size", "13"),
+                Ctl::Slider("appearance.ui_font_size", SliderKind::UiFontSize),
             ),
             r(
                 Terminal,
@@ -609,7 +722,7 @@ impl SettingsView {
                 Terminal,
                 t("ui.term_padding"),
                 t("ui.term_padding_desc"),
-                Ctl::Text("terminal.padding", "8"),
+                Ctl::Slider("terminal.padding", SliderKind::TermPadding),
             ),
             r(
                 Terminal,
@@ -633,7 +746,7 @@ impl SettingsView {
                 Terminal,
                 t("ui.scrollback_lines"),
                 t("ui.applies_to_new_sessions"),
-                Ctl::Text("terminal.scrollback", "10000"),
+                Ctl::Slider("terminal.scrollback", SliderKind::Scrollback),
             ),
             r(
                 Terminal,
@@ -989,7 +1102,7 @@ impl SettingsView {
                 Agents,
                 t("ui.approval_timeout_s"),
                 t("ui.how_long_to_wait_after"),
-                Ctl::Text("agents.approval_timeout_secs", "120"),
+                Ctl::Slider("agents.approval_timeout_secs", SliderKind::ApprovalTimeout),
             ),
             r(
                 Agents,
@@ -1251,16 +1364,190 @@ impl SettingsView {
         e
     }
 
+    fn slider_state(
+        &mut self,
+        key: &str,
+        kind: SliderKind,
+        initial: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<SliderState> {
+        if let Some(e) = self.sliders.get(key) {
+            return e.clone();
+        }
+        let (min, max, step, log) = kind.bounds();
+        let clamped = initial.clamp(min, max);
+        let e = cx.new(|_| {
+            let mut st = SliderState::new().min(min).max(max).step(step);
+            if log {
+                st = st.scale(SliderScale::Logarithmic);
+            }
+            st.default_value(clamped)
+        });
+        let k = key.to_string();
+        self._subs.push(cx.subscribe_in(
+            &e,
+            window,
+            move |this, st, ev: &SliderEvent, w, cx| match ev {
+                SliderEvent::Change(val) => {
+                    let v = kind.normalize(val.end());
+                    this.apply_slider_value(&k, kind, v, false, cx);
+                }
+                SliderEvent::Release(val) => {
+                    let v = kind.normalize(val.end());
+                    st.update(cx, |s, cx| s.set_value(v, w, cx));
+                    this.apply_slider_value(&k, kind, v, true, cx);
+                }
+            },
+        ));
+        self.sliders.insert(key.to_string(), e.clone());
+        e
+    }
+
+    fn apply_slider_value(
+        &mut self,
+        key: &str,
+        kind: SliderKind,
+        v: f32,
+        persist_now: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let seq = {
+            let entry = self.slider_save_seq.entry(key.to_string()).or_default();
+            *entry = entry.wrapping_add(1);
+            *entry
+        };
+        if persist_now {
+            self.pending_sliders.remove(key);
+            self.persist_slider_value(key, kind, v, cx);
+            return;
+        }
+        self.pending_sliders.insert(key.to_string(), (kind, v));
+        if kind == SliderKind::AiTemperature {
+            if let Some(pid) = key
+                .strip_prefix("aip.")
+                .and_then(|rest| rest.strip_suffix(".temperature"))
+            {
+                config::preview(|s| {
+                    if let Some(p) = s.ai.providers.iter_mut().find(|p| p.id == pid) {
+                        p.temperature = v;
+                    }
+                });
+            }
+        } else {
+            config::preview(|s| {
+                let _ = s.set(key, kind.to_toml(v));
+            });
+        }
+        cx.emit(SettingsEvent::Preview(key.to_string()));
+        cx.notify();
+        let key_owned = key.to_string();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(180))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.slider_save_seq.get(&key_owned).copied() == Some(seq) {
+                    this.persist_slider_value(&key_owned, kind, v, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub fn flush_pending_sliders(&mut self, cx: &mut Context<Self>) {
+        let pending: Vec<(String, SliderKind, f32)> = self
+            .pending_sliders
+            .drain()
+            .map(|(k, (kind, v))| (k, kind, v))
+            .collect();
+        for (k, kind, v) in pending {
+            let entry = self.slider_save_seq.entry(k.clone()).or_default();
+            *entry = entry.wrapping_add(1);
+            self.persist_slider_value(&k, kind, v, cx);
+        }
+    }
+
+    fn persist_slider_value(
+        &mut self,
+        key: &str,
+        kind: SliderKind,
+        v: f32,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_sliders.remove(key);
+        if kind == SliderKind::AiTemperature {
+            if let Some(pid) = key
+                .strip_prefix("aip.")
+                .and_then(|rest| rest.strip_suffix(".temperature"))
+            {
+                self.update_provider(pid, |p| p.temperature = v, cx);
+            }
+        } else {
+            self.set(key, kind.to_toml(v), cx);
+        }
+    }
+
+    fn slider_control(
+        &mut self,
+        key: &str,
+        kind: SliderKind,
+        initial: f32,
+        total_w: f32,
+        badge_w: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let th = cur();
+        let st = self.slider_state(key, kind, initial, window, cx);
+        let cur_val = kind.normalize(st.read(cx).value().end());
+        div()
+            .w(px(total_w))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .child(div().flex_1().min_w_0().child(Slider::new(&st)))
+            .child(
+                div()
+                    .w(px(badge_w))
+                    .flex_shrink_0()
+                    .px(px(6.))
+                    .py(px(3.))
+                    .rounded(px(ui::R_MD))
+                    .bg(crate::theme::sub_bg())
+                    .border_1()
+                    .border_color(crate::theme::divider())
+                    .text_align(gpui::TextAlign::Right)
+                    .font_family(ui::mono_family())
+                    .text_size(px(ui::fs_small()))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(c(th.text))
+                    .child(kind.format(cur_val)),
+            )
+            .into_any_element()
+    }
+
     fn control(&mut self, ctl: &Ctl, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let s = config::get();
         let th = cur();
         match ctl {
             Ctl::Toggle(path) => {
                 let p = *path;
+                let checked = if p == "appearance.opacity" {
+                    s.appearance.opacity < 0.999
+                } else {
+                    s.get_bool(p)
+                };
                 Switch::new(SharedString::from(format!("sw-{p}")))
-                    .checked(s.get_bool(p))
+                    .checked(checked)
                     .on_click(cx.listener(move |this, checked: &bool, _w, cx| {
-                        this.set(p, toml::Value::Boolean(*checked), cx)
+                        let val = if p == "appearance.opacity" {
+                            toml::Value::Float(if *checked { 0.90 } else { 1.0 })
+                        } else {
+                            toml::Value::Boolean(*checked)
+                        };
+                        this.set(p, val, cx)
                     }))
                     .into_any_element()
             }
@@ -1270,8 +1557,7 @@ impl SettingsView {
                 let on = move |v: String, _w: &mut Window, cx: &mut gpui::App| {
                     let _ = me.update(cx, |this, cx| this.set(p, toml::Value::String(v), cx));
                 };
-                // long lists (themes) become a wrapping card grid instead of an overflowing segmented control
-                if options.len() > 4 {
+                if Self::uses_choice_grid(p, options) {
                     let sw = self.theme_swatch.clone();
                     ui::choice_grid(p, options, &s.get_str(p), move |v| sw.get(v).copied(), on)
                         .into_any_element()
@@ -1281,12 +1567,8 @@ impl SettingsView {
             }
             Ctl::Text(path, ph) => {
                 let e = self.input(path, ph, s.get_str(path), window, cx);
-                // width follows content: numbers 80, lists 320, other text 260
+                // width follows content: lists 320, other text 260
                 let w = match *path {
-                    "font.size"
-                    | "font.line_height"
-                    | "appearance.opacity"
-                    | "appearance.ui_font_size" => 80.,
                     "font.fallbacks" => 320.,
                     _ => 260.,
                 };
@@ -1296,9 +1578,15 @@ impl SettingsView {
                     .child(ui::text_field(&e, false))
                     .into_any_element()
             }
+            Ctl::Slider(path, kind) => {
+                let initial = kind.read_config(&s);
+                self.slider_control(path, *kind, initial, 260., 72., window, cx)
+            }
             Ctl::Font(path) => self.font_picker(path, window, cx).into_any_element(),
             Ctl::Info(text) => div()
                 .max_w(px(360.))
+                .min_w_0()
+                .whitespace_normal()
                 .text_size(px(ui::fs_small()))
                 .text_color(c(th.subtext))
                 .text_align(gpui::TextAlign::Right)
@@ -1363,21 +1651,26 @@ impl SettingsView {
         });
         filtered.dedup();
 
+        let record = self.font_anchor.clone();
         let mut trigger = div().relative().w(px(260.));
         let button = div()
             .id("font-select-btn")
             .w_full()
-            .h(px(32.))
+            .h(px(ui::H_DEFAULT))
             .px_3()
             .rounded(px(ui::R_MD))
-            .bg(c(th.surface0).opacity(0.85))
+            .bg(crate::theme::input_bg())
             .border_1()
-            .border_color(if open { c(th.accent) } else { c(th.surface1) })
+            .border_color(if open {
+                c(th.accent)
+            } else {
+                crate::theme::input_border()
+            })
             .flex()
             .items_center()
             .justify_between()
             .cursor_pointer()
-            .hover(|d| d.bg(c(th.surface1)))
+            .hover(|d| d.bg(crate::theme::hover_bg()))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.font_dropdown = !this.font_dropdown;
                 if this.font_dropdown {
@@ -1414,15 +1707,21 @@ impl SettingsView {
                 ui::IC_XS,
                 c(th.overlay1),
             ));
-        trigger = trigger.child(button);
+        trigger = trigger.child(
+            div()
+                .w_full()
+                .on_children_prepainted(move |bounds, _, _| {
+                    if let Some(b) = bounds.first().copied() {
+                        record.set(Some(b));
+                    }
+                })
+                .child(button),
+        );
 
         if open {
             let mut popover = ui::popover()
                 .id("font-picker-popover")
                 .occlude()
-                .absolute()
-                .top(px(36.))
-                .right_0()
                 .w(px(340.))
                 .max_h(px(360.))
                 .p(px(8.))
@@ -1633,10 +1932,37 @@ impl SettingsView {
                 );
             }
 
-            trigger = trigger.child(gpui::deferred(popover).with_priority(3));
+            let pos = self
+                .font_anchor
+                .get()
+                .map(|b| gpui::point(b.right(), b.bottom() + px(4.)))
+                .unwrap_or_else(|| gpui::point(px(400.), px(180.)));
+            trigger = trigger.child(
+                gpui::deferred(
+                    gpui::anchored()
+                        .anchor(gpui::Anchor::TopRight)
+                        .position(pos)
+                        .snap_to_window_with_margin(px(ui::EDGE_MARGIN))
+                        .child(popover),
+                )
+                .with_priority(3),
+            );
         }
 
         trigger
+    }
+
+    fn uses_choice_grid(path: &str, options: &[(String, String)]) -> bool {
+        options.len() > 4
+            || matches!(
+                path,
+                "appearance.theme"
+                    | "appearance.light_theme"
+                    | "appearance.dark_theme"
+                    | "appearance.scheme"
+                    | "appearance.light_scheme"
+                    | "appearance.dark_scheme"
+            )
     }
 
     fn row_el(
@@ -1647,14 +1973,22 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let th = cur();
+        let is_grid = matches!(
+            &row.ctl,
+            Ctl::Choice(p, opts) if Self::uses_choice_grid(p, opts)
+        );
         let ctl = self.control(&row.ctl, window, cx);
         let path = match &row.ctl {
-            Ctl::Toggle(p) | Ctl::Choice(p, _) | Ctl::Text(p, _) | Ctl::Font(p) => Some(*p),
+            Ctl::Toggle(p)
+            | Ctl::Choice(p, _)
+            | Ctl::Text(p, _)
+            | Ctl::Slider(p, _)
+            | Ctl::Font(p) => Some(*p),
             _ => None,
         };
         let err = path.and_then(|p| self.errors.get(p).cloned());
         let mut left = div()
-            .flex_1()
+            .when(!is_grid, |d| d.flex_1())
             .min_w_0()
             .flex()
             .flex_col()
@@ -1685,6 +2019,18 @@ impl SettingsView {
                     .child(e),
             );
         }
+        if is_grid {
+            return div()
+                .id(("row", idx))
+                .px(px(16.))
+                .py(px(12.))
+                .flex()
+                .flex_col()
+                .gap(px(10.))
+                .child(left)
+                .child(div().w_full().child(ctl))
+                .into_any_element();
+        }
         div()
             .id(("row", idx))
             .px(px(16.))
@@ -1698,6 +2044,7 @@ impl SettingsView {
             .child(
                 div()
                     .flex_shrink_0()
+                    .max_w(gpui::relative(0.58))
                     .flex()
                     .items_center()
                     .justify_end()
@@ -1710,9 +2057,9 @@ impl SettingsView {
         let mut card = div()
             .mt_2()
             .rounded(px(ui::R_LG))
-            .bg(crate::theme::sub_bg())
+            .bg(crate::theme::settings_group_bg())
             .border_1()
-            .border_color(crate::theme::divider())
+            .border_color(crate::theme::glass_edge().unwrap_or_else(crate::theme::divider))
             .flex()
             .flex_col()
             .overflow_hidden();
@@ -1739,6 +2086,27 @@ impl SettingsView {
             .child(t.to_string())
     }
 
+    fn section_header_row(title: &str, right: impl IntoElement) -> gpui::Div {
+        let th = cur();
+        div()
+            .pt_5()
+            .pb_1()
+            .px(px(4.))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .child(
+                div()
+                    .px(px(8.))
+                    .text_size(px(ui::fs_small()))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(c(th.subtext))
+                    .child(title.to_string()),
+            )
+            .child(right)
+    }
+
     /// Tag definitions (PRD 5.23): built-in color tags (rename / delete) and custom tags
     /// (name + "#rrggbb" color with preset swatches; add / delete). Deleting removes the tag from
     /// every host and group.
@@ -1763,6 +2131,7 @@ impl SettingsView {
             );
             let mut row = div()
                 .flex()
+                .flex_wrap()
                 .items_center()
                 .gap_2()
                 .px_3()
@@ -2072,7 +2441,7 @@ impl SettingsView {
                                 )
                             }),
                     )
-                    .child(div().w(px(176.)).child(ui::segmented(
+                    .child(div().flex_shrink_0().child(ui::segmented(
                         seg_id,
                         &eff_opts,
                         &cur_eff,
@@ -2181,7 +2550,7 @@ impl SettingsView {
                         .flex_1()
                         .child(ui::text_field(&self.new_rule[2], false)),
                 )
-                .child(div().w(px(176.)).child(ui::segmented(
+                .child(div().flex_shrink_0().child(ui::segmented(
                     "new-eff",
                     &opts(&[
                         ("allow", t("ui.allow")),
@@ -2257,7 +2626,7 @@ impl SettingsView {
             div()
                 .p_3()
                 .rounded(px(ui::R_SUB))
-                .bg(crate::theme::sub_bg())
+                .bg(crate::theme::settings_group_bg())
                 .border_1()
                 .border_color(crate::theme::divider())
                 .flex()
@@ -2801,26 +3170,18 @@ impl SettingsView {
         div()
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(Self::section_title(t("ui.agent_hooks")))
-                    .child(
-                        ui::button("ag-copy-skill", t("ag.copy_skill"), 0)
-                            .gap_1()
-                            .child(icon(IconName::Copy, ui::IC_XS, c(th.overlay1)))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let skill = include_str!("../assets/skills/shellax/SKILL.md");
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                    skill.to_string(),
-                                ));
-                                this.notice = Some(t("ag.copied_skill").to_string());
-                                cx.notify();
-                            })),
-                    ),
-            )
+            .child(Self::section_header_row(
+                t("ui.agent_hooks"),
+                ui::button("ag-copy-skill", t("ag.copy_skill"), 0)
+                    .gap_1()
+                    .child(icon(IconName::Copy, ui::IC_XS, c(th.overlay1)))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let skill = include_str!("../assets/skills/shellax/SKILL.md");
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(skill.to_string()));
+                        this.notice = Some(t("ag.copied_skill").to_string());
+                        cx.notify();
+                    })),
+            ))
             .child(list)
             .children(self.notice.clone().map(|n| {
                 div()
@@ -2836,7 +3197,7 @@ impl SettingsView {
                     .text_color(c(th.overlay1))
                     .child(tf("settings.hooks_note", &[("ep", &ep.display())])),
             )
-            .child(div().pt_4().child(Self::section_title(t("ag.detect_list"))))
+            .child(Self::section_title(t("ag.detect_list")))
             .child(detect_box)
             .into_any_element()
     }
@@ -2942,7 +3303,7 @@ impl SettingsView {
             .w_full()
             .p_4()
             .rounded(px(ui::R_LG))
-            .bg(crate::theme::sub_bg())
+            .bg(crate::theme::settings_group_bg())
             .border_1()
             .border_color(crate::theme::divider())
             .flex()
@@ -3088,6 +3449,8 @@ impl SettingsView {
             cx.notify();
             return;
         }
+        self.inputs.clear();
+        self.sliders.clear();
         cx.emit(SettingsEvent::Changed("import".into()));
         self.notice = Some(t("ui.import_done").into());
         cx.notify();
@@ -3103,7 +3466,7 @@ impl SettingsView {
                 .w_full()
                 .p_4()
                 .rounded(px(ui::R_LG))
-                .bg(crate::theme::sub_bg())
+                .bg(crate::theme::settings_group_bg())
                 .border_1()
                 .border_color(crate::theme::divider())
                 .flex()
@@ -3538,21 +3901,23 @@ impl SettingsView {
                 ),
             );
 
-        div()
+        let mut col = div()
+            .mt_4()
             .flex()
             .flex_col()
-            .gap_3()
             .child(self.sync_card(cx))
             .child(Self::section_title(t("ui.updates")))
-            .child(version_card)
-            .child(github_card)
-            .children(history)
-            .into_any_element()
+            .child(div().mt_1().child(version_card))
+            .child(div().mt_3().child(github_card));
+        if let Some(h) = history {
+            col = col.child(div().mt_3().child(h));
+        }
+        col.into_any_element()
     }
 
     fn scheme_preview(&self) -> AnyElement {
         let sc = crate::theme::scheme();
-        let mut dots = div().flex().items_center().gap(px(3.));
+        let mut dots = div().flex().flex_wrap().items_center().gap(px(3.));
         for (i, col) in sc.ansi.iter().enumerate() {
             dots = dots.child(
                 div()
@@ -3563,28 +3928,44 @@ impl SettingsView {
             );
         }
         div()
-            .mb_2()
-            .p(px(10.))
+            .mb_1()
+            .px_3()
+            .py(px(10.))
             .rounded(px(ui::R_MD))
             .bg(c(sc.bg))
+            .border_1()
+            .border_color(crate::theme::divider())
             .flex()
+            .flex_wrap()
             .items_center()
+            .justify_between()
             .gap_3()
             .overflow_hidden()
             .child(
                 div()
-                    .text_size(px(ui::fs_body()))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(c(sc.fg))
-                    .child(t("ui.scheme_preview")),
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .text_size(px(ui::fs_body()))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(c(sc.fg))
+                            .whitespace_nowrap()
+                            .child(t("ui.scheme_preview")),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_size(px(ui::fs_body()))
+                            .text_color(c(sc.fg).opacity(0.82))
+                            .child(crate::theme::display_name(&sc.name)),
+                    ),
             )
-            .child(
-                div()
-                    .text_size(px(ui::fs_body()))
-                    .text_color(c(sc.fg))
-                    .child(crate::theme::display_name(&sc.name)),
-            )
-            .child(div().flex_1())
             .child(dots)
             .into_any_element()
     }
@@ -3903,7 +4284,7 @@ impl SettingsView {
             .gap_1()
             .p_3()
             .rounded(px(ui::R_SUB))
-            .bg(crate::theme::sub_bg())
+            .bg(crate::theme::settings_group_bg())
             .border_1()
             .border_color(crate::theme::divider());
         for line in notices.lines() {
@@ -4146,13 +4527,12 @@ impl Render for SettingsView {
         // The settings view is a tab page, so it fills the tab body instead of a fixed-size card.
         // `compact` keeps the category rail from squeezing the form in a narrow window.
         let compact = f32::from(window.viewport_size().width) < 980.0;
-        // One opaque surface for the page and both columns, so the rounded corners match the body.
-        let sheet = if th.appearance == crate::theme::Appearance::Dark {
-            c(th.base)
+        // When liquid-glass transparency is active, never stack an extra sheet fill over `content_card`.
+        let sheet = if crate::theme::glass_enabled() {
+            gpui::transparent_black()
         } else {
-            c(th.mantle)
-        }
-        .opacity(crate::theme::card_alpha());
+            c(th.base)
+        };
         let query = self.search.read(cx).value().to_string().to_lowercase();
         let mut rows = self.rows();
         // light / dark theme pickers only matter when following the system appearance
@@ -4180,7 +4560,7 @@ impl Render for SettingsView {
             .flex_col()
             .gap(px(1.))
             .p(px(10.))
-            .bg(crate::theme::sub_bg())
+            .bg(crate::theme::settings_nav_bg())
             .border_r_1()
             .border_color(crate::theme::divider())
             .child(div().pb_2().child(ui::search_field(&self.search, false)));
@@ -4189,8 +4569,9 @@ impl Render for SettingsView {
             nav = nav.child(
                 div()
                     .id(("cat", i))
+                    .relative()
                     .h(px(30.))
-                    .px(px(8.))
+                    .px(px(9.))
                     .rounded(px(ui::R_MD))
                     .flex()
                     .items_center()
@@ -4199,6 +4580,16 @@ impl Render for SettingsView {
                     .when(active, |d| {
                         d.bg(crate::theme::selected_bg())
                             .font_weight(FontWeight::MEDIUM)
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left(px(0.))
+                                    .top(px(7.))
+                                    .bottom(px(7.))
+                                    .w(px(2.))
+                                    .rounded_full()
+                                    .bg(c(th.accent)),
+                            )
                     })
                     .when(!active, |d| d.hover(|d| d.bg(crate::theme::hover_bg())))
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -4268,7 +4659,10 @@ impl Render for SettingsView {
                     Cat::Suggest => Some(self.suggest_extra(cx)),
                     Cat::About => Some(self.about_extra()),
                     Cat::ContextMenu => Some(self.ctxmenu_extra(window, cx)),
-                    Cat::Extensions => self.ext.clone().map(|e| e.into_any_element()),
+                    Cat::Extensions => self
+                        .ext
+                        .clone()
+                        .map(|e| div().mt_2().child(e).into_any_element()),
                     Cat::Appearance => Some(self.appearance_extra(cx)),
                     Cat::General => Some(self.general_extra(cx)),
                     Cat::Ai => Some(self.ai_extra(window, cx)),
@@ -4289,8 +4683,11 @@ impl Render for SettingsView {
                         r.desc,
                         r.cat.name(),
                         match &r.ctl {
-                            Ctl::Toggle(p) | Ctl::Choice(p, _) | Ctl::Text(p, _) | Ctl::Font(p) =>
-                                *p,
+                            Ctl::Toggle(p)
+                            | Ctl::Choice(p, _)
+                            | Ctl::Text(p, _)
+                            | Ctl::Slider(p, _)
+                            | Ctl::Font(p) => *p,
                             _ => "",
                         }
                     )
@@ -4360,7 +4757,6 @@ impl Render for SettingsView {
                             .overflow_y_scroll()
                             .px(px(ui::SP_6))
                             .py_4()
-                            .bg(sheet)
                             .child(body.w_full().max_w(px(760.))),
                     ),
             )
@@ -4435,15 +4831,21 @@ impl SettingsView {
         let host = self.proxy_host.read(cx).value().trim().to_string();
         let port_s = self.proxy_port.read(cx).value().trim().to_string();
         if host.is_empty() {
-            self.proxy_note = Some((false, t("proxy.bad_host").into()));
-            cx.notify();
+            cx.emit(SettingsEvent::Toast {
+                key: None,
+                kind: crate::ToastKind::Error,
+                msg: t("proxy.bad_host").into(),
+            });
             return;
         }
         let port: u16 = match port_s.parse::<u16>() {
             Ok(p) if p > 0 => p,
             _ => {
-                self.proxy_note = Some((false, t("proxy.bad_port").into()));
-                cx.notify();
+                cx.emit(SettingsEvent::Toast {
+                    key: None,
+                    kind: crate::ToastKind::Error,
+                    msg: t("proxy.bad_port").into(),
+                });
                 return;
             }
         };
@@ -4466,20 +4868,35 @@ impl SettingsView {
             user,
         });
         let Ok(back) = ssh_term_proto::proxy::parse(&url) else {
-            self.proxy_note = Some((false, t("proxy.bad_url").into()));
-            cx.notify();
+            cx.emit(SettingsEvent::Toast {
+                key: None,
+                kind: crate::ToastKind::Error,
+                msg: t("proxy.bad_url").into(),
+            });
             return;
         };
         if back.host != host || back.port != port {
-            self.proxy_note = Some((false, t("proxy.bad_url").into()));
-            cx.notify();
+            cx.emit(SettingsEvent::Toast {
+                key: None,
+                kind: crate::ToastKind::Error,
+                msg: t("proxy.bad_url").into(),
+            });
             return;
         }
         let err = config::update(|s| s.ssh.proxy = url);
-        self.proxy_note = Some(match err {
-            Some(e) => (false, e),
-            None => (true, t("proxy.saved").into()),
-        });
+        self.proxy_note = None;
+        match err {
+            Some(e) => cx.emit(SettingsEvent::Toast {
+                key: None,
+                kind: crate::ToastKind::Error,
+                msg: e,
+            }),
+            None => cx.emit(SettingsEvent::Toast {
+                key: None,
+                kind: crate::ToastKind::Success,
+                msg: t("proxy.saved").into(),
+            }),
+        }
         cx.emit(SettingsEvent::Changed("ssh.proxy".into()));
         cx.notify();
     }
@@ -4496,10 +4913,19 @@ impl SettingsView {
         self.proxy_pass
             .update(cx, |s, cx| s.set_value("", window, cx));
         let err = config::update(|s| s.ssh.proxy.clear());
-        self.proxy_note = Some(match err {
-            Some(e) => (false, e),
-            None => (true, t("proxy.cleared").into()),
-        });
+        self.proxy_note = None;
+        match err {
+            Some(e) => cx.emit(SettingsEvent::Toast {
+                key: None,
+                kind: crate::ToastKind::Error,
+                msg: e,
+            }),
+            None => cx.emit(SettingsEvent::Toast {
+                key: None,
+                kind: crate::ToastKind::Info,
+                msg: t("proxy.cleared").into(),
+            }),
+        }
         cx.emit(SettingsEvent::Changed("ssh.proxy".into()));
         cx.notify();
     }
@@ -4513,7 +4939,7 @@ impl SettingsView {
                 .flex()
                 .flex_col()
                 .gap(px(8.))
-                .bg(crate::theme::sub_bg())
+                .bg(crate::theme::settings_group_bg())
                 .border_1()
                 .border_color(crate::theme::divider())
         };
@@ -4890,10 +5316,6 @@ impl SettingsView {
                             Ok(n) if n > 0 => p.timeout_secs = n,
                             _ => bad = true,
                         },
-                        "temperature" => match vv.parse::<f32>() {
-                            Ok(n) if (0.0..=2.0).contains(&n) => p.temperature = n,
-                            _ => bad = true,
-                        },
                         "max_tokens" => match vv.parse() {
                             Ok(n) if n > 0 => p.max_tokens = n,
                             _ => bad = true,
@@ -4920,7 +5342,7 @@ impl SettingsView {
         let th = cur();
         let s = config::get();
         let default_id = s.ai.default_provider().map(|p| p.id.clone());
-        let mut out = div().flex().flex_col().gap_3();
+        let mut out = div().mt_4().flex().flex_col().gap_3();
 
         // Storage backend banner
         let probe = crate::secret_store();
@@ -4946,14 +5368,8 @@ impl SettingsView {
         );
 
         // Provider list header
-        let list_header = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .pt_2()
-            .child(Self::section_title(t("ai.providers")))
-            .child(self.preset_menu("add", window, cx));
-        out = out.child(list_header);
+        let add_menu = self.preset_menu("add", window, cx);
+        out = out.child(Self::section_header_row(t("ai.providers"), add_menu));
 
         // Provider list
         let mut list = div()
@@ -4962,7 +5378,7 @@ impl SettingsView {
             .rounded(px(ui::R_SUB))
             .border_1()
             .border_color(crate::theme::divider())
-            .bg(crate::theme::sub_bg())
+            .bg(crate::theme::settings_group_bg())
             .overflow_hidden();
         if s.ai.providers.is_empty() {
             list = list.child(
@@ -5136,14 +5552,8 @@ impl SettingsView {
             return out.into_any_element();
         };
 
-        let edit_title = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .pt_4()
-            .child(Self::section_title(t("ai.edit_provider")))
-            .child(self.preset_menu("apply", window, cx));
-        out = out.child(edit_title);
+        let apply_menu = self.preset_menu("apply", window, cx);
+        out = out.child(Self::section_header_row(t("ai.edit_provider"), apply_menu));
 
         let mut editor_card = div()
             .flex()
@@ -5151,7 +5561,7 @@ impl SettingsView {
             .rounded(px(ui::R_SUB))
             .border_1()
             .border_color(crate::theme::divider())
-            .bg(crate::theme::sub_bg())
+            .bg(crate::theme::settings_group_bg())
             .overflow_hidden();
 
         // 1. Name
@@ -5264,29 +5674,8 @@ impl SettingsView {
                     .find(|p| p.id == sid)
                     .map(|p| p.secret_name());
                 if let Some(n) = name {
-                    this.ai_note = Some(match crate::secret_store().set(&n, &v) {
-                        Ok((Location::Keychain, _)) => (true, t("ai.saved_keychain").into()),
-                        Ok((l, why)) => (
-                            false,
-                            tf(
-                                "ai.saved_fallback",
-                                &[
-                                    ("where", &location_label(&l)),
-                                    (
-                                        "why",
-                                        &why.unwrap_or_default()
-                                            .split(": ")
-                                            .last()
-                                            .unwrap_or("")
-                                            .chars()
-                                            .take(80)
-                                            .collect::<String>(),
-                                    ),
-                                ],
-                            ),
-                        ),
-                        Err(e) => (false, format!("{e:#}")),
-                    });
+                    self_ai_secret_toast(&n, &v, cx);
+                    this.ai_note = None;
                 }
                 this.ai_key.update(cx, |s, cx| s.set_value("", window, cx));
                 this.refresh_keys();
@@ -5322,6 +5711,11 @@ impl SettingsView {
                     .map(|x| x.0)
                     .unwrap_or_default();
                 this.ai_testing = Some(p.id.clone());
+                cx.emit(SettingsEvent::Toast {
+                    key: Some("conn-test"),
+                    kind: crate::ToastKind::Loading,
+                    msg: t("ai.testing").into(),
+                });
                 cx.notify();
                 let task = cx.background_executor().spawn(async move {
                     ssh_term_proto::ai::test_connection(&p, &key)
@@ -5333,19 +5727,19 @@ impl SettingsView {
                     let r = task.await;
                     let _ = this.update(cx, |this, cx| {
                         this.ai_testing = None;
-                        this.ai_test.insert(
-                            id,
-                            match r {
-                                Ok((lat, model)) => (
-                                    true,
-                                    tf(
-                                        "ai.test_ok",
-                                        &[("ms", &lat.as_millis()), ("model", &model)],
-                                    ),
-                                ),
-                                Err(e) => (false, tf("ai.test_fail", &[("e", &e)])),
-                            },
-                        );
+                        this.ai_test.remove(&id);
+                        match r {
+                            Ok((lat, model)) => cx.emit(SettingsEvent::Toast {
+                                key: Some("conn-test"),
+                                kind: crate::ToastKind::Success,
+                                msg: tf("ai.test_ok", &[("ms", &lat.as_millis()), ("model", &model)]),
+                            }),
+                            Err(e) => cx.emit(SettingsEvent::Toast {
+                                key: Some("conn-test"),
+                                kind: crate::ToastKind::Error,
+                                msg: tf("ai.test_fail", &[("e", &e)]),
+                            }),
+                        }
                         cx.notify();
                     });
                 })
@@ -5364,7 +5758,12 @@ impl SettingsView {
                     if let Some(n) = name {
                         crate::secret_store().delete(&n);
                     }
-                    this.ai_note = Some((true, t("ai.key_deleted").into()));
+                    this.ai_note = None;
+                    cx.emit(SettingsEvent::Toast {
+                        key: None,
+                        kind: crate::ToastKind::Info,
+                        msg: t("ai.key_deleted").into(),
+                    });
                     this.refresh_keys();
                     cx.notify();
                 }),
@@ -5391,13 +5790,14 @@ impl SettingsView {
                 .child(
                     div()
                         .flex()
+                        .flex_wrap()
                         .items_center()
                         .justify_between()
-                        .gap_4()
+                        .gap_3()
                         .child(
                             div()
                                 .flex_1()
-                                .min_w_0()
+                                .min_w(px(160.))
                                 .flex()
                                 .flex_col()
                                 .gap(px(2.))
@@ -5642,11 +6042,12 @@ impl SettingsView {
             );
 
             // Temperature
-            let temp_in = self.provider_input(
-                &p.id,
-                "temperature",
-                "0.2",
-                p.temperature.to_string(),
+            let temp_ctl = self.slider_control(
+                &format!("aip.{}.temperature", p.id),
+                SliderKind::AiTemperature,
+                p.temperature,
+                240.,
+                54.,
                 window,
                 cx,
             );
@@ -5681,12 +6082,7 @@ impl SettingsView {
                                     .child(t("ai.temperature.d")),
                             ),
                     )
-                    .child(
-                        div()
-                            .w(px(200.))
-                            .flex_shrink_0()
-                            .child(ui::text_field(&temp_in, false)),
-                    ),
+                    .child(temp_ctl),
             );
 
             // Max Tokens
@@ -5745,6 +6141,44 @@ impl SettingsView {
     fn ai_key_reset(&mut self, _cx: &mut Context<Self>) {
         self.ai_note = None;
     }
+}
+
+fn self_ai_secret_toast(name: &str, val: &str, cx: &mut Context<SettingsView>) {
+    match crate::secret_store().set(name, val) {
+        Ok((Location::Keychain, _)) => cx.emit(SettingsEvent::Toast {
+            key: None,
+            kind: crate::ToastKind::Success,
+            msg: t("ai.saved_keychain").into(),
+        }),
+        Ok((l, why)) => cx.emit(SettingsEvent::Toast {
+            key: None,
+            kind: crate::ToastKind::Warn,
+            msg: tf(
+                "ai.saved_fallback",
+                &[
+                    ("where", &location_label(&l)),
+                    (
+                        "why",
+                        &why.unwrap_or_default()
+                            .split(": ")
+                            .last()
+                            .unwrap_or("")
+                            .chars()
+                            .take(80)
+                            .collect::<String>(),
+                    ),
+                ],
+            ),
+        }),
+        Err(e) => cx.emit(SettingsEvent::Toast {
+            key: None,
+            kind: crate::ToastKind::Error,
+            msg: format!("{e:#}"),
+        }),
+    }
+}
+
+impl SettingsView {
 
     fn preset_menu(
         &mut self,
@@ -5788,7 +6222,7 @@ impl SettingsView {
                         IconName::ChevronDown
                     },
                     ui::IC_XS,
-                    c(th.base),
+                    crate::theme::on_accent(),
                 ))
         } else {
             div()
@@ -5944,6 +6378,8 @@ impl SettingsView {
                                     cx,
                                 );
                                 this.inputs
+                                    .retain(|k, _| !k.starts_with(&format!("aip.{id}.")));
+                                this.sliders
                                     .retain(|k, _| !k.starts_with(&format!("aip.{id}.")));
                                 let _ = window;
                                 this.load_models(&id, true, cx);
@@ -6162,21 +6598,20 @@ impl SettingsView {
             t("models.fast.d")
         };
         let mut col = div()
-            .py(px(8.))
+            .py(px(4.))
             .flex()
             .flex_col()
-            .gap_1()
-            .border_b_1()
-            .border_color(crate::theme::divider())
+            .gap_2()
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap_3()
                     .child(
                         div()
                             .flex_1()
-                            .min_w_0()
+                            .min_w(px(140.))
                             .flex()
                             .flex_col()
                             .text_size(px(ui::fs_body()))
@@ -6495,5 +6930,37 @@ mod preset_menu_tests {
             "{}",
             f32::from(pos.x)
         );
+    }
+}
+
+#[cfg(test)]
+mod slider_tests {
+    use super::SliderKind;
+
+    #[test]
+    fn normalizes_clamps_and_formats_ranged_settings() {
+        assert!((SliderKind::FontSize.normalize(13.4) - 13.5).abs() < 1e-5);
+        assert_eq!(SliderKind::FontSize.format(14.0), "14 pt");
+        assert_eq!(SliderKind::FontSize.format(13.5), "13.5 pt");
+
+        assert!((SliderKind::LineHeight.normalize(1.42) - 1.40).abs() < 1e-5);
+        assert_eq!(SliderKind::LineHeight.format(1.4), "1.40");
+
+        assert!((SliderKind::UiFontSize.normalize(25.0) - 20.0).abs() < 1e-5);
+        assert_eq!(SliderKind::UiFontSize.format(13.0), "13 pt");
+
+        assert!((SliderKind::TermPadding.normalize(-2.0) - 0.0).abs() < 1e-5);
+        assert_eq!(SliderKind::TermPadding.format(8.0), "8 px");
+
+        assert_eq!(
+            SliderKind::Scrollback.to_toml(SliderKind::Scrollback.normalize(10123.0)),
+            toml::Value::Integer(10000)
+        );
+        assert_eq!(
+            SliderKind::ApprovalTimeout.to_toml(SliderKind::ApprovalTimeout.normalize(122.0)),
+            toml::Value::Integer(120)
+        );
+        assert!((SliderKind::AiTemperature.normalize(0.73) - 0.75).abs() < 1e-5);
+        assert_eq!(SliderKind::AiTemperature.format(0.20), "0.20");
     }
 }

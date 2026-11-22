@@ -2219,7 +2219,7 @@ impl SftpView {
             .min_h_0()
             .flex()
             .flex_col()
-            .bg(c(th.base))
+            .when(!crate::theme::glass_enabled(), |d| d.bg(c(th.base)))
             .overflow_hidden()
     }
     fn sync_panel(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
@@ -2969,6 +2969,7 @@ impl SftpView {
     fn pane(&self, pi: usize, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
         let p = &self.panes[pi];
+        let is_active = self.active == pi;
         let mut card = div()
             .id(("sftp-pane-card", pi))
             .flex_1()
@@ -2976,8 +2977,13 @@ impl SftpView {
             .h_full()
             .flex()
             .flex_col()
+            .bg(crate::theme::sub_bg())
             .border_1()
-            .border_color(crate::theme::divider())
+            .border_color(if is_active {
+                crate::theme::active_border()
+            } else {
+                crate::theme::divider()
+            })
             .rounded(px(ui::R_LG))
             .overflow_hidden();
         if p.picker.is_some() {
@@ -3481,10 +3487,11 @@ impl SftpView {
             .collect();
         let mut col = div()
             .id("sftp-queue")
-            .h(px(130.))
+            .h(px(124.))
             .overflow_y_scroll()
             .flex()
             .flex_col()
+            .bg(crate::theme::sub_bg())
             .border_1()
             .border_color(crate::theme::divider())
             .rounded(px(ui::R_LG));
@@ -3559,10 +3566,11 @@ impl SftpView {
             col = col.child(
                 div()
                     .px_3()
-                    .py(px(4.))
+                    .py(px(5.))
                     .flex()
                     .items_center()
                     .gap_2()
+                    .hover(|s| s.bg(crate::theme::hover_bg()))
                     .border_t_1()
                     .border_color(crate::theme::divider())
                     .text_size(px(fs_small()))
@@ -3587,9 +3595,9 @@ impl SftpView {
                     .child(
                         div()
                             .flex_1()
-                            .h(px(6.))
+                            .h(px(4.))
                             .rounded_full()
-                            .bg(c(th.surface0))
+                            .bg(c(th.text).opacity(0.09))
                             .child(
                                 div()
                                     .h_full()
@@ -3601,7 +3609,8 @@ impl SftpView {
                     .child(
                         div()
                             .w(px(150.))
-                            .text_size(px(fs_small()))
+                            .font_family(ui::mono_family())
+                            .text_size(px(ui::fs_caption()))
                             .text_color(c(th.overlay1))
                             .child(format!(
                                 "{} / {}{}",
@@ -3854,19 +3863,23 @@ impl Render for SftpView {
                 .id(id)
                 .size(px(H_COMPACT))
                 .rounded(px(R_MD))
+                .bg(crate::theme::sub_bg())
+                .border_1()
+                .border_color(crate::theme::divider())
                 .flex()
                 .items_center()
                 .justify_center()
                 .when(both, |d| {
-                    d.cursor_pointer().hover(|d| d.bg(crate::theme::hover_bg()))
+                    d.cursor_pointer()
+                        .hover(|d| d.bg(crate::theme::hover_bg()).border_color(crate::theme::active_border()))
                 })
                 .child(icon(
                     ic,
-                    ui::IC_MD,
+                    ui::IC_SM,
                     if both {
                         c(th.accent)
                     } else {
-                        c(th.overlay0).opacity(0.5)
+                        c(th.overlay0).opacity(0.45)
                     },
                 ))
                 .on_click(cx.listener(move |v, _, _, cx| v.transfer_from(from, cx)))

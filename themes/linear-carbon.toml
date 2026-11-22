@@ -1,0 +1,30 @@
+# Linear Carbon — calm neutral carbon dark theme with gentle Linear-grade tonal steps.
+name = "Linear Carbon"
+appearance = "dark"
+
+[ui]
+crust = "#141518"
+mantle = "#18191d"
+base = "#1c1e23"
+surface0 = "#252830"
+surface1 = "#2f333d"
+surface2 = "#3e4350"
+overlay0 = "#6d7382"
+overlay1 = "#9197a6"
+text = "#ededf0"
+subtext = "#a1a7b5"
+accent = "#6e7bf2"
+success = "#3ecf8e"
+error = "#f25f5c"
+warning = "#f5a623"
+info = "#5eb0ef"
+
+[terminal]
+foreground = "#e6e7ec"
+background = "#1c1e23"
+cursor = "#6e7bf2"
+cursor_text = "#141518"
+selection = "#2d3561"
+suggestion = "#636978"
+ansi = ["#23262e","#f25f5c","#3ecf8e","#f5a623","#6e7bf2","#b57edc","#4cc9cf","#c7cad4",
+        "#616778","#ff7a77","#5be0a3","#ffc04d","#8b96ff","#cca0ed","#6ee0e6","#f2f3f7"]

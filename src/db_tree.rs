@@ -1398,8 +1398,43 @@ impl Root {
         } else {
             c(th.overlay0)
         };
-        let (k, k2) = (id.clone(), id.clone());
+        let (k, k2, k_ch, k_q, k_plug, k_ed) = (
+            id.clone(),
+            id.clone(),
+            id.clone(),
+            id.clone(),
+            id.clone(),
+            id.clone(),
+        );
+        let gid = SharedString::from(format!("dbc-g:{id}"));
+        let chev_btn = div()
+            .id(SharedString::from(format!("dbc-ch:{id}")))
+            .w(px(ui::INDENT))
+            .h_full()
+            .flex()
+            .items_center()
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _w, cx| {
+                cx.stop_propagation();
+                this.dbp.selected = Some(k_ch.clone());
+                if this.db_up(&k_ch) {
+                    this.db_toggle_expand(&k_ch, cx);
+                } else {
+                    this.db_open_conn(&k_ch, cx);
+                }
+                cx.notify();
+            }))
+            .child(icon(
+                if open {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                },
+                ui::IC_XS,
+                c(cur().overlay1),
+            ));
         let mut r = row(SharedString::from(format!("dbc:{id}")), depth, sel)
+            .group(gid.clone())
             .on_click(cx.listener(move |this, e: &ClickEvent, _w, cx| {
                 this.dbp.selected = Some(k.clone());
                 if this.db_up(&k) {
@@ -1418,7 +1453,7 @@ impl Root {
                     cx.notify();
                 }),
             )
-            .child(chev(open, true))
+            .child(chev_btn)
             .child(crate::file_icon::db_glyph(kind.id(), ui::IC_MD, glyph_col))
             .child(hl_label(
                 &d.name,
@@ -1440,6 +1475,57 @@ impl Root {
         if let Some(col) = dot {
             r = r.child(div().size(px(7.)).rounded_full().bg(col));
         }
+        r = r.child(
+            ui::row_actions(gid)
+                .child(
+                    ui::icon_button(
+                        SharedString::from(format!("dbc-act-q:{id}")),
+                        IconName::SquareTerminal,
+                        ui::IconBtn::Sm,
+                        t("db.new_query"),
+                    )
+                    .on_click(cx.listener(move |this, _, w, cx| {
+                        cx.stop_propagation();
+                        this.db_new_query(Some(k_q.clone()), w, cx);
+                    })),
+                )
+                .child(
+                    ui::icon_button(
+                        SharedString::from(format!("dbc-act-p:{id}")),
+                        if ready {
+                            IconName::Unplug
+                        } else {
+                            IconName::Plug
+                        },
+                        ui::IconBtn::Sm,
+                        if ready {
+                            t("dbt.close_conn")
+                        } else {
+                            t("dbt.open_conn")
+                        },
+                    )
+                    .on_click(cx.listener(move |this, _, _w, cx| {
+                        cx.stop_propagation();
+                        if this.db_up(&k_plug) {
+                            this.db_disconnect(&k_plug, cx);
+                        } else {
+                            this.db_open_conn(&k_plug, cx);
+                        }
+                    })),
+                )
+                .child(
+                    ui::icon_button(
+                        SharedString::from(format!("dbc-act-e:{id}")),
+                        IconName::Pencil,
+                        ui::IconBtn::Sm,
+                        t("db.edit"),
+                    )
+                    .on_click(cx.listener(move |this, _, w, cx| {
+                        cx.stop_propagation();
+                        this.open_db_dialog(Some(k_ed.clone()), w, cx);
+                    })),
+                ),
+        );
         list = list.child(r);
         if let Some(e) = fail {
             if self.dbp.open.contains(&id) {
@@ -1518,9 +1604,43 @@ impl Root {
             } else {
                 IconName::Database
             };
-            let (k1, k2) = (ck.clone(), ck.clone());
+            let (k1, k2, k_ch, k_q, k_rf) = (
+                ck.clone(),
+                ck.clone(),
+                ck.clone(),
+                ck.clone(),
+                ck.clone(),
+            );
+            let gid = SharedString::from(format!("dbn-g:{ck}"));
+            let chev_btn = div()
+                .id(SharedString::from(format!("dbn-ch:{ck}")))
+                .w(px(ui::INDENT))
+                .h_full()
+                .flex()
+                .items_center()
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _w, cx| {
+                    cx.stop_propagation();
+                    this.dbp.selected = Some(k_ch.clone());
+                    if this.dbp.opened.contains(&k_ch) {
+                        this.db_toggle_expand(&k_ch, cx);
+                    } else {
+                        this.db_open_node(&k_ch, cx);
+                    }
+                    cx.notify();
+                }))
+                .child(icon(
+                    if open {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    },
+                    ui::IC_XS,
+                    c(cur().overlay1),
+                ));
             list = list.child(
                 row(SharedString::from(format!("dbn:{ck}")), depth, sel)
+                    .group(gid.clone())
                     .on_click(cx.listener(move |this, e: &ClickEvent, _w, cx| {
                         this.dbp.selected = Some(k1.clone());
                         if this.dbp.opened.contains(&k1) {
@@ -1539,7 +1659,7 @@ impl Root {
                             cx.notify();
                         }),
                     )
-                    .child(chev(open, true))
+                    .child(chev_btn)
                     .child(icon(
                         ic,
                         ui::IC_MD,
@@ -1549,7 +1669,40 @@ impl Root {
                         &name,
                         q,
                         if opened { c(th.text) } else { c(th.subtext) },
-                    )),
+                    ))
+                    .child(
+                        ui::row_actions(gid)
+                            .child(
+                                ui::icon_button(
+                                    SharedString::from(format!("dbn-q:{ck}")),
+                                    IconName::SquareTerminal,
+                                    ui::IconBtn::Sm,
+                                    t("db.new_query"),
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, w, cx| {
+                                        cx.stop_propagation();
+                                        this.db_new_query(Some(k_q.clone()), w, cx);
+                                    },
+                                )),
+                            )
+                            .when(opened, |d| {
+                                d.child(
+                                    ui::icon_button(
+                                        SharedString::from(format!("dbn-rf:{ck}")),
+                                        IconName::RefreshCw,
+                                        ui::IconBtn::Sm,
+                                        t("db.refresh"),
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, _w, cx| {
+                                            cx.stop_propagation();
+                                            this.db_refresh(&k_rf, cx);
+                                        },
+                                    )),
+                                )
+                            }),
+                    ),
             );
             if !open {
                 continue;
@@ -1692,8 +1845,21 @@ impl Root {
                 name.clone(),
                 node.to_string(),
             );
+            let (gk_open, n_open, node_open, gk_des, n_des) = (
+                gk.clone(),
+                name.clone(),
+                node.to_string(),
+                gk.clone(),
+                name.clone(),
+            );
+            let gid = SharedString::from(format!("dbo-g:{mk}"));
+            let can_open = g == Group::Queries
+                || g.opens_data()
+                || (matches!(g, Group::Collections | Group::GridFs)
+                    && Self::db_kind(&key_parts(&gk).0) == Some(DbKind::Mongodb));
             list = list.child(
                 row(SharedString::from(format!("dbo:{mk}")), depth + 1, sel)
+                    .group(gid.clone())
                     .on_click(cx.listener(move |this, e: &ClickEvent, w, cx| {
                         this.dbp.selected = Some(k1.clone());
                         if e.click_count() >= 2 {
@@ -1728,6 +1894,59 @@ impl Root {
                         }),
                     ))
                     .child(hl_label(&name, find, c(th.text)))
+                    .when(can_open, |d| {
+                        d.child(
+                            ui::row_actions(gid)
+                                .child(
+                                    ui::icon_button(
+                                        SharedString::from(format!("dbo-op:{mk}")),
+                                        if g == Group::Queries {
+                                            IconName::SquareTerminal
+                                        } else {
+                                            IconName::Table
+                                        },
+                                        ui::IconBtn::Sm,
+                                        if g == Group::Queries {
+                                            t("dbt.open")
+                                        } else {
+                                            t("dbt.open_data")
+                                        },
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, w, cx| {
+                                            cx.stop_propagation();
+                                            if g == Group::Queries {
+                                                this.db_open_saved(&node_open, &n_open, w, cx);
+                                            } else {
+                                                this.db_open_object(&gk_open, &n_open, None, w, cx);
+                                            }
+                                        },
+                                    )),
+                                )
+                                .when(g == Group::Tables, |ra| {
+                                    ra.child(
+                                        ui::icon_button(
+                                            SharedString::from(format!("dbo-ds:{mk}")),
+                                            IconName::Settings2,
+                                            ui::IconBtn::Sm,
+                                            t("dbt.design"),
+                                        )
+                                        .on_click(
+                                            cx.listener(move |this, _, w, cx| {
+                                                cx.stop_propagation();
+                                                this.db_open_object(
+                                                    &gk_des,
+                                                    &n_des,
+                                                    Some(Intent::Design),
+                                                    w,
+                                                    cx,
+                                                );
+                                            }),
+                                        ),
+                                    )
+                                }),
+                        )
+                    })
                     .when_some(note, |d, n| d.tooltip(ui::tip(n))),
             );
         }

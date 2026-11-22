@@ -1380,7 +1380,7 @@ impl Render for DocView {
             .flex()
             .flex_col()
             .relative()
-            .bg(c(th.base))
+            .when(!crate::theme::glass_enabled(), |d| d.bg(c(th.base)))
             .child(head)
             .children(err)
             .children(note)

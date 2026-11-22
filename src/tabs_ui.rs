@@ -86,7 +86,8 @@ impl Root {
     /// Same panes (fresh shells in the same cwd / hosts), inserted right after `i`.
     fn duplicate_tab(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get(i) else { return };
-        let node = Self::save_node(&tab.layout, cx);
+        let mut node = Self::save_node(&tab.layout, cx);
+        node.strip_agent_sessions();
         let name = tab.name.clone();
         self.insert_tab_from(node, name, i + 1, window, cx);
         self.log("tab.duplicate", format!("index={i}"));
@@ -118,6 +119,7 @@ impl Root {
                 .iter()
                 .map(|p| p.read(cx).pane_id.clone())
                 .collect()],
+            active_by_module: Default::default(),
         };
         let dir = crate::data_dir().join("windows");
         let file = dir.join(format!(
@@ -697,7 +699,7 @@ impl Root {
             ui::icon_button(
                 (gpui::SharedString::from(format!("ph-{}", p.entity_id())), i),
                 ic,
-                ui::IconBtn::Md,
+                ui::IconBtn::Sm,
                 tip,
             )
         };
@@ -718,20 +720,20 @@ impl Root {
         let (a, b, d) = (p.clone(), p.clone(), p.clone());
         div()
             .absolute()
-            .top(px(4.))
-            .right(px(8.))
+            .top(px(6.))
+            .right(px(10.))
             .p(px(2.))
             .flex()
             .items_center()
             .justify_end()
-            .gap(px(2.))
-            .rounded(px(ui::R_SUB))
+            .gap(px(1.))
+            .rounded(px(ui::R_MD))
             .invisible()
             .group_hover(group.clone(), |s| s.visible())
             .hover(|s| s.visible())
-            .bg(crate::theme::solid_card_bg())
+            .bg(crate::theme::overlay_card_bg(0.92))
             .border_1()
-            .border_color(crate::theme::divider())
+            .border_color(crate::theme::island_border())
             .shadow(chrome::soft_shadow(false))
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
@@ -758,7 +760,7 @@ impl Root {
                 ui::icon_button_state(
                     (gpui::SharedString::from(format!("ph-{}", p.entity_id())), 2usize),
                     IconName::X,
-                    ui::IconBtn::Md,
+                    ui::IconBtn::Sm,
                     t("ui.close_pane"),
                     false,
                     true,

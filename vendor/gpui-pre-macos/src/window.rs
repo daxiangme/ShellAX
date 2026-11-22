@@ -303,10 +303,6 @@ unsafe fn build_classes() {
                 sel!(initWithFrame:),
                 blurred_view_init_with_frame as extern "C" fn(&Object, Sel, NSRect) -> id,
             );
-            decl.add_method(
-                sel!(updateLayer),
-                blurred_view_update_layer as extern "C" fn(&Object, Sel),
-            );
             decl.register()
         };
         WINDOW_STATE_ARCHIVER_DELEGATE_CLASS = {
@@ -1886,8 +1882,31 @@ impl PlatformWindow for MacWindow {
             } else if this.blurred_view.is_none() {
                 let content_view = this.native_window.contentView();
                 let frame = NSView::bounds(content_view);
-                let mut blur_view: id = msg_send![BLURRED_VIEW_CLASS, alloc];
-                blur_view = NSView::initWithFrame_(blur_view, frame);
+                let blur_view: id =
+                    if is_macos_version_at_least(NSOperatingSystemVersion::new(26, 0, 0)) {
+                        if let Some(glass_cls) = Class::get("NSGlassEffectView") {
+                            let view: id = msg_send![glass_cls, alloc];
+                            let view = NSView::initWithFrame_(view, frame);
+                            let has_style: BOOL =
+                                msg_send![view, respondsToSelector: sel!(setStyle:)];
+                            if has_style == YES {
+                                // NSGlassEffectViewStyleRegular = 0
+                                let _: () = msg_send![view, setStyle: 0 as NSInteger];
+                            }
+                            let has_radius: BOOL =
+                                msg_send![view, respondsToSelector: sel!(setCornerRadius:)];
+                            if has_radius == YES {
+                                let _: () = msg_send![view, setCornerRadius: 16.0f64];
+                            }
+                            view
+                        } else {
+                            let view: id = msg_send![BLURRED_VIEW_CLASS, alloc];
+                            NSView::initWithFrame_(view, frame)
+                        }
+                    } else {
+                        let view: id = msg_send![BLURRED_VIEW_CLASS, alloc];
+                        NSView::initWithFrame_(view, frame)
+                    };
                 blur_view.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable);
 
                 let _: () = msg_send![
@@ -3806,76 +3825,12 @@ fn display_id_for_screen(screen: id) -> Option<CGDirectDisplayID> {
 extern "C" fn blurred_view_init_with_frame(this: &Object, _: Sel, frame: NSRect) -> id {
     unsafe {
         let view = msg_send![super(this, class!(NSVisualEffectView)), initWithFrame: frame];
-        // A window-background material, whose tint and extra saturation
-        // `blurred_view_update_layer` strips, leaving only the blur. `Selection`, used before,
-        // has no `CABackdropLayer` on macOS 27, so nothing behind the window was blurred. (Setting
-        // a material also avoids the deprecated default, `AppearanceBased`.)
+        // Fallback for macOS < 26: preserve native vibrancy (desktop tinting and saturation)
+        // for a genuine macOS frosted glass appearance behind the window.
         NSVisualEffectView::setMaterial_(view, NSVisualEffectMaterial::UnderWindowBackground);
-        // The default, but blurring what's behind the window is this view's whole purpose.
         NSVisualEffectView::setBlendingMode_(view, NSVisualEffectBlendingMode::BehindWindow);
         NSVisualEffectView::setState_(view, NSVisualEffectState::Active);
         view
-    }
-}
-
-extern "C" fn blurred_view_update_layer(this: &Object, _: Sel) {
-    unsafe {
-        let _: () = msg_send![super(this, class!(NSVisualEffectView)), updateLayer];
-        let layer: id = msg_send![this, layer];
-        if !layer.is_null() {
-            remove_layer_background(layer);
-        }
-    }
-}
-
-unsafe fn remove_layer_background(layer: id) {
-    unsafe {
-        let _: () = msg_send![layer, setBackgroundColor:nil];
-
-        let class_name: id = msg_send![layer, className];
-        if class_name.isEqualToString("CAChameleonLayer") {
-            // Remove the desktop tinting effect.
-            let _: () = msg_send![layer, setHidden: YES];
-            return;
-        }
-
-        let filters: id = msg_send![layer, filters];
-        if !filters.is_null() {
-            // Remove the increased saturation.
-            // The effect of a `CAFilter` or `CIFilter` is determined by its name, and the
-            // `description` reflects its name and some parameters. Currently `NSVisualEffectView`
-            // uses a `CAFilter` named "colorSaturate". If one day they switch to `CIFilter`, the
-            // `description` will still contain "Saturat" ("... inputSaturation = ...").
-            let test_string: id = ns_string("Saturat");
-            let count = NSArray::count(filters);
-            for i in 0..count {
-                let description: id = msg_send![filters.objectAtIndex(i), description];
-                let hit: BOOL = msg_send![description, containsString: test_string];
-                if hit == NO {
-                    continue;
-                }
-
-                let all_indices = NSRange {
-                    location: 0,
-                    length: count,
-                };
-                let indices: id = msg_send![class!(NSMutableIndexSet), indexSet];
-                let _: () = msg_send![indices, addIndexesInRange: all_indices];
-                let _: () = msg_send![indices, removeIndex:i];
-                let filtered: id = msg_send![filters, objectsAtIndexes: indices];
-                let _: () = msg_send![layer, setFilters: filtered];
-                break;
-            }
-        }
-
-        let sublayers: id = msg_send![layer, sublayers];
-        if !sublayers.is_null() {
-            let count = NSArray::count(sublayers);
-            for i in 0..count {
-                let sublayer = sublayers.objectAtIndex(i);
-                remove_layer_background(sublayer);
-            }
-        }
     }
 }
 

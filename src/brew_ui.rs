@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 
 use gpui::{div, prelude::*, px, AnyElement, ClipboardItem, Context, Entity, SharedString, Window};
 use gpui_component::input::{InputEvent, InputState};
-use ssh_term_proto::brew::{self, Kind, Op, Package, Service};
+use ssh_term_proto::brew::{self, Kind, Op, Package, Service, SvcAct};
 use ssh_term_proto::i18n::{t, tf};
 
 use crate::activity::{self, log_push};
@@ -571,6 +571,15 @@ impl Root {
         let q = search.read(cx).value().trim().to_lowercase();
         let hub = self.brew_hub(cx);
         let snap = hub.read(cx).list_snap();
+        let th = cur();
+        let add_btn = ui::icon_button(
+            "brew-add",
+            IconName::Plus,
+            ui::IconBtn::Md,
+            t("brew.install"),
+        )
+        .on_click(cx.listener(|this, _, w, cx| this.open_brew_install(w, cx)))
+        .into_any_element();
         let refresh = ui::icon_button(
             "brew-refresh",
             IconName::RefreshCw,
@@ -644,15 +653,70 @@ impl Root {
                 .flex()
                 .flex_col()
                 .pb(px(ui::SP_2));
+            let out_on = focus
+                .as_ref()
+                .is_some_and(|(install, page, _)| !install && *page == Page::Outdated);
+            let all_on = focus
+                .as_ref()
+                .is_some_and(|(install, page, _)| !install && *page == Page::All);
+            let ins_on = focus.as_ref().is_some_and(|(install, _, _)| *install);
+            list = list
+                .child(ui::section_header(
+                    "brew-ov-cap",
+                    t("ux.brew_overview").to_string(),
+                    None,
+                    None,
+                ))
+                .child(
+                    ui::list_row("brew-nav-out", 0, out_on)
+                        .on_click(cx.listener(|this, _, w, cx| {
+                            this.show_brew_list(Page::Outdated, w, cx)
+                        }))
+                        .child(ui::icon(
+                            IconName::ArrowUpFromLine,
+                            ui::IC_MD,
+                            if outdated_n > 0 {
+                                c(th.warning)
+                            } else {
+                                c(th.overlay1)
+                            },
+                        ))
+                        .child(
+                            ui::row_title(tf("brew.nav_outdated", &[("n", &outdated_n)])).flex_1(),
+                        )
+                        .when(outdated_n > 0, |d| {
+                            d.child(ui::tag(outdated_n.to_string(), c(th.warning)))
+                        }),
+                )
+                .child(
+                    ui::list_row("brew-nav-all", 0, all_on)
+                        .on_click(
+                            cx.listener(|this, _, w, cx| this.show_brew_list(Page::All, w, cx)),
+                        )
+                        .child(ui::icon(IconName::Package, ui::IC_MD, c(th.overlay1)))
+                        .child(ui::row_title(t("brew.nav_all").to_string()).flex_1())
+                        .child(ui::row_meta(snap.packages.len().to_string())),
+                )
+                .child(
+                    ui::list_row("brew-nav-ins", 0, ins_on)
+                        .on_click(cx.listener(|this, _, w, cx| this.open_brew_install(w, cx)))
+                        .child(ui::icon(IconName::Plus, ui::IC_MD, c(th.accent)))
+                        .child(ui::row_title(t("ux.brew_nav_install").to_string()).flex_1()),
+                );
             if !services.is_empty() {
-                list = list.child(ui::section_header(
-                    "brew-svc-cap",
-                    t("brew.services").to_string(),
-                    None,
-                    None,
-                ));
+                list = list.child(
+                    ui::section_header(
+                        "brew-svc-cap",
+                        t("brew.services").to_string(),
+                        Some(services.len()),
+                        None,
+                    )
+                    .mt(px(ui::SP_1)),
+                );
                 for s in &services {
                     let name = s.name.clone();
+                    let svc_name_act = s.name.clone();
+                    let started = s.status == "started";
                     let pkg = snap
                         .packages
                         .iter()
@@ -663,8 +727,10 @@ impl Root {
                         *page == Page::Detail && sel.as_deref() == Some(id.as_str())
                     });
                     let col = svc_color(&s.status);
+                    let gid = SharedString::from(format!("brew-svc-g-{}", s.name));
                     list = list.child(
                         ui::list_row(SharedString::from(format!("brew-svc-{}", s.name)), 0, on)
+                            .group(gid.clone())
                             .on_click(cx.listener(move |this, _, w, cx| {
                                 let id = pkg.clone().unwrap_or_else(|| brew::service_id(&name));
                                 this.open_brew_content(false, Page::Detail, Some(id), w, cx);
@@ -673,26 +739,85 @@ impl Root {
                             .child(ui::row_title(s.name.clone()).flex_1())
                             .child(ui::row_meta(
                                 t(brew::service_label_key(&s.status)).to_string(),
-                            )),
+                            ))
+                            .child(
+                                ui::row_actions(gid).child(
+                                    ui::icon_button(
+                                        SharedString::from(format!("brew-sa-{}", s.name)),
+                                        if started {
+                                            IconName::CircleStop
+                                        } else {
+                                            IconName::Play
+                                        },
+                                        ui::IconBtn::Sm,
+                                        if started {
+                                            t("brew.svc_stop")
+                                        } else {
+                                            t("brew.svc_start")
+                                        },
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, _w, cx| {
+                                            cx.stop_propagation();
+                                            let act = if started {
+                                                SvcAct::Stop
+                                            } else {
+                                                SvcAct::Start
+                                            };
+                                            this.brew_hub(cx).update(cx, |h, cx| {
+                                                h.enqueue(
+                                                    Op::Service {
+                                                        name: svc_name_act.clone(),
+                                                        act,
+                                                    },
+                                                    cx,
+                                                )
+                                            });
+                                        },
+                                    )),
+                                ),
+                            ),
                     );
                 }
             }
-            let out_on = focus.as_ref().is_some_and(|(install, page, _)| !install && *page == Page::Outdated);
-            let all_on = focus.as_ref().is_some_and(|(install, page, _)| !install && *page == Page::All);
-            list = list.child(
-                ui::list_row("brew-nav-out", 0, out_on)
-                    .mt(px(ui::SP_2))
-                    .on_click(
-                        cx.listener(|this, _, w, cx| this.show_brew_list(Page::Outdated, w, cx)),
-                    )
-                    .child(ui::row_title(tf("brew.nav_outdated", &[("n", &outdated_n)])).flex_1()),
-            );
-            list = list.child(
-                ui::list_row("brew-nav-all", 0, all_on)
-                    .on_click(cx.listener(|this, _, w, cx| this.show_brew_list(Page::All, w, cx)))
-                    .child(ui::row_title(t("brew.nav_all").to_string()).flex_1())
-                    .child(ui::row_meta(snap.packages.len().to_string())),
-            );
+            if searching {
+                let pkg_hits: Vec<&Package> = snap
+                    .packages
+                    .iter()
+                    .filter(|p| hit(&p.name, &q) || hit(&p.title, &q) || hit(&p.desc, &q))
+                    .take(30)
+                    .collect();
+                if !pkg_hits.is_empty() {
+                    list = list.child(
+                        ui::section_header(
+                            "brew-pkg-hits",
+                            t("brew.nav_all").to_string(),
+                            Some(pkg_hits.len()),
+                            None,
+                        )
+                        .mt(px(ui::SP_1)),
+                    );
+                    for p in pkg_hits {
+                        let pid = p.id.clone();
+                        let sel_on = focus.as_ref().is_some_and(|(_, page, sel)| {
+                            *page == Page::Detail && sel.as_deref() == Some(pid.as_str())
+                        });
+                        list = list.child(
+                            ui::list_row(
+                                SharedString::from(format!("brew-ph-{}", p.id)),
+                                0,
+                                sel_on,
+                            )
+                            .on_click(cx.listener(move |this, _, w, cx| {
+                                this.open_brew_content(false, Page::Detail, Some(pid.clone()), w, cx);
+                            }))
+                            .child(ui::icon(IconName::Package, ui::IC_SM, c(th.overlay1)))
+                            .child(ui::row_title(p.title.clone()).flex_1())
+                            .child(ui::row_meta(p.installed.clone())),
+                        );
+                    }
+                }
+            }
             body = body.child(list);
         }
         div()
@@ -704,7 +829,7 @@ impl Root {
                 t("tool.brew"),
                 None,
                 Some(IconName::Beer),
-                vec![refresh],
+                vec![add_btn, refresh],
             ))
             .child(body)
             .into_any_element()

@@ -449,10 +449,13 @@ fn mix(a: u32, b: u32, t: f32) -> u32 {
 pub const BUILTIN: &[&str] = &[
     include_str!("../themes/light.toml"),
     include_str!("../themes/dark.toml"),
-    include_str!("../themes/catppuccin-mocha.toml"),
-    include_str!("../themes/catppuccin-latte.toml"),
+    include_str!("../themes/linear-carbon.toml"),
+    include_str!("../themes/linear-paper.toml"),
+    include_str!("../themes/tokyo-night.toml"),
     include_str!("../themes/shellax-midnight.toml"),
     include_str!("../themes/shellax-daylight.toml"),
+    include_str!("../themes/catppuccin-mocha.toml"),
+    include_str!("../themes/catppuccin-latte.toml"),
 ];
 
 pub const BUILTIN_SCHEMES: &[&str] = &[
@@ -804,9 +807,17 @@ mod tests {
             ("Dark", Appearance::Dark, 0x0a84ff)
         );
         assert!(is_macos_theme(&l) && is_macos_theme(&d));
-        // Terminal.app-like basics: black on white / light on dark, red ≈ 0x990000
-        assert_eq!((l.fg, l.bg, l.ansi[1]), (0x000000, 0xffffff, 0x990000));
+        assert!(luma(l.bg) > 0.9 && luma(l.fg) < 0.2);
         assert!(luma(d.bg) < 0.2 && luma(d.fg) > 0.8);
+        // Proper 3-step harmonious depth: outer frame (`crust`) < sidebar (`mantle`) < content (`base`)
+        for s in BUILTIN {
+            let t = Theme::from_toml(s).unwrap();
+            assert!(
+                luma(t.crust) < luma(t.mantle) && luma(t.mantle) < luma(t.base),
+                "{}: expected crust < mantle < base for smooth surface harmony",
+                t.name
+            );
+        }
     }
     #[test]
     fn accent_mapping() {
@@ -957,86 +968,301 @@ mod iterm_tests {
 
 // ---- 统一的三层背景：外层框架 / 卡片 / 悬停与选中。界面各处只用这几个，不再各自调深浅。
 
-/// 当前配置的窗口不透明度（0.5–1.0）；1.0 表示完全不透明。
+/// 当前配置的窗口不透明度（开关两档：关闭 1.0，开启 0.90 模糊液态玻璃）。
 pub fn window_opacity() -> f32 {
-    crate::config::get().appearance.opacity.clamp(0.5, 1.0)
+    if crate::config::get().appearance.opacity < 0.999 {
+        0.90
+    } else {
+        1.0
+    }
 }
-/// 卡片层实际不透明度：在开启半透模式时，macOS 依靠原生磨砂模糊可直接使用 `window_opacity()`；
-/// 非 macOS 无系统高斯模糊时略微抬高基底以保证文字锐利可读。
+/// 是否开启了模糊液态玻璃窗口半透明效果。
+pub fn glass_enabled() -> bool {
+    window_opacity() < 0.999
+}
+/// 在不透明实心模式下混合两种主题 HEX 颜色（100% 不透明，彻底避免 GPUI Metal 半透层叠导致的暗底透出）。
+fn mix_solid(a_hex: u32, b_hex: u32, weight_a: f32) -> gpui::Hsla {
+    let (a, b) = (gpui::Rgba::from(c(a_hex)), gpui::Rgba::from(c(b_hex)));
+    let w = weight_a.clamp(0.0, 1.0);
+    gpui::Rgba {
+        r: a.r * w + b.r * (1.0 - w),
+        g: a.g * w + b.g * (1.0 - w),
+        b: a.b * w + b.b * (1.0 - w),
+        a: 1.0,
+    }
+    .into()
+}
+
+/// 侧边栏与辅助面板层不透明度：macOS 上顺接外层磨砂框架 `chrome_bg` 并显著抑制半透叠层造成的暗底发灰（浅色尤需高纯度通透白感）。
+pub fn panel_alpha() -> f32 {
+    let op = window_opacity();
+    if op >= 0.999 {
+        1.0
+    } else if cfg!(target_os = "macos") {
+        if cur().appearance == Appearance::Dark {
+            0.88
+        } else {
+            0.95
+        }
+    } else {
+        (op + 0.01).clamp(0.55, 0.96)
+    }
+}
+/// 中间内容卡片实际不透明度：保持工作区最高纯净度与文字锐利度，消除浅色下内容区比外框更暗的反差倒挂。
 pub fn card_alpha() -> f32 {
     let op = window_opacity();
     if op >= 0.999 {
         1.0
     } else if cfg!(target_os = "macos") {
-        op
+        if cur().appearance == Appearance::Dark {
+            0.94
+        } else {
+            0.97
+        }
     } else {
         (op + 0.03).clamp(0.55, 0.98)
     }
 }
-/// 实心卡片底色：用于虚拟列表吸顶标题、悬浮按钮条、分段控件选中态等需要遮挡下方滚动文字的元素。
+/// 实心卡片底色：用于主内容区内悬浮按钮条、分段控件选中态等需要遮挡下方滚动文字的元素。
 pub fn solid_card_bg() -> gpui::Hsla {
     c(scheme().bg)
 }
-/// 卡片层：左侧面板、中间内容卡片、右侧卡片（随全局透明度呈现柔和半透，同时保证文字清晰）。
+/// 实心侧栏底色：用于左侧面板虚拟列表吸顶标题，与 `panel_bg` 色相一致且不透出下方滚动行。
+pub fn solid_panel_bg() -> gpui::Hsla {
+    c(cur().mantle)
+}
+/// 侧边栏 / 右侧停靠栏 / 底部工具面板底色：取 `mantle`，作为外框 `crust` 到主内容 `base` 的自然过渡阶梯。
+pub fn panel_bg() -> gpui::Hsla {
+    c(cur().mantle).opacity(panel_alpha())
+}
+/// 中间主内容卡片底色（终端、SFTP、数据库等工作区）。
 pub fn card_bg() -> gpui::Hsla {
     c(scheme().bg).opacity(card_alpha())
 }
-/// 卡片内底栏（如 Agent 底部状态栏、终端路径栏）：在半透模式下使用柔和层次叠层，不堵死卡片底部圆角。
-pub fn bar_bg() -> gpui::Hsla {
-    if window_opacity() >= 0.999 {
-        c(cur().mantle)
-    } else if cur().appearance == Appearance::Dark {
-        gpui::black().opacity(0.20)
+/// 设置页主卡片底色：居中衔接侧边栏 `panel_bg` 与工作区 `card_bg`，保证浅色明快干净、深色柔和抬升。
+pub fn settings_card_bg() -> gpui::Hsla {
+    if !glass_enabled() {
+        return card_bg();
+    }
+    if cfg!(target_os = "macos") {
+        let a = if cur().appearance == Appearance::Dark {
+            0.91
+        } else {
+            0.96
+        };
+        c(cur().base).opacity(a)
     } else {
-        gpui::black().opacity(0.045)
+        card_bg()
     }
 }
-/// 外层框架：窗口、标题栏、两侧图标栏、标签栏、状态栏。
+/// 设置页左侧导航栏底色：统一使用主题 `mantle` 阶梯，与主窗口侧边栏保持一致的平滑明度，不因黑底混合变灰。
+pub fn settings_nav_bg() -> gpui::Hsla {
+    c(cur().mantle)
+}
+/// 设置页右侧分组卡片底色：深浅与毛玻璃/实心模式下均使用 100% 干净抬升表面，浅色明亮通透、深色温和分层。
+pub fn settings_group_bg() -> gpui::Hsla {
+    let th = cur();
+    if th.appearance == Appearance::Dark {
+        mix_solid(th.surface0, th.base, 0.34)
+    } else {
+        mix_solid(0xffffff, th.base, 0.72)
+    }
+}
+/// 弹出菜单、命令面板、悬浮 HUD 与模态对话框卡片底色：
+/// GPUI 渲染层不支持对画布内下层文字做实时高斯模糊，若浮层小于 1.0 不透明度会导致底部文字/按钮直接穿透（鬼影）。
+/// 因此所有浮层统一使用 100% 实心抬升表面（深色融合 28% `surface0` 呈现悬浮层次，浅色保持纯净 `base`）。
+pub fn overlay_card_bg(_opaque_fallback: f32) -> gpui::Hsla {
+    let th = cur();
+    if th.appearance == Appearance::Dark {
+        mix_solid(th.surface0, th.base, 0.28)
+    } else {
+        c(th.base)
+    }
+}
+/// 模态弹窗与命令面板的全屏背景遮罩：以高浓度外框色阶柔化压暗底层工作区，配合 macOS 原生液态玻璃衬底突出前景弹窗。
+pub fn modal_scrim_bg() -> gpui::Hsla {
+    let th = cur();
+    if th.appearance == Appearance::Dark {
+        c(th.crust).opacity(0.76)
+    } else {
+        c(th.crust).opacity(0.72)
+    }
+}
+/// 模态弹窗、下拉菜单、气泡卡片的高清轮廓边线。
+pub fn overlay_border() -> gpui::Hsla {
+    if cur().appearance == Appearance::Dark {
+        gpui::white().opacity(0.13)
+    } else {
+        gpui::black().opacity(0.11)
+    }
+}
+/// 液态玻璃卡片边缘细描边：深浅色均采用极柔和低对比发丝边，避免生硬亮白框。
+pub fn glass_edge() -> Option<gpui::Hsla> {
+    if !glass_enabled() {
+        return None;
+    }
+    Some(if cur().appearance == Appearance::Dark {
+        gpui::white().opacity(0.07)
+    } else {
+        gpui::black().opacity(0.055)
+    })
+}
+/// 液态玻璃卡片的微阴影；关闭半透明时返回 `None`。
+pub fn glass_island_shadow() -> Option<Vec<gpui::BoxShadow>> {
+    if !glass_enabled() {
+        return None;
+    }
+    let dark = cur().appearance == Appearance::Dark;
+    Some(vec![gpui::BoxShadow {
+        color: gpui::black().opacity(if dark { 0.10 } else { 0.025 }),
+        offset: gpui::point(gpui::px(0.), gpui::px(1.)),
+        blur_radius: gpui::px(6.),
+        spread_radius: gpui::px(0.),
+        inset: false,
+    }])
+}
+/// 卡片内底栏（如 Agent 底部状态栏、终端路径栏）：使用轻柔过渡色，不形成突兀深黑条或灰条。
+pub fn bar_bg() -> gpui::Hsla {
+    let th = cur();
+    if th.appearance == Appearance::Dark {
+        mix_solid(th.crust, th.mantle, 0.35)
+    } else {
+        mix_solid(th.mantle, th.base, 0.75)
+    }
+}
+/// 外层框架：窗口、标题栏、左右两侧图标栏、标签栏、状态栏。
+/// macOS 液态玻璃下保留充足的磨砂底色浓度（0.78 / 0.84），既透出柔和环境光，又确保最左/最右未选中图标始终清晰可见，
+/// 并缩小外框与左右面板卡片之间的明度跨度。
 pub fn chrome_bg() -> gpui::Hsla {
     let op = window_opacity();
     let base = outer_bg();
     if op >= 0.999 {
         base
     } else if cfg!(target_os = "macos") {
-        base.opacity((op - 0.16).clamp(0.42, 0.92))
+        base.opacity(if cur().appearance == Appearance::Dark {
+            0.78
+        } else {
+            0.84
+        })
     } else {
-        base.opacity((op - 0.06).clamp(0.45, 0.94))
+        base.opacity((op - 0.04).clamp(0.65, 0.95))
     }
 }
-/// 悬停行：卡片上叠一层很淡的前景色。
+/// 悬停行：Linear/Raycast 风格中性细微高亮，避免带色偏。
 pub fn hover_bg() -> gpui::Hsla {
-    c(cur().text).opacity(0.06)
+    if cur().appearance == Appearance::Dark {
+        gpui::white().opacity(0.05)
+    } else {
+        gpui::black().opacity(0.04)
+    }
 }
-/// 选中行：带一点强调色的淡底，不抢文字。
+/// 选中行：克制的中性高亮层（Linear 风格，不用大面积蓝块淹没侧边栏，把强调色留给主按钮与 2px 指示条）。
 pub fn selected_bg() -> gpui::Hsla {
-    c(cur().accent).opacity(0.10)
+    if cur().appearance == Appearance::Dark {
+        gpui::white().opacity(0.085)
+    } else {
+        gpui::black().opacity(0.06)
+    }
+}
+/// 强调色淡底：用于激活态筛选胶囊、徽标与状态指示底。
+pub fn accent_bg() -> gpui::Hsla {
+    c(cur().accent).opacity(if cur().appearance == Appearance::Dark {
+        0.14
+    } else {
+        0.10
+    })
+}
+/// 任意实心色块（如主按钮、红绿徽标、警告条）上的文字/图标前景色：按感知亮度自动切换纯白或深墨色。
+pub fn on_color(hex: u32) -> gpui::Hsla {
+    if luma(hex) < 0.62 {
+        gpui::white()
+    } else {
+        gpui::rgb(0x111118).into()
+    }
+}
+/// 实心强调色表面上的文字/图标前景色：按感知亮度自动切换纯白或深墨色，确保主按钮清晰锐利。
+pub fn on_accent() -> gpui::Hsla {
+    on_color(cur().accent)
 }
 /// 状态栏等弱化文字：取次文本色 subtext（与规范的文本层级一致）。
 pub fn muted_text() -> gpui::Hsla {
     c(cur().subtext)
 }
-/// 弹出菜单 / 命令面板 / 下拉的键盘高亮行：强调色与卡片底色 30% 混合的不透明色，文字保持 text。
+/// 弹出菜单 / 命令面板 / 下拉的键盘高亮行：中性微亮混色，文字保持 text。
 pub fn menu_sel_bg() -> gpui::Hsla {
-    let (a, b) = (
-        gpui::Rgba::from(c(cur().accent)),
-        gpui::Rgba::from(solid_card_bg()),
-    );
-    let mix = |x: f32, y: f32| x * 0.3 + y * 0.7;
-    gpui::Rgba {
-        r: mix(a.r, b.r),
-        g: mix(a.g, b.g),
-        b: mix(a.b, b.b),
-        a: 1.,
-    }
-    .into()
+    mix_solid(cur().text, scheme().bg, 0.10)
 }
-/// 统一分隔线 / 发丝边框。
+/// 统一分隔线 / 1px 极细发丝线（深浅主题自适应低饱和中性灰，避免“框套框”粗糙感）。
 pub fn divider() -> gpui::Hsla {
-    c(cur().surface1).opacity(0.6)
+    if cur().appearance == Appearance::Dark {
+        gpui::white().opacity(0.065)
+    } else {
+        gpui::black().opacity(0.065)
+    }
 }
-/// 岛内子卡片底色：卡片底上叠一层很淡的前景色。
+/// 交互控件边框（次级按钮、分段滑块等），仅比发丝线略高半档。
+pub fn control_border() -> gpui::Hsla {
+    if cur().appearance == Appearance::Dark {
+        gpui::white().opacity(0.095)
+    } else {
+        gpui::black().opacity(0.09)
+    }
+}
+/// 输入框与搜索框静息态底色：微凹中性淡层。
+pub fn input_bg() -> gpui::Hsla {
+    if cur().appearance == Appearance::Dark {
+        gpui::white().opacity(0.04)
+    } else {
+        gpui::black().opacity(0.032)
+    }
+}
+/// 输入框与搜索框静息态边框：极轻发丝轮廓，聚焦时才切换为 `accent`。
+pub fn input_border() -> gpui::Hsla {
+    if cur().appearance == Appearance::Dark {
+        gpui::white().opacity(0.07)
+    } else {
+        gpui::black().opacity(0.075)
+    }
+}
+/// 选中/激活控件的强调色发丝边框。
+pub fn active_border() -> gpui::Hsla {
+    c(cur().accent).opacity(if cur().appearance == Appearance::Dark {
+        0.34
+    } else {
+        0.28
+    })
+}
+/// 浮层卡片轮廓边：液态玻璃模式用高光边，实色模式用极细发丝边。
+pub fn island_border() -> gpui::Hsla {
+    glass_edge().unwrap_or_else(divider)
+}
+/// 按钮 / 分段滑块 / 键帽的 1px 触感微阴影。
+pub fn control_shadow() -> Vec<gpui::BoxShadow> {
+    let dark = cur().appearance == Appearance::Dark;
+    vec![gpui::BoxShadow {
+        color: gpui::black().opacity(if dark { 0.26 } else { 0.06 }),
+        offset: gpui::point(gpui::px(0.), gpui::px(1.)),
+        blur_radius: gpui::px(2.),
+        spread_radius: gpui::px(0.),
+        inset: false,
+    }]
+}
+/// 抬升小表面底色（次级按钮、键帽、空状态图标块、快捷入口图标槽）。
+pub fn elevated_surface() -> gpui::Hsla {
+    let th = cur();
+    if th.appearance == Appearance::Dark {
+        mix_solid(th.surface0, th.base, 0.78)
+    } else {
+        mix_solid(0xffffff, th.base, 0.84)
+    }
+}
+/// 岛内子卡片底色：卡片底上叠一层很淡的中性表面。
 pub fn sub_bg() -> gpui::Hsla {
-    c(cur().text).opacity(0.035)
+    if cur().appearance == Appearance::Dark {
+        gpui::white().opacity(0.032)
+    } else {
+        gpui::black().opacity(0.024)
+    }
 }
 /// 自定义图标色板（8 色，id 与 `ssh_term_proto::iconset::COLORS` 一一对应）：每色给出浅色、深色主题各一组
 /// `[后层, 前层, 字形]`；字形是叠在文件夹前层上的小图案，取与前层反差足够的颜色。蓝色即默认的 SFTP 文件夹蓝。
@@ -1153,20 +1379,102 @@ pub fn ui_size() -> f32 {
     f32::from_bits(UI_SIZE.load(Ordering::Relaxed))
 }
 
-/// 窗口外层（侧栏、标签行、状态栏所在）背景：用 crust；与终端背景过近时由终端背景调暗或调亮推导，
-/// 保证终端卡片在亮色、暗色主题下都能与外层区分。
+/// 窗口外层（侧栏外框、标签行、状态栏所在）背景：优先忠实使用主题精心调校的 `crust`；
+/// 仅当用户单独切换了与 `crust` 几乎完全同色的外部终端配色时，才做 2.8% 的温和明度微调，避免产生突兀反差。
 pub fn outer_bg() -> gpui::Hsla {
     let mut o = c(cur().crust);
     let bg = c(scheme().bg);
-    if (o.l - bg.l).abs() < 0.06 {
+    if (o.l - bg.l).abs() < 0.012 {
         o = bg;
         o.l = if bg.l > 0.5 {
-            bg.l - 0.07
-        } else if bg.l < 0.08 {
-            bg.l + 0.07
+            (bg.l - 0.028).max(0.)
         } else {
-            bg.l - 0.06
+            (bg.l - 0.025).max(0.035)
         };
     }
     o
+}
+
+#[cfg(test)]
+mod opacity_tests {
+    use super::*;
+
+    fn hsla_luma(col: gpui::Hsla) -> f32 {
+        let r = gpui::Rgba::from(col);
+        0.2126 * r.r + 0.7152 * r.g + 0.0722 * r.b
+    }
+
+    /// Approximate gpui-pre-apple Metal premultiplied RGB compositing over `chrome_bg`
+    /// (`dst.rgb = a * src.rgb + (1 - a) * (ch * chrome.rgb)`).
+    fn over_chrome(layer: gpui::Hsla, ch_col: gpui::Hsla) -> f32 {
+        let l = gpui::Rgba::from(layer);
+        let ch = gpui::Rgba::from(ch_col);
+        let r = l.a * l.r + (1.0 - l.a) * (ch.a * ch.r);
+        let g = l.a * l.g + (1.0 - l.a) * (ch.a * ch.g);
+        let b = l.a * l.b + (1.0 - l.a) * (ch.a * ch.b);
+        0.2126 * r + 0.7152 * g + 0.0722 * b
+    }
+
+    #[test]
+    fn window_opacity_toggle_drives_glass_layers_and_solid_mode() {
+        crate::config::preview(|s| s.appearance.opacity = 1.0);
+        assert!(!glass_enabled());
+        assert!((card_alpha() - 1.0).abs() < 1e-5);
+        assert!((panel_alpha() - 1.0).abs() < 1e-5);
+        assert!(glass_edge().is_none());
+        assert_eq!(chrome_bg(), outer_bg());
+
+        let themes = load_all();
+        for name in ["ShellAX Midnight", "ShellAX Daylight", "Light", "Catppuccin Latte"] {
+            let th = themes
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("missing builtin theme {name}"))
+                .clone();
+            let sch = Arc::new(th.to_scheme());
+            set_current(th);
+            set_scheme(sch);
+            crate::config::preview(|s| {
+                s.appearance.opacity = 0.90;
+                s.appearance.theme = name.into();
+            });
+            assert!(glass_enabled());
+            assert!((overlay_card_bg(0.88).a - 1.0).abs() < 1e-5);
+            assert!((settings_group_bg().a - 1.0).abs() < 1e-5);
+            assert!(glass_edge().is_some());
+            assert!(glass_island_shadow().is_some());
+            if cfg!(target_os = "macos") {
+                let ch = chrome_bg();
+                assert!(
+                    (0.74..=0.86).contains(&ch.a),
+                    "{name}: chrome_bg alpha out of expected frosted range: {}",
+                    ch.a
+                );
+                let pa = panel_alpha();
+                let sa = settings_card_bg().a;
+                let ca = card_alpha();
+                assert!(
+                    ch.a < pa && pa < sa && sa < ca && pa >= 0.88,
+                    "{name}: layer alphas must increase monotonically to avoid black-bleed greying: ch={}, pa={pa}, sa={sa}, ca={ca}",
+                    ch.a
+                );
+                let chrome_l = hsla_luma(outer_bg());
+                let sidebar_l = over_chrome(panel_bg(), ch);
+                let nav_l = hsla_luma(settings_nav_bg());
+                let settings_l = over_chrome(settings_card_bg(), ch);
+                let group_l = hsla_luma(settings_group_bg());
+                let card_l = over_chrome(card_bg(), ch);
+                if cur().appearance == Appearance::Light {
+                    assert!(
+                        sidebar_l <= settings_l + 0.002 && settings_l <= group_l + 0.002,
+                        "{name}: Light surface progression must never sink dark: chrome={chrome_l:.3}, sidebar={sidebar_l:.3}, nav={nav_l:.3}, settings={settings_l:.3}, group={group_l:.3}"
+                    );
+                    assert!(
+                        (sidebar_l - chrome_l).abs() <= 0.05 && (settings_l - sidebar_l).abs() <= 0.05,
+                        "{name}: Light neighboring panels should transition gently: chrome={chrome_l:.3}, sidebar={sidebar_l:.3}, settings={settings_l:.3}, card={card_l:.3}"
+                    );
+                }
+            }
+        }
+    }
 }

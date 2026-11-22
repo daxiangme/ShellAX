@@ -449,6 +449,15 @@ impl Root {
         let conn = target.conn.clone();
         let (rt, log) = (self.rt.handle().clone(), self.exec_log.clone());
         let v = cx.new(|cx| DbView::new(target, sql, rt, log, window, cx));
+        self._subs.push(cx.subscribe_in(
+            &v,
+            window,
+            |this, _, ev: &crate::db_view::DbEvent, window, cx| {
+                if let crate::db_view::DbEvent::OpenQuery(tg, sql) = ev {
+                    this.open_db_tab(tg.clone(), sql.clone(), window, cx);
+                }
+            },
+        ));
         if matches!(self.dbp.live.get(&conn), Some(LiveState::Failed(_))) {
             self.dbp.live.remove(&conn);
         }
@@ -551,6 +560,10 @@ impl Root {
                         this.close_overlay(window, cx);
                     }
                     DbDialogEvent::Close => this.close_overlay(window, cx),
+                    DbDialogEvent::Toast { key, kind, msg } => match key {
+                        Some(k) => this.toast_upsert(k, *kind, msg.clone(), vec![], cx),
+                        None => this.toast_kind(*kind, msg.clone(), cx),
+                    },
                 }
             }),
         );

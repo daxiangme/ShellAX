@@ -1,0 +1,30 @@
+# Tokyo Night — https://github.com/folke/tokyonight.nvim (MIT)
+name = "Tokyo Night"
+appearance = "dark"
+
+[ui]
+crust = "#161720"
+mantle = "#191b26"
+base = "#1e202e"
+surface0 = "#262a3d"
+surface1 = "#31374f"
+surface2 = "#414868"
+overlay0 = "#636d9c"
+overlay1 = "#858eb8"
+text = "#c8d1f7"
+subtext = "#9ea9d4"
+accent = "#7aa2f7"
+success = "#9ece6a"
+error = "#f7768e"
+warning = "#e0af68"
+info = "#7dcfff"
+
+[terminal]
+foreground = "#c8d1f7"
+background = "#1e202e"
+cursor = "#c8d1f7"
+cursor_text = "#161720"
+selection = "#33467c"
+suggestion = "#5e6794"
+ansi = ["#191b26","#f7768e","#9ece6a","#e0af68","#7aa2f7","#bb9af7","#7dcfff","#a9b1d6",
+        "#414868","#f7768e","#9ece6a","#e0af68","#7aa2f7","#bb9af7","#7dcfff","#c0caf5"]

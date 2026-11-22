@@ -1,0 +1,30 @@
+# Linear Paper — warm-neutral minimal paper light theme with indigo-violet accent.
+name = "Linear Paper"
+appearance = "light"
+
+[ui]
+crust = "#f3f3f6"
+mantle = "#f7f7fa"
+base = "#fcfcfd"
+surface0 = "#ebecf1"
+surface1 = "#dedfe7"
+surface2 = "#ccced9"
+overlay0 = "#898f9e"
+overlay1 = "#636978"
+text = "#191a20"
+subtext = "#555b69"
+accent = "#5e6ad2"
+success = "#18965c"
+error = "#dc3545"
+warning = "#d47500"
+info = "#2563eb"
+
+[terminal]
+foreground = "#1e2028"
+background = "#fcfcfd"
+cursor = "#5e6ad2"
+cursor_text = "#ffffff"
+selection = "#d8dcfb"
+suggestion = "#9096a4"
+ansi = ["#1e2028","#d1293d","#188652","#9c6400","#4b58c6","#7e42d6","#0d7c86","#767d8c",
+        "#525866","#e63e52","#23a467","#bd7d00","#6370e8","#985ef0","#159ba6","#9ea5b4"]

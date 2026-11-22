@@ -26,6 +26,11 @@ pub enum AssetKind {
 pub enum AssetEvent {
     Saved,
     Close,
+    Toast {
+        key: Option<&'static str>,
+        kind: crate::ToastKind,
+        msg: String,
+    },
 }
 
 /// New / edit dialog for a `[[redis]]` connection or a `[[docker]]` endpoint.
@@ -48,12 +53,10 @@ pub struct AssetDialog {
     production: bool,
     read_only: bool,
     hosts: Vec<String>,
-    error: Option<String>,
     targets: HashMap<String, SshTarget>,
     prompts: Prompts,
     rt: tokio::runtime::Handle,
-    /// None = not run; Some(None) = running; Some(Some(Ok/Err)).
-    test: Option<Option<Result<String, String>>>,
+    testing: bool,
     test_gen: u64,
     test_abort: Option<tokio::task::AbortHandle>,
     _subs: Vec<gpui::Subscription>,
@@ -193,11 +196,10 @@ impl AssetDialog {
             production: (if redis { &r.tags } else { &d.tags }).contains(&prod_tag),
             read_only: if redis { r.read_only } else { d.read_only },
             hosts,
-            error: None,
             targets,
             prompts,
             rt,
-            test: None,
+            testing: false,
             test_gen: 0,
             test_abort: None,
             kind,
@@ -209,7 +211,7 @@ impl AssetDialog {
         built._subs.push(cx.subscribe(
             &via,
             |this: &mut Self, _, _: &crate::host_picker::HostChanged, cx| {
-                this.test = None;
+                this.testing = false;
                 cx.notify();
             },
         ));
@@ -228,8 +230,11 @@ impl AssetDialog {
             String::new()
         };
         if !via.is_empty() && !self.hosts.contains(&via) {
-            self.error = Some(t("kv.err_host").into());
-            cx.notify();
+            cx.emit(AssetEvent::Toast {
+                key: None,
+                kind: crate::ToastKind::Error,
+                msg: t("kv.err_host").into(),
+            });
             return None;
         }
         let port = Self::v(&self.port, cx);
@@ -239,8 +244,11 @@ impl AssetDialog {
             match port.parse() {
                 Ok(p) => Some(p),
                 Err(_) => {
-                    self.error = Some(t("kv.err_port").into());
-                    cx.notify();
+                    cx.emit(AssetEvent::Toast {
+                        key: None,
+                        kind: crate::ToastKind::Error,
+                        msg: t("kv.err_port").into(),
+                    });
                     return None;
                 }
             }
@@ -272,17 +280,19 @@ impl AssetDialog {
             r.tags.push(prod_tag);
         }
         if r.host.is_empty() && r.nodes.is_empty() {
-            self.error = Some(t("kv.err_host_empty").into());
-            cx.notify();
+            cx.emit(AssetEvent::Toast {
+                key: None,
+                kind: crate::ToastKind::Error,
+                msg: t("kv.err_host_empty").into(),
+            });
             return None;
         }
-        self.error = None;
         Some((r, self.password.read(cx).value().to_string()))
     }
 
     /// Connect with the unsaved form and report version plus latency. Does not write config.
     fn run_test(&mut self, cx: &mut Context<Self>) {
-        self.test = None;
+        self.testing = false;
         let Some((conn, pw)) = self.redis_draft(cx) else {
             return;
         };
@@ -292,8 +302,11 @@ impl AssetDialog {
             match self.targets.get(&conn.ssh_via) {
                 Some(t) => Some((t.clone(), self.prompts.clone())),
                 None => {
-                    self.test = Some(Some(Err(tf("db.via_missing", &[("host", &conn.ssh_via)]))));
-                    cx.notify();
+                    cx.emit(AssetEvent::Toast {
+                        key: Some("conn-test"),
+                        kind: crate::ToastKind::Error,
+                        msg: tf("db.via_missing", &[("host", &conn.ssh_via)]),
+                    });
                     return;
                 }
             }
@@ -303,7 +316,12 @@ impl AssetDialog {
         }
         self.test_gen = self.test_gen.wrapping_add(1);
         let gen = self.test_gen;
-        self.test = Some(None);
+        self.testing = true;
+        cx.emit(AssetEvent::Toast {
+            key: Some("conn-test"),
+            kind: crate::ToastKind::Loading,
+            msg: t("db.testing").into(),
+        });
         let me = cx.entity().downgrade();
         let pw = (!pw.is_empty()).then_some(pw);
         let started = std::time::Instant::now();
@@ -322,19 +340,31 @@ impl AssetDialog {
                     return;
                 }
                 this.test_abort = None;
-                this.test = Some(Some(match r {
+                this.testing = false;
+                match r {
                     Ok((v, via)) => {
                         let version = if v.is_empty() { "Redis".to_string() } else { v };
-                        Ok(match via {
+                        let msg = match via {
                             Some(h) => tf(
                                 "db.test_ok_via",
                                 &[("version", &version), ("ms", &ms), ("host", &h)],
                             ),
                             None => tf("db.test_ok", &[("version", &version), ("ms", &ms)]),
-                        })
+                        };
+                        cx.emit(AssetEvent::Toast {
+                            key: Some("conn-test"),
+                            kind: crate::ToastKind::Success,
+                            msg,
+                        });
                     }
-                    Err(e) => Err(ssh_term_proto::kv::conn_failure(&e)),
-                }));
+                    Err(e) => {
+                        cx.emit(AssetEvent::Toast {
+                            key: Some("conn-test"),
+                            kind: crate::ToastKind::Error,
+                            msg: ssh_term_proto::kv::conn_failure(&e),
+                        });
+                    }
+                }
                 cx.notify();
             });
         })
@@ -367,8 +397,11 @@ impl AssetDialog {
                 let group = Some(Self::v(&self.group, cx)).filter(|g| !g.is_empty());
                 let via = self.via.read(cx).value.clone();
                 if !via.is_empty() && !self.hosts.contains(&via) {
-                    self.error = Some(t("kv.err_host").into());
-                    cx.notify();
+                    cx.emit(AssetEvent::Toast {
+                        key: None,
+                        kind: crate::ToastKind::Error,
+                        msg: t("kv.err_host").into(),
+                    });
                     return;
                 }
                 let id = self.id.clone().unwrap_or_else(assets::new_id);
@@ -443,7 +476,8 @@ impl Render for AssetDialog {
             .flex()
             .flex_col()
             .gap_3()
-            .max_h(px(600.))
+            .flex_1()
+            .min_h_0()
             .id("kv-form")
             .overflow_y_scroll();
         form = form.child(line(
@@ -461,7 +495,7 @@ impl Render for AssetDialog {
                 ui::segmented("kv-mode", &modes, &self.mode, move |v, _w, cx| {
                     let _ = me.update(cx, |d, cx| {
                         d.mode = v;
-                        d.test = None;
+                        d.testing = false;
                         cx.notify();
                     });
                 })
@@ -521,7 +555,7 @@ impl Render for AssetDialog {
                 ui::segmented("kv-tls", &tls, &self.tls, move |v, _w, cx| {
                     let _ = me.update(cx, |d, cx| {
                         d.tls = v;
-                        d.test = None;
+                        d.testing = false;
                         cx.notify();
                     });
                 })
@@ -589,48 +623,6 @@ impl Render for AssetDialog {
                             })),
                     ),
             );
-        if self.kind == AssetKind::Redis {
-            if let Some(r) = &self.test {
-                let (col, ic, msg) = match r {
-                    None => (
-                        th.overlay1,
-                        IconName::LoaderCircle,
-                        t("db.testing").to_string(),
-                    ),
-                    Some(Ok(m)) => (th.success, IconName::CircleCheck, m.clone()),
-                    Some(Err(e)) => (th.error, IconName::CircleX, e.clone()),
-                };
-                form = form.child(
-                    div()
-                        .p_3()
-                        .rounded(px(ui::R_SUB))
-                        .bg(crate::theme::sub_bg())
-                        .border_1()
-                        .border_color(crate::theme::divider())
-                        .flex()
-                        .items_start()
-                        .gap_2()
-                        .child(icon(ic, ui::IC_SM, c(col)))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .whitespace_normal()
-                                .text_size(px(ui::fs_body()))
-                                .text_color(c(col))
-                                .child(msg),
-                        ),
-                );
-            }
-        }
-        if let Some(e) = &self.error {
-            form = form.child(
-                div()
-                    .text_size(px(ui::fs_body()))
-                    .text_color(c(th.error))
-                    .child(e.clone()),
-            );
-        }
         let mut btns: Vec<AnyElement> = Vec::new();
         if self.id.is_some() {
             btns.push(
@@ -649,22 +641,31 @@ impl Render for AssetDialog {
                 .on_click(cx.listener(|d, _, _w, cx| d.save(cx)))
                 .into_any_element(),
         );
-        let testing = self.kind == AssetKind::Redis && matches!(self.test, Some(None));
+        let testing = self.kind == AssetKind::Redis && self.testing;
         let leading = (self.kind == AssetKind::Redis).then(|| {
-            ui::button("kv-test", t("host.test"), 0)
-                .when(testing, |b| b.opacity(0.5))
-                .on_click(cx.listener(move |this, _, _w, cx| {
-                    if !testing {
-                        this.run_test(cx)
-                    }
-                }))
-                .into_any_element()
+            ui::button(
+                "kv-test",
+                if testing {
+                    t("db.testing")
+                } else {
+                    t("host.test")
+                },
+                0,
+            )
+            .when(testing, |b| b.opacity(0.6))
+            .on_click(cx.listener(move |this, _, _w, cx| {
+                if !testing {
+                    this.run_test(cx)
+                }
+            }))
+            .into_any_element()
         });
         let footer = ui::dialog_footer(leading, btns);
         let title: SharedString = match self.kind {
             AssetKind::Redis => t("kv.redis_conn").into(),
             AssetKind::Docker => t("kv.docker_ep").into(),
         };
+        let me_close = cx.entity().downgrade();
         ui::modal(
             ui::card(580.)
                 .child(ui::dialog_header(
@@ -676,7 +677,9 @@ impl Render for AssetDialog {
                     c(cur().accent),
                     title,
                     None,
-                    None,
+                    Some(ui::dialog_close("kv-dlg-close", move |_w, cx| {
+                        let _ = me_close.update(cx, |_, cx| cx.emit(AssetEvent::Close));
+                    })),
                 ))
                 .child(form)
                 .child(footer),
@@ -705,11 +708,16 @@ impl Root {
             .collect();
         let d = cx.new(|cx| AssetDialog::new(kind, id, hosts, targets, prompts, rt, window, cx));
         self._subs.push(
-            cx.subscribe_in(&d, window, |this, _, ev: &AssetEvent, window, cx| {
-                if let AssetEvent::Saved = ev {
+            cx.subscribe_in(&d, window, |this, _, ev: &AssetEvent, window, cx| match ev {
+                AssetEvent::Saved => {
                     this.log("asset.save", "redis/docker");
+                    this.close_overlay(window, cx);
                 }
-                this.close_overlay(window, cx);
+                AssetEvent::Close => this.close_overlay(window, cx),
+                AssetEvent::Toast { key, kind, msg } => match key {
+                    Some(k) => this.toast_upsert(k, *kind, msg.clone(), vec![], cx),
+                    None => this.toast_kind(*kind, msg.clone(), cx),
+                },
             }),
         );
         self.overlay = Overlay::Asset(d);
@@ -935,6 +943,7 @@ impl Root {
                         this.push_embed(Embed::Log(l), window, cx);
                     }
                     DockEvent::Exec(cid) => this.docker_exec(&ep, cid, window, cx),
+                    DockEvent::Toast(kind, msg) => this.toast_kind(*kind, msg.clone(), cx),
                 },
             ),
         );
@@ -1013,8 +1022,30 @@ impl Root {
     }
 
     /// Tool window body for Redis or containers: saved entries grouped by group path.
-    pub(crate) fn asset_panel(&mut self, kind: AssetKind, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn asset_panel(
+        &mut self,
+        kind: AssetKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let th = cur();
+        let search = if kind == AssetKind::Redis {
+            if self.kvp.search.is_none() {
+                let st =
+                    cx.new(|cx| InputState::new(window, cx).placeholder(t("ux.kv_search_conn")));
+                self._subs.push(cx.observe(&st, |_, _, cx| cx.notify()));
+                self.kvp.search = Some(st);
+            }
+            self.kvp.search.clone().unwrap()
+        } else {
+            if self.kvp.docker_search.is_none() {
+                let st = cx.new(|cx| InputState::new(window, cx).placeholder(t("db.search")));
+                self._subs.push(cx.observe(&st, |_, _, cx| cx.notify()));
+                self.kvp.docker_search = Some(st);
+            }
+            self.kvp.docker_search.clone().unwrap()
+        };
+        let q = search.read(cx).value().trim().to_lowercase();
         let s = config::get();
         let items: Vec<(String, String, String, String, bool)> = match kind {
             AssetKind::Redis => s
@@ -1064,15 +1095,34 @@ impl Root {
             AssetKind::Redis => t("kv.add_redis"),
             AssetKind::Docker => t("kv.add_docker"),
         };
-        let add = ui::icon_button("kv-add", IconName::Plus, ui::IconBtn::Md, add_tip)
-            .on_click(cx.listener(move |this, _, w, cx| this.open_asset_dialog(kind, None, w, cx)))
-            .into_any_element();
+        let mut actions = vec![
+            ui::icon_button("kv-add", IconName::Plus, ui::IconBtn::Md, add_tip)
+                .on_click(cx.listener(move |this, _, w, cx| {
+                    this.open_asset_dialog(kind, None, w, cx)
+                }))
+                .into_any_element(),
+        ];
+        if kind == AssetKind::Redis && !items.is_empty() {
+            actions.push(
+                ui::icon_button(
+                    "kv-collapse",
+                    IconName::ChevronsDownUp,
+                    ui::IconBtn::Md,
+                    t("db.collapse_all"),
+                )
+                .on_click(cx.listener(|this, _, _w, cx| {
+                    this.kvp.open.clear();
+                    cx.notify();
+                }))
+                .into_any_element(),
+            );
+        }
         let mut col = div()
             .flex_1()
             .min_h_0()
             .flex()
             .flex_col()
-            .child(ui::panel_header(title, None, None, vec![add]));
+            .child(ui::panel_header(title, None, None, actions));
         if items.is_empty() {
             let (msg, btn) = match kind {
                 AssetKind::Redis => (t("kv.redis_empty"), t("kv.redis_conn")),
@@ -1093,14 +1143,62 @@ impl Root {
                 ))
                 .into_any_element();
         }
+        col = col.child(
+            ui::field_row()
+                .pb(px(ui::SP_2))
+                .child(ui::search_field(&search, false)),
+        );
         if kind == AssetKind::Redis {
-            col = col.child(self.kv_tree_list(cx));
+            if !self.kvp.live.is_empty() {
+                let hide_empty = self.kvp.hide_empty_db;
+                col = col.child(
+                    div()
+                        .px(px(ui::LIST_INSET))
+                        .pb(px(ui::SP_2))
+                        .flex()
+                        .items_center()
+                        .gap(px(ui::SP_1))
+                        .child(
+                            ui::chip("kv-db-all", t("ux.kv_all_db").to_string(), !hide_empty)
+                                .on_click(cx.listener(|this, _, _w, cx| {
+                                    this.kvp.hide_empty_db = false;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            ui::chip(
+                                "kv-db-nonempty",
+                                t("ux.kv_hide_empty_db").to_string(),
+                                hide_empty,
+                            )
+                            .on_click(cx.listener(|this, _, _w, cx| {
+                                this.kvp.hide_empty_db = !this.kvp.hide_empty_db;
+                                cx.notify();
+                            })),
+                        ),
+                );
+            }
+            col = col.child(self.kv_tree_list(&q, cx));
             if let Some((k, pos)) = self.kvp.menu.clone() {
                 col = col.child(self.kv_menu_el(k, pos, cx));
             }
             return col.into_any_element();
         }
-        let mut sorted = items;
+        let active_ep = self.tabs.get(self.active).and_then(|tab| {
+            match &tab.layout.leaves()[0].read(cx).embed {
+                Some(Embed::Dock(v)) => Some(v.read(cx).ep.id.clone()),
+                _ => None,
+            }
+        });
+        let mut sorted: Vec<_> = items
+            .into_iter()
+            .filter(|(_, name, addr, group, _)| {
+                q.is_empty()
+                    || name.to_lowercase().contains(&q)
+                    || addr.to_lowercase().contains(&q)
+                    || group.to_lowercase().contains(&q)
+            })
+            .collect();
         sorted.sort_by(|a, b| {
             (a.3.clone(), a.1.to_lowercase()).cmp(&(b.3.clone(), b.1.to_lowercase()))
         });
@@ -1123,10 +1221,11 @@ impl Root {
                 ));
             }
             last = Some(group.clone());
+            let is_active = active_ep.as_deref() == Some(id.as_str());
             let (oid, eid) = (id.clone(), id.clone());
             let gid = SharedString::from(format!("kv-it-g-{i}"));
             list = list.child(
-                ui::list_row(("kv-it", i), 0, false)
+                ui::list_row(("kv-it", i), 0, is_active)
                     .min_h(px(ui::row2_h()))
                     .group(gid.clone())
                     .on_click(cx.listener(move |this, _, w, cx| match kind {
@@ -1136,7 +1235,13 @@ impl Root {
                     .child(icon(
                         ic,
                         ui::IC_MD,
-                        c(if prod { th.error } else { th.overlay1 }),
+                        c(if prod {
+                            th.error
+                        } else if is_active {
+                            th.accent
+                        } else {
+                            th.overlay1
+                        }),
                     ))
                     .child(
                         div()
@@ -1188,7 +1293,7 @@ impl Render for GoneView {
             .items_center()
             .justify_center()
             .gap_2()
-            .bg(c(th.base))
+            .when(!crate::theme::glass_enabled(), |d| d.bg(c(th.base)))
             .child(icon(IconName::TriangleAlert, ui::IC_LG, c(th.warning)))
             .child(
                 div()

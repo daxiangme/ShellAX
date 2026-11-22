@@ -385,6 +385,75 @@ pub fn pop_in(id: impl Into<gpui::ElementId>, el: impl IntoElement + 'static) ->
         .into_any_element()
 }
 
+/// Sync the macOS `NSWindow` appearance with ShellAX's active theme so native Liquid Glass
+/// (`NSGlassEffectView`) and vibrancy (`NSVisualEffectView`) match explicit light/dark themes.
+/// Pass `None` when following the system appearance so macOS updates take effect automatically.
+#[cfg(target_os = "macos")]
+#[allow(unexpected_cfgs)]
+pub fn sync_window_appearance(explicit_dark: Option<bool>) {
+    use objc::runtime::Object;
+    use objc::{class, msg_send, sel, sel_impl};
+
+    unsafe {
+        let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+        if app.is_null() {
+            return;
+        }
+        let windows: *mut Object = msg_send![app, windows];
+        if windows.is_null() {
+            return;
+        }
+        let count: usize = msg_send![windows, count];
+        let target: *mut Object = match explicit_dark {
+            None => std::ptr::null_mut(),
+            Some(dark) => {
+                let cname = if dark {
+                    c"NSAppearanceNameDarkAqua"
+                } else {
+                    c"NSAppearanceNameAqua"
+                };
+                let ns_name: *mut Object =
+                    msg_send![class!(NSString), stringWithUTF8String: cname.as_ptr()];
+                if ns_name.is_null() {
+                    return;
+                }
+                msg_send![class!(NSAppearance), appearanceNamed: ns_name]
+            }
+        };
+        for i in 0..count {
+            let win: *mut Object = msg_send![windows, objectAtIndex: i];
+            if win.is_null() {
+                continue;
+            }
+            let current: *mut Object = msg_send![win, appearance];
+            if target.is_null() {
+                if !current.is_null() {
+                    let _: () = msg_send![win, setAppearance: std::ptr::null_mut::<Object>()];
+                }
+            } else {
+                let same = if !current.is_null() {
+                    let cur_name: *mut Object = msg_send![current, name];
+                    let tgt_name: *mut Object = msg_send![target, name];
+                    if !cur_name.is_null() && !tgt_name.is_null() {
+                        let eq: bool = msg_send![cur_name, isEqualToString: tgt_name];
+                        eq
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if !same {
+                    let _: () = msg_send![win, setAppearance: target];
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn sync_window_appearance(_explicit_dark: Option<bool>) {}
+
 /// Fade-out for a popup that is being dismissed (kept mounted for `motion::EXIT_MS`).
 pub fn pop_out(id: impl Into<gpui::ElementId>, el: impl IntoElement + 'static) -> AnyElement {
     if crate::motion::reduced() {

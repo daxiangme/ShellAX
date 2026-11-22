@@ -237,22 +237,37 @@ pub(crate) struct PaneInit {
     pub(crate) daemon_id: Option<String>,
     pub(crate) resume: Option<String>,
     pub(crate) pane_id: Option<String>,
+    pub(crate) agent_session: Option<ssh_term_proto::session_store::SavedAgentSession>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ToastKind {
+    Loading,
     Info,
     Success,
     Warn,
     Error,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ToastStep {
+    /// `None` = running, `Some(true)` = ok, `Some(false)` = failed, `Some` not started = `started == false`.
+    pub(crate) started: bool,
+    pub(crate) ok: Option<bool>,
+    pub(crate) label: String,
+    pub(crate) detail: String,
+    pub(crate) ms: Option<u128>,
+}
+
 struct ToastEntry {
     seq: u64,
+    key: Option<String>,
     kind: ToastKind,
     msg: String,
+    steps: Vec<ToastStep>,
     closing: bool,
     paused: bool,
+    dismiss_gen: u64,
 }
 
 #[derive(Clone)]
@@ -266,10 +281,11 @@ impl Render for DividerDrag {
     }
 }
 
-/// Dragging a tab onto an edge of a pane in the active tab moves it there as a split (PRD US-03).
+/// Dragging a tab horizontally along the tab bar reorders tabs; dragging it onto a pane edge
+/// splits it into the active tab (PRD US-03).
 #[derive(Clone)]
 struct TabDrag {
-    idx: usize,
+    key: gpui::EntityId,
     title: SharedString,
 }
 impl Render for TabDrag {
@@ -336,7 +352,6 @@ pub(crate) enum Overlay {
     Palette(Entity<Palette>),
     Host(Entity<HostDialog>),
     Audit,
-    Port,
     Db(Entity<db_dialog::DbDialog>),
     Asset(Entity<kv_ui::AssetDialog>),
 }
@@ -462,6 +477,9 @@ pub(crate) struct Root {
     new_menu_sel: usize,
     new_menu_search: Entity<InputState>,
     tab_scroll: gpui::ScrollHandle,
+    /// Prevents repeated mid-frame swaps from coalesced drag moves before the next render updates bounds.
+    tab_reorder_pending: bool,
+    tab_order_save_seq: u64,
     /// inline tab rename (tab index, input)
     tab_rename: Option<(usize, Entity<InputState>)>,
     /// recently closed tabs, newest last
@@ -668,8 +686,17 @@ impl Root {
         .detach();
     }
 
+    fn default_toast_dur(kind: ToastKind) -> std::time::Duration {
+        match kind {
+            ToastKind::Loading => std::time::Duration::from_secs(600),
+            ToastKind::Error => std::time::Duration::from_secs(7),
+            ToastKind::Warn => std::time::Duration::from_secs(6),
+            ToastKind::Info | ToastKind::Success => std::time::Duration::from_millis(4500),
+        }
+    }
+
     pub(crate) fn toast(&mut self, msg: String, cx: &mut Context<Self>) {
-        self.toast_with(ToastKind::Info, msg, std::time::Duration::from_secs(4), cx);
+        self.toast_with(ToastKind::Info, msg, Self::default_toast_dur(ToastKind::Info), cx);
     }
 
     pub(crate) fn toast_kind(
@@ -678,11 +705,7 @@ impl Root {
         msg: impl Into<String>,
         cx: &mut Context<Self>,
     ) {
-        let dur = match kind {
-            ToastKind::Error => std::time::Duration::from_secs(3600),
-            ToastKind::Warn => std::time::Duration::from_secs(6),
-            ToastKind::Info | ToastKind::Success => std::time::Duration::from_secs(4),
-        };
+        let dur = Self::default_toast_dur(kind);
         self.toast_with(kind, msg.into(), dur, cx);
     }
 
@@ -695,6 +718,71 @@ impl Root {
         self.toast_with(ToastKind::Info, msg, dur, cx);
     }
 
+    /// Upsert a keyed floating Toast (e.g. `"conn-test"`), updating an active test card in-place
+    /// and starting its auto-dismiss countdown once `kind != ToastKind::Loading`.
+    pub(crate) fn toast_upsert(
+        &mut self,
+        key: &str,
+        kind: ToastKind,
+        msg: impl Into<String>,
+        steps: Vec<ToastStep>,
+        cx: &mut Context<Self>,
+    ) {
+        let msg = msg.into();
+        let dur = Self::default_toast_dur(kind);
+        if let Some(t) = self
+            .toasts
+            .iter_mut()
+            .find(|t| t.key.as_deref() == Some(key) && !t.closing)
+        {
+            t.kind = kind;
+            t.msg = msg;
+            t.steps = steps;
+            t.dismiss_gen = t.dismiss_gen.wrapping_add(1);
+            let (seq, dgen) = (t.seq, t.dismiss_gen);
+            cx.notify();
+            if kind != ToastKind::Loading {
+                self.schedule_toast_dismiss(seq, dgen, dur, cx);
+            }
+            return;
+        }
+        self.toast_seq += 1;
+        let seq = self.toast_seq;
+        if self.toasts.len() >= 3 {
+            if let Some(pos) = self
+                .toasts
+                .iter()
+                .position(|t| t.kind != ToastKind::Error && t.kind != ToastKind::Loading)
+            {
+                self.toasts.remove(pos);
+            } else {
+                self.toasts.remove(0);
+            }
+        }
+        self.toasts.push(ToastEntry {
+            seq,
+            key: Some(key.to_string()),
+            kind,
+            msg,
+            steps,
+            closing: false,
+            paused: false,
+            dismiss_gen: 1,
+        });
+        cx.notify();
+        if kind != ToastKind::Loading {
+            self.schedule_toast_dismiss(seq, 1, dur, cx);
+        }
+    }
+
+    pub(crate) fn dismiss_toast_key(&mut self, key: &str, cx: &mut Context<Self>) {
+        let before = self.toasts.len();
+        self.toasts.retain(|t| t.key.as_deref() != Some(key));
+        if self.toasts.len() != before {
+            cx.notify();
+        }
+    }
+
     fn toast_with(
         &mut self,
         kind: ToastKind,
@@ -705,11 +793,10 @@ impl Root {
         self.toast_seq += 1;
         let seq = self.toast_seq;
         if self.toasts.len() >= 3 {
-            // Evict oldest non-error toast first, or oldest overall.
             if let Some(pos) = self
                 .toasts
                 .iter()
-                .position(|t| t.kind != ToastKind::Error)
+                .position(|t| t.kind != ToastKind::Error && t.kind != ToastKind::Loading)
             {
                 self.toasts.remove(pos);
             } else {
@@ -718,22 +805,24 @@ impl Root {
         }
         self.toasts.push(ToastEntry {
             seq,
+            key: None,
             kind,
             msg,
+            steps: Vec::new(),
             closing: false,
             paused: false,
+            dismiss_gen: 1,
         });
         cx.notify();
-        if kind == ToastKind::Error {
-            // Error toasts stay visible until the user dismisses them.
-            return;
+        if kind != ToastKind::Loading {
+            self.schedule_toast_dismiss(seq, 1, dur, cx);
         }
-        self.schedule_toast_dismiss(seq, dur, cx);
     }
 
     fn schedule_toast_dismiss(
         &self,
         seq: u64,
+        dgen: u64,
         dur: std::time::Duration,
         cx: &mut Context<Self>,
     ) {
@@ -746,7 +835,7 @@ impl Root {
                     .update(cx, |r, _| {
                         r.toasts
                             .iter()
-                            .find(|t| t.seq == seq)
+                            .find(|t| t.seq == seq && t.dismiss_gen == dgen)
                             .map(|t| t.paused)
                     })
                     .ok()
@@ -758,22 +847,36 @@ impl Root {
                 }
             }
             let reduced = motion::reduced();
-            let _ = this.update(cx, |r, cx| {
-                if reduced {
-                    r.toasts.retain(|t| t.seq != seq);
-                } else if let Some(t) = r.toasts.iter_mut().find(|t| t.seq == seq) {
-                    t.closing = true;
-                }
-                cx.notify();
-            });
-            if reduced {
+            let matched = this
+                .update(cx, |r, cx| {
+                    if reduced {
+                        let before = r.toasts.len();
+                        r.toasts.retain(|t| !(t.seq == seq && t.dismiss_gen == dgen));
+                        if r.toasts.len() != before {
+                            cx.notify();
+                        }
+                        false
+                    } else if let Some(t) = r
+                        .toasts
+                        .iter_mut()
+                        .find(|t| t.seq == seq && t.dismiss_gen == dgen)
+                    {
+                        t.closing = true;
+                        cx.notify();
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .unwrap_or(false);
+            if !matched {
                 return;
             }
             cx.background_executor()
                 .timer(motion::ms(motion::TOAST_EXIT_MS))
                 .await;
             let _ = this.update(cx, |r, cx| {
-                r.toasts.retain(|t| t.seq != seq);
+                r.toasts.retain(|t| !(t.seq == seq && t.dismiss_gen == dgen));
                 cx.notify();
             });
         })
@@ -1197,13 +1300,18 @@ impl Root {
     ) -> Entity<TermView> {
         #[cfg_attr(not(unix), allow(unused_mut))]
         let mut pi = pi;
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut reattached_daemon = false;
         // reattaching to a still-running daemon shell: the agent is alive, nothing to resume
         #[cfg(unix)]
-        if let Some(id) = &pi.daemon_id {
-            if ssh_term_proto::daemon::list(&ssh_term_proto::daemon::socket_path(&data_dir()))
-                .is_ok_and(|l| l.iter().any(|i| &i.id == id && i.alive))
-            {
-                pi.resume = None;
+        if config::get().session.local_daemon {
+            if let Some(id) = &pi.daemon_id {
+                if ssh_term_proto::daemon::list(&ssh_term_proto::daemon::socket_path(&data_dir()))
+                    .is_ok_and(|l| l.iter().any(|i| &i.id == id && i.alive))
+                {
+                    reattached_daemon = true;
+                    pi.resume = None;
+                }
             }
         }
         let v = self.open_pane_inner(spec, &pi, window, cx);
@@ -1415,10 +1523,47 @@ impl Root {
                 }
             },
         ));
+        let parsed_legacy = pi
+            .resume
+            .as_deref()
+            .and_then(ssh_term_proto::agent_resume::parse_resume_command);
+        let saved_agent = pi.agent_session.clone();
         v.update(cx, |v, _| {
             v.resume_offer = pi.resume.clone();
+            v.reattached_daemon = reattached_daemon;
             if v.daemon_id.is_none() {
                 v.daemon_id = pi.daemon_id.clone();
+            }
+            let aid = saved_agent
+                .as_ref()
+                .and_then(|s| s.agent_id.clone())
+                .or_else(|| parsed_legacy.as_ref().map(|(a, _)| a.clone()));
+            let sid = saved_agent
+                .as_ref()
+                .and_then(|s| s.session_id.clone())
+                .or_else(|| {
+                    parsed_legacy
+                        .as_ref()
+                        .and_then(|(_, r)| r.as_ref().map(|x| x.value.clone()))
+                });
+            let tp = saved_agent
+                .as_ref()
+                .and_then(|s| s.transcript_path.clone());
+            if let Some(sid) = sid.filter(|s| !s.trim().is_empty()) {
+                v.agent_session_id = Some(sid);
+            }
+            if let Some(tp) = tp.filter(|s| !s.trim().is_empty()) {
+                v.agent_transcript_path = Some(tp);
+            }
+            if let Some(ref sa) = saved_agent {
+                v.auto_title = sa.auto_title;
+            }
+            if let Some(aid) = aid.filter(|s| !s.trim().is_empty()) {
+                let norm = agent::normalize_id(&aid);
+                v.last_agent = Some(agent::display_name(&norm).to_string());
+                if reattached_daemon {
+                    v.set_launched_agent(&norm);
+                }
             }
         });
         v
@@ -1479,6 +1624,7 @@ impl Root {
                             v.update(cx, |v, _| {
                                 v.daemon_id = Some(id);
                                 v.pane_id = pid;
+                                v.initial_cwd = spawn_at.clone().or_else(|| pi.cwd.clone());
                             });
                             return v;
                         }
@@ -1494,7 +1640,10 @@ impl Root {
                     Some(pid.as_str()),
                 );
                 let v = cx.new(|cx| TermView::new(&title, Spec::Local, sess, h, m, window, cx));
-                v.update(cx, |v, _| v.pane_id = pid);
+                v.update(cx, |v, _| {
+                    v.pane_id = pid;
+                    v.initial_cwd = spawn_at.clone().or_else(|| pi.cwd.clone());
+                });
                 v
             }
             Spec::Ssh(mut t) => {
@@ -1670,7 +1819,10 @@ impl Root {
         self._subs.push(cx.subscribe_in(
             &v,
             window,
-            |this, _, _ev: &port_view::PortEvent, w, cx| this.close_overlay(w, cx),
+            |this, _, ev: &port_view::PortToast, _w, cx| {
+                let port_view::PortToast::Toast(kind, msg) = ev;
+                this.toast_kind(*kind, msg.clone(), cx);
+            },
         ));
         self.port_view = Some(v.clone());
         v
@@ -2691,6 +2843,71 @@ impl Root {
         self.focus_active(window, cx);
         cx.notify();
     }
+
+    fn drop_tab_by_key(
+        &mut self,
+        key: gpui::EntityId,
+        target: Entity<TermView>,
+        edge: Edge,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(src) = self
+            .tabs
+            .iter()
+            .position(|t| t.layout.leaves()[0].entity_id() == key)
+        {
+            self.drop_tab(src, target, edge, window, cx);
+        }
+    }
+
+    fn schedule_tab_order_save(&mut self, cx: &mut Context<Self>) {
+        self.tab_order_save_seq = self.tab_order_save_seq.wrapping_add(1);
+        let seq = self.tab_order_save_seq;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(250))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.tab_order_save_seq == seq {
+                    this.save_layout(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn reorder_tab_by_key(
+        &mut self,
+        key: gpui::EntityId,
+        dst: usize,
+        persist: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(src) = self
+            .tabs
+            .iter()
+            .position(|t| t.layout.leaves()[0].entity_id() == key)
+        else {
+            return false;
+        };
+        let changed = reorder_tabs_and_active(&mut self.tabs, &mut self.active, src, dst);
+        if changed {
+            self.tab_reorder_pending = true;
+            if persist {
+                self.tab_order_save_seq = self.tab_order_save_seq.wrapping_add(1);
+                self.save_layout(cx);
+                self.log("tab.reorder", format!("from={src} to={dst}"));
+            } else {
+                self.schedule_tab_order_save(cx);
+            }
+            cx.notify();
+        } else if persist {
+            self.tab_order_save_seq = self.tab_order_save_seq.wrapping_add(1);
+            self.save_layout(cx);
+        }
+        changed
+    }
     /// Probe the OS of connected SSH panes once per target (read-only `uname`), for the sidebar badge.
     fn probe_os(&mut self, cx: &mut Context<Self>) {
         let todo: Vec<SshTarget> = self
@@ -2795,21 +3012,24 @@ impl Root {
                             .map(str::to_string)
                     })
                     .or(v.resume_offer.clone());
+                let agent_session = v.saved_agent_session();
                 // Same directory the path bar shows (OSC 7 / OSC 9;9, then the process probe, then the
                 // prompt). The process probe alone is the spawn directory on Windows, and it can be
                 // the foreground program's directory, so a restored tab would keep the folder name
                 // in the title and open somewhere else.
-                let cwd = v.shell_cwd().unwrap_or_default();
+                let cwd = v.shell_cwd().or_else(|| v.initial_cwd.clone()).unwrap_or_default();
                 let pane = match &v.spec {
                     Spec::Local => PaneSave::Local {
                         cwd,
                         daemon_id: v.daemon_id.clone(),
                         resume,
+                        agent_session,
                     },
                     Spec::Ssh(t) => PaneSave::Ssh {
                         target: t.clone(),
                         cwd,
                         resume,
+                        agent_session,
                     },
                 };
                 NodeSave::Leaf { pane }
@@ -2842,6 +3062,15 @@ impl Root {
                     .collect()
             })
             .collect();
+        let mut active_by_module = HashMap::new();
+        for (&mod_id, &key) in &self.ws_last {
+            if let Some(idx) = self.tabs.iter().position(|t| Self::tab_key(t) == key) {
+                active_by_module.insert(mod_id.to_string(), idx);
+            }
+        }
+        if self.active_in_ws(cx) {
+            active_by_module.insert(self.tool.workspace().id().to_string(), self.active);
+        }
         ssh_term_proto::session_store::LayoutSave {
             version: 1,
             saved_at: chrono::Local::now().to_rfc3339(),
@@ -2867,6 +3096,7 @@ impl Root {
                 vec![]
             },
             pane_ids,
+            active_by_module,
         }
     }
     pub(crate) fn save_layout(&self, cx: &App) {
@@ -2935,6 +3165,7 @@ impl Root {
                     cwd,
                     daemon_id,
                     resume,
+                    agent_session,
                 } => r.open_pane_with(
                     Spec::Local,
                     PaneInit {
@@ -2942,6 +3173,7 @@ impl Root {
                         daemon_id,
                         resume,
                         pane_id: next_pid,
+                        agent_session,
                     },
                     window,
                     cx,
@@ -2950,12 +3182,14 @@ impl Root {
                     target,
                     resume,
                     cwd,
+                    agent_session,
                 } => {
                     let v = r.open_pane_with(
                         Spec::Ssh(target),
                         PaneInit {
                             resume,
                             pane_id: next_pid,
+                            agent_session,
                             ..Default::default()
                         },
                         window,
@@ -3054,17 +3288,60 @@ impl Root {
         if l.tabs.is_empty() {
             return false;
         }
+        let has_agent_tabs = l.agent_tabs.iter().any(|&b| b)
+            || l.tasks.iter().any(|t| t.is_some());
+        if has_agent_tabs {
+            self.ensure_agent_hub_started(cx);
+        }
+        let base = self.tabs.len();
         for (i, n) in l.tabs.iter().enumerate() {
             let saved_ids = l.pane_ids.get(i).map(Vec::as_slice).unwrap_or(&[]);
             let mut id_iter = saved_ids.iter();
             let layout = self.build_node_with_ids(n, &mut id_iter, window, cx);
-            let is_agent_tab = l.agent_tabs.get(i) == Some(&true)
-                || l.tasks.get(i).and_then(|t| t.as_ref()).is_some();
+            let task = l.tasks.get(i).cloned().flatten();
+            let is_agent_tab = l.agent_tabs.get(i) == Some(&true) || task.is_some();
             if is_agent_tab {
+                let task_agent = task
+                    .as_ref()
+                    .map(|t| agent::normalize_id(&t.agent))
+                    .filter(|s| !s.is_empty());
                 for leaf in layout.leaves() {
+                    let cached_tp = leaf
+                        .read(cx)
+                        .agent_session_id
+                        .as_deref()
+                        .and_then(|sid| {
+                            self.agent_hub
+                                .sessions
+                                .iter()
+                                .find(|m| m.id == sid)
+                                .map(|m| m.path.display().to_string())
+                        });
                     leaf.update(cx, |v, _| {
                         if v.ws.is_none() && !v.embedded() {
                             v.ws = Some(activity::Tool::Agents);
+                        }
+                        if v.agent_transcript_path.is_none() {
+                            v.agent_transcript_path = cached_tp;
+                        }
+                        if matches!(v.spec, Spec::Local) && !v.reattached_daemon && !v.embedded() {
+                            let aid = v.resolved_agent_id().or_else(|| task_agent.clone());
+                            if let (Some(aid), Some(sid)) = (aid, v.agent_session_id.clone()) {
+                                if let Some(cmd) =
+                                    ssh_term_proto::agent_resume::build_validated_resume_line(
+                                        &aid, &sid,
+                                    )
+                                {
+                                    v.pending_agent_resume = Some(termview::PendingAgentResume {
+                                        agent_id: aid.clone(),
+                                        session_id: sid,
+                                        transcript_path: v.agent_transcript_path.clone(),
+                                        cmd,
+                                    });
+                                    v.last_agent = Some(agent::display_name(&aid).to_string());
+                                    v.resume_offer = None;
+                                }
+                            }
                         }
                     });
                 }
@@ -3075,10 +3352,29 @@ impl Root {
                 layout,
                 focused,
                 name: l.names.get(i).cloned().flatten(),
-                task: l.tasks.get(i).cloned().flatten(),
+                task,
             });
         }
-        self.active = l.active.min(self.tabs.len() - 1);
+        for (mod_id, idx) in &l.active_by_module {
+            let ws_id = activity::Tool::from_id(mod_id).workspace().id();
+            if let Some(tab) = self.tabs.get(base + *idx) {
+                self.ws_last.insert(ws_id, Self::tab_key(tab));
+            }
+        }
+        self.active = (base + l.active).min(self.tabs.len() - 1);
+        if !self.active_in_ws(cx) {
+            let ws = self.tool.workspace();
+            let mine = self.ws_tabs(cx);
+            let last = self.ws_last.get(ws.id()).copied();
+            if let Some(i) = mine
+                .iter()
+                .copied()
+                .find(|&i| Some(Self::tab_key(&self.tabs[i])) == last)
+                .or(mine.last().copied())
+            {
+                self.active = i;
+            }
+        }
         self.leave_settings();
         self.log(
             "layout.restore",
@@ -3086,6 +3382,7 @@ impl Root {
         );
         self.toast(t("main.layout_restored").into(), cx);
         self.focus_active(window, cx);
+        self.wake_active_agent_tab_if_needed(cx);
         true
     }
     fn should_close(&mut self, _w: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -3442,6 +3739,9 @@ impl Root {
         theme::set_current(th.clone());
         theme::set_scheme(sc);
         sync_component_theme(&th, cx);
+        let explicit_dark = (config::get().appearance.theme != "system")
+            .then_some(th.appearance == Appearance::Dark);
+        chrome::sync_window_appearance(explicit_dark);
     }
     fn cycle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let cur_idx = self
@@ -3613,6 +3913,9 @@ impl Root {
         if self.settings.is_none() {
             return;
         }
+        if let Some((v, _)) = &self.settings {
+            v.update(cx, |s, cx| s.flush_pending_sliders(cx));
+        }
         if !self.settings_dirty.is_empty() {
             let mut paths = std::mem::take(&mut self.settings_dirty);
             paths.sort();
@@ -3625,6 +3928,9 @@ impl Root {
     }
     pub(crate) fn close_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.overlay = Overlay::None;
+        // Clean up any in-flight loading toast from a cancelled connection dialog
+        self.toasts
+            .retain(|t| !(t.key.as_deref() == Some("conn-test") && t.kind == ToastKind::Loading));
         if !self.settings_active() {
             self.focus_active(window, cx);
         }
@@ -3662,6 +3968,10 @@ impl Root {
                 |this, _, ev: &SettingsEvent, window, cx| match ev {
                     SettingsEvent::Close => this.close_settings(window, cx),
                     SettingsEvent::ApplyUpdate(rec) => this.apply_update(rec, window, cx),
+                    SettingsEvent::Toast { key, kind, msg } => match key {
+                        Some(k) => this.toast_upsert(k, *kind, msg.clone(), vec![], cx),
+                        None => this.toast_kind(*kind, msg.clone(), cx),
+                    },
                     SettingsEvent::OpenAudit => {
                         this.leave_settings();
                         this.overlay = Overlay::Audit;
@@ -3671,6 +3981,14 @@ impl Root {
                         this.schemes = theme::load_schemes(&this.themes);
                         this.apply_theme(window, cx);
                         cx.notify();
+                    }
+                    SettingsEvent::Preview(path) => {
+                        if path == "appearance.ui_font_size" {
+                            this.apply_theme(window, cx);
+                            this.refresh_all(cx);
+                        } else {
+                            this.refresh_all(cx);
+                        }
                     }
                     SettingsEvent::Changed(path) => {
                         this.settings_dirty.push(path.clone());
@@ -3750,6 +4068,15 @@ impl Root {
                 }
                 HostEvent::Close => this.close_overlay(window, cx),
                 HostEvent::OpenProxySettings => this.open_settings(Cat::Proxy, window, cx),
+                HostEvent::Toast {
+                    key,
+                    kind,
+                    msg,
+                    steps,
+                } => match key {
+                    Some(k) => this.toast_upsert(k, *kind, msg.clone(), steps.clone(), cx),
+                    None => this.toast_kind(*kind, msg.clone(), cx),
+                },
             },
         ));
         self.overlay = Overlay::Host(d);
@@ -3818,13 +4145,7 @@ impl Root {
             Action::OpenHostTools => self.toggle_host_dock(window, cx),
             Action::OpenPortForward => {
                 let tg = self.ssh_target_for_tools(cx);
-                let pv = self.port_view(window, cx);
-                pv.update(cx, |v, _| {
-                    if v.target.is_none() || tg.is_some() {
-                        v.target = tg
-                    }
-                });
-                self.overlay = Overlay::Port;
+                self.open_ports_tab(tg, window, cx);
             }
             Action::OpenAi => self.toggle_dock(SideDock::Ai, window, cx),
             Action::OpenSnippets => self.toggle_dock(SideDock::Snippets, window, cx),
@@ -3927,21 +4248,23 @@ pub(crate) fn sync_component_theme(th: &Theme, cx: &mut App) {
     );
     let th = th.clone();
     CTheme::update(cx, move |t| {
-        t.colors.background = c(th.mantle);
+        t.colors.background = theme::input_bg();
         t.colors.foreground = c(th.text);
-        t.colors.border = c(th.surface1);
-        t.colors.input = c(th.surface1);
+        t.colors.border = theme::divider();
+        t.colors.input = theme::input_border();
         t.colors.ring = c(th.accent);
         t.colors.caret = c(th.accent);
         t.colors.primary = c(th.accent);
-        t.colors.primary_foreground = c(th.base);
-        t.colors.muted_foreground = c(th.overlay0);
+        t.colors.primary_foreground = theme::on_accent();
+        t.colors.muted_foreground = c(th.overlay1).opacity(0.78);
         t.colors.accent = c(th.surface0);
         t.colors.accent_foreground = c(th.text);
         t.colors.selection = c(th.accent).opacity(0.3);
         t.colors.switch = c(th.surface2);
         t.colors.switch_thumb = gpui::white();
-        t.colors.popover = c(th.base);
+        t.tokens.slider_bar = c(th.accent).into();
+        t.tokens.slider_thumb = gpui::white().into();
+        t.colors.popover = theme::overlay_card_bg(1.0);
         t.colors.popover_foreground = c(th.text);
         theme::set_ui_size(config::get().appearance.ui_font_size);
         t.font_size = px(config::get().appearance.ui_font_size.clamp(10., 20.));
@@ -3994,13 +4317,13 @@ impl Root {
         }
         let mut row = div()
             .id("cwd-bar")
-            .h(px(ui::H_DEFAULT))
+            .h(px(26.))
             .flex_shrink_0()
-            .px_2()
+            .px_3()
             .flex()
             .items_center()
             .gap(px(ui::SP_2))
-            // 与终端内容之间一条细分隔线，底色略深一层且保持半透一致
+            // 与终端内容之间一条极细分隔线，底色略深一层且保持半透一致
             .bg(theme::bar_bg())
             .border_t_1()
             .border_color(crate::theme::divider())
@@ -4099,7 +4422,7 @@ impl Root {
                                 .size_full()
                                 .rounded(px(ui::R_SM))
                                 .border_1()
-                                .border_color(c(th.accent).opacity(0.55)),
+                                .border_color(c(th.accent).opacity(0.32)),
                         );
                     }
                     d = d.child(self.pane_header(p, pg, cx));
@@ -4137,7 +4460,7 @@ impl Root {
                             })
                             .on_drop(cx.listener(
                                 move |this, dd: &TabDrag, w, cx| {
-                                    this.drop_tab(dd.idx, target.clone(), edge, w, cx)
+                                    this.drop_tab_by_key(dd.key, target.clone(), edge, w, cx)
                                 },
                             )),
                         );
@@ -4197,9 +4520,9 @@ impl Root {
                     .bg(if dragging {
                         c(th.accent)
                     } else {
-                        c(th.overlay1)
+                        theme::divider()
                     })
-                    .group_hover(dg.clone(), |s| s.bg(c(cur().accent).opacity(0.8)));
+                    .group_hover(dg.clone(), |s| s.bg(c(cur().accent).opacity(0.75)));
                 let line = if vertical {
                     line.h_full()
                         .w(px(if dragging { 3. } else { 1. }))
@@ -4216,7 +4539,7 @@ impl Root {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .bg(c(theme::scheme().bg))
+                    .when(!theme::glass_enabled(), |d| d.bg(c(theme::scheme().bg)))
                     .child(line)
                     .on_drag(drag, |d: &DividerDrag, _, _, cx| cx.new(|_| d.clone()));
                 let divider = if vertical {
@@ -4290,11 +4613,11 @@ impl Render for Root {
             self.save_dock_split();
         }
         self.probe_os(cx);
-        // appearance.opacity: frosted/translucent window backdrop with legible card surfaces
+        // appearance.opacity: macOS uses Blurred (NSVisualEffectView frosted glass) when toggled on
         let op = theme::window_opacity();
         let want = if op >= 0.999 {
             gpui::WindowBackgroundAppearance::Opaque
-        } else if chrome::NATIVE_LIGHTS {
+        } else if cfg!(target_os = "macos") {
             gpui::WindowBackgroundAppearance::Blurred
         } else {
             gpui::WindowBackgroundAppearance::Transparent
@@ -4330,31 +4653,37 @@ impl Render for Root {
         // Modern pill tab strip: bar blends with the title bar (crust), active tab is one soft
         // elevated pill (no border / accent bar), inactive tabs are bare text with a faint hover fill.
         let dark_ui = th.appearance == theme::Appearance::Dark;
+        let glass_on = theme::glass_enabled();
         let pill_bg = if dark_ui {
-            c(th.surface0)
+            if glass_on {
+                gpui::white().opacity(0.10)
+            } else {
+                c(th.surface0)
+            }
+        } else if glass_on {
+            gpui::white().opacity(0.76)
         } else {
             gpui::white()
         };
         let hover_bg = theme::hover_bg();
         let pill_shadow = vec![gpui::BoxShadow {
-            color: gpui::black().opacity(if dark_ui { 0.28 } else { 0.07 }),
+            color: gpui::black().opacity(if dark_ui { 0.22 } else { 0.05 }),
             offset: gpui::point(px(0.), px(1.)),
             blur_radius: px(2.),
             spread_radius: px(0.),
             inset: false,
         }];
-        // 标签之间的间隙：拖动区（Windows 上为 HTCAPTION，其他平台由整行 drag_region 处理）
+        // Hairline separator between inactive tabs (must stay non-draggable for window move).
         let gap = |sep: bool| {
             div()
-                .w(px(5.))
+                .w(px(4.))
                 .h(px(28.))
                 .flex_shrink_0()
                 .flex()
                 .items_center()
                 .justify_center()
-                .window_control_area(gpui::WindowControlArea::Drag)
                 .when(sep, |d| {
-                    d.child(div().w(px(1.)).h(px(14.)).bg(c(th.text).opacity(0.08)))
+                    d.child(div().w(px(1.)).h(px(12.)).bg(theme::divider()))
                 })
         };
         // 标签行没有自己的底色，直接落在窗口外层背景上
@@ -4364,22 +4693,24 @@ impl Render for Root {
             .flex()
             .items_center()
             .overflow_hidden();
-        // 侧栏折叠时标签栏到达窗口左缘：为红黄绿按钮留位
-        // 侧栏收起后标签栏到达窗口左缘，为红黄绿按钮留位；原生按钮的留白随动画进度渐变，收起结束时标签不会突然右移
-        row = if mac && !self.sidebar_visible {
+        // 侧栏收起后标签栏左移贴近红黄绿按钮：扣除左侧活动栏（STRIP_W + CARD_GAP）已占据的宽度，避免留出大片死白
+        let collapsed_pad = (chrome::LIGHTS_W - activity::STRIP_W - CARD_GAP).max(4.);
+        row = if mac && !chrome::NATIVE_LIGHTS && !self.sidebar_visible {
             row.child(self.lights(window, cx))
         } else if mac && chrome::NATIVE_LIGHTS {
-            row.pl(px(6.
-                + (chrome::LIGHTS_W - 6.)
-                    * (1.
-                        - self
-                            .sb_reveal
-                            .as_ref()
-                            .map_or(1., |r| r.progress())
-                            .clamp(0., 1.))))
+            let p_sb = if self.sidebar_visible {
+                self.sb_reveal
+                    .as_ref()
+                    .map_or(1., |r| r.progress())
+                    .clamp(0., 1.)
+            } else {
+                0.
+            };
+            row.pl(px(2. + (collapsed_pad - 2.) * (1. - p_sb)))
         } else {
-            row.pl(px(6.))
+            row.pl(px(4.))
         };
+        self.tab_reorder_pending = false;
         let mut tabbar = div()
             .id("tab-scroll")
             .h_full()
@@ -4388,7 +4719,14 @@ impl Render for Root {
             .flex()
             .items_center()
             .overflow_x_scroll()
-            .track_scroll(&self.tab_scroll);
+            .track_scroll(&self.tab_scroll)
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_drop(cx.listener(|this, _dd: &TabDrag, _, cx| {
+                this.tab_reorder_pending = false;
+                this.tab_order_save_seq = this.tab_order_save_seq.wrapping_add(1);
+                this.save_layout(cx);
+                cx.notify();
+            }));
         row = row.child(
             ui::icon_button(
                 "sb-collapse",
@@ -4418,10 +4756,14 @@ impl Render for Root {
                     Some(n) => n.clone().into(),
                     None => {
                         let first = if Self::tab_module(t, cx) == activity::Tool::Agents {
-                            t.focused
-                                .read(cx)
-                                .agent_label()
+                            let fv = t.focused.read(cx);
+                            fv.agent_label()
                                 .map(|(n, _)| SharedString::from(n))
+                                .or_else(|| {
+                                    fv.pending_agent_resume
+                                        .as_ref()
+                                        .map(|p| SharedString::from(agent::display_name(&p.agent_id)))
+                                })
                                 .unwrap_or_else(|| pane_label(panes[0].read(cx), cx))
                         } else {
                             pane_label(panes[0].read(cx), cx)
@@ -4436,6 +4778,7 @@ impl Render for Root {
             })
             .collect();
         let ws_mod = self.tool.workspace();
+        let is_agent_ws = ws_mod == activity::Tool::Agents;
         let mut shown = 0usize;
         for (i, t) in self.tabs.iter().enumerate() {
             if Self::tab_module(t, cx) != ws_mod {
@@ -4443,7 +4786,10 @@ impl Render for Root {
             }
             shown += 1;
             let active = i == self.active && !settings_on;
+            let renaming_this = self.tab_rename.as_ref().is_some_and(|(j, _)| *j == i);
             let panes = t.layout.leaves();
+            let tab_key = panes[0].entity_id();
+            let tab_key_id = tab_key.as_u64() as usize;
             let nth = base_titles[..i]
                 .iter()
                 .filter(|x| **x == base_titles[i])
@@ -4453,23 +4799,39 @@ impl Render for Root {
             } else {
                 base_titles[i].clone()
             };
-            let tip: Option<String> = match &panes[0].read(cx).spec {
+            let tab_proj = is_agent_ws.then(|| self.agent_tab_project(t, cx)).flatten();
+            let has_proj = tab_proj.is_some();
+            let tab_w = if has_proj { AGENT_TAB_W } else { TAB_W };
+            let tab_min_w = if has_proj { AGENT_TAB_MIN_W } else { TAB_MIN_W };
+            let ssh_tip: Option<String> = match &panes[0].read(cx).spec {
                 Spec::Ssh(st) => Some(st.label()),
                 _ => None,
+            };
+            enum TabTip {
+                Standard(String),
+                FullPath(String),
+            }
+            let tip: Option<TabTip> = match (&tab_proj, ssh_tip) {
+                (Some((_, full_dir)), Some(ssh)) => {
+                    Some(TabTip::FullPath(format!("{ssh}\n{full_dir}")))
+                }
+                (Some((_, full_dir)), None) => Some(TabTip::FullPath(full_dir.clone())),
+                (None, Some(ssh)) => Some(TabTip::Standard(ssh)),
+                (None, None) => None,
             };
             // hairline separator only between two inactive tabs
             if shown > 1 {
                 tabbar = tabbar.child(gap(!active && (settings_on || i != self.active + 1)));
             }
-            let tg = SharedString::from(format!("tab-g-{i}"));
+            let tg = SharedString::from(format!("tab-g-{tab_key_id}"));
             let mut tabel = div()
-                .id(("tab", i))
+                .id(("tab", tab_key_id))
                 .relative()
                 .group(tg.clone())
                 .h(px(card_layout::TAB_PILL_H))
-                .w(px(TAB_W))
+                .w(px(tab_w))
                 .flex_shrink(1.)
-                .min_w(px(TAB_MIN_W))
+                .min_w(px(tab_min_w))
                 .pl(px(10.))
                 .pr(px(4.))
                 .rounded(px(ui::R_MD))
@@ -4478,13 +4840,13 @@ impl Render for Root {
                 .gap(px(6.))
                 .cursor_pointer()
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .when(active, |d| {
-                    d.bg(pill_bg)
-                        .shadow(pill_shadow.clone())
-                        .rounded_tl(px(ui::R_LG))
-                        .rounded_tr(px(ui::R_LG))
+                .when(active, |d| d.bg(pill_bg).shadow(pill_shadow.clone()))
+                .when(!renaming_this, |d| {
+                    d.when_some(tip, |d, tip| match tip {
+                        TabTip::FullPath(p) => d.tooltip(crate::ui::tip_full(p)),
+                        TabTip::Standard(s) => d.tooltip(crate::ui::tip(s)),
+                    })
                 })
-                .when_some(tip, |d, tip| d.tooltip(crate::ui::tip(tip.clone())))
                 .when(!active, |d| d.hover(move |s| s.bg(hover_bg)))
                 .on_click(cx.listener({
                     let title = title.to_string();
@@ -4526,6 +4888,8 @@ impl Render for Root {
                         IconName::PencilRuler
                     } else if matches!(v.embed, Some(termview::Embed::Brew(_))) {
                         IconName::Beer
+                    } else if matches!(v.embed, Some(termview::Embed::Port(_))) {
+                        IconName::ArrowLeftRight
                     } else if v.embed.is_some() {
                         IconName::Container
                     } else if v.db.is_some() {
@@ -4541,11 +4905,39 @@ impl Render for Root {
                         ic,
                         ui::IC_SM,
                         if active {
-                            c(th.subtext)
+                            c(th.accent)
                         } else {
-                            c(th.overlay1)
+                            c(th.subtext)
                         },
                     )
+                })
+                .when(!renaming_this, |d| {
+                    d.when_some(tab_proj.as_ref(), |d, (short_proj, _)| {
+                        d.child(
+                            div()
+                                .flex_shrink_0()
+                                .max_w(px((ui::fs_caption() * 5.8).round()))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .px(px(5.))
+                                .py(px(1.))
+                                .rounded(px(ui::R_SM))
+                                .bg(if active {
+                                    c(th.accent).opacity(0.16)
+                                } else {
+                                    c(th.text).opacity(0.07)
+                                })
+                                .text_color(if active {
+                                    c(th.accent)
+                                } else {
+                                    c(th.subtext)
+                                })
+                                .text_size(px(ui::fs_caption()))
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(short_proj.clone()),
+                        )
+                    })
                 })
                 .child(
                     div()
@@ -4555,7 +4947,7 @@ impl Render for Root {
                         .whitespace_nowrap()
                         .text_ellipsis()
                         .text_size(px(ui::fs_body()))
-                        .text_color(if active { c(th.text) } else { c(th.overlay1) })
+                        .text_color(if active { c(th.text) } else { c(th.subtext) })
                         .when(active, |d| d.font_weight(FontWeight::MEDIUM))
                         .child(match &self.tab_rename {
                             Some((j, inp)) if *j == i => gpui_component::Sizable::with_size(
@@ -4567,10 +4959,54 @@ impl Render for Root {
                         }),
                 );
             let drag = TabDrag {
-                idx: i,
+                key: tab_key,
                 title: title.clone(),
             };
-            tabel = tabel.on_drag(drag, |d: &TabDrag, _, _, cx| cx.new(|_| d.clone()));
+            if !renaming_this {
+                tabel = tabel.on_drag(drag, |d: &TabDrag, _, _, cx| cx.new(|_| d.clone()));
+            }
+            tabel = tabel
+                .on_drag_move::<TabDrag>(cx.listener(move |this, ev: &gpui::DragMoveEvent<TabDrag>, _, cx| {
+                    let drag_key = ev.drag(cx).key;
+                    if drag_key == tab_key || this.tab_reorder_pending {
+                        return;
+                    }
+                    let pos = ev.event.position;
+                    if pos.x < ev.bounds.left()
+                        || pos.x > ev.bounds.right()
+                        || pos.y > ev.bounds.bottom() + px(6.)
+                    {
+                        return;
+                    }
+                    let Some(src) = this
+                        .tabs
+                        .iter()
+                        .position(|t| t.layout.leaves()[0].entity_id() == drag_key)
+                    else {
+                        return;
+                    };
+                    let Some(dst) = this
+                        .tabs
+                        .iter()
+                        .position(|t| t.layout.leaves()[0].entity_id() == tab_key)
+                    else {
+                        return;
+                    };
+                    let center_x = ev.bounds.left() + ev.bounds.size.width * 0.5;
+                    if (src < dst && pos.x >= center_x) || (src > dst && pos.x <= center_x) {
+                        this.reorder_tab_by_key(drag_key, dst, false, cx);
+                    }
+                }))
+                .on_drop(cx.listener(move |this, dd: &TabDrag, _, cx| {
+                    this.tab_reorder_pending = false;
+                    if let Some(dst) = this
+                        .tabs
+                        .iter()
+                        .position(|t| t.layout.leaves()[0].entity_id() == tab_key)
+                    {
+                        this.reorder_tab_by_key(dd.key, dst, true, cx);
+                    }
+                }));
             // trailing slot: status dot (connecting / failed / disconnected) at rest, close × on hover or when active
             let (_, scol) = panes[0].read(cx).status(&th);
             let show_dot = !active
@@ -4596,7 +5032,7 @@ impl Render for Root {
                     })
                     .child(
                         div()
-                            .id(("close", i))
+                            .id(("close", tab_key_id))
                             .absolute()
                             .top_0()
                             .left_0()
@@ -4625,7 +5061,7 @@ impl Render for Root {
                         ("tab-in", panes[0].entity_id().as_u64() as usize),
                         gpui::Animation::new(motion::ms(motion::APPEAR_MS))
                             .with_easing(gpui::ease_out_quint()),
-                        |d, t| d.opacity(t).min_w(px(TAB_MIN_W * t)),
+                        move |d, t| d.opacity(t).min_w(px(tab_min_w * t)),
                     )
                     .into_any_element()
             };
@@ -4656,21 +5092,16 @@ impl Render for Root {
                     .gap(px(6.))
                     .cursor_pointer()
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .when(settings_on, |d| {
-                        d.bg(pill_bg)
-                            .shadow(pill_shadow.clone())
-                            .rounded_tl(px(ui::R_LG))
-                            .rounded_tr(px(ui::R_LG))
-                    })
+                    .when(settings_on, |d| d.bg(pill_bg).shadow(pill_shadow.clone()))
                     .when(!settings_on, |d| d.hover(move |s| s.bg(hover_bg)))
                     .on_click(cx.listener(|this, _, w, cx| this.open_settings(Cat::General, w, cx)))
                     .child(icon(
                         IconName::Settings,
                         ui::IC_SM,
                         if settings_on {
-                            c(th.subtext)
+                            c(th.accent)
                         } else {
-                            c(th.overlay1)
+                            c(th.subtext)
                         },
                     ))
                     .child(
@@ -4684,7 +5115,7 @@ impl Render for Root {
                             .text_color(if settings_on {
                                 c(th.text)
                             } else {
-                                c(th.overlay1)
+                                c(th.subtext)
                             })
                             .when(settings_on, |d| d.font_weight(FontWeight::MEDIUM))
                             .child(t("ui.settings")),
@@ -4741,7 +5172,6 @@ impl Render for Root {
                     .flex_shrink_0()
                     .flex_grow(1.),
             );
-        // settings: a gear at the right end of the title row, just before the window buttons
         let gear_on = self.settings_active();
         row = row.child(
             ui::icon_button_state(
@@ -4806,6 +5236,9 @@ impl Render for Root {
             .when_some(self.freeze_w, |d, w| d.w(px(w)).flex_shrink_0())
             .child(workspace);
         let center = card_layout::content_card("center")
+            .when(settings_on && theme::glass_enabled(), |d| {
+                d.bg(theme::settings_card_bg())
+            })
             .child(
                 div()
                     .flex_1()
@@ -4813,8 +5246,10 @@ impl Render for Root {
                     .overflow_hidden()
                     .flex()
                     .flex_col()
-                    .p(px(card_layout::CARD_PAD))
-                    .when(cwd_bar.is_some(), |d| d.pb_0())
+                    .when(!settings_on, |d| {
+                        d.p(px(card_layout::CARD_PAD))
+                            .when(cwd_bar.is_some(), |d| d.pb_0())
+                    })
                     .child(
                         div()
                             .relative()
@@ -4911,25 +5346,31 @@ impl Render for Root {
         let sb_btn = |id: &'static str| {
             div()
                 .id(id)
-                .px_2()
-                .h(px(22.))
-                .rounded(px(ui::R_MD))
+                .px(px(6.))
+                .h(px(19.))
+                .rounded(px(ui::R_SM))
                 .flex()
                 .items_center()
-                .gap_1()
+                .gap(px(4.))
                 .cursor_pointer()
-                .hover(|s| s.bg(crate::theme::hover_bg()))
+                .hover(|s| s.bg(crate::theme::hover_bg()).text_color(c(cur().text)))
         };
-        // 状态栏：统一低饱和文字，只有状态圆点保留颜色
+        let sb_dot = || {
+            div()
+                .size(px(2.5))
+                .rounded_full()
+                .bg(c(th.overlay0).opacity(0.45))
+                .flex_shrink_0()
+        };
+        // 状态栏：24px 极简静默底栏（无多余顶框与竖线干扰，保持岛卡片悬浮呼吸感）
         let statusbar = div()
-            .h(px(28.))
+            .h(px(24.))
             .px_3()
             .flex()
             .items_center()
-            .gap_3()
-            .text_size(px(ui::fs_small()))
+            .gap(px(8.))
+            .text_size(px(ui::fs_caption()))
             .text_color(theme::muted_text())
-            // 原标题栏右上角的“本地终端”入口
             .child(
                 sb_btn("sb-local")
                     .tooltip(crate::ui::tip(t("ui.local_terminal")))
@@ -4937,20 +5378,36 @@ impl Render for Root {
                     .child(icon(IconName::SquareTerminal, ui::IC_XS, c(th.overlay1)))
                     .child(t("ui.local_terminal")),
             )
+            .child(sb_dot())
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .child(div().size(px(7.)).rounded_full().bg(scolor))
+                    .gap(px(5.))
+                    .child(div().size(px(6.)).rounded_full().bg(scolor))
                     .child(status),
             )
-            .child(title)
+            .when(!title.is_empty(), |d| {
+                d.child(sb_dot()).child(
+                    div()
+                        .min_w_0()
+                        .max_w(px(360.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_color(c(th.subtext))
+                        .child(title),
+                )
+            })
             .child(div().flex_1())
             .children(self.update_status_chip(cx))
-            .child(hist)
-            .child(dims)
-            .child("UTF-8")
+            .when(!hist.is_empty(), |d| d.child(hist).child(sb_dot()))
+            .when(!dims.is_empty(), |d| {
+                d.child(div().font_family(ui::mono_family()).child(dims))
+                    .child(sb_dot())
+            })
+            .child(div().font_family(ui::mono_family()).child("UTF-8"))
+            .child(sb_dot())
             .child(
                 sb_btn("theme-btn")
                     .on_click(cx.listener(|this, _, w, cx| this.cycle_theme(w, cx)))
@@ -4959,13 +5416,15 @@ impl Render for Root {
             )
             .child(
                 sb_btn("mode-btn")
-                    .border_1()
-                    .border_color(theme::divider())
-                    .text_color(theme::muted_text())
+                    .rounded_full()
+                    .px(px(7.))
+                    .bg(mode_col.opacity(0.11))
+                    .text_color(mode_col)
+                    .font_weight(FontWeight::MEDIUM)
                     .on_click(
                         cx.listener(|this, _, w, cx| this.run(Action::CyclePermissionMode, w, cx)),
                     )
-                    .child(icon(IconName::Shield, ui::IC_XS, mode_col.opacity(0.8)))
+                    .child(icon(IconName::Shield, ui::IC_XS, mode_col))
                     .child(tf("main.perm_status", &[("mode", &mode.label())]))
                     .when(org.is_some(), |d| {
                         d.child(div().pl_1().child(t("main.org_badge")))
@@ -5000,25 +5459,8 @@ impl Render for Root {
                 0.
             };
             let w = self.sb_width;
-            let name = div()
-                .text_size(px(ui::fs_body()))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(c(th.text))
-                .whitespace_nowrap()
-                .child("ShellAX");
-            let title = if mac {
-                div().flex().items_center().child(name)
-            } else {
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .pl(px(12.))
-                    .child(crate::file_icon::brand_icon(ui::IC_MD))
-                    .child(name)
-            };
             let head_inner = if mac {
-                // 收起后红黄绿按钮的位置由标签栏留出，这里只占位
+                // macOS 原生风格：红黄绿按钮旁保持干净留白（Linear / Zed 风格，不堆叠冗余应用名）
                 let lights = if open {
                     self.lights(window, cx)
                 } else {
@@ -5034,8 +5476,20 @@ impl Render for Root {
                     .flex()
                     .items_center()
                     .child(lights)
-                    .child(title)
             } else {
+                let name = div()
+                    .text_size(px(ui::fs_body()))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(c(th.text))
+                    .whitespace_nowrap()
+                    .child("ShellAX");
+                let title = div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .pl(px(12.))
+                    .child(crate::file_icon::brand_icon(ui::IC_MD))
+                    .child(name);
                 div()
                     .h_full()
                     .w(px(activity::STRIP_W + w))
@@ -5319,7 +5773,22 @@ impl Render for Root {
                 }
                 cx.stop_propagation();
             }));
-        root = root.child(body).child(statusbar);
+        let modal_active = !matches!(self.overlay, Overlay::None)
+            || !self.hk_pending.is_empty()
+            || !self.auth_pending.is_empty()
+            || !self.approvals.is_empty()
+            || !self.mcp.confirms.is_empty()
+            || self.quit_confirm
+            || update_ui::prompt().is_some()
+            || self.modal.is_some()
+            || self.dbp.new_db.is_some()
+            || self.dbp.transfer.is_some()
+            || self.sb_modal.is_some()
+            || self.agent_hub.new_task.is_some()
+            || self.agent_hub.finish_task.is_some();
+        root = root
+            .child(body.when(modal_active, |d| d.opacity(0.28)))
+            .child(statusbar.when(modal_active, |d| d.opacity(0.28)));
         if let Some(e) = chrome::resize_edges(window) {
             root = root.child(e);
         }
@@ -5400,7 +5869,6 @@ impl Render for Root {
                     .into_any_element(),
             ),
             Overlay::Audit => Some(self.audit_panel(cx)),
-            Overlay::Port => Some(self.port_panel(cx)),
         };
         if let Some(o) = overlay {
             root = root.child(o);
@@ -5920,44 +6388,165 @@ impl Render for Root {
             }
         }
         if !self.toasts.is_empty() {
-            let max_w = ui::corner_w(window, 16.);
-            let min_w = max_w.min(320.);
-            let entries: Vec<(u64, ToastKind, String, bool)> = self
+            let ww = f32::from(window.viewport_size().width);
+            let max_w = 480.0_f32.min((ww - 32.0).max(200.0));
+            let min_w = max_w.min(340.);
+            let entries: Vec<(u64, ToastKind, String, Vec<ToastStep>, bool)> = self
                 .toasts
                 .iter()
-                .map(|t| (t.seq, t.kind, t.msg.clone(), t.closing))
+                .map(|t| (t.seq, t.kind, t.msg.clone(), t.steps.clone(), t.closing))
                 .collect();
             let mut stack = div()
                 .absolute()
-                .bottom(px(40.))
-                .right(px(16.))
-                .max_w(px(max_w))
+                .top(px(44.))
+                .left_0()
+                .right_0()
                 .flex()
                 .flex_col()
-                .items_end()
+                .items_center()
                 .gap(px(ui::SP_2));
-            for (seq, kind, msg, closing) in entries {
-                let (ic, col) = match kind {
-                    ToastKind::Info => (IconName::Info, c(th.info)),
-                    ToastKind::Success => (IconName::CircleCheck, c(th.success)),
-                    ToastKind::Warn => (IconName::TriangleAlert, c(th.warning)),
-                    ToastKind::Error => (IconName::CircleAlert, c(th.error)),
+            for (seq, kind, msg, steps, closing) in entries {
+                let col = match kind {
+                    ToastKind::Loading => c(th.accent),
+                    ToastKind::Info => c(th.info),
+                    ToastKind::Success => c(th.success),
+                    ToastKind::Warn => c(th.warning),
+                    ToastKind::Error => c(th.error),
                 };
+                let status_icon: AnyElement = match kind {
+                    ToastKind::Loading => ui::spinning_icon(
+                        ("toast-spin", seq as usize),
+                        IconName::LoaderCircle,
+                        ui::IC_SM,
+                        col,
+                    ),
+                    ToastKind::Info => icon(IconName::Info, ui::IC_SM, col).into_any_element(),
+                    ToastKind::Success => {
+                        icon(IconName::CircleCheck, ui::IC_SM, col).into_any_element()
+                    }
+                    ToastKind::Warn => {
+                        icon(IconName::TriangleAlert, ui::IC_SM, col).into_any_element()
+                    }
+                    ToastKind::Error => {
+                        icon(IconName::CircleAlert, ui::IC_SM, col).into_any_element()
+                    }
+                };
+                let mut content_col = div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(if steps.is_empty() { 0. } else { 6. }))
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .font_weight(if steps.is_empty() {
+                                FontWeight::NORMAL
+                            } else {
+                                FontWeight::SEMIBOLD
+                            })
+                            .whitespace_normal()
+                            .child(ui::mid_ellipsis_tokens(&msg)),
+                    );
+                if !steps.is_empty() {
+                    let mut step_box = div()
+                        .w_full()
+                        .pt(px(6.))
+                        .border_t_1()
+                        .border_color(theme::divider())
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.));
+                    for (si, st) in steps.iter().enumerate() {
+                        let (s_ic, s_col): (AnyElement, gpui::Hsla) = match (st.started, st.ok) {
+                            (false, _) => (
+                                icon(IconName::Circle, ui::IC_XS, c(th.overlay0))
+                                    .into_any_element(),
+                                c(th.overlay0),
+                            ),
+                            (true, None) => (
+                                ui::spinning_icon(
+                                    ("toast-step-spin", seq as usize * 8 + si),
+                                    IconName::LoaderCircle,
+                                    ui::IC_XS,
+                                    c(th.accent),
+                                ),
+                                c(th.text),
+                            ),
+                            (true, Some(true)) => (
+                                icon(IconName::CircleCheck, ui::IC_XS, c(th.success))
+                                    .into_any_element(),
+                                c(th.text),
+                            ),
+                            (true, Some(false)) => (
+                                icon(IconName::CircleX, ui::IC_XS, c(th.error)).into_any_element(),
+                                c(th.error),
+                            ),
+                        };
+                        step_box = step_box.child(
+                            div()
+                                .flex()
+                                .items_start()
+                                .gap(px(6.))
+                                .text_size(px(ui::fs_small()))
+                                .child(
+                                    div()
+                                        .pt(px(2.))
+                                        .flex_shrink_0()
+                                        .child(s_ic),
+                                )
+                                .child(
+                                    div()
+                                        .w(px(96.))
+                                        .flex_shrink_0()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(s_col)
+                                        .child(st.label.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .whitespace_normal()
+                                        .text_color(if st.ok == Some(false) {
+                                            c(th.error)
+                                        } else {
+                                            c(th.subtext)
+                                        })
+                                        .child(st.detail.clone()),
+                                )
+                                .when_some(st.ms, |d, ms| {
+                                    d.child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .font_family(ui::mono_family())
+                                            .text_size(px(ui::fs_caption()))
+                                            .text_color(c(th.overlay0))
+                                            .child(format!("{ms} ms")),
+                                    )
+                                }),
+                        );
+                    }
+                    content_col = content_col.child(step_box);
+                }
+
                 let card = div()
                     .id(("toast-card", seq as usize))
+                    .occlude()
                     .min_w(px(min_w))
                     .max_w(px(max_w))
                     .rounded(px(ui::R_LG))
                     .border_1()
-                    .border_color(crate::theme::divider())
-                    .bg(c(th.mantle))
-                    .shadow_lg()
+                    .border_color(col.opacity(0.38))
+                    .bg(theme::overlay_card_bg(1.0))
+                    .shadow(chrome::soft_shadow(true))
                     .pl(px(12.))
                     .pr(px(8.))
-                    .py_2()
+                    .py(px(10.))
                     .flex()
                     .items_start()
-                    .gap_2()
+                    .gap(px(8.))
                     .text_size(px(ui::fs_body()))
                     .text_color(c(th.text))
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -5980,15 +6569,9 @@ impl Render for Root {
                             .h(px(18.))
                             .flex()
                             .items_center()
-                            .child(icon(ic, ui::IC_SM, col)),
+                            .child(status_icon),
                     )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .whitespace_normal()
-                            .child(ui::mid_ellipsis_tokens(&msg)),
-                    )
+                    .child(content_col)
                     .child(
                         ui::icon_button(
                             ("toast-x", seq as usize),
@@ -6030,8 +6613,10 @@ impl Render for Root {
 /// 标签宽度：先在 TAB_W 与 TAB_MIN_W 之间压缩，再放不下就横向滚动。
 /// 终端卡片与外层之间的间距。
 const CARD_GAP: f32 = card_layout::CARD_GAP;
-const TAB_W: f32 = 220.;
-const TAB_MIN_W: f32 = 110.;
+const TAB_W: f32 = 176.;
+const TAB_MIN_W: f32 = 96.;
+const AGENT_TAB_W: f32 = 212.;
+const AGENT_TAB_MIN_W: f32 = 120.;
 
 fn main() {
     ssh_term_proto::platform::init_env();
@@ -6257,6 +6842,8 @@ fn open_main(
                     new_menu_sel: 0,
                     new_menu_search: new_menu_search.clone(),
                     tab_scroll: gpui::ScrollHandle::new(),
+                    tab_reorder_pending: false,
+                    tab_order_save_seq: 0,
                     tab_rename: None,
                     closed_tabs: vec![],
                     sb_width: config::get().sidebar.width.clamp(180.0, 480.0),
@@ -6996,4 +7583,62 @@ pub(crate) fn shell_display_name() -> String {
         .or_else(|| base.strip_suffix(".EXE"))
         .unwrap_or(&base)
         .to_string()
+}
+
+/// Reorder `tabs` by moving `src` to `dst`, keeping `active` pointing at the same tab.
+fn reorder_tabs_and_active<T>(tabs: &mut Vec<T>, active: &mut usize, src: usize, dst: usize) -> bool {
+    if src == dst || src >= tabs.len() || dst >= tabs.len() {
+        return false;
+    }
+    let moved = tabs.remove(src);
+    tabs.insert(dst, moved);
+    if *active == src {
+        *active = dst;
+    } else if src < *active && *active <= dst {
+        *active -= 1;
+    } else if dst <= *active && *active < src {
+        *active += 1;
+    }
+    true
+}
+
+#[cfg(test)]
+mod tab_reorder_tests {
+    use super::reorder_tabs_and_active;
+
+    #[test]
+    fn move_right_and_left_updates_active_tab_index() {
+        let mut tabs = vec!["a", "b", "c", "d"];
+        let mut active = 0;
+        assert!(reorder_tabs_and_active(&mut tabs, &mut active, 0, 2));
+        assert_eq!(tabs, vec!["b", "c", "a", "d"]);
+        assert_eq!(active, 2);
+
+        // Moving a different tab past active shifts active back accordingly.
+        assert!(reorder_tabs_and_active(&mut tabs, &mut active, 3, 1));
+        assert_eq!(tabs, vec!["b", "d", "c", "a"]);
+        assert_eq!(active, 3);
+
+        // Moving active tab leftward keeps it active.
+        assert!(reorder_tabs_and_active(&mut tabs, &mut active, 3, 0));
+        assert_eq!(tabs, vec!["a", "b", "d", "c"]);
+        assert_eq!(active, 0);
+
+        // Moving a right tab across an active tab > 0 shifts active right.
+        active = 1;
+        assert!(reorder_tabs_and_active(&mut tabs, &mut active, 2, 0));
+        assert_eq!(tabs, vec!["d", "a", "b", "c"]);
+        assert_eq!(active, 2);
+    }
+
+    #[test]
+    fn noop_when_same_or_out_of_bounds() {
+        let mut tabs = vec!["a", "b"];
+        let mut active = 1;
+        assert!(!reorder_tabs_and_active(&mut tabs, &mut active, 1, 1));
+        assert!(!reorder_tabs_and_active(&mut tabs, &mut active, 2, 0));
+        assert!(!reorder_tabs_and_active(&mut tabs, &mut active, 0, 2));
+        assert_eq!(tabs, vec!["a", "b"]);
+        assert_eq!(active, 1);
+    }
 }

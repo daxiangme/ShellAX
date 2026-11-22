@@ -162,6 +162,7 @@ fn follow_cwd_and_restore_against_sshd() {
                         target: target.clone(),
                         cwd: String::new(),
                         resume: None,
+                        agent_session: None,
                     },
                 }),
                 b: Box::new(NodeSave::Leaf {

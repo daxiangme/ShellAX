@@ -9,6 +9,24 @@ use serde::{Deserialize, Serialize};
 
 use crate::ssh::SshTarget;
 
+/// Structured Agent session identity saved with a pane so restoring can immediately rebind
+/// titles, context stats, sidebar dedupe, and safely auto-resume validated local conversations.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+pub struct SavedAgentSession {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub auto_title: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum PaneSave {
@@ -19,6 +37,8 @@ pub enum PaneSave {
         daemon_id: Option<String>,
         #[serde(default)]
         resume: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_session: Option<SavedAgentSession>,
     },
     /// `cwd` is the remote shell's last directory. Older files omit it.
     Ssh {
@@ -27,6 +47,8 @@ pub enum PaneSave {
         cwd: String,
         #[serde(default)]
         resume: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_session: Option<SavedAgentSession>,
     },
     /// SFTP browser pane/tab (PRD 5.21): reopens on the same host and directories.
     /// `panes` (left, right) describes each pane's source; older files only have `target`.
@@ -119,6 +141,33 @@ pub enum NodeSave {
         b: Box<NodeSave>,
     },
 }
+impl NodeSave {
+    /// Drop saved agent bindings and resume hints when duplicating a tab as fresh shells.
+    pub fn strip_agent_sessions(&mut self) {
+        match self {
+            NodeSave::Leaf { pane } => match pane {
+                PaneSave::Local {
+                    resume,
+                    agent_session,
+                    ..
+                }
+                | PaneSave::Ssh {
+                    resume,
+                    agent_session,
+                    ..
+                } => {
+                    *resume = None;
+                    *agent_session = None;
+                }
+                _ => {}
+            },
+            NodeSave::Split { a, b, .. } => {
+                a.strip_agent_sessions();
+                b.strip_agent_sessions();
+            }
+        }
+    }
+}
 fn half() -> f32 {
     0.5
 }
@@ -166,6 +215,9 @@ pub struct LayoutSave {
     /// Stable leaf `pane_id`s per tab (in leaf order), parallel to `tabs`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pane_ids: Vec<Vec<String>>,
+    /// Last active tab index per workspace module id (e.g. `"agents" -> 1`).
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub active_by_module: std::collections::HashMap<String, usize>,
 }
 
 pub fn save(path: &Path, l: &LayoutSave) -> Result<()> {
@@ -405,6 +457,7 @@ mod tests {
                             target: t.clone(),
                             cwd: String::new(),
                             resume: None,
+                            agent_session: None,
                         },
                     }),
                     b: Box::new(NodeSave::Leaf {
@@ -456,6 +509,12 @@ mod tests {
                         cwd: "/tmp".into(),
                         daemon_id: Some("d1".into()),
                         resume: Some("claude --continue".into()),
+                        agent_session: Some(SavedAgentSession {
+                            agent_id: Some("claude".into()),
+                            session_id: Some("11111111-2222-3333-4444-555555555555".into()),
+                            transcript_path: Some("/tmp/s.jsonl".into()),
+                            auto_title: true,
+                        }),
                     },
                 },
                 NodeSave::Split {
@@ -466,6 +525,7 @@ mod tests {
                             cwd: String::new(),
                             daemon_id: None,
                             resume: None,
+                            agent_session: None,
                         },
                     }),
                     b: Box::new(NodeSave::Leaf {
@@ -479,6 +539,7 @@ mod tests {
                             },
                             cwd: "/srv/app".into(),
                             resume: None,
+                            agent_session: None,
                         },
                     }),
                 },
@@ -512,6 +573,7 @@ mod tests {
                         cwd: r"C:\Users\me\my dir".into(),
                         daemon_id: None,
                         resume: Some("claude --continue".into()),
+                        agent_session: None,
                     },
                 },
                 NodeSave::Leaf {
@@ -524,6 +586,7 @@ mod tests {
                         },
                         cwd: "/home/u/my dir".into(),
                         resume: None,
+                        agent_session: None,
                     },
                 },
             ],
@@ -547,8 +610,54 @@ mod tests {
         );
         let old_local: LayoutSave = serde_json::from_str(r#"{"version":1,"saved_at":"","active":0,"tabs":[{"node":"leaf","pane":{"kind":"local"}}]}"#).unwrap();
         assert!(
-            matches!(&old_local.tabs[0], NodeSave::Leaf { pane: PaneSave::Local { cwd, .. } } if cwd.is_empty())
+            matches!(&old_local.tabs[0], NodeSave::Leaf { pane: PaneSave::Local { cwd, agent_session: None, .. } } if cwd.is_empty())
         );
+        assert!(old_local.active_by_module.is_empty());
+    }
+
+    #[test]
+    fn agent_session_and_active_by_module_roundtrip_and_strip() {
+        let mut active_by_module = std::collections::HashMap::new();
+        active_by_module.insert("agents".to_string(), 1);
+        active_by_module.insert("hosts".to_string(), 0);
+        let mut node = NodeSave::Leaf {
+            pane: PaneSave::Local {
+                cwd: "/proj".into(),
+                daemon_id: None,
+                resume: Some("claude --resume 11111111-2222".into()),
+                agent_session: Some(SavedAgentSession {
+                    agent_id: Some("claude".into()),
+                    session_id: Some("11111111-2222".into()),
+                    transcript_path: Some("/tmp/11111111-2222.jsonl".into()),
+                    auto_title: true,
+                }),
+            },
+        };
+        let l = LayoutSave {
+            version: 1,
+            saved_at: "t".into(),
+            active: 1,
+            tabs: vec![node.clone()],
+            agent_tabs: vec![true],
+            active_by_module,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&l).unwrap();
+        let back: LayoutSave = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, l);
+        assert_eq!(back.active_by_module.get("agents"), Some(&1));
+
+        node.strip_agent_sessions();
+        assert!(matches!(
+            node,
+            NodeSave::Leaf {
+                pane: PaneSave::Local {
+                    resume: None,
+                    agent_session: None,
+                    ..
+                }
+            }
+        ));
     }
 
     #[test]

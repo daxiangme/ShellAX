@@ -1,31 +1,30 @@
-# Light — original ShellAX theme. UI tokens follow system colors; terminal palette
-# approximates Terminal.app's "Basic" profile (plain hex values, no third-party file used).
+# Light — soft paper-mist light theme with gentle, glare-free surface transitions.
 name = "Light"
 appearance = "light"
 
 [ui]
-crust = "#e9e9eb"
-mantle = "#f2f2f4"
-base = "#ffffff"
-surface0 = "#e8e8ed"
-surface1 = "#d8d8dd"
-surface2 = "#c7c7cc"
-overlay0 = "#aeaeb2"
-overlay1 = "#8e8e93"
-text = "#1d1d1f"
-subtext = "#6e6e73"
+crust = "#f2f3f6"
+mantle = "#f6f7f9"
+base = "#fbfcfd"
+surface0 = "#eaecf1"
+surface1 = "#dde0e7"
+surface2 = "#cbcfe0"
+overlay0 = "#8b92a0"
+overlay1 = "#646b78"
+text = "#181a1f"
+subtext = "#555c68"
 accent = "#007aff"
-success = "#28a745"
-error = "#ff3b30"
-warning = "#ff9500"
-info = "#32ade6"
+success = "#1f9d4c"
+error = "#e5352b"
+warning = "#d97706"
+info = "#0284c7"
 
 [terminal]
-foreground = "#000000"
-background = "#ffffff"
-cursor = "#7f7f7f"
+foreground = "#1e2229"
+background = "#fbfcfd"
+cursor = "#007aff"
 cursor_text = "#ffffff"
-selection = "#b4d5fe"
-suggestion = "#a0a0a5"
-ansi = ["#000000","#990000","#00a600","#999900","#0000b2","#b200b2","#00a6b2","#bfbfbf",
-        "#666666","#e50000","#00d900","#e5e500","#0000ff","#e500e5","#00e5e5","#e5e5e5"]
+selection = "#cfe3fe"
+suggestion = "#9098a3"
+ansi = ["#24292f","#cf222e","#1a7f37","#9a6700","#0969da","#8250df","#097c87","#6e7781",
+        "#57606a","#e5352b","#2da44e","#bf8700","#218bff","#a475f9","#139aa6","#8c959f"]

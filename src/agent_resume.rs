@@ -176,6 +176,137 @@ pub fn shell_line(argv: &[String]) -> Option<String> {
     )
 }
 
+/// Build a session reference from a raw ID or (for `pi` / `omp`) absolute session file path.
+pub fn session_ref_for_agent(agent: &str, value: impl Into<String>) -> Option<AgentSessionRef> {
+    let value = value.into();
+    let norm = crate::agent::normalize_id(agent);
+    if matches!(norm.as_str(), "pi" | "omp") && Path::new(&value).is_absolute() {
+        AgentSessionRef::path(value)
+    } else {
+        AgentSessionRef::id(value)
+    }
+}
+
+/// Build a strictly validated shell resume line from structured `(agent, session_id)`.
+pub fn build_validated_resume_line(agent: &str, session_id: &str) -> Option<String> {
+    let sref = session_ref_for_agent(agent, session_id)?;
+    let p = plan(agent, &sref)?;
+    shell_line(&p.argv)
+}
+
+/// Parse a previously saved resume shell line (including legacy `layout.json` entries before
+/// structured `agent_session` persistence) back into `(normalized_agent_id, Option<AgentSessionRef>)`.
+/// Generic fallback flags (`--continue`, `--last`, `latest`) return `(agent_id, None)`.
+pub fn parse_resume_command(cmd: &str) -> Option<(String, Option<AgentSessionRef>)> {
+    let tokens = split_simple_shell_line(cmd)?;
+    let first = tokens.first()?.as_str();
+    let stem = first
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(first)
+        .to_ascii_lowercase();
+    let stem = stem
+        .strip_suffix(".exe")
+        .or_else(|| stem.strip_suffix(".cmd"))
+        .or_else(|| stem.strip_suffix(".bat"))
+        .unwrap_or(&stem);
+    let agent = match stem {
+        "claude" | "claude-code" => "claude",
+        "codex" => "codex",
+        "copilot" | "github-copilot" => "copilot",
+        "devin" => "devin",
+        "droid" => "droid",
+        "kimi" => "kimi",
+        "pi" => "pi",
+        "omp" => "omp",
+        "hermes" => "hermes",
+        "opencode" => "opencode",
+        "qodercli" => "qodercli",
+        "qwen" => "qwen",
+        "kilo" => "kilo",
+        "cursor" | "cursor-agent" => "cursor",
+        "agy" | "antigravity" => "agy",
+        "grok" => "grok",
+        "gemini" => "gemini",
+        "letta" => "letta",
+        _ => return None,
+    };
+    let rest = &tokens[1..];
+    let pick_id = |raw: &str| -> Option<AgentSessionRef> {
+        let v = raw.trim();
+        if v.is_empty() || v.starts_with('-') || v.eq_ignore_ascii_case("latest") {
+            return None;
+        }
+        session_ref_for_agent(agent, v)
+    };
+    let sref = match (agent, rest) {
+        ("codex", [sub, val]) if sub == "resume" => pick_id(val),
+        ("copilot" | "omp", [arg]) => arg.strip_prefix("--resume=").and_then(pick_id),
+        ("letta", [f1, val]) if f1 == "--conversation" => pick_id(val),
+        ("letta", [f1, def, f2, aid])
+            if f1 == "--conversation" && def == "default" && f2 == "--agent" =>
+        {
+            let aid = aid.trim();
+            if aid.is_empty() || aid.starts_with('-') {
+                None
+            } else {
+                AgentSessionRef::id(format!("default:{aid}"))
+            }
+        }
+        ("agy", [f, val]) if f == "--conversation" => pick_id(val),
+        ("kimi" | "pi" | "opencode" | "kilo", [f, val]) if f == "--session" => pick_id(val),
+        (
+            "claude" | "devin" | "droid" | "hermes" | "qodercli" | "qwen" | "cursor" | "grok"
+            | "gemini",
+            [f, val],
+        ) if f == "--resume" || f == "-r" => pick_id(val),
+        (
+            "claude" | "devin" | "droid" | "hermes" | "qodercli" | "qwen" | "cursor" | "grok"
+            | "gemini",
+            [arg],
+        ) => arg.strip_prefix("--resume=").and_then(pick_id),
+        _ => None,
+    };
+    Some((agent.to_string(), sref))
+}
+
+fn split_simple_shell_line(line: &str) -> Option<Vec<String>> {
+    let s = line.trim();
+    if s.is_empty() || s.chars().any(char::is_control) {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_single = false;
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if in_single {
+            if ch == '\'' {
+                in_single = false;
+            } else {
+                cur.push(ch);
+            }
+        } else if ch == '\'' {
+            in_single = true;
+        } else if matches!(ch, ';' | '|' | '&' | '$' | '`' | '<' | '>' | '(' | ')' | '"') {
+            return None;
+        } else if ch.is_whitespace() {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+        } else {
+            cur.push(ch);
+        }
+    }
+    if in_single {
+        return None;
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 /// Fallback resume command when no explicit session ID was reported yet.
 pub fn fallback_continue_command(agent: &str) -> Option<&'static str> {
     match agent.trim().to_ascii_lowercase().as_str() {
@@ -243,5 +374,62 @@ mod tests {
         );
         assert!(AgentSessionRef::id("bad'quote").is_none());
         assert!(AgentSessionRef::id("bad\x07ctrl").is_none());
+    }
+
+    #[test]
+    fn parses_legacy_and_structured_resume_commands() {
+        assert_eq!(
+            parse_resume_command("claude --resume 01a0de21-1234"),
+            Some((
+                "claude".into(),
+                AgentSessionRef::id("01a0de21-1234"),
+            ))
+        );
+        assert_eq!(
+            parse_resume_command("codex resume e8168069"),
+            Some(("codex".into(), AgentSessionRef::id("e8168069")))
+        );
+        assert_eq!(
+            parse_resume_command("agy --conversation 547101a9-aa33"),
+            Some(("agy".into(), AgentSessionRef::id("547101a9-aa33")))
+        );
+        assert_eq!(
+            parse_resume_command("copilot --resume=abc-123"),
+            Some(("copilot".into(), AgentSessionRef::id("abc-123")))
+        );
+        assert_eq!(
+            parse_resume_command("pi --session '/tmp/my sessions/a.jsonl'"),
+            Some((
+                "pi".into(),
+                AgentSessionRef::path("/tmp/my sessions/a.jsonl"),
+            ))
+        );
+        assert_eq!(
+            parse_resume_command("letta --conversation default --agent ag-9"),
+            Some(("letta".into(), AgentSessionRef::id("default:ag-9")))
+        );
+        // Generic fallback commands must NOT masquerade as exact session IDs.
+        assert_eq!(
+            parse_resume_command("claude --continue"),
+            Some(("claude".into(), None))
+        );
+        assert_eq!(
+            parse_resume_command("codex resume --last"),
+            Some(("codex".into(), None))
+        );
+        assert_eq!(
+            parse_resume_command("gemini --resume latest"),
+            Some(("gemini".into(), None))
+        );
+        // Unknown or shell-injected strings are rejected.
+        assert_eq!(parse_resume_command("rm -rf /"), None);
+        assert_eq!(
+            parse_resume_command("claude --resume id; echo pwn"),
+            None
+        );
+        assert_eq!(
+            build_validated_resume_line("antigravity", "547101a9-aa33").as_deref(),
+            Some("agy --conversation 547101a9-aa33")
+        );
     }
 }

@@ -34,6 +34,7 @@ pub enum Sub {
 pub enum DockEvent {
     Logs(String, String),
     Exec(String),
+    Toast(crate::ToastKind, String),
 }
 
 enum Ask {
@@ -115,6 +116,7 @@ pub struct DockView {
     selected: Option<String>,
     inspect_ed: Entity<EditorState>,
     pending_inspect: Option<String>,
+    filter_in: Entity<InputState>,
     pull_in: Entity<InputState>,
     pull_log: Vec<String>,
     pulling: bool,
@@ -165,17 +167,22 @@ impl DockView {
                 .language("json")
                 .line_number(true)
         });
+        let filter_in =
+            cx.new(|cx| InputState::new(window, cx).placeholder(t("ux.dk_filter")));
         let pull_in =
             cx.new(|cx| InputState::new(window, cx).placeholder(t("docker.pull_placeholder")));
-        let subs = vec![cx.subscribe_in(
-            &pull_in,
-            window,
-            |this: &mut Self, _, ev: &InputEvent, _w, cx| {
-                if let InputEvent::PressEnter { .. } = ev {
-                    this.pull(cx);
-                }
-            },
-        )];
+        let subs = vec![
+            cx.observe(&filter_in, |_, _, cx| cx.notify()),
+            cx.subscribe_in(
+                &pull_in,
+                window,
+                |this: &mut Self, _, ev: &InputEvent, _w, cx| {
+                    if let InputEvent::PressEnter { .. } = ev {
+                        this.pull(cx);
+                    }
+                },
+            ),
+        ];
         let me = Self {
             title: ep.name.clone(),
             production,
@@ -194,6 +201,7 @@ impl DockView {
             selected: None,
             inspect_ed,
             pending_inspect: None,
+            filter_in,
             pull_in,
             pull_log: vec![],
             pulling: false,
@@ -718,10 +726,7 @@ impl DockView {
         };
         // validate before anything reaches the daemon
         if let Err(e) = dock::create_body(&spec) {
-            if let Some(f) = self.create.as_mut() {
-                f.err = Some(format!("{e:#}"));
-            }
-            cx.notify();
+            cx.emit(DockEvent::Toast(crate::ToastKind::Error, format!("{e:#}")));
             return;
         }
         if self.production {
@@ -767,8 +772,8 @@ impl DockView {
                     Err(e) => {
                         if let Some(f) = v.create.as_mut() {
                             f.busy = false;
-                            f.err = Some(format!("{e:#}"));
                         }
+                        cx.emit(DockEvent::Toast(crate::ToastKind::Error, format!("{e:#}")));
                     }
                 }
             },
@@ -863,10 +868,20 @@ impl DockView {
     // ---- render
     fn containers_el(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
+        let q = self.filter_in.read(cx).value().trim().to_lowercase();
         let shown: Vec<Container> = self
             .containers
             .iter()
             .filter(|c| self.show_all || c.state == "running")
+            .filter(|c| {
+                q.is_empty()
+                    || c.name.to_lowercase().contains(&q)
+                    || c.image.to_lowercase().contains(&q)
+                    || c.ports.to_lowercase().contains(&q)
+                    || c.project
+                        .as_deref()
+                        .is_some_and(|p| p.to_lowercase().contains(&q))
+            })
             .cloned()
             .collect();
         let mut list = div()
@@ -951,14 +966,14 @@ impl DockView {
                 let mk =
                     |lbl: SharedString, key: &'static str, a: Action, cx: &mut Context<Self>| {
                         let (id, name) = (id.clone(), name.clone());
-                        ui::button((key, n), lbl, if a == Action::Remove { 2 } else { 0 }).on_click(
+                        ui::button_sm((key, n), lbl, if a == Action::Remove { 2 } else { 0 }).on_click(
                             cx.listener(move |v, _, _w, cx| {
                                 cx.stop_propagation();
                                 v.act(id.clone(), name.clone(), a, cx);
                             }),
                         )
                     };
-                let mut btns = div().flex().gap_1().flex_shrink_0();
+                let mut btns = div().flex().items_center().gap_1().flex_shrink_0();
                 if running {
                     btns = btns
                         .child(mk(t("docker.stop").into(), "dk-stop", Action::Stop, cx))
@@ -971,14 +986,14 @@ impl DockView {
                         .child(mk(t("ui.delete").into(), "dk-rm", Action::Remove, cx));
                 }
                 let (lid, lname, eid) = (ct.id.clone(), ct.name.clone(), ct.id.clone());
-                btns = btns.child(ui::button(("dk-logs", n), t("docker.logs"), 0).on_click(
+                btns = btns.child(ui::button_sm(("dk-logs", n), t("docker.logs"), 0).on_click(
                     cx.listener(move |_, _, _w, cx| {
                         cx.stop_propagation();
                         cx.emit(DockEvent::Logs(lid.clone(), lname.clone()));
                     }),
                 ));
                 if running {
-                    btns = btns.child(ui::button(("dk-exec", n), t("docker.exec"), 0).on_click(
+                    btns = btns.child(ui::button_sm(("dk-exec", n), t("docker.exec"), 0).on_click(
                         cx.listener(move |_, _, _w, cx| {
                             cx.stop_propagation();
                             cx.emit(DockEvent::Exec(eid.clone()));
@@ -1059,6 +1074,7 @@ impl DockView {
                                         .overflow_hidden()
                                         .text_ellipsis()
                                         .text_size(px(ui::fs_body()))
+                                        .font_weight(FontWeight::MEDIUM)
                                         .text_color(c(th.text))
                                         .child(match &ct.service {
                                             Some(s) => format!("{}  ({s})", ct.name),
@@ -1127,6 +1143,7 @@ impl DockView {
 
     fn images_el(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
+        let q = self.filter_in.read(cx).value().trim().to_lowercase();
         let mut list = div()
             .id("dk-img")
             .flex_1()
@@ -1140,14 +1157,21 @@ impl DockView {
             } else {
                 im.tags.join(", ")
             };
+            if !q.is_empty()
+                && !tags.to_lowercase().contains(&q)
+                && !im.id.to_lowercase().contains(&q)
+            {
+                continue;
+            }
             let (id, label) = (im.id.clone(), tags.clone());
             list = list.child(
                 div()
-                    .min_h(px(36.))
+                    .min_h(px(38.))
                     .px_3()
                     .flex()
                     .items_center()
                     .gap_3()
+                    .hover(|s| s.bg(crate::theme::hover_bg()))
                     .border_b_1()
                     .border_color(crate::theme::divider())
                     .child(
@@ -1162,6 +1186,7 @@ impl DockView {
                                     .overflow_hidden()
                                     .text_ellipsis()
                                     .text_size(px(ui::fs_body()))
+                                    .font_weight(FontWeight::MEDIUM)
                                     .text_color(c(th.text))
                                     .child(tags),
                             )
@@ -1181,11 +1206,11 @@ impl DockView {
                     })
                     .child({
                         let img = im.tags.first().cloned().unwrap_or_else(|| im.id.clone());
-                        ui::button(("dk-run", i), t("docker.run"), 1)
+                        ui::button_sm(("dk-run", i), t("docker.run"), 1)
                             .on_click(cx.listener(move |v, _, w, cx| v.open_create(&img, w, cx)))
                     })
                     .child(
-                        ui::button(("dk-rmi", i), t("ui.delete"), 2).on_click(cx.listener(
+                        ui::button_sm(("dk-rmi", i), t("ui.delete"), 2).on_click(cx.listener(
                             move |v, _, _w, cx| {
                                 if v.ep.read_only {
                                     v.error = Some(t("docker.read_only").into());
@@ -1268,6 +1293,7 @@ impl DockView {
                     .flex()
                     .items_center()
                     .gap_3()
+                    .hover(|s| s.bg(crate::theme::hover_bg()))
                     .border_b_1()
                     .border_color(crate::theme::divider())
                     .child(
@@ -1543,19 +1569,29 @@ impl DockView {
         .map(|(a, b)| (a.to_string(), t(b).to_string()))
         .collect();
         let start = f.start;
+        let me_close = cx.entity().downgrade();
         Some(
             ui::modal(
-                ui::card(560.)
+                ui::card(600.)
                     .child(ui::dialog_header(
                         Some(IconName::Container),
                         c(cur().accent),
                         t("docker.create"),
                         None,
-                        None,
+                        Some(ui::dialog_close("dk-cr-x", move |_w, cx| {
+                            let _ = me_close.update(cx, |v, cx| {
+                                v.create = None;
+                                cx.notify();
+                            });
+                        })),
                     ))
                     .child(
                         div()
+                            .id("dk-cr-form")
                             .p(px(ui::SP_5))
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
                             .flex()
                             .flex_col()
                             .gap(px(ui::SP_3))
@@ -1608,11 +1644,6 @@ impl DockView {
                                             cx.notify();
                                         })),
                                 ),
-                            )
-                            .children(
-                                f.err
-                                    .clone()
-                                    .map(|e| ui::notice(ui::Notice::Error, e).mx_0()),
                             ),
                     )
                     .child(
@@ -1676,6 +1707,7 @@ impl DockView {
         {
             out = out.child(mono(l.to_string()).whitespace_normal());
         }
+        let me_ex_close = cx.entity().downgrade();
         Some(
             ui::modal(
                 ui::card(640.)
@@ -1685,7 +1717,12 @@ impl DockView {
                             c(cur().accent),
                             tf("docker.exec_title", &[("name", &b.name)]),
                             None,
-                            None,
+                            Some(ui::dialog_close("dk-ex-x", move |_w, cx| {
+                                let _ = me_ex_close.update(cx, |v, cx| {
+                                    v.exec_box = None;
+                                    cx.notify();
+                                });
+                            })),
                         )
                         .when(self.production, |d| {
                             d.child(ui::tag(t("tag.production"), c(th.error)))
@@ -1852,16 +1889,34 @@ impl Render for DockView {
         if self.ep.read_only {
             head = head.child(ui::tag(t("db.read_only"), c(th.warning)));
         }
+        if !self.containers.is_empty() && matches!(self.sub, Sub::Containers | Sub::Stats) {
+            let run_n = self
+                .containers
+                .iter()
+                .filter(|c| c.state == "running")
+                .count();
+            head = head.child(small(tf(
+                "ux.dk_summary",
+                &[("run", &run_n), ("total", &self.containers.len())],
+            )));
+        }
         head = head.child(div().flex_1());
+        if self.dock.is_some() {
+            head = head.child(
+                div()
+                    .w(px(200.))
+                    .child(ui::search_field(&self.filter_in, false)),
+            );
+        }
         if self.sub == Sub::Containers && !self.ep.read_only {
             head = head.child(
-                ui::button("dk-new", t("docker.create"), 1)
+                ui::button_sm("dk-new", t("docker.create"), 1)
                     .on_click(cx.listener(|v, _, w, cx| v.open_create("", w, cx))),
             );
         }
         if self.sub == Sub::Containers {
             head = head.child(
-                ui::button(
+                ui::button_sm(
                     "dk-all",
                     if self.show_all {
                         t("docker.show_running")
@@ -1877,7 +1932,7 @@ impl Render for DockView {
             );
         }
         head = head.child(
-            ui::button("dk-refresh", t("redis.refresh"), 0).on_click(cx.listener(
+            ui::button_sm("dk-refresh", t("redis.refresh"), 0).on_click(cx.listener(
                 |v, _, _w, cx| {
                     v.refresh(cx);
                     cx.notify();
@@ -1977,7 +2032,6 @@ impl Render for DockView {
             .flex()
             .flex_col()
             .relative()
-            .bg(c(th.base))
             .child(head)
             .children(err)
             .child(body)
@@ -2160,13 +2214,26 @@ impl Render for LogView {
             out = out.child(mono(e.clone()).text_color(c(th.error)).whitespace_normal());
         }
         for l in &shown[start..] {
-            out = out.child(mono((*l).clone()).whitespace_normal());
+            let low = l.to_ascii_lowercase();
+            let col = if low.contains("error") || low.contains("fatal") || low.contains("panic") {
+                c(th.error)
+            } else if low.contains("warn") {
+                c(th.warning)
+            } else {
+                c(th.text)
+            };
+            out = out.child(mono((*l).clone()).text_color(col).whitespace_normal());
         }
+        let copy_payload = shown[start..]
+            .iter()
+            .map(|s| (*s).as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         div()
             .size_full()
             .flex()
             .flex_col()
-            .bg(c(th.base))
+            .when(!crate::theme::glass_enabled(), |d| d.bg(c(th.base)))
             .child(
                 ui::toolbar()
                     .child(icon(IconName::FileText, ui::IC_SM, c(th.accent)))
@@ -2183,6 +2250,15 @@ impl Render for LogView {
                         div()
                             .w(px(220.))
                             .child(ui::search_field(&self.filter_in, false)),
+                    )
+                    .child(
+                        ui::button("dk-log-copy", t("ux.dk_copy_log"), 0).on_click(
+                            move |_, _w, cx| {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    copy_payload.clone(),
+                                ));
+                            },
+                        ),
                     )
                     .child(
                         ui::button(

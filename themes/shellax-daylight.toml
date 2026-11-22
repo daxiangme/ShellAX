@@ -1,30 +1,30 @@
-# ShellAX Daylight — original theme by the ShellAX project (proprietary, ships with the product)
+# ShellAX Daylight — soft Nordic ice light theme by the ShellAX project.
 name = "ShellAX Daylight"
 appearance = "light"
 
 [ui]
-crust = "#e9ecf1"
-mantle = "#f1f3f6"
-base = "#fbfcfd"
-surface0 = "#dde2e9"
-surface1 = "#cbd2dc"
-surface2 = "#b4bdca"
-overlay0 = "#8994a5"
-overlay1 = "#768295"
-text = "#1f2733"
-subtext = "#4f5b6d"
-accent = "#0a6cff"
-success = "#1a8f4c"
+crust = "#eff2f7"
+mantle = "#f4f7fb"
+base = "#fbfcfe"
+surface0 = "#e6ebf3"
+surface1 = "#d7dfeb"
+surface2 = "#c2ccd9"
+overlay0 = "#828fa3"
+overlay1 = "#626f84"
+text = "#18202c"
+subtext = "#4f5b6e"
+accent = "#2563eb"
+success = "#168a48"
 error = "#d1293d"
 warning = "#c26a00"
-info = "#0a6cff"
+info = "#0284c7"
 
 [terminal]
-foreground = "#1f2733"
-background = "#fbfcfd"
-cursor = "#0a6cff"
+foreground = "#18202c"
+background = "#fbfcfe"
+cursor = "#2563eb"
 cursor_text = "#ffffff"
-selection = "#c9dcff"
-suggestion = "#9aa3b2"
-ansi = ["#1f2733","#c4213a","#1a7f43","#9a6700","#0a5fd6","#8a3ffc","#0b7d86","#8b95a5",
-        "#4f5b6d","#e0364f","#22a057","#b88000","#2f7bff","#a066ff","#0f9aa5","#c3cad5"]
+selection = "#cfe0ff"
+suggestion = "#8f9bae"
+ansi = ["#18202c","#c4213a","#1a7f43","#9a6700","#1d5bd6","#7c3aed","#0b7d86","#8b95a5",
+        "#4f5b6d","#e0364f","#22a057","#b88000","#3b82f6","#9353ff","#0f9aa5","#c3cad5"]

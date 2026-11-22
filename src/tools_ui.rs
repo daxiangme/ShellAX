@@ -19,6 +19,7 @@ const RECENT_MAX: usize = 8;
 pub struct ToolsPanel {
     search: Option<Entity<InputState>>,
     collapsed: HashSet<String>,
+    cat_filter: Option<String>,
     manage: bool,
 }
 
@@ -45,9 +46,18 @@ impl Root {
             None => {
                 let s = cx.new(|cx| InputState::new(window, cx).placeholder(t("tools.ui_search")));
                 self._subs
-                    .push(cx.subscribe_in(&s, window, |_, _, ev: &InputEvent, _, cx| {
-                        if matches!(ev, InputEvent::Change) {
-                            cx.notify()
+                    .push(cx.subscribe_in(&s, window, |this, st, ev: &InputEvent, w, cx| {
+                        match ev {
+                            InputEvent::Change => cx.notify(),
+                            InputEvent::PressEnter { .. } => {
+                                let q = st.read(cx).value().to_string();
+                                if let Some(sp) =
+                                    all_tools().into_iter().find(|sp| tools::matches(sp, &q))
+                                {
+                                    this.open_tool(&sp.id, None, w, cx);
+                                }
+                            }
+                            _ => {}
                         }
                     }));
                 self.toolsp.search = Some(s.clone());
@@ -228,8 +238,14 @@ impl Root {
             .flex()
             .flex_col()
             .pb(px(ui::SP_2));
+        let active_cat = self.toolsp.cat_filter.clone();
         if !q.trim().is_empty() {
-            let hits: Vec<&ToolSpec> = all.iter().filter(|s| tools::matches(s, &q)).collect();
+            let hits: Vec<&ToolSpec> = all
+                .iter()
+                .filter(|s| {
+                    active_cat.as_deref().is_none_or(|c| s.cat == c) && tools::matches(s, &q)
+                })
+                .collect();
             if hits.is_empty() {
                 list = list.child(ui::empty_state(
                     IconName::Search,
@@ -243,57 +259,64 @@ impl Root {
                 let f = favs.contains(&sp.id);
                 list = list.child(row(self, format!("q-{}", sp.id), sp, f, cx));
             }
-            for sp in placeholders.iter().filter(|s| tools::matches(s, &q)) {
+            for sp in placeholders.iter().filter(|s| {
+                active_cat.as_deref().is_none_or(|c| s.cat == c) && tools::matches(s, &q)
+            }) {
                 list = list.child(ghost(self, format!("qg-{}", sp.id), sp, cx));
             }
         } else {
-            let sections: [(&str, Vec<String>); 2] = [
-                ("fav", favs.clone()),
-                (
-                    "recent",
-                    recent
+            if active_cat.is_none() {
+                let sections: [(&str, Vec<String>); 2] = [
+                    ("fav", favs.clone()),
+                    (
+                        "recent",
+                        recent
+                            .iter()
+                            .filter(|r| !favs.contains(r))
+                            .cloned()
+                            .collect(),
+                    ),
+                ];
+                for (key, ids) in sections {
+                    let items: Vec<&ToolSpec> = ids
                         .iter()
-                        .filter(|r| !favs.contains(r))
-                        .cloned()
-                        .collect(),
-                ),
-            ];
-            for (key, ids) in sections {
-                let items: Vec<&ToolSpec> = ids
-                    .iter()
-                    .filter_map(|i| all.iter().find(|s| &s.id == i))
-                    .collect();
-                if items.is_empty() {
-                    continue;
-                }
-                let collapsed = self.toolsp.collapsed.contains(key);
-                list = list.child(head(
-                    if key == "fav" {
-                        t("tools.ui_fav")
-                    } else {
-                        t("tools.ui_recent")
+                        .filter_map(|i| all.iter().find(|s| &s.id == i))
+                        .collect();
+                    if items.is_empty() {
+                        continue;
                     }
-                    .to_string(),
-                    key.to_string(),
-                    None,
-                    collapsed,
-                    cx,
-                ));
-                if !collapsed {
-                    for sp in items {
-                        let f = favs.contains(&sp.id);
-                        list = list.child(row(self, format!("{key}-{}", sp.id), sp, f, cx));
+                    let collapsed = self.toolsp.collapsed.contains(key);
+                    list = list.child(head(
+                        if key == "fav" {
+                            t("tools.ui_fav")
+                        } else {
+                            t("tools.ui_recent")
+                        }
+                        .to_string(),
+                        key.to_string(),
+                        Some(items.len()),
+                        collapsed,
+                        cx,
+                    ));
+                    if !collapsed {
+                        for sp in items {
+                            let f = favs.contains(&sp.id);
+                            list = list.child(row(self, format!("{key}-{}", sp.id), sp, f, cx));
+                        }
                     }
                 }
             }
             for (cat, _) in tools::CATEGORIES {
+                if active_cat.as_deref().is_some_and(|c| c != *cat) {
+                    continue;
+                }
                 let items: Vec<&ToolSpec> = all.iter().filter(|s| s.cat == *cat).collect();
                 let ghosts: Vec<&ToolSpec> =
                     placeholders.iter().filter(|s| s.cat == *cat).collect();
                 if items.is_empty() && ghosts.is_empty() {
                     continue;
                 }
-                let collapsed = self.toolsp.collapsed.contains(*cat);
+                let collapsed = active_cat.is_none() && self.toolsp.collapsed.contains(*cat);
                 list = list.child(head(
                     tools::cat_label(cat).to_string(),
                     cat.to_string(),
@@ -312,6 +335,48 @@ impl Root {
                 }
             }
         }
+        let mut chips = div()
+            .id("tools-cat-chips")
+            .px(px(ui::LIST_INSET))
+            .pb(px(ui::SP_2))
+            .flex_shrink_0()
+            .overflow_x_scroll()
+            .flex()
+            .items_center()
+            .gap(px(ui::SP_1))
+            .child(
+                ui::chip("tc-all", t("ux.cat_all").to_string(), active_cat.is_none()).on_click(
+                    cx.listener(|this, _, _w, cx| {
+                        this.toolsp.cat_filter = None;
+                        cx.notify();
+                    }),
+                ),
+            );
+        for &(cat, _) in tools::CATEGORIES {
+            let has_any =
+                all.iter().any(|s| s.cat == cat) || placeholders.iter().any(|s| s.cat == cat);
+            if !has_any {
+                continue;
+            }
+            let c_id = cat.to_string();
+            let on = active_cat.as_deref() == Some(cat);
+            chips = chips.child(
+                ui::chip(
+                    SharedString::from(format!("tc-{cat}")),
+                    tools::cat_label(cat),
+                    on,
+                )
+                .on_click(cx.listener(move |this, _, _w, cx| {
+                    this.toolsp.cat_filter = if this.toolsp.cat_filter.as_deref() == Some(c_id.as_str())
+                    {
+                        None
+                    } else {
+                        Some(c_id.clone())
+                    };
+                    cx.notify();
+                })),
+            );
+        }
         div()
             .flex_1()
             .min_h_0()
@@ -321,23 +386,43 @@ impl Root {
                 t("tool.tools"),
                 None,
                 None,
-                vec![ui::icon_button(
-                    "tools-ext-open",
-                    IconName::Puzzle,
-                    ui::IconBtn::Md,
-                    t("ext.title"),
-                )
-                .on_click(cx.listener(|this, _, _w, cx| {
-                    this.toolsp.manage = true;
-                    cx.notify();
-                }))
-                .into_any_element()],
+                vec![
+                    ui::icon_button(
+                        "tools-collapse-all",
+                        IconName::ChevronsDownUp,
+                        ui::IconBtn::Md,
+                        t("ux.collapse_all"),
+                    )
+                    .on_click(cx.listener(|this, _, _w, cx| {
+                        let cats: Vec<String> =
+                            tools::CATEGORIES.iter().map(|(c, _)| (*c).into()).collect();
+                        if cats.iter().all(|c| this.toolsp.collapsed.contains(c)) {
+                            this.toolsp.collapsed.clear();
+                        } else {
+                            this.toolsp.collapsed.extend(cats);
+                        }
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+                    ui::icon_button(
+                        "tools-ext-open",
+                        IconName::Puzzle,
+                        ui::IconBtn::Md,
+                        t("ext.title"),
+                    )
+                    .on_click(cx.listener(|this, _, _w, cx| {
+                        this.toolsp.manage = true;
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+                ],
             ))
             .child(
                 ui::field_row()
                     .pb(px(ui::SP_2))
                     .child(ui::search_field(&search, false)),
             )
+            .child(chips)
             .child(list)
             .into_any_element()
     }

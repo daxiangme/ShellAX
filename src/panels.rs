@@ -74,6 +74,7 @@ impl Root {
                     .gap_3()
                     .px_4()
                     .py(px(6.))
+                    .hover(|s| s.bg(crate::theme::hover_bg()))
                     .border_t_1()
                     .border_color(crate::theme::divider())
                     .text_size(px(ui::fs_small()))
@@ -145,7 +146,7 @@ impl Root {
             .child(div().flex_1())
             .child(verify_el)
             .child(
-                ui::button("audit-verify", t("ui.verify_hash_chain"), 0).on_click(cx.listener(
+                ui::button_sm("audit-verify", t("ui.verify_hash_chain"), 0).on_click(cx.listener(
                     |this, _, _w, cx| {
                         this.audit_verify = Some(audit::verify(&config::get().audit_path()));
                         cx.notify();
@@ -153,7 +154,7 @@ impl Root {
                 )),
             )
             .child(
-                ui::button("audit-export", t("ui.export"), 0).on_click(cx.listener(
+                ui::button_sm("audit-export", t("ui.export"), 0).on_click(cx.listener(
                     |this, _, _w, cx| {
                         let src = config::get().audit_path();
                         let dst =
@@ -278,13 +279,6 @@ impl Root {
             .child(list),
         )
         .into_any_element()
-    }
-
-    pub(crate) fn port_panel(&mut self, _cx: &mut Context<Root>) -> AnyElement {
-        match self.port_view.clone() {
-            Some(v) => ui::modal(v).into_any_element(),
-            None => div().into_any_element(),
-        }
     }
 
     /// One right-column card: an island with a `panel_header` (extra actions + collapse + close).

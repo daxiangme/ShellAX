@@ -116,17 +116,21 @@ impl Render for Palette {
         let entity = cx.entity().downgrade();
 
         let list = if n == 0 {
-            div()
-                .p_4()
-                .text_size(px(ui::fs_body()))
-                .text_color(c(th.overlay1))
-                .child(t("ui.no_matching_commands"))
-                .into_any_element()
+            ui::empty_state(
+                IconName::Search,
+                t("ui.no_matching_commands"),
+                None,
+                vec![],
+                true,
+            )
+            .py(px(ui::SP_6))
+            .into_any_element()
         } else {
-            let list_h = ((n as f32) * ui::H_LARGE + 16.).min(420.);
+            let row_h = ui::H_LARGE + 6.;
+            let list_h = ((n as f32) * row_h + 16.).min(420.);
             div()
                 .h(px(list_h))
-                .p_2()
+                .p(px(ui::SP_2))
                 .flex()
                 .flex_col()
                 .child(ui::virtual_list(
@@ -155,16 +159,17 @@ impl Render for Palette {
                             rows.push(
                                 div()
                                     .id(("pal", i))
+                                    .relative()
                                     .w_full()
-                                    .h(px(ui::H_LARGE))
+                                    .h(px(row_h))
                                     .px(px(10.))
                                     .rounded(px(ui::R_MD))
                                     .flex()
                                     .items_center()
-                                    .gap_3()
+                                    .gap(px(10.))
                                     .cursor_pointer()
                                     .bg(if sel {
-                                        crate::theme::menu_sel_bg()
+                                        crate::theme::selected_bg()
                                     } else {
                                         gpui::transparent_black()
                                     })
@@ -177,7 +182,37 @@ impl Render for Palette {
                                             });
                                         }
                                     })
-                                    .child(icon(ic, ui::IC_MD, c(th.overlay1)))
+                                    .when(sel, |d| {
+                                        d.child(
+                                            div()
+                                                .absolute()
+                                                .left(px(0.))
+                                                .top(px(8.))
+                                                .bottom(px(8.))
+                                                .w(px(2.))
+                                                .rounded_full()
+                                                .bg(c(th.accent)),
+                                        )
+                                    })
+                                    .child(
+                                        div()
+                                            .size(px(22.))
+                                            .flex_shrink_0()
+                                            .rounded(px(ui::R_SM))
+                                            .bg(if sel {
+                                                crate::theme::accent_bg()
+                                            } else {
+                                                crate::theme::sub_bg()
+                                            })
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .child(icon(
+                                                ic,
+                                                ui::IC_SM,
+                                                if sel { c(th.accent) } else { c(th.overlay1) },
+                                            )),
+                                    )
                                     .child(
                                         div()
                                             .flex_1()
@@ -186,15 +221,22 @@ impl Render for Palette {
                                             .overflow_hidden()
                                             .text_ellipsis()
                                             .text_size(px(ui::fs_body()))
+                                            .when(sel, |d| d.font_weight(FontWeight::MEDIUM))
                                             .text_color(c(th.text))
                                             .child(label),
                                     )
                                     .child(
                                         div()
                                             .flex_shrink_0()
-                                            .text_size(px(ui::fs_small()))
-                                            .text_color(c(th.overlay0))
-                                            .when(!query_non_empty && i > 0, |d| d.opacity(0.75))
+                                            .text_size(px(ui::fs_caption()))
+                                            .text_color(if sel {
+                                                c(th.subtext)
+                                            } else {
+                                                c(th.overlay0)
+                                            })
+                                            .when(!query_non_empty && !sel && i > 0, |d| {
+                                                d.opacity(0.82)
+                                            })
                                             .child(group),
                                     )
                                     .when(!binding.is_empty(), |d| d.child(ui::kbd(&binding))),
@@ -214,8 +256,8 @@ impl Render for Palette {
             .flex()
             .flex_col()
             .items_center()
-            .pt(px(96.))
-            .bg(gpui::black().opacity(0.12))
+            .pt(px(88.))
+            .bg(crate::theme::modal_scrim_bg())
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|_, _, _w, cx| cx.emit(PaletteEvent::Close)),
@@ -224,6 +266,8 @@ impl Render for Palette {
                 "palette-pop",
                 ui::popover()
                     .w(px(640.))
+                    .max_w(px(640.))
+                    .rounded(px(ui::R_XL))
                     .occlude()
                     .flex()
                     .flex_col()
@@ -232,6 +276,9 @@ impl Render for Palette {
                     .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, _w, cx| {
                         this.ensure_items(cx);
                         let n = this.cached.len();
+                        let ctrl = ev.keystroke.modifiers.control
+                            && !ev.keystroke.modifiers.alt
+                            && !ev.keystroke.modifiers.platform;
                         match ev.keystroke.key.as_str() {
                             "down" => {
                                 if n > 0 {
@@ -240,7 +287,21 @@ impl Render for Palette {
                                         .scroll_to_item(this.selected, gpui::ScrollStrategy::Nearest);
                                 }
                             }
+                            "n" if ctrl => {
+                                if n > 0 {
+                                    this.selected = (this.selected + 1) % n;
+                                    this.scroll
+                                        .scroll_to_item(this.selected, gpui::ScrollStrategy::Nearest);
+                                }
+                            }
                             "up" => {
+                                if n > 0 {
+                                    this.selected = (this.selected + n - 1) % n;
+                                    this.scroll
+                                        .scroll_to_item(this.selected, gpui::ScrollStrategy::Nearest);
+                                }
+                            }
+                            "p" if ctrl => {
                                 if n > 0 {
                                     this.selected = (this.selected + n - 1) % n;
                                     this.scroll
@@ -255,29 +316,75 @@ impl Render for Palette {
                     }))
                     .child(
                         div()
-                            .p_3()
+                            .h(px(48.))
+                            .px(px(ui::SP_4))
+                            .flex()
+                            .items_center()
+                            .gap(px(ui::SP_2))
                             .border_b_1()
                             .border_color(crate::theme::divider())
-                            .child(ui::search_field(&self.query, true).cleanable(false)),
+                            .child(icon(IconName::Search, ui::IC_MD, c(th.accent)))
+                            .child(
+                                div().flex_1().min_w_0().child(
+                                    gpui_component::input::Input::new(&self.query)
+                                        .appearance(false)
+                                        .w_full()
+                                        .text_size(px(ui::fs_title())),
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .px(px(7.))
+                                    .h(px(20.))
+                                    .rounded_full()
+                                    .bg(crate::theme::sub_bg())
+                                    .border_1()
+                                    .border_color(crate::theme::divider())
+                                    .flex()
+                                    .items_center()
+                                    .text_size(px(ui::fs_caption()))
+                                    .text_color(c(th.subtext))
+                                    .child(tf("palette.count", &[("n", &n)])),
+                            ),
                     )
                     .child(list)
                     .child(
                         div()
-                            .h(px(ui::H_DEFAULT))
-                            .px_3()
+                            .h(px(34.))
+                            .px(px(ui::SP_4))
+                            .bg(crate::theme::sub_bg())
                             .flex()
                             .items_center()
-                            .gap_3()
+                            .gap(px(ui::SP_4))
                             .border_t_1()
                             .border_color(crate::theme::divider())
-                            .text_size(px(ui::fs_small()))
-                            .text_color(c(th.overlay0))
-                            .child(tf("palette.count", &[("n", &n)]))
+                            .text_size(px(ui::fs_caption()))
+                            .text_color(c(th.subtext))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .child(ui::kbd("up-down"))
+                                    .child(t("ui.select")),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .child(ui::kbd("enter"))
+                                    .child(t("ui.enter_run")),
+                            )
                             .child(div().flex_1())
-                            .child(t("ui.select"))
-                            .child(t("ui.enter_run"))
-                            .child(t("ui.esc_close"))
-                            .font_weight(FontWeight::NORMAL),
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .child(ui::kbd("escape"))
+                                    .child(t("ui.esc_close")),
+                            ),
                     ),
             ))
     }

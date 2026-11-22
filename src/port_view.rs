@@ -3,7 +3,9 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use gpui::{div, prelude::*, px, Context, Entity, FontWeight, Window};
+use gpui::{
+    deferred, div, prelude::*, px, ClipboardItem, Context, Entity, FontWeight, SharedString, Window,
+};
 use gpui_component::input::InputState;
 use gpui_component::switch::Switch;
 use ssh_term_proto::forward::{self, Kind, Running, Spec, State};
@@ -13,20 +15,21 @@ use ssh_term_proto::ssh::{self, SshTarget};
 use crate::theme::{c, cur};
 use crate::ui::{self, icon, IconName};
 
-pub enum PortEvent {
-    Close,
+pub enum PortToast {
+    Toast(crate::ToastKind, String),
 }
-impl gpui::EventEmitter<PortEvent> for PortView {}
+impl gpui::EventEmitter<PortToast> for PortView {}
 
 pub struct PortView {
     rt: tokio::runtime::Handle,
     prompts: ssh::Prompts,
     pub target: Option<SshTarget>,
     pub items: Vec<Arc<Running>>,
+    pub host_filter: Option<String>,
     kind: Kind,
     auto: bool,
     fields: [Entity<InputState>; 4],
-    error: Option<String>,
+    host_menu_open: bool,
     ticking: bool,
 }
 
@@ -55,18 +58,104 @@ impl PortView {
             .into_iter()
             .map(Running::new)
             .collect();
+        let default_tg = crate::config::resolved_hosts()
+            .first()
+            .map(|(_, tg)| tg.clone());
         Self {
             rt,
             prompts,
-            target: None,
+            target: default_tg,
             items,
+            host_filter: None,
             kind: Kind::L,
             auto: false,
             fields,
-            error: None,
+            host_menu_open: false,
             ticking: false,
         }
     }
+
+    pub fn ensure_default_target(&mut self) {
+        if self.target.is_none() {
+            self.target = crate::config::resolved_hosts()
+                .first()
+                .map(|(_, tg)| tg.clone());
+        }
+    }
+
+    pub fn resolve_target(&self, host_or_label: &str) -> Option<SshTarget> {
+        if let Some(tg) = &self.target {
+            if tg.label() == host_or_label {
+                return Some(tg.clone());
+            }
+        }
+        crate::config::resolved_hosts()
+            .iter()
+            .find(|(he, tg)| he.name == host_or_label || tg.label() == host_or_label)
+            .map(|(_, tg)| tg.clone())
+    }
+
+    pub fn active_count(&self) -> usize {
+        self.items.iter().filter(|r| r.is_on()).count()
+    }
+
+    pub fn tab_title(&self) -> String {
+        let on = self.active_count();
+        if on > 0 {
+            format!("{} ({on})", t("tool.ports"))
+        } else {
+            t("tool.ports").to_string()
+        }
+    }
+
+    pub fn crumbs(&self) -> String {
+        tf(
+            "ux.pf_active_summary",
+            &[("on", &self.active_count()), ("total", &self.items.len())],
+        )
+    }
+
+    pub fn start_rule(&mut self, r: Arc<Running>, cx: &mut Context<Self>) {
+        if let Some(tg) = self.resolve_target(&r.spec.host) {
+            self.start(r, tg, cx);
+        } else {
+            cx.emit(PortToast::Toast(
+                crate::ToastKind::Error,
+                tf("pf.open_host_first", &[("h", &r.spec.host)]),
+            ));
+        }
+    }
+
+    pub fn stop_rule(&mut self, r: Arc<Running>, cx: &mut Context<Self>) {
+        self.stop(r, cx);
+    }
+
+    pub fn stop_all(&mut self, cx: &mut Context<Self>) {
+        let running: Vec<_> = self.items.iter().filter(|r| r.is_on()).cloned().collect();
+        for r in running {
+            self.stop(r, cx);
+        }
+    }
+
+    fn apply_preset(
+        &mut self,
+        kind: Kind,
+        bind_addr: &str,
+        bind_port: &str,
+        dest_host: &str,
+        dest_port: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.kind = kind;
+        let vals = [bind_addr, bind_port, dest_host, dest_port];
+        for (i, v) in vals.iter().enumerate() {
+            let s = (*v).to_string();
+            self.fields[i].update(cx, |inp, cx| inp.set_value(s, window, cx));
+        }
+        cx.notify();
+    }
+
     fn save(&self) {
         let _ = forward::save(
             &store_path(),
@@ -82,9 +171,12 @@ impl PortView {
     }
 
     fn add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_default_target();
         let Some(tg) = self.target.clone() else {
-            self.error = Some(t("pf.need_ssh").into());
-            cx.notify();
+            cx.emit(PortToast::Toast(
+                crate::ToastKind::Error,
+                t("pf.need_ssh").into(),
+            ));
             return;
         };
         let port = |s: String| s.parse::<u16>().ok();
@@ -103,11 +195,9 @@ impl PortView {
             auto_start: self.auto,
         };
         if let Err(e) = spec.validate() {
-            self.error = Some(format!("{e}"));
-            cx.notify();
+            cx.emit(PortToast::Toast(crate::ToastKind::Error, format!("{e}")));
             return;
         }
-        self.error = None;
         for i in [1, 3] {
             self.fields[i].update(cx, |s, cx| s.set_value("", window, cx));
         }
@@ -169,6 +259,23 @@ impl PortView {
     }
 }
 
+pub fn listen_addr_of(r: &Running, st: &State) -> String {
+    let port = match st {
+        State::Running { port } => *port,
+        _ => r.spec.bind_port,
+    };
+    let addr = if r.spec.bind_addr.trim().is_empty() {
+        "127.0.0.1"
+    } else {
+        r.spec.bind_addr.trim()
+    };
+    if r.spec.kind == Kind::D {
+        format!("socks5://{addr}:{port}")
+    } else {
+        format!("{addr}:{port}")
+    }
+}
+
 fn human(n: u64) -> String {
     if n < 1024 {
         format!("{n} B")
@@ -181,7 +288,138 @@ fn human(n: u64) -> String {
 
 impl Render for PortView {
     fn render(&mut self, _w: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_default_target();
         let th = cur();
+        let resolved = crate::config::resolved_hosts();
+        let cur_host_display = if let Some(tg) = &self.target {
+            let lbl = tg.label();
+            if let Some((he, _)) = resolved.iter().find(|(_, t)| t.label() == lbl) {
+                if he.name != lbl {
+                    format!("{} ({lbl})", he.name)
+                } else {
+                    lbl
+                }
+            } else {
+                lbl
+            }
+        } else {
+            t("pf.need_ssh").to_string()
+        };
+
+        let mut host_picker = div().relative().child(
+            div()
+                .id("pf-host-btn")
+                .h(px(ui::H_DEFAULT))
+                .px(px(ui::SP_2))
+                .rounded(px(ui::R_MD))
+                .bg(crate::theme::input_bg())
+                .border_1()
+                .border_color(if self.host_menu_open {
+                    c(th.accent)
+                } else {
+                    crate::theme::divider()
+                })
+                .hover(|s| s.bg(crate::theme::hover_bg()))
+                .cursor_pointer()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .on_click(cx.listener(|v, _, _, cx| {
+                    v.host_menu_open = !v.host_menu_open;
+                    cx.notify();
+                }))
+                .child(icon(IconName::Server, ui::IC_XS, c(th.accent)))
+                .child(
+                    div()
+                        .text_size(px(ui::fs_small()))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(c(th.text))
+                        .max_w(px(260.))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(cur_host_display),
+                )
+                .child(icon(IconName::ChevronDown, ui::IC_XS, c(th.overlay1))),
+        );
+
+        if self.host_menu_open && !resolved.is_empty() {
+            let sel_lbl = self.target.as_ref().map(|t| t.label()).unwrap_or_default();
+            let mut menu = ui::popover()
+                .absolute()
+                .top(px(ui::H_DEFAULT + 4.))
+                .left_0()
+                .w(px(280.))
+                .max_h(px(280.))
+                .p_1()
+                .id("pf-host-pop")
+                .overflow_y_scroll()
+                .flex()
+                .flex_col();
+            for (idx, (he, tg)) in resolved.iter().enumerate() {
+                let lbl = tg.label();
+                let is_sel = lbl == sel_lbl;
+                let tg_cl = tg.clone();
+                menu = menu.child(
+                    div()
+                        .id(("pf-host-opt", idx))
+                        .px(px(ui::SP_2))
+                        .py(px(6.))
+                        .rounded(px(ui::R_SM))
+                        .cursor_pointer()
+                        .bg(if is_sel {
+                            crate::theme::menu_sel_bg()
+                        } else {
+                            gpui::transparent_black()
+                        })
+                        .hover(|s| s.bg(crate::theme::hover_bg()))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .on_click(cx.listener(move |v, _, _, cx| {
+                            v.target = Some(tg_cl.clone());
+                            v.host_menu_open = false;
+                            cx.notify();
+                        }))
+                        .child(icon(
+                            IconName::Server,
+                            ui::IC_XS,
+                            if is_sel { c(th.accent) } else { c(th.overlay1) },
+                        ))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_size(px(ui::fs_small()))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(c(th.text))
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .child(he.name.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(ui::fs_caption()))
+                                        .text_color(c(th.overlay1))
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .child(lbl),
+                                ),
+                        )
+                        .when(is_sel, |d| {
+                            d.child(icon(IconName::Check, ui::IC_XS, c(th.accent)))
+                        }),
+                );
+            }
+            host_picker = host_picker.child(deferred(menu).with_priority(3));
+        }
+
         let labels = match self.kind {
             Kind::L => [
                 t("ui.local_address"),
@@ -197,17 +435,18 @@ impl Render for PortView {
             ],
             Kind::D => [t("ui.local_address"), t("ui.local_port"), "", ""],
         };
-        let mut inputs = div().flex().gap_3();
+        let mut inputs = div().flex().flex_wrap().items_end().gap_3();
         for (i, l) in labels.iter().enumerate() {
             if l.is_empty() {
                 continue;
             }
+            let width = if i == 1 || i == 3 { 128. } else { 176. };
             inputs = inputs.child(
                 div()
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .w(px(170.))
+                    .w(px(width))
                     .child(
                         div()
                             .text_size(px(ui::fs_small()))
@@ -217,6 +456,27 @@ impl Render for PortView {
                     .child(ui::text_field(&self.fields[i], false)),
             );
         }
+        inputs = inputs
+            .child(
+                div()
+                    .h(px(ui::H_DEFAULT))
+                    .flex()
+                    .items_center()
+                    .child(
+                        Switch::new("pf-auto")
+                            .checked(self.auto)
+                            .label(t("pf.auto_start"))
+                            .on_click(cx.listener(|v, on: &bool, _, cx| {
+                                v.auto = *on;
+                                cx.notify()
+                            })),
+                    ),
+            )
+            .child(
+                ui::button("pf-add", t("ui.add_and_start"), 1)
+                    .on_click(cx.listener(|v, _, w, cx| v.add(w, cx))),
+            );
+
         let kinds = vec![
             ("L".to_string(), t("ui.local_l").to_string()),
             ("R".to_string(), t("ui.remote_r").to_string()),
@@ -228,10 +488,30 @@ impl Render for PortView {
             Kind::D => "D",
         };
         let me = cx.entity().downgrade();
+
+        let presets: [(&'static str, &'static str, Kind, &'static str, &'static str, &'static str, &'static str); 5] = [
+            ("pf-pre-web", t("ux.pf_preset_web"), Kind::L, "127.0.0.1", "8080", "localhost", "80"),
+            ("pf-pre-mysql", t("ux.pf_preset_mysql"), Kind::L, "127.0.0.1", "3306", "127.0.0.1", "3306"),
+            ("pf-pre-pg", t("ux.pf_preset_pg"), Kind::L, "127.0.0.1", "5432", "127.0.0.1", "5432"),
+            ("pf-pre-redis", t("ux.pf_preset_redis"), Kind::L, "127.0.0.1", "6379", "127.0.0.1", "6379"),
+            ("pf-pre-socks", t("ux.pf_preset_socks"), Kind::D, "127.0.0.1", "1080", "localhost", "80"),
+        ];
+        let mut preset_row = div().flex().flex_wrap().items_center().gap(px(6.));
+        for (pid, plabel, pk, ba, bp, dh, dp) in presets {
+            preset_row = preset_row.child(
+                ui::chip(pid, plabel, false).on_click(cx.listener(move |v, _, w, cx| {
+                    v.apply_preset(pk, ba, bp, dh, dp, w, cx);
+                })),
+            );
+        }
+
         let form = div()
             .p_4()
-            .m_4()
+            .mx_4()
+            .mt_3()
+            .mb_3()
             .rounded(px(ui::R_SUB))
+            .bg(crate::theme::sub_bg())
             .border_1()
             .border_color(crate::theme::divider())
             .flex()
@@ -240,8 +520,9 @@ impl Render for PortView {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
-                    .gap_2()
+                    .gap_3()
                     .child(
                         div()
                             .text_size(px(ui::fs_body()))
@@ -251,51 +532,76 @@ impl Render for PortView {
                     )
                     .child(
                         div()
-                            .text_size(px(ui::fs_small()))
-                            .text_color(c(th.overlay1))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
                             .child(
-                                self.target
-                                    .as_ref()
-                                    .map(|t| tf("pf.on_host", &[("h", &t.label())]))
-                                    .unwrap_or_else(|| t("pf.need_ssh").into()),
-                            ),
-                    ),
+                                div()
+                                    .text_size(px(ui::fs_small()))
+                                    .text_color(c(th.overlay1))
+                                    .child(t("ux.pf_host")),
+                            )
+                            .child(host_picker),
+                    )
+                    .child(div().flex_1())
+                    .child(ui::segmented("pf-kind", &kinds, sel, move |v, _, cx| {
+                        let _ = me.update(cx, |p, cx| {
+                            p.kind = match v.as_str() {
+                                "R" => Kind::R,
+                                "D" => Kind::D,
+                                _ => Kind::L,
+                            };
+                            cx.notify()
+                        });
+                    })),
             )
-            .child(ui::segmented("pf-kind", &kinds, sel, move |v, _, cx| {
-                let _ = me.update(cx, |p, cx| {
-                    p.kind = match v.as_str() {
-                        "R" => Kind::R,
-                        "D" => Kind::D,
-                        _ => Kind::L,
-                    };
-                    cx.notify()
-                });
-            }))
-            .child(inputs)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(
-                        Switch::new("pf-auto")
-                            .checked(self.auto)
-                            .label(t("pf.auto_start"))
-                            .on_click(cx.listener(|v, on: &bool, _, cx| {
-                                v.auto = *on;
-                                cx.notify()
-                            })),
-                    )
-                    .child(
-                        ui::button("pf-add", t("ui.add_and_start"), 1)
-                            .on_click(cx.listener(|v, _, w, cx| v.add(w, cx))),
-                    )
-                    .children(
-                        self.error
-                            .clone()
-                            .map(|e| ui::notice(ui::Notice::Error, e).mx_0()),
-                    ),
+            .child(preset_row)
+            .child(inputs);
+
+        // Distinct hosts across saved rules for quick host filtering
+        let mut distinct_hosts: Vec<String> = Vec::new();
+        for r in &self.items {
+            if !distinct_hosts.iter().any(|h| h == &r.spec.host) {
+                distinct_hosts.push(r.spec.host.clone());
+            }
+        }
+        let show_host_chips = distinct_hosts.len() >= 2 || self.host_filter.is_some();
+        let mut filter_bar = div().mx_4().mb_2().flex().flex_wrap().items_center().gap(px(6.));
+        if show_host_chips {
+            let all_on = self.host_filter.is_none();
+            filter_bar = filter_bar.child(
+                ui::chip("pf-hf-all", t("ux.pf_all_hosts"), all_on).on_click(cx.listener(
+                    |v, _, _, cx| {
+                        v.host_filter = None;
+                        cx.notify();
+                    },
+                )),
             );
+            for (hi, hname) in distinct_hosts.iter().enumerate() {
+                let on = self.host_filter.as_deref() == Some(hname.as_str());
+                let h_cl = hname.clone();
+                filter_bar = filter_bar.child(
+                    ui::chip(SharedString::from(format!("pf-hf-{hi}")), hname.clone(), on)
+                        .on_click(cx.listener(move |v, _, _, cx| {
+                            v.host_filter = Some(h_cl.clone());
+                            cx.notify();
+                        })),
+                );
+            }
+        }
+
+        let visible_items: Vec<(usize, Arc<Running>)> = self
+            .items
+            .iter()
+            .cloned()
+            .enumerate()
+            .filter(|(_, r)| {
+                self.host_filter
+                    .as_deref()
+                    .is_none_or(|hf| r.spec.host == hf)
+            })
+            .collect();
+
         let mut list = div()
             .id("pf-list")
             .mx_4()
@@ -307,7 +613,7 @@ impl Render for PortView {
             .rounded(px(ui::R_SUB))
             .border_1()
             .border_color(crate::theme::divider());
-        if self.items.is_empty() {
+        if visible_items.is_empty() {
             list = list.child(ui::empty_state(
                 IconName::ArrowLeftRight,
                 t("ui.no_port_forwards"),
@@ -316,7 +622,7 @@ impl Render for PortView {
                 true,
             ));
         }
-        for (i, r) in self.items.iter().enumerate() {
+        for (row_idx, (i, r)) in visible_items.into_iter().enumerate() {
             let st = r.state();
             let (label, col) = match &st {
                 State::Stopped => (t("pf.stopped").to_string(), c(th.overlay1)),
@@ -326,6 +632,7 @@ impl Render for PortView {
             };
             let on = r.is_on();
             let (r1, r2) = (r.clone(), r.clone());
+            let listen_addr = listen_addr_of(&r, &st);
             let stats = tf(
                 "pf.stats",
                 &[
@@ -341,7 +648,8 @@ impl Render for PortView {
                     .flex()
                     .items_center()
                     .gap_3()
-                    .when(i > 0, |d| {
+                    .hover(|s| s.bg(crate::theme::hover_bg()))
+                    .when(row_idx > 0, |d| {
                         d.border_t_1().border_color(crate::theme::divider())
                     })
                     .text_size(px(ui::fs_body()))
@@ -350,9 +658,10 @@ impl Render for PortView {
                     .child(
                         div()
                             .flex_1()
+                            .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(div().child(r.spec.describe()))
+                            .child(div().font_weight(FontWeight::MEDIUM).child(r.spec.describe()))
                             .child(diagram(
                                 &r.spec,
                                 match &st {
@@ -389,25 +698,30 @@ impl Render for PortView {
                             ),
                     )
                     .child(ui::tag(label, col))
+                    .child(
+                        ui::icon_button(
+                            ("pf-copy", i),
+                            IconName::Copy,
+                            ui::IconBtn::Sm,
+                            t("ux.pf_copy_addr"),
+                        )
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(listen_addr.clone()));
+                            cx.emit(PortToast::Toast(
+                                crate::ToastKind::Success,
+                                tf("ux.pf_copied_addr", &[("addr", &listen_addr)]),
+                            ));
+                        })),
+                    )
                     .child(if on {
-                        ui::button(("pf-stop", i), t("pf.stop"), 0)
-                            .on_click(cx.listener(move |v, _, _, cx| v.stop(r1.clone(), cx)))
+                        ui::button_sm(("pf-stop", i), t("pf.stop"), 0)
+                            .on_click(cx.listener(move |v, _, _, cx| v.stop_rule(r1.clone(), cx)))
                     } else {
-                        ui::button(("pf-start", i), t("pf.start"), 1).on_click(cx.listener(
-                            move |v, _, _, cx| match v.target.clone() {
-                                Some(tg) if tg.label() == r1.spec.host => {
-                                    v.start(r1.clone(), tg, cx)
-                                }
-                                _ => {
-                                    v.error =
-                                        Some(tf("pf.open_host_first", &[("h", &r1.spec.host)]));
-                                    cx.notify()
-                                }
-                            },
-                        ))
+                        ui::button_sm(("pf-start", i), t("pf.start"), 1)
+                            .on_click(cx.listener(move |v, _, _, cx| v.start_rule(r1.clone(), cx)))
                     })
                     .child(
-                        ui::button(("pf-del", i), t("sftp.delete"), 2).on_click(cx.listener(
+                        ui::button_sm(("pf-del", i), t("sftp.delete"), 2).on_click(cx.listener(
                             move |v, _, _, cx| {
                                 let r = r2.clone();
                                 v.stop(r.clone(), cx);
@@ -419,23 +733,55 @@ impl Render for PortView {
                     ),
             );
         }
-        ui::card(980.)
-            .h(px(640.))
-            .child(ui::dialog_header(
-                Some(IconName::ArrowLeftRight),
-                c(cur().accent),
-                t("ui.port_forwarding"),
-                Some(t("pf.subtitle").into()),
-                Some(ui::dialog_close("pf-close", {
-                    let me2 = cx.entity().downgrade();
-                    move |_w, cx| {
-                        let _ = me2.update(cx, |_, cx| cx.emit(PortEvent::Close));
-                    }
-                })),
+
+        let active_n = self.active_count();
+        let summary = self.crumbs();
+        let mut bar = ui::toolbar()
+            .child(icon(IconName::ArrowLeftRight, ui::IC_SM, c(th.accent)))
+            .child(
+                div()
+                    .text_size(px(ui::fs_body()))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(c(th.text))
+                    .child(t("ui.port_forwarding")),
+            )
+            .child(ui::tag(
+                summary,
+                if active_n > 0 {
+                    c(th.success)
+                } else {
+                    c(th.overlay1)
+                },
             ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(ui::fs_small()))
+                    .text_color(c(th.overlay1))
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .child(t("pf.subtitle")),
+            );
+        if active_n > 0 {
+            bar = bar.child(
+                ui::button_sm("pf-stop-all", t("ux.pf_stop_all"), 2)
+                    .on_click(cx.listener(|v, _, _, cx| v.stop_all(cx))),
+            );
+        }
+
+        div()
+            .flex_1()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(bar)
             .child(form)
+            .when(show_host_chips, |d| d.child(filter_bar))
             .child(list)
-            .child(div().h(px(16.)))
+            .child(div().h(px(12.)))
+            .into_any_element()
     }
 }
 
@@ -517,6 +863,7 @@ fn diagram(
     div()
         .mt_1()
         .flex()
+        .flex_wrap()
         .items_center()
         .gap_1()
         .child(boxn(0, &nodes[0].1, &nodes[0].2))

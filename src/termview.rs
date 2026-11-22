@@ -901,6 +901,15 @@ fn char_to_byte_ranges(s: &str, hl: &[(usize, usize)]) -> Vec<std::ops::Range<us
 }
 
 // ---------------------------------------------------------------- pane
+/// Validated local Agent conversation queued to auto-resume when its restored tab becomes visible.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingAgentResume {
+    pub agent_id: String,
+    pub session_id: String,
+    pub transcript_path: Option<String>,
+    pub cmd: String,
+}
+
 pub struct TermView {
     /// SFTP browser hosted in this layout leaf (PRD 5.21 tab/split mode); no shell session then.
     pub sftp: Option<Entity<crate::sftp_view::SftpView>>,
@@ -954,11 +963,17 @@ pub struct TermView {
     pub pending_paste: Option<String>,
     /// `cd` line to send once the shell is connected (saved directory).
     pending_cd: Option<String>,
+    /// Directory requested when this pane was opened (fallback before shell cwd probes arrive).
+    pub initial_cwd: Option<String>,
     pub ai: Option<AiCard>,
     /// Local pane held by the keep-alive daemon (id there).
     pub daemon_id: Option<String>,
+    /// True when this pane reattached to an already-running daemon PTY on startup.
+    pub reattached_daemon: bool,
     /// After a layout restore: agent resume command offered as a button (never auto-run).
     pub resume_offer: Option<String>,
+    /// Restored local Agent conversation waiting to auto-resume when its tab is activated.
+    pub pending_agent_resume: Option<PendingAgentResume>,
     /// OSC 52 write waiting for the user (terminal.osc52_write = ask)
     pub clip_ask: Option<String>,
     /// AI input held back for a pane running an external agent (write_to_pty = ask):
@@ -1135,8 +1150,9 @@ impl TermView {
         }));
         me._subs
             .push(cx.subscribe(&v, |_, _, ev: &crate::db_view::DbEvent, cx| {
-                let crate::db_view::DbEvent::Refresh(k) = ev;
-                cx.emit(TermEvent::RefreshDb(k.clone()));
+                if let crate::db_view::DbEvent::Refresh(k) = ev {
+                    cx.emit(TermEvent::RefreshDb(k.clone()));
+                }
             }));
         me.db = Some(v);
         me
@@ -1407,9 +1423,12 @@ impl TermView {
             detect_scheduled: false,
             pending_paste: None,
             pending_cd: None,
+            initial_cwd: None,
             ai: None,
             daemon_id: None,
+            reattached_daemon: false,
             resume_offer: None,
+            pending_agent_resume: None,
             clip_ask: None,
             pty_ask: None,
             pty_write_ok: false,
@@ -1901,7 +1920,9 @@ impl TermView {
             }
             (None, Some((ni, ns))) => {
                 self.agent_state_since = Instant::now();
-                self.agent_started_unix = now_unix_secs();
+                if self.agent_started_unix == 0 {
+                    self.agent_started_unix = now_unix_secs();
+                }
                 if ns != AgentState::Unknown {
                     cx.emit(TermEvent::Agent(
                         agent::display_name(&self.manifests[ni].id).to_string(),
@@ -2036,25 +2057,72 @@ impl TermView {
         cx.notify();
     }
 
+    fn last_agent_id(&self) -> Option<String> {
+        let last = self.last_agent.as_deref()?.trim().to_ascii_lowercase();
+        if last.is_empty() {
+            return None;
+        }
+        self.manifests
+            .iter()
+            .find(|m| {
+                agent::display_name(&m.id).to_ascii_lowercase() == last
+                    || m.id == last
+                    || m.aliases.iter().any(|a| a.eq_ignore_ascii_case(&last))
+            })
+            .map(|m| agent::normalize_id(&m.id))
+            .or_else(|| Some(agent::normalize_id(&last)))
+    }
+
+    /// Best known normalized agent id across live detection, launch intent, pending lazy resume,
+    /// and last seen agent.
+    pub fn resolved_agent_id(&self) -> Option<String> {
+        self.agent_id()
+            .or_else(|| self.launched_agent_id.clone())
+            .or_else(|| self.pending_agent_resume.as_ref().map(|p| p.agent_id.clone()))
+            .or_else(|| self.last_agent_id())
+            .map(|a| agent::normalize_id(&a))
+            .filter(|a| !a.is_empty())
+    }
+
+    /// Structured Agent session snapshot persisted in `layout.json` so restarts preserve bindings,
+    /// titles, context rings, and validated conversation resume commands.
+    pub fn saved_agent_session(&self) -> Option<ssh_term_proto::session_store::SavedAgentSession> {
+        let agent_id = self.resolved_agent_id();
+        let session_id = self
+            .agent_session_id
+            .clone()
+            .or_else(|| self.pending_agent_resume.as_ref().map(|p| p.session_id.clone()))
+            .filter(|s| !s.trim().is_empty());
+        let transcript_path = self
+            .agent_transcript_path
+            .clone()
+            .or_else(|| {
+                self.pending_agent_resume
+                    .as_ref()
+                    .and_then(|p| p.transcript_path.clone())
+            })
+            .filter(|s| !s.trim().is_empty());
+        if agent_id.is_none() && session_id.is_none() && transcript_path.is_none() {
+            return None;
+        }
+        Some(ssh_term_proto::session_store::SavedAgentSession {
+            agent_id,
+            session_id,
+            transcript_path,
+            auto_title: self.auto_title,
+        })
+    }
+
     /// Resume command saved into layout snapshots: prefers exact session ID (`agent_resume::plan`),
     /// falling back to generic `--continue` / `resume --last`.
     pub fn resume_command_for_snapshot(&self) -> Option<String> {
-        let aid = self
-            .agent_id()
-            .or_else(|| {
-                let last = self.last_agent.as_deref()?.to_ascii_lowercase();
-                self.manifests
-                    .iter()
-                    .find(|m| agent::display_name(&m.id).to_ascii_lowercase() == last || m.id == last)
-                    .map(|m| m.id.clone())
-            })?;
+        if let Some(pending) = &self.pending_agent_resume {
+            return Some(pending.cmd.clone());
+        }
+        let aid = self.resolved_agent_id()?;
         if let Some(sid) = self.agent_session_id.as_deref() {
-            if let Some(sref) = ssh_term_proto::agent_resume::AgentSessionRef::id(sid) {
-                if let Some(plan) = ssh_term_proto::agent_resume::plan(&aid, &sref) {
-                    if let Some(cmd) = ssh_term_proto::agent_resume::shell_line(&plan.argv) {
-                        return Some(cmd);
-                    }
-                }
+            if let Some(cmd) = ssh_term_proto::agent_resume::build_validated_resume_line(&aid, sid) {
+                return Some(cmd);
             }
         }
         ssh_term_proto::agent_resume::fallback_continue_command(&aid)
@@ -3806,9 +3874,9 @@ fn clip_caption(s: &str) -> String {
                 .right(px(12.))
                 .p_3()
                 .rounded(px(ui::R_LG))
-                .bg(c(th.base).opacity(0.97))
+                .bg(crate::theme::overlay_card_bg(1.0))
                 .border_1()
-                .border_color(crate::theme::divider())
+                .border_color(crate::theme::overlay_border())
                 .shadow(crate::chrome::soft_shadow(true))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .flex()
@@ -5038,7 +5106,7 @@ impl Render for TermView {
                         .text_size(px(ui::fs_body()))
                         .font_weight(FontWeight::SEMIBOLD)
                         .bg(c(th.error).opacity(0.92))
-                        .text_color(c(th.base))
+                        .text_color(crate::theme::on_color(th.error))
                         .child(tf("bc.banner", &[("n", &broadcast_count())])),
                 );
                 body = body.child(
@@ -5112,9 +5180,9 @@ impl Render for TermView {
                                 .w(px(360.))
                                 .p_4()
                                 .rounded(px(ui::R_LG))
-                                .bg(c(th.base).opacity(0.97))
+                                .bg(crate::theme::overlay_card_bg(1.0))
                                 .border_1()
-                                .border_color(crate::theme::divider())
+                                .border_color(crate::theme::overlay_border())
                                 .shadow(crate::chrome::soft_shadow(true))
                                 .flex()
                                 .flex_col()
@@ -5183,16 +5251,16 @@ impl Render for TermView {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .bg(c(th.base).opacity(0.6))
+                    .bg(crate::theme::modal_scrim_bg())
                     .child(
                         div()
                             .w(px(420.))
                             .max_w(gpui::relative(0.9))
                             .p_4()
                             .rounded(px(ui::R_LG))
-                            .bg(c(th.base).opacity(0.97))
+                            .bg(crate::theme::overlay_card_bg(1.0))
                             .border_1()
-                            .border_color(crate::theme::divider())
+                            .border_color(crate::theme::overlay_border())
                             .shadow(crate::chrome::soft_shadow(true))
                             .flex()
                             .flex_col()
@@ -5231,9 +5299,9 @@ impl Render for TermView {
                         .right(px(12.))
                         .p_3()
                         .rounded(px(ui::R_LG))
-                        .bg(c(th.base).opacity(0.97))
+                        .bg(crate::theme::overlay_card_bg(1.0))
                         .border_1()
-                        .border_color(crate::theme::divider())
+                        .border_color(crate::theme::overlay_border())
                         .shadow(crate::chrome::soft_shadow(true))
                         .flex()
                         .items_center()
@@ -5301,22 +5369,24 @@ impl Render for TermView {
         if let Some(card) = self.ai_card(cx) {
             body = body.child(card);
         }
-        if let Some(cmd) = self
-            .resume_offer
-            .clone()
-            .filter(|_| config::get().session.prompt_resume_agent)
-        {
+        if let Some(cmd) = self.resume_offer.clone().filter(|_| {
+            self.pending_agent_resume.is_none()
+                && self.agent.is_none()
+                && (config::get().session.prompt_resume_agent
+                    || self.ws == Some(crate::activity::Tool::Agents))
+        }) {
             body = body.child(
                 div()
                     .absolute()
                     .bottom(px(12.))
                     .left(px(12.))
                     .right(px(12.))
-                    .p_2()
+                    .px_3()
+                    .py_2()
                     .rounded(px(ui::R_LG))
-                    .bg(c(th.base).opacity(0.97))
+                    .bg(crate::theme::overlay_card_bg(0.95))
                     .border_1()
-                    .border_color(c(th.accent))
+                    .border_color(crate::theme::active_border())
                     .shadow(crate::chrome::soft_shadow(true))
                     .flex()
                     .flex_wrap()
@@ -5331,7 +5401,33 @@ impl Render for TermView {
                                 if let (Some(cmd), Some(s)) =
                                     (v.resume_offer.take(), v.session.clone())
                                 {
-                                    s.write(format!("{cmd}\r").into_bytes());
+                                    if let Some((aid, sref)) =
+                                        ssh_term_proto::agent_resume::parse_resume_command(&cmd)
+                                    {
+                                        v.set_launched_agent(&aid);
+                                        v.agent_started_unix = now_unix_secs();
+                                        if let Some(r) = sref {
+                                            if v.agent_session_id.is_none() {
+                                                v.agent_session_id = Some(r.value);
+                                            }
+                                        }
+                                    }
+                                    if s.is_shell_prompt_ready() {
+                                        s.write(format!("{cmd}\r").into_bytes());
+                                    } else {
+                                        cx.spawn(async move |_, cx| {
+                                            let start = Instant::now();
+                                            while !s.is_shell_prompt_ready()
+                                                && start.elapsed() < Duration::from_millis(2200)
+                                            {
+                                                cx.background_executor()
+                                                    .timer(Duration::from_millis(60))
+                                                    .await;
+                                            }
+                                            s.write(format!("{cmd}\r").into_bytes());
+                                        })
+                                        .detach();
+                                    }
                                 }
                                 cx.notify();
                             }),
@@ -5358,19 +5454,20 @@ impl Render for TermView {
                     .id("search-bar")
                     .occlude()
                     .absolute()
-                    .top(px(6.))
-                    .right(px(16.))
-                    .w(px(360.))
+                    .top(px(8.))
+                    .right(px(14.))
+                    .w(px(340.))
                     .max_w(gpui::relative(0.9))
-                    .p_2()
+                    .px(px(10.))
+                    .py(px(5.))
                     .rounded(px(ui::R_LG))
-                    .bg(c(th.base).opacity(0.97))
+                    .bg(crate::theme::overlay_card_bg(1.0))
                     .border_1()
-                    .border_color(c(th.accent))
+                    .border_color(crate::theme::overlay_border())
                     .shadow(crate::chrome::soft_shadow(true))
                     .flex()
                     .items_center()
-                    .gap_2()
+                    .gap(px(6.))
                     .text_size(px(ui::fs_small()))
                     .text_color(c(th.text))
                     .child(crate::ui::icon(
@@ -5381,14 +5478,23 @@ impl Render for TermView {
                     .child(
                         div()
                             .flex_1()
-                            .px_1()
+                            .min_w_0()
+                            .px(px(6.))
+                            .py(px(2.))
                             .rounded(px(ui::R_SM))
-                            .bg(c(th.base))
+                            .bg(crate::theme::input_bg())
+                            .border_1()
+                            .border_color(crate::theme::input_border())
                             .font_family(ui::mono_family())
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
                             .child(format!("{}▏", bar.query)),
                     )
                     .child(
                         div()
+                            .flex_shrink_0()
+                            .text_size(px(ui::fs_caption()))
                             .text_color(if bar.found == Some(false) {
                                 c(th.error)
                             } else {
@@ -5397,31 +5503,34 @@ impl Render for TermView {
                             .child(status),
                     )
                     .child(
-                        div()
-                            .id("search-prev")
-                            .px_1()
-                            .cursor_pointer()
-                            .child("↑")
-                            .on_click(cx.listener(|v, _, _w, cx| v.search_step(false, cx))),
+                        ui::icon_button(
+                            "search-prev",
+                            crate::ui::IconName::ChevronUp,
+                            ui::IconBtn::Sm,
+                            "",
+                        )
+                        .on_click(cx.listener(|v, _, _w, cx| v.search_step(false, cx))),
                     )
                     .child(
-                        div()
-                            .id("search-next")
-                            .px_1()
-                            .cursor_pointer()
-                            .child("↓")
-                            .on_click(cx.listener(|v, _, _w, cx| v.search_step(true, cx))),
+                        ui::icon_button(
+                            "search-next",
+                            crate::ui::IconName::ChevronDown,
+                            ui::IconBtn::Sm,
+                            "",
+                        )
+                        .on_click(cx.listener(|v, _, _w, cx| v.search_step(true, cx))),
                     )
                     .child(
-                        div()
-                            .id("search-close")
-                            .px_1()
-                            .cursor_pointer()
-                            .child("✕")
-                            .on_click(cx.listener(|v, _, _w, cx| {
-                                v.search = None;
-                                cx.notify();
-                            })),
+                        ui::icon_button(
+                            "search-close",
+                            crate::ui::IconName::X,
+                            ui::IconBtn::Sm,
+                            t("ui.close"),
+                        )
+                        .on_click(cx.listener(|v, _, _w, cx| {
+                            v.search = None;
+                            cx.notify();
+                        })),
                     ),
             );
         }
@@ -5452,9 +5561,9 @@ impl Render for TermView {
                         .right(px(12.))
                         .p_2()
                         .rounded(px(ui::R_LG))
-                        .bg(c(th.base).opacity(0.97))
+                        .bg(crate::theme::overlay_card_bg(1.0))
                         .border_1()
-                        .border_color(crate::theme::divider())
+                        .border_color(crate::theme::overlay_border())
                         .shadow(crate::chrome::soft_shadow(true))
                         .flex()
                         .flex_wrap()
@@ -5509,9 +5618,9 @@ impl Render for TermView {
                     .right(px(12.))
                     .p_2()
                     .rounded(px(ui::R_LG))
-                    .bg(c(th.base).opacity(0.97))
+                    .bg(crate::theme::overlay_card_bg(1.0))
                     .border_1()
-                    .border_color(crate::theme::divider())
+                    .border_color(crate::theme::overlay_border())
                     .shadow(crate::chrome::soft_shadow(true))
                     .flex()
                     .flex_wrap()
@@ -5552,9 +5661,9 @@ impl Render for TermView {
                     .right(px(12.))
                     .p_2()
                     .rounded(px(ui::R_LG))
-                    .bg(c(th.base).opacity(0.97))
+                    .bg(crate::theme::overlay_card_bg(1.0))
                     .border_1()
-                    .border_color(crate::theme::divider())
+                    .border_color(crate::theme::overlay_border())
                     .shadow(crate::chrome::soft_shadow(true))
                     .flex()
                     .flex_col()
@@ -5633,9 +5742,9 @@ impl Render for TermView {
                     .right(px(12.))
                     .p_2()
                     .rounded(px(ui::R_LG))
-                    .bg(c(th.base).opacity(0.97))
+                    .bg(crate::theme::overlay_card_bg(1.0))
                     .border_1()
-                    .border_color(crate::theme::divider())
+                    .border_color(crate::theme::overlay_border())
                     .shadow(crate::chrome::soft_shadow(true))
                     .text_size(px(ui::fs_body()))
                     .text_color(c(th.error))
@@ -6154,6 +6263,7 @@ pub enum Embed {
     Gone(Entity<crate::kv_ui::GoneView>),
     Tool(Entity<crate::tools_view::ToolView>),
     Brew(Entity<crate::brew_view::BrewView>),
+    Port(Entity<crate::port_view::PortView>),
 }
 
 impl Embed {
@@ -6166,6 +6276,7 @@ impl Embed {
             Embed::Gone(v) => v.clone().into(),
             Embed::Tool(v) => v.clone().into(),
             Embed::Brew(v) => v.clone().into(),
+            Embed::Port(v) => v.clone().into(),
         }
     }
     pub fn title(&self, cx: &gpui::App) -> String {
@@ -6177,6 +6288,7 @@ impl Embed {
             Embed::Gone(v) => v.read(cx).what.clone(),
             Embed::Tool(v) => v.read(cx).title.clone(),
             Embed::Brew(v) => v.read(cx).tab_label(cx),
+            Embed::Port(v) => v.read(cx).tab_title(),
         }
     }
     pub fn crumbs(&self, cx: &gpui::App) -> String {
@@ -6188,6 +6300,7 @@ impl Embed {
             Embed::Gone(v) => v.read(cx).what.clone(),
             Embed::Tool(v) => v.read(cx).title.clone(),
             Embed::Brew(v) => v.read(cx).crumbs(cx),
+            Embed::Port(v) => v.read(cx).crumbs(),
         }
     }
     pub fn badge(&self) -> &'static str {
@@ -6198,6 +6311,7 @@ impl Embed {
             Embed::Gone(_) => "—",
             Embed::Tool(_) => t("tool.tools"),
             Embed::Brew(_) => t("tool.brew"),
+            Embed::Port(_) => t("tool.ports"),
         }
     }
     /// Layout entry; `None` for a placeholder (the tab is dropped on save).
@@ -6208,7 +6322,7 @@ impl Embed {
             Embed::Log(v) => Some(v.read(cx).save()),
             Embed::Mongo(v) => Some(v.read(cx).save()),
             Embed::Gone(v) => v.read(cx).save.clone(),
-            Embed::Tool(_) | Embed::Brew(_) => None,
+            Embed::Tool(_) | Embed::Brew(_) | Embed::Port(_) => None,
         }
     }
 }

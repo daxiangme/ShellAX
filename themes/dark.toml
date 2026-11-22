@@ -1,19 +1,18 @@
-# Dark — original ShellAX theme. UI tokens follow system dark-mode colors; terminal
-# palette approximates Terminal.app's dark profiles (blue lifted for contrast on dark background).
+# Dark — macOS Sequoia / Linear harmonious charcoal-slate dark theme.
 name = "Dark"
 appearance = "dark"
 
 [ui]
-crust = "#2b2b2e"
-mantle = "#262628"
-base = "#1e1e1f"
-surface0 = "#3a3a3c"
-surface1 = "#48484a"
-surface2 = "#5e5e62"
-overlay0 = "#8e8e93"
-overlay1 = "#98989d"
-text = "#f5f5f7"
-subtext = "#aeaeb2"
+crust = "#17181c"
+mantle = "#1b1c21"
+base = "#1f2127"
+surface0 = "#282b33"
+surface1 = "#323640"
+surface2 = "#414652"
+overlay0 = "#707785"
+overlay1 = "#949ba8"
+text = "#f0f2f5"
+subtext = "#a5acb8"
 accent = "#0a84ff"
 success = "#30d158"
 error = "#ff453a"
@@ -21,11 +20,11 @@ warning = "#ff9f0a"
 info = "#64d2ff"
 
 [terminal]
-foreground = "#e6e6e6"
-background = "#1e1e1f"
-cursor = "#bfbfbf"
-cursor_text = "#1e1e1f"
-selection = "#3f638b"
-suggestion = "#6e6e73"
-ansi = ["#000000","#c23621","#25bc24","#adad27","#4d6bff","#d338d3","#33bbc8","#cbcccd",
-        "#818383","#fc391f","#31e722","#eaec23","#5c7cff","#f935f8","#14f0f0","#e9ebeb"]
+foreground = "#e6e9ef"
+background = "#1f2127"
+cursor = "#e6e9ef"
+cursor_text = "#17181c"
+selection = "#2b4c75"
+suggestion = "#6c7382"
+ansi = ["#23262e","#f85149","#3fb950","#d29922","#58a6ff","#bc8cff","#39c5cf","#c9d1d9",
+        "#6e7681","#ff7b72","#56d364","#e3b341","#79c0ff","#d2a8ff","#56d4dd","#f0f6fc"]

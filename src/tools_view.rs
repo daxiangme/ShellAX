@@ -256,8 +256,24 @@ impl ToolView {
             rt,
             _subs: subs,
         };
-        if me.spec.live && !me.spec.interactive && !me.spec.heavy {
+        if (me.spec.live && !me.spec.interactive && !me.spec.heavy)
+            || me.spec.id == "ifaces"
+            || (tools::has_history(&me.spec.id)
+                && me.spec.inputs.is_empty()
+                && me.hist.borrow().is_empty())
+        {
             me.run(cx);
+        }
+        if me.spec.id == "timestamp" {
+            cx.spawn(async move |this, cx| loop {
+                cx.background_executor()
+                    .timer(Duration::from_secs(1))
+                    .await;
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            })
+            .detach();
         }
         me
     }
@@ -496,7 +512,7 @@ impl ToolView {
         cx.notify();
     }
 
-    /// 把当前结果放回第一个输入框并重新运行（加密后再解密、格式化后再压缩等来回操作）。
+    /// 把当前结果放回第一个输入框并重新运行（加密后再解密、格式化后再压缩等来回操作，自动翻转双向开关）。
     fn swap(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.output_text();
         let Some(f) = self.spec.inputs.first().cloned() else {
@@ -505,8 +521,118 @@ impl ToolView {
         if !self.areas.contains_key(&f.id) && !self.tareas.contains_key(&f.id) {
             return;
         }
+        if let Some(dir) = self.picks.get("dir").cloned() {
+            let flipped = match dir.as_str() {
+                "enc" | "enc_uri" => Some("dec"),
+                "dec" => Some("enc"),
+                _ => None,
+            };
+            if let Some(next) = flipped {
+                self.picks.insert("dir".into(), next.into());
+            }
+        } else if let Some(mode) = self.picks.get("mode").cloned() {
+            let flipped = match (self.spec.id.as_str(), mode.as_str()) {
+                ("go_json", "json2go") => Some("go2json"),
+                ("go_json", "go2json") => Some("json2go"),
+                ("plural", "plural") => Some("singular"),
+                ("plural", "singular") => Some("plural"),
+                ("json" | "sql" | "css" | "html", "pretty") => Some("minify"),
+                ("json" | "sql" | "css" | "html", "minify") => Some("pretty"),
+                _ => None,
+            };
+            if let Some(next) = flipped {
+                self.picks.insert("mode".into(), next.into());
+            }
+        }
         self.set_field(&f.id, text, window, cx);
         self.run(cx);
+    }
+
+    fn paste_field(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        self.set_field(id, text, window, cx);
+        if !self.spec.heavy || self.spec.id == "ip_lookup" || self.spec.id == "ip_latency" {
+            self.run(cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    fn fill_sample(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mode = self.picks.get("mode").map(|s| s.as_str()).unwrap_or("");
+        let dir = self.picks.get("dir").map(|s| s.as_str()).unwrap_or("");
+        match self.spec.id.as_str() {
+            "regex" => {
+                self.set_field(
+                    "pattern",
+                    r"(?P<user>[a-zA-Z0-9._%+-]+)@(?P<host>[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})".into(),
+                    window,
+                    cx,
+                );
+                self.set_field(
+                    "input",
+                    "Contact ops@shellax.dev or support@example.org for SSH access.".into(),
+                    window,
+                    cx,
+                );
+                self.set_field("replace", "[$user at $host]".into(), window, cx);
+                self.run(cx);
+                return;
+            }
+            "hmac" => {
+                self.set_field("input", "GET /v1/sessions?limit=20".into(), window, cx);
+                self.set_field("key", "sk_live_shellax_secret_2026".into(), window, cx);
+                self.run(cx);
+                return;
+            }
+            _ => {}
+        }
+        let Some(sample) = tool_sample(&self.spec.id, mode, dir) else {
+            return;
+        };
+        if let Some(f) = self.spec.inputs.first().cloned() {
+            self.set_field(&f.id, sample.into(), window, cx);
+            self.run(cx);
+        }
+    }
+
+    fn gen_random_field(
+        &mut self,
+        id: &str,
+        len: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let hex_mode = self.picks.get("keymode").map(|s| s.as_str()) == Some("hex");
+        let alphabet: &[u8] = if hex_mode {
+            b"0123456789abcdef"
+        } else {
+            b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+        };
+        let n = if hex_mode { len * 2 } else { len };
+        let mut seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x9e3779b97f4a7c15)
+            ^ (self.seq.wrapping_mul(0x517cc1b727220a95));
+        let mut s = String::with_capacity(n);
+        for _ in 0..n {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            s.push(alphabet[(seed as usize) % alphabet.len()] as char);
+        }
+        self.set_field(id, s, window, cx);
+        if self.spec.live {
+            self.run(cx);
+        } else {
+            cx.notify();
+        }
     }
 
     /// 清空历史（只清结果，输入与选项都保留）。
@@ -662,6 +788,20 @@ impl ToolView {
         }
     }
 
+    fn set_pick_in(
+        &mut self,
+        id: String,
+        v: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.spec.id == "units" && id == "kind" {
+            let def_unit = default_unit_for(&v);
+            self.set_field("from", def_unit.into(), window, cx);
+        }
+        self.set_pick(id, v, cx);
+    }
+
     // ---------------- WebSocket
     fn ws_toggle(&mut self, cx: &mut Context<Self>) {
         let Some(w) = &mut self.ws else { return };
@@ -746,6 +886,54 @@ impl ToolView {
         let th = cur();
         let w = self.ws.as_ref().unwrap();
         let connected = w.tx.is_some();
+        let is_open = w.open;
+        let msg_count = w.log.len();
+        let status_col = if is_open {
+            c(th.success)
+        } else if connected {
+            c(th.warning)
+        } else {
+            c(th.overlay1)
+        };
+        let status_txt = if is_open {
+            t("ux.ws_connected")
+        } else if connected {
+            t("tools.ui_running")
+        } else {
+            t("ux.ws_disconnected")
+        };
+        let mut presets = div().flex().items_center().flex_wrap().gap(px(ui::SP_1));
+        for (i, url) in [
+            "wss://echo.websocket.org",
+            "ws://127.0.0.1:8080",
+            "ws://localhost:3000/ws",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let u = url.to_string();
+            presets = presets.child(
+                ui::chip(("ws-pre", i), url, false).on_click(cx.listener(
+                    move |this, _, win, cx| {
+                        if let Some(ws) = &this.ws {
+                            ws.url.update(cx, |s, cx| s.set_value(u.clone(), win, cx));
+                        }
+                        cx.notify();
+                    },
+                )),
+            );
+        }
+        presets = presets
+            .child(div().flex_1())
+            .child(ui::tag(status_txt, status_col))
+            .when(msg_count > 0, |d| {
+                d.child(
+                    div()
+                        .text_size(px(ui::fs_caption()))
+                        .text_color(c(th.overlay1))
+                        .child(tf("ux.ws_msgs", &[("n", &msg_count)])),
+                )
+            });
         let bar = div()
             .flex()
             .items_center()
@@ -769,7 +957,18 @@ impl ToolView {
             .gap_2()
             .child(div().flex_1().child(ui::text_field(&w.msg, false)))
             .child(
-                ui::button("ws-send", t("tools.ws_send"), 0)
+                ui::button("ws-paste", t("ux.paste"), 0).on_click(cx.listener(
+                    |this, _, win, cx| {
+                        if let (Some(ws), Some(txt)) =
+                            (&this.ws, cx.read_from_clipboard().and_then(|c| c.text()))
+                        {
+                            ws.msg.update(cx, |s, cx| s.set_value(txt, win, cx));
+                        }
+                    },
+                )),
+            )
+            .child(
+                ui::button("ws-send", t("tools.ws_send"), 1)
                     .on_click(cx.listener(|this, _, w, cx| this.ws_send(w, cx))),
             );
         let mut log = sub_card_body()
@@ -777,13 +976,22 @@ impl ToolView {
             .overflow_y_scroll()
             .flex()
             .flex_col()
-            .gap(px(2.))
-            .font_family(SharedString::from(crate::config::get().font.family.clone()))
-            .text_size(px(ui::fs_small()));
+            .gap(px(ui::SP_1))
+            .font_family(ui::mono_family())
+            .text_size(px(ui::fs_mono()));
         for (i, (mine, l)) in w.log.iter().enumerate() {
+            let line_copy = l.clone();
             log = log.child(
                 div()
                     .id(("wsl", i))
+                    .px(px(ui::SP_2))
+                    .py(px(2.))
+                    .rounded(px(ui::R_SM))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(crate::theme::hover_bg()))
+                    .on_click(cx.listener(move |this, _, _w, cx| {
+                        this.copy_text(format!("ws-{i}"), line_copy.clone(), cx)
+                    }))
                     .whitespace_normal()
                     .text_color(if *mine { c(th.accent) } else { c(th.text) })
                     .child(l.clone()),
@@ -801,8 +1009,8 @@ impl ToolView {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .child(bar)
-                    .child(send),
+                    .child(presets)
+                    .child(bar),
             )
             .child(
                 sub_card()
@@ -811,7 +1019,14 @@ impl ToolView {
                     .flex()
                     .flex_col()
                     .child(self.out_head(false, cx))
-                    .child(log),
+                    .child(log)
+                    .child(
+                        div()
+                            .p(px(SUB_PAD))
+                            .border_t_1()
+                            .border_color(crate::theme::divider())
+                            .child(send),
+                    ),
             )
             .into_any_element()
     }
@@ -1029,7 +1244,7 @@ impl ToolView {
             .flex()
             .flex_col()
             .gap(px(ui::SP_1));
-        if let Some([r, g, b, a]) = self.output.color {
+        if let (Some([r, g, b, a]), false) = (self.output.color, self.spec.id == "color") {
             list = list.child(
                 div()
                     .px(px(ui::LIST_INSET + ui::ROW_PX))
@@ -1428,12 +1643,9 @@ impl ToolView {
             .child(s.to_string())
     }
 
-    /// 选项多、下拉很长或带颜色时逐行排，避免和「运行」挤在同一行。
+    /// 选项多或带颜色色板时分多行展示；单个分段选择不再强撑满整行。
     fn opts_stacked(spec: &ToolSpec) -> bool {
-        spec.options.len() >= 4
-            || spec.options.iter().any(|f| {
-                f.kind == FieldKind::Color || (f.kind == FieldKind::Select && f.choices.len() > 3)
-            })
+        spec.options.len() >= 5 || spec.options.iter().any(|f| f.kind == FieldKind::Color)
     }
 
     /// 平铺间距只在位置选了平铺时出现。两个水印工具的字段都叫 `gap` / `pos`。
@@ -1442,6 +1654,64 @@ impl ToolView {
             return self.picks.get("pos").map(|s| s.as_str()) == Some("tile");
         }
         true
+    }
+
+    /// 紧凑内联选项控件（用于顶部工具栏、生成器工作台、查询栏）：标签与控件同行，不强撑 100% 宽。
+    fn inline_option_el(
+        &self,
+        f: &tools::Field,
+        me: &gpui::WeakEntity<Self>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let cur_v = self.picks.get(&f.id).cloned().unwrap_or_default();
+        match f.kind {
+            FieldKind::Select => {
+                let (id, me) = (f.id.clone(), me.clone());
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(ui::SP_2))
+                    .flex_shrink_0()
+                    .when(!f.label.is_empty(), |d| d.child(Self::field_label(&f.label)))
+                    .child(ui::segmented(
+                        intern(&format!("opt-{}", f.id)),
+                        &f.choices,
+                        &cur_v,
+                        move |v, w, cx| {
+                            let _ = me.update(cx, |this, cx| this.set_pick_in(id.clone(), v, w, cx));
+                        },
+                    ))
+                    .into_any_element()
+            }
+            FieldKind::Toggle => {
+                let id = f.id.clone();
+                gpui_component::switch::Switch::new(SharedString::from(format!("tg-{}", f.id)))
+                    .checked(cur_v == "true")
+                    .label(f.label.clone())
+                    .small()
+                    .on_click(cx.listener(move |this, on: &bool, w, cx| {
+                        this.set_pick_in(id.clone(), on.to_string(), w, cx)
+                    }))
+                    .into_any_element()
+            }
+            FieldKind::Text | FieldKind::Number => {
+                let w = if f.kind == FieldKind::Number {
+                    88.
+                } else {
+                    136.
+                };
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(ui::SP_2))
+                    .flex_shrink_0()
+                    .when(!f.label.is_empty(), |d| d.child(Self::field_label(&f.label)))
+                    .child(div().w(px(w)).child(ui::text_field(&self.texts[&f.id], false)))
+                    .into_any_element()
+            }
+            FieldKind::Color => self.option_el(f, me, cx),
+            _ => div().into_any_element(),
+        }
     }
 
     fn option_el(
@@ -1455,7 +1725,6 @@ impl ToolView {
             FieldKind::Select => {
                 let (id, me) = (f.id.clone(), me.clone());
                 div()
-                    .w_full()
                     .flex()
                     .flex_col()
                     .gap_1()
@@ -1464,8 +1733,8 @@ impl ToolView {
                         intern(&format!("opt-{}", f.id)),
                         &f.choices,
                         &cur_v,
-                        move |v, _w, cx| {
-                            let _ = me.update(cx, |this, cx| this.set_pick(id.clone(), v, cx));
+                        move |v, w, cx| {
+                            let _ = me.update(cx, |this, cx| this.set_pick_in(id.clone(), v, w, cx));
                         },
                     ))
                     .into_any_element()
@@ -1476,8 +1745,8 @@ impl ToolView {
                     .checked(cur_v == "true")
                     .label(f.label.clone())
                     .small()
-                    .on_click(cx.listener(move |this, on: &bool, _, cx| {
-                        this.set_pick(id.clone(), on.to_string(), cx)
+                    .on_click(cx.listener(move |this, on: &bool, w, cx| {
+                        this.set_pick_in(id.clone(), on.to_string(), w, cx)
                     }))
                     .into_any_element()
             }
@@ -1501,8 +1770,8 @@ impl ToolView {
                         "mark-color",
                         &mark_colors(),
                         Some(cur_v.as_str()),
-                        move |v, _w, cx| {
-                            let _ = me.update(cx, |this, cx| this.set_pick(id.clone(), v, cx));
+                        move |v, w, cx| {
+                            let _ = me.update(cx, |this, cx| this.set_pick_in(id.clone(), v, w, cx));
                         },
                     ))
                     .into_any_element()
@@ -1510,6 +1779,1397 @@ impl ToolView {
             _ => div().into_any_element(),
         }
     }
+
+    fn action_pill(
+        id: impl Into<gpui::ElementId>,
+        ic: IconName,
+        label: &'static str,
+    ) -> gpui::Stateful<gpui::Div> {
+        let th = cur();
+        div()
+            .id(id)
+            .h(px(ui::H_COMPACT))
+            .px_2()
+            .rounded(px(ui::R_MD))
+            .flex()
+            .items_center()
+            .gap_1()
+            .cursor_pointer()
+            .flex_shrink_0()
+            .text_size(px(ui::fs_small()))
+            .text_color(c(th.subtext))
+            .hover(|s| s.bg(crate::theme::hover_bg()))
+            .child(icon(ic, ui::IC_XS, c(th.overlay1)))
+            .child(label)
+    }
+
+    /// 构建标准输出卡片（统一承载错误、判定横幅、历史、文件、Markdown、正则或文本/KV）。
+    fn build_out_card(&self, out_fill: bool, both: bool, side: bool, cx: &mut Context<Self>) -> gpui::Div {
+        let grow = |share: f32| (share * 1000.).max(1.);
+        let mut out = sub_card().flex().flex_col().child(self.out_head(true, cx));
+        if let Some(e) = &self.error {
+            out = out.child(
+                ui::notice(ui::Notice::Error, e.clone())
+                    .mx(px(SUB_PAD))
+                    .my(px(ui::SP_2)),
+            );
+        }
+        if let (Some(v), false) = (&self.output.verdict, self.error.is_some()) {
+            out = out.child(result_list::verdict_banner(v));
+        }
+        if tools::has_history(&self.spec.id) {
+            out = out.child(self.render_history(cx));
+        } else if self.output.file.is_some() {
+            out = out.child(self.render_file(out_fill, cx));
+        } else if self.spec.id == "md_html" && !self.output.text.is_empty() {
+            out = out.child(self.render_markdown(cx));
+        } else if self.output.kind == OutKind::Kv && self.output.source.is_some() {
+            out = out.child(self.render_regex(cx));
+        } else if self.output.kind == OutKind::Kv {
+            out = out.child(self.render_kv(!out_fill, cx));
+        } else {
+            if let (Some([r, g, b, a]), false) = (self.output.color, self.spec.id == "color") {
+                out = out.child(
+                    div()
+                        .px(px(SUB_PAD))
+                        .pt(px(SUB_PAD))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .size(px(ui::H_DEFAULT))
+                                .rounded(px(ui::R_MD))
+                                .border_1()
+                                .border_color(crate::theme::divider())
+                                .bg(gpui::Rgba {
+                                    r: r as f32 / 255.,
+                                    g: g as f32 / 255.,
+                                    b: b as f32 / 255.,
+                                    a: a as f32 / 255.,
+                                }),
+                        ),
+                );
+            }
+            out = out.child(
+                sub_card_body()
+                    .min_h(px(lay::OUT_EDITOR_MIN_H))
+                    .child(Editor::new(&self.out_ed).h_full()),
+            );
+        }
+        if out_fill {
+            let base = out.min_h(px(lay::OUT_FILL_MIN_H)).min_w(px(if side {
+                lay::SIDE_PANE_MIN_W
+            } else {
+                0.
+            }));
+            if both {
+                base.flex_basis(px(0.))
+                    .flex_grow(grow(1. - self.split))
+                    .flex_shrink(1.)
+            } else {
+                base.flex_1()
+            }
+        } else {
+            out.flex_grow(0.)
+                .flex_shrink(1.)
+                .min_h(px(lay::fit_min_h()))
+        }
+    }
+
+    /// 正则测试专属工作台：顶部 `/pattern/flags` + 常用正则预设 + 替换串，下方测试文本与匹配结果分栏对照。
+    fn render_regex_workbench(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let th = cur();
+        let side = lay::side_by_side(self.body_w.get());
+        self.side = side;
+        let opts_h = self.opts_h.clone();
+        let mut flags_row = div().flex().items_center().gap(px(ui::SP_1));
+        for (fid, short, tip_txt) in [
+            ("i", "i", t("tools.o_ignore_case")),
+            ("m", "m", t("tools.o_multiline")),
+            ("s", "s", t("tools.o_dotall")),
+        ] {
+            let on = self.picks.get(fid).map(|s| s.as_str()) == Some("true");
+            let fid_s = fid.to_string();
+            flags_row = flags_row.child(
+                div()
+                    .id(SharedString::from(format!("rx-fl-{fid}")))
+                    .tooltip(ui::tip(tip_txt))
+                    .child(
+                        ui::chip(SharedString::from(format!("rx-fc-{fid}")), short, on).on_click(
+                            cx.listener(move |this, _, w, cx| {
+                                let cur_on =
+                                    this.picks.get(&fid_s).map(|s| s.as_str()) == Some("true");
+                                this.set_pick_in(fid_s.clone(), (!cur_on).to_string(), w, cx);
+                            }),
+                        ),
+                    ),
+            );
+        }
+        let mut presets = div().flex().items_center().flex_wrap().gap(px(ui::SP_1));
+        presets = presets.child(
+            div()
+                .text_size(px(ui::fs_caption()))
+                .text_color(c(th.overlay1))
+                .child(t("ux.presets")),
+        );
+        for (i, (label, pat, sample)) in [
+            (
+                t("ux.rx_email"),
+                r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
+                "ops@shellax.dev, billing@company.co.uk",
+            ),
+            (
+                t("ux.rx_phone"),
+                r"1[3-9]\d{9}",
+                "联系人：13800138000 / 备用：18612345678",
+            ),
+            (
+                t("ux.rx_ipv4"),
+                r"\b(?:\d{1,3}\.){3}\d{1,3}\b",
+                "eth0 192.168.1.10 -> gateway 10.0.0.1",
+            ),
+            (
+                t("ux.rx_url"),
+                r"https?://[^\s/$.?#].[^\s]*",
+                "Docs: https://shellax.dev/docs and http://localhost:8080/health",
+            ),
+            (
+                t("ux.rx_date"),
+                r"\b\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])\b",
+                "deploy 2026-11-22, rollback 2026-10-01",
+            ),
+            (
+                t("ux.rx_tag"),
+                r"<([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>(.*?)</\1>",
+                "<div class=\"card\">Hello</div> <span>World</span>",
+            ),
+            (
+                t("ux.rx_cjk"),
+                r"[\p{Han}]+",
+                "ShellAX 终端与数据库 Workbench 2.0",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (p, sm) = (pat.to_string(), sample.to_string());
+            presets = presets.child(ui::chip(("rx-pre", i), label, false).on_click(cx.listener(
+                move |this, _, w, cx| {
+                    this.set_field("pattern", p.clone(), w, cx);
+                    if this
+                        .areas
+                        .get("input")
+                        .is_some_and(|a| a.read(cx).value().trim().is_empty())
+                    {
+                        this.set_field("input", sm.clone(), w, cx);
+                    }
+                    this.run(cx);
+                },
+            )));
+        }
+        let top_bar = sub_card()
+            .w_full()
+            .relative()
+            .p(px(SUB_PAD))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .flex_shrink_0()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .font_family(ui::mono_family())
+                            .text_size(px(ui::fs_title()))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(c(th.accent))
+                            .child("/"),
+                    )
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            ui::text_field(&self.texts["pattern"], false)
+                                .font_family(ui::mono_family()),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .font_family(ui::mono_family())
+                            .text_size(px(ui::fs_title()))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(c(th.accent))
+                            .child("/"),
+                    )
+                    .child(flags_row)
+                    .child(
+                        Self::action_pill("rx-sample", IconName::Sparkles, t("ux.sample"))
+                            .on_click(cx.listener(|this, _, w, cx| this.fill_sample(w, cx))),
+                    ),
+            )
+            .child(presets)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .w(px(64.))
+                            .flex_shrink_0()
+                            .child(Self::field_label(t("tools.f_replace"))),
+                    )
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            ui::text_field(&self.texts["replace"], false)
+                                .font_family(ui::mono_family()),
+                        ),
+                    ),
+            )
+            .child(
+                gpui::canvas(
+                    move |b, _, _| opts_h.set(f32::from(b.size.height)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            );
+        self.has_opts = true;
+        let grow = |share: f32| (share * 1000.).max(1.);
+        let stat = self
+            .areas
+            .get("input")
+            .map(|a| tools::text_stats(&a.read(cx).value()))
+            .filter(|s| s.1 > 0);
+        let in_head = ui::toolbar()
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(ui::fs_small()))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(c(th.overlay1))
+                    .child(t("ux.rx_test_text")),
+            )
+            .when_some(stat, |d, (l, n)| {
+                d.child(
+                    div()
+                        .text_size(px(ui::fs_caption()))
+                        .text_color(c(th.overlay1))
+                        .child(tf("tools.ui_stat", &[("lines", &l), ("chars", &n)])),
+                )
+            })
+            .child(
+                Self::action_pill("rx-paste", IconName::ClipboardPaste, t("ux.paste"))
+                    .on_click(cx.listener(|this, _, w, cx| this.paste_field("input", w, cx))),
+            )
+            .child(
+                Self::action_pill("rx-clear", IconName::Eraser, t("tools.ui_clear"))
+                    .on_click(cx.listener(|this, _, w, cx| this.clear_input(w, cx))),
+            );
+        let input = sub_card()
+            .flex()
+            .flex_col()
+            .min_h(px(lay::OUT_FILL_MIN_H))
+            .min_w(px(if side { lay::SIDE_PANE_MIN_W } else { 0. }))
+            .flex_basis(px(0.))
+            .flex_grow(grow(self.split))
+            .flex_shrink(1.)
+            .child(in_head)
+            .child(
+                sub_card_body()
+                    .min_h(px(lay::OUT_EDITOR_MIN_H))
+                    .child(Editor::new(&self.areas["input"]).h_full()),
+            );
+        let out = self.build_out_card(true, true, side, cx);
+        let split_handle = lay::handle("tool-split", side).on_click(cx.listener(
+            |this, ev: &gpui::ClickEvent, _w, cx| {
+                if ev.click_count() >= 2 {
+                    this.split = lay::SPLIT_DEFAULT;
+                    this.dragging = true;
+                    cx.notify();
+                }
+            },
+        ));
+        if side {
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(top_bar)
+                .child(lay::gap(false))
+                .child(
+                    div()
+                        .id("tool-split-row")
+                        .flex_1()
+                        .min_h(px(lay::OUT_FILL_MIN_H))
+                        .flex()
+                        .flex_row()
+                        .on_drag_move(cx.listener(
+                            |this, ev: &gpui::DragMoveEvent<ToolSplit>, _w, cx| {
+                                this.drag_split(ev, cx)
+                            },
+                        ))
+                        .child(input)
+                        .child(split_handle)
+                        .child(out),
+                )
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .on_drag_move(cx.listener(|this, ev: &gpui::DragMoveEvent<ToolSplit>, _w, cx| {
+                    this.drag_split(ev, cx)
+                }))
+                .child(top_bar)
+                .child(lay::gap(false))
+                .child(input)
+                .child(split_handle)
+                .child(out)
+                .into_any_element()
+        }
+    }
+
+    /// 时间戳专属工作台：实时跳动的「当前时间」英雄横幅（秒/毫秒一键复制或填入）+ 偏移快捷按钮 + 多时区结果。
+    fn render_timestamp_workbench(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let th = cur();
+        let now = chrono::Local::now();
+        let now_s = now.timestamp();
+        let now_ms = now.timestamp_millis();
+        let now_iso = now.format("%Y-%m-%d %H:%M:%S").to_string();
+        let s_str = now_s.to_string();
+        let ms_str = now_ms.to_string();
+        let iso_str = now_iso.clone();
+        let cp_pill = |id: &'static str, lbl: &'static str, val: String, cx: &mut Context<Self>| {
+            let v2 = val.clone();
+            let copied = self.copied.as_deref() == Some(id);
+            div()
+                .id(id)
+                .px(px(ui::SP_2 + 2.))
+                .py(px(4.))
+                .rounded(px(ui::R_MD))
+                .bg(if copied {
+                    c(th.success).opacity(0.14)
+                } else {
+                    crate::theme::hover_bg()
+                })
+                .border_1()
+                .border_color(crate::theme::divider())
+                .cursor_pointer()
+                .hover(|s| s.bg(crate::theme::hover_bg()))
+                .on_click(cx.listener(move |this, _, _w, cx| {
+                    this.copy_text(id.into(), v2.clone(), cx);
+                }))
+                .flex()
+                .items_center()
+                .gap(px(ui::SP_2))
+                .child(
+                    div()
+                        .text_size(px(ui::fs_caption()))
+                        .text_color(c(th.overlay1))
+                        .child(lbl),
+                )
+                .child(
+                    div()
+                        .font_family(ui::mono_family())
+                        .text_size(px(ui::fs_body()))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(c(th.text))
+                        .child(val),
+                )
+                .child(icon(
+                    if copied {
+                        IconName::Check
+                    } else {
+                        IconName::Copy
+                    },
+                    ui::IC_XS,
+                    if copied { c(th.success) } else { c(th.overlay1) },
+                ))
+        };
+        let hero = sub_card()
+            .p(px(SUB_PAD))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .gap(px(ui::SP_2))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .flex_wrap()
+                    .gap(px(ui::SP_2))
+                    .child(ui::tag(t("ux.now_title"), c(th.accent)))
+                    .child(cp_pill("ts-now-s", "Unix (s)", s_str.clone(), cx))
+                    .child(cp_pill("ts-now-ms", "Unix (ms)", ms_str.clone(), cx))
+                    .child(cp_pill("ts-now-iso", "Local", iso_str, cx)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .flex_wrap()
+                    .gap(px(ui::SP_2))
+                    .child(div().flex_1().min_w(px(200.)).child(
+                        ui::text_field(&self.texts["input"], false).font_family(ui::mono_family()),
+                    ))
+                    .child(
+                        ui::chip("ts-fill-s", t("ux.use_sec"), false).on_click(cx.listener(
+                            move |this, _, w, cx| {
+                                let v = chrono::Local::now().timestamp().to_string();
+                                this.set_field("input", v, w, cx);
+                                this.run(cx);
+                            },
+                        )),
+                    )
+                    .child(
+                        ui::chip("ts-fill-ms", t("ux.use_ms"), false).on_click(cx.listener(
+                            move |this, _, w, cx| {
+                                let v = chrono::Local::now().timestamp_millis().to_string();
+                                this.set_field("input", v, w, cx);
+                                this.run(cx);
+                            },
+                        )),
+                    )
+                    .child(
+                        ui::chip("ts-zero", t("ux.today_zero"), false).on_click(cx.listener(
+                            move |this, _, w, cx| {
+                                let v = chrono::Local::now()
+                                    .format("%Y-%m-%d 00:00:00")
+                                    .to_string();
+                                this.set_field("input", v, w, cx);
+                                this.run(cx);
+                            },
+                        )),
+                    )
+                    .child(
+                        ui::chip("ts-m1h", t("ux.minus_1h"), false).on_click(cx.listener(
+                            move |this, _, w, cx| {
+                                let v = (chrono::Local::now().timestamp() - 3600).to_string();
+                                this.set_field("input", v, w, cx);
+                                this.run(cx);
+                            },
+                        )),
+                    )
+                    .child(
+                        ui::chip("ts-p1d", t("ux.plus_1d"), false).on_click(cx.listener(
+                            move |this, _, w, cx| {
+                                let v = (chrono::Local::now().timestamp() + 86400).to_string();
+                                this.set_field("input", v, w, cx);
+                                this.run(cx);
+                            },
+                        )),
+                    )
+                    .child(
+                        Self::action_pill("ts-paste", IconName::ClipboardPaste, t("ux.paste"))
+                            .on_click(
+                                cx.listener(|this, _, w, cx| this.paste_field("input", w, cx)),
+                            ),
+                    )
+                    .child(
+                        Self::action_pill("ts-clear", IconName::Eraser, t("tools.ui_clear"))
+                            .on_click(cx.listener(|this, _, w, cx| this.clear_input(w, cx))),
+                    ),
+            );
+        let show_out = self.has_result() || self.error.is_some();
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap(px(CARD_PAD))
+            .child(hero)
+            .when(show_out, |d| d.child(self.build_out_card(false, false, false, cx)))
+            .into_any_element()
+    }
+
+    /// Cron 专属工作台：5/6 字段可视化拆解 + 常用调度预设卡片 + 未来触发时间表。
+    fn render_cron_workbench(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let th = cur();
+        let raw = self
+            .texts
+            .get("input")
+            .map(|e| e.read(cx).value().to_string())
+            .unwrap_or_default();
+        let tokens: Vec<&str> = raw.split_whitespace().collect();
+        let labels = [
+            t("ux.cron_f_min"),
+            t("ux.cron_f_hour"),
+            t("ux.cron_f_day"),
+            t("ux.cron_f_mon"),
+            t("ux.cron_f_dow"),
+        ];
+        let mut fields_bar = div().flex().items_center().flex_wrap().gap(px(ui::SP_2));
+        let offset = if tokens.len() == 6 { 1 } else { 0 };
+        if offset == 1 {
+            fields_bar = fields_bar.child(
+                div()
+                    .px_2()
+                    .py(px(2.))
+                    .rounded(px(ui::R_SM))
+                    .bg(crate::theme::hover_bg())
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(ui::fs_caption()))
+                            .text_color(c(th.overlay1))
+                            .child("Sec"),
+                    )
+                    .child(
+                        div()
+                            .font_family(ui::mono_family())
+                            .text_size(px(ui::fs_body()))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(c(th.accent))
+                            .child(tokens[0].to_string()),
+                    ),
+            );
+        }
+        for (i, lbl) in labels.iter().enumerate() {
+            let tok = tokens.get(i + offset).copied().unwrap_or("—");
+            fields_bar = fields_bar.child(
+                div()
+                    .px_2()
+                    .py(px(2.))
+                    .rounded(px(ui::R_SM))
+                    .bg(crate::theme::hover_bg())
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(ui::fs_caption()))
+                            .text_color(c(th.overlay1))
+                            .child((*lbl).to_string()),
+                    )
+                    .child(
+                        div()
+                            .font_family(ui::mono_family())
+                            .text_size(px(ui::fs_body()))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(c(th.accent))
+                            .child(tok.to_string()),
+                    ),
+            );
+        }
+        let mut presets = div().flex().items_center().flex_wrap().gap(px(ui::SP_1));
+        for (i, (lbl, expr)) in [
+            (t("ux.cron_every_min"), "* * * * *"),
+            (t("ux.cron_5m"), "*/5 * * * *"),
+            (t("ux.cron_15m"), "*/15 * * * *"),
+            (t("ux.cron_hourly"), "0 * * * *"),
+            (t("ux.cron_daily"), "0 0 * * *"),
+            (t("ux.cron_morning"), "0 9 * * *"),
+            (t("ux.cron_workday"), "30 9 * * 1-5"),
+            (t("ux.cron_weekly"), "0 0 * * 1"),
+            (t("ux.cron_monthly"), "0 0 1 * *"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let on = raw.trim() == expr;
+            let ex = expr.to_string();
+            presets = presets.child(ui::chip(("cron-pre", i), lbl, on).on_click(cx.listener(
+                move |this, _, w, cx| {
+                    this.set_field("input", ex.clone(), w, cx);
+                    this.run(cx);
+                },
+            )));
+        }
+        let me = cx.entity().downgrade();
+        let top = sub_card()
+            .p(px(SUB_PAD))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .gap(px(ui::SP_2))
+            .child(presets)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(ui::SP_2))
+                    .child(div().flex_1().min_w_0().child(
+                        ui::text_field(&self.texts["input"], false).font_family(ui::mono_family()),
+                    ))
+                    .children(
+                        self.spec
+                            .options
+                            .first()
+                            .map(|f| self.inline_option_el(f, &me, cx)),
+                    )
+                    .child(
+                        Self::action_pill("cron-paste", IconName::ClipboardPaste, t("ux.paste"))
+                            .on_click(
+                                cx.listener(|this, _, w, cx| this.paste_field("input", w, cx)),
+                            ),
+                    ),
+            )
+            .child(fields_bar);
+        let show_out = self.has_result() || self.error.is_some();
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap(px(CARD_PAD))
+            .child(top)
+            .when(show_out, |d| d.child(self.build_out_card(false, false, false, cx)))
+            .into_any_element()
+    }
+
+    /// 颜色转换专属工作台：调色板快捷色样 + 双背景可读性对比大色卡 + 多格式一键复制。
+    fn render_color_workbench(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let cur_in = self
+            .texts
+            .get("input")
+            .map(|e| e.read(cx).value().trim().to_lowercase())
+            .unwrap_or_default();
+        let swatches: Vec<(String, gpui::Hsla, String)> = [
+            "#3b82f6", "#6366f1", "#8b5cf6", "#ec4899", "#ef4444", "#f97316", "#eab308", "#10b981",
+            "#06b6d4", "#64748b", "#0f172a", "#f8fafc",
+        ]
+        .iter()
+        .map(|hex| {
+            let n = u32::from_str_radix(hex.trim_start_matches('#'), 16).unwrap_or(0);
+            let col = gpui::Rgba {
+                r: ((n >> 16) & 255) as f32 / 255.,
+                g: ((n >> 8) & 255) as f32 / 255.,
+                b: (n & 255) as f32 / 255.,
+                a: 1.,
+            };
+            ((*hex).to_string(), col.into(), (*hex).to_string())
+        })
+        .collect();
+        let me = cx.entity().downgrade();
+        let mut studio = sub_card()
+            .p(px(SUB_PAD))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .gap(px(ui::SP_3))
+            .child(ui::swatch_row(
+                "color-studio-sw",
+                &swatches,
+                Some(cur_in.as_str()),
+                move |v, w, cx| {
+                    let _ = me.update(cx, |this, cx| {
+                        this.set_field("input", v, w, cx);
+                        this.run(cx);
+                    });
+                },
+            ))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(ui::SP_2))
+                    .child(div().flex_1().min_w_0().child(
+                        ui::text_field(&self.texts["input"], false).font_family(ui::mono_family()),
+                    ))
+                    .child(
+                        Self::action_pill("col-paste", IconName::ClipboardPaste, t("ux.paste"))
+                            .on_click(
+                                cx.listener(|this, _, w, cx| this.paste_field("input", w, cx)),
+                            ),
+                    )
+                    .child(
+                        Self::action_pill("col-clear", IconName::Eraser, t("tools.ui_clear"))
+                            .on_click(cx.listener(|this, _, w, cx| this.clear_input(w, cx))),
+                    ),
+            );
+        if let Some([r, g, b, a]) = self.output.color {
+            let bg = gpui::Rgba {
+                r: r as f32 / 255.,
+                g: g as f32 / 255.,
+                b: b as f32 / 255.,
+                a: a as f32 / 255.,
+            };
+            let hex_label = format!("#{:02x}{:02x}{:02x}", r, g, b);
+            studio = studio.child(
+                div()
+                    .flex()
+                    .gap(px(ui::SP_2))
+                    .child(
+                        div()
+                            .flex_1()
+                            .h(px(ui::H_LARGE * 2.))
+                            .rounded(px(ui::R_MD))
+                            .border_1()
+                            .border_color(crate::theme::divider())
+                            .bg(bg)
+                            .px(px(ui::SP_3))
+                            .flex()
+                            .flex_col()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .text_size(px(ui::fs_caption()))
+                                    .text_color(gpui::white().opacity(0.82))
+                                    .child(t("ux.color_light_fg")),
+                            )
+                            .child(
+                                div()
+                                    .font_family(ui::mono_family())
+                                    .text_size(px(ui::fs_title()))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(gpui::white())
+                                    .child(hex_label.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .h(px(ui::H_LARGE * 2.))
+                            .rounded(px(ui::R_MD))
+                            .border_1()
+                            .border_color(crate::theme::divider())
+                            .bg(bg)
+                            .px(px(ui::SP_3))
+                            .flex()
+                            .flex_col()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .text_size(px(ui::fs_caption()))
+                                    .text_color(c(0x0f172a).opacity(0.76))
+                                    .child(t("ux.color_dark_fg")),
+                            )
+                            .child(
+                                div()
+                                    .font_family(ui::mono_family())
+                                    .text_size(px(ui::fs_title()))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(c(0x0f172a))
+                                    .child(hex_label),
+                            ),
+                    ),
+            );
+        }
+        let show_out = self.has_result() || self.error.is_some();
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap(px(CARD_PAD))
+            .child(studio)
+            .when(show_out, |d| d.child(self.build_out_card(false, false, false, cx)))
+            .into_any_element()
+    }
+
+    /// 单位换算专属工作台：顶部分类切换 + 动态源单位快捷胶囊（不再出现切分类后单位不匹配的报错）。
+    fn render_units_workbench(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let me = cx.entity().downgrade();
+        let cur_kind = self
+            .picks
+            .get("kind")
+            .cloned()
+            .unwrap_or_else(|| "length".into());
+        let cur_from = self
+            .texts
+            .get("from")
+            .map(|e| e.read(cx).value().trim().to_string())
+            .unwrap_or_default();
+        let mut kind_chips = div().flex().items_center().flex_wrap().gap(px(ui::SP_1));
+        if let Some(kf) = self.spec.options.first() {
+            for (i, (val, lbl)) in kf.choices.iter().enumerate() {
+                let on = cur_kind == *val;
+                let v = val.clone();
+                let me2 = me.clone();
+                kind_chips =
+                    kind_chips.child(ui::chip(("uk-chip", i), lbl.clone(), on).on_click(
+                        move |_, w, cx| {
+                            let _ = me2.update(cx, |this, cx| {
+                                this.set_pick_in("kind".into(), v.clone(), w, cx)
+                            });
+                        },
+                    ));
+            }
+        }
+        let mut unit_pills = div().flex().items_center().flex_wrap().gap(px(ui::SP_1));
+        for (i, u) in unit_choices_for(&cur_kind).iter().enumerate() {
+            let on = cur_from == *u;
+            let u_s = (*u).to_string();
+            unit_pills = unit_pills.child(ui::chip(("uu-pill", i), *u, on).on_click(cx.listener(
+                move |this, _, w, cx| {
+                    this.set_field("from", u_s.clone(), w, cx);
+                    this.run(cx);
+                },
+            )));
+        }
+        let top = sub_card()
+            .p(px(SUB_PAD))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .gap(px(ui::SP_2))
+            .child(kind_chips)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(ui::SP_2))
+                    .child(div().flex_1().min_w(px(140.)).child(
+                        ui::text_field(&self.texts["input"], false).font_family(ui::mono_family()),
+                    ))
+                    .child(div().w(px(96.)).child(
+                        ui::text_field(&self.texts["from"], false).font_family(ui::mono_family()),
+                    )),
+            )
+            .child(unit_pills);
+        let show_out = self.has_result() || self.error.is_some();
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap(px(CARD_PAD))
+            .child(top)
+            .when(show_out, |d| d.child(self.build_out_card(false, false, false, cx)))
+            .into_any_element()
+    }
+
+    /// 生成器与零输入工具专属工作台（随机密码、UUID、随机数、网卡信息、贷款计算）。
+    fn render_generator_workbench(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let me = cx.entity().downgrade();
+        let id = self.spec.id.as_str();
+        if id == "loan" {
+            let mut grid = div().flex().items_end().flex_wrap().gap(px(ui::SP_3));
+            for f in self.spec.options.clone() {
+                grid = grid.child(self.option_el(&f, &me, cx));
+            }
+            let mut presets = div().flex().items_center().flex_wrap().gap(px(ui::SP_1));
+            for (i, (lbl, p, r, y)) in [
+                ("100万 · 30年 · 3.1%", "1000000", "3.1", "30"),
+                ("200万 · 30年 · 3.1%", "2000000", "3.1", "30"),
+                ("50万 · 10年 · 3.45%", "500000", "3.45", "10"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                presets = presets.child(ui::chip(("loan-pre", i), lbl, false).on_click(
+                    cx.listener(move |this, _, w, cx| {
+                        this.set_field("principal", p.into(), w, cx);
+                        this.set_field("rate", r.into(), w, cx);
+                        this.set_field("years", y.into(), w, cx);
+                        this.run(cx);
+                    }),
+                ));
+            }
+            let card = sub_card()
+                .p(px(SUB_PAD))
+                .flex_shrink_0()
+                .flex()
+                .flex_col()
+                .gap(px(ui::SP_2))
+                .child(presets)
+                .child(grid);
+            let show_out = self.has_result() || self.error.is_some();
+            return div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .gap(px(CARD_PAD))
+                .child(card)
+                .when(show_out, |d| d.child(self.build_out_card(false, false, false, cx)))
+                .into_any_element();
+        }
+        let mut quick = div().flex().items_center().flex_wrap().gap(px(ui::SP_1));
+        if id == "password" {
+            let cur_len = self
+                .texts
+                .get("len")
+                .map(|e| e.read(cx).value().trim().to_string())
+                .unwrap_or_default();
+            for (i, l) in ["8", "12", "16", "24", "32", "64"].into_iter().enumerate() {
+                let on = cur_len == l;
+                let ls = l.to_string();
+                quick = quick.child(
+                    ui::chip(("pw-len", i), format!("{l} chars"), on).on_click(cx.listener(
+                        move |this, _, w, cx| {
+                            this.set_field("len", ls.clone(), w, cx);
+                            this.run(cx);
+                        },
+                    )),
+                );
+            }
+        } else if id == "uuid" {
+            let cur_cnt = self
+                .texts
+                .get("count")
+                .map(|e| e.read(cx).value().trim().to_string())
+                .unwrap_or_default();
+            for (i, c_n) in ["1", "5", "10", "20", "50"].into_iter().enumerate() {
+                let on = cur_cnt == c_n;
+                let cs = c_n.to_string();
+                quick = quick.child(
+                    ui::chip(("uuid-cnt", i), format!("×{c_n}"), on).on_click(cx.listener(
+                        move |this, _, w, cx| {
+                            this.set_field("count", cs.clone(), w, cx);
+                            this.run(cx);
+                        },
+                    )),
+                );
+            }
+        }
+        let mut controls = div().flex().items_center().flex_wrap().gap(px(ui::SP_3));
+        for f in self.spec.options.clone() {
+            controls = controls.child(self.inline_option_el(&f, &me, cx));
+        }
+        let has_latest = if tools::has_history(id) {
+            !self.hist.borrow().is_empty()
+        } else {
+            self.has_result()
+        };
+        let deck = sub_card()
+            .p(px(SUB_PAD))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .gap(px(ui::SP_2))
+            .when(id == "password" || id == "uuid", |d| d.child(quick))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .flex_wrap()
+                    .gap(px(ui::SP_3))
+                    .child(div().flex_1().min_w_0().child(controls))
+                    .when(has_latest, |d| {
+                        d.child(
+                            ui::button("gen-copy-latest", t("ux.copy_latest"), 0)
+                                .on_click(cx.listener(|this, _, _w, cx| this.copy(cx))),
+                        )
+                    })
+                    .child(
+                        ui::button(
+                            "tool-run",
+                            if id == "ifaces" {
+                                t("tools.ui_refresh")
+                            } else {
+                                t("ux.generate")
+                            },
+                            1,
+                        )
+                        .on_click(cx.listener(|this, _, _w, cx| this.run(cx))),
+                    ),
+            );
+        let out_fill = self.out_fill();
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap(px(CARD_PAD))
+            .child(deck)
+            .child(self.build_out_card(out_fill, false, false, cx))
+            .into_any_element()
+    }
+
+    /// 单行查询栏工具（IP 查询、TCP 延迟、CIDR、IP 转换、进制转换、身份证校验、金额大写）：合一搜索栏 + 预设胶囊。
+    fn render_omnibox_workbench(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let me = cx.entity().downgrade();
+        let id = self.spec.id.clone();
+        let mine = self.lookup_mine();
+        let can_run = self.lookup_can_run(cx);
+        let mut opts_inline = div().flex().items_center().flex_wrap().gap(px(ui::SP_2));
+        for f in self.spec.options.clone() {
+            if self.option_shown(&f) {
+                opts_inline = opts_inline.child(self.inline_option_el(&f, &me, cx));
+            }
+        }
+        let mut presets = div().flex().items_center().flex_wrap().gap(px(ui::SP_1));
+        let mut has_presets = false;
+        match id.as_str() {
+            "ip_lookup" => {
+                has_presets = true;
+                presets = presets.child(
+                    ui::chip("ip-mine-chip", t("tools.net_run_mine"), mine).on_click(cx.listener(
+                        |this, _, w, cx| {
+                            this.set_pick_in("mine".into(), "true".into(), w, cx);
+                            this.run(cx);
+                        },
+                    )),
+                );
+                for (i, ip) in ["8.8.8.8", "1.1.1.1", "223.5.5.5"].into_iter().enumerate() {
+                    let s = ip.to_string();
+                    presets = presets.child(ui::chip(("ip-pre", i), ip, false).on_click(
+                        cx.listener(move |this, _, w, cx| {
+                            this.picks.insert("mine".into(), "false".into());
+                            this.set_field("input", s.clone(), w, cx);
+                            this.run(cx);
+                        }),
+                    ));
+                }
+            }
+            "ip_latency" => {
+                has_presets = true;
+                for (i, (lbl, host, port)) in [
+                    ("Cloudflare 1.1.1.1:443", "1.1.1.1", "443"),
+                    ("Google DNS 8.8.8.8:53", "8.8.8.8", "53"),
+                    ("AliDNS 223.5.5.5:53", "223.5.5.5", "53"),
+                    ("GitHub 443", "github.com", "443"),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    presets = presets.child(ui::chip(("lat-pre", i), lbl, false).on_click(
+                        cx.listener(move |this, _, w, cx| {
+                            this.set_field("input", host.into(), w, cx);
+                            this.set_field("port", port.into(), w, cx);
+                            this.run(cx);
+                        }),
+                    ));
+                }
+            }
+            "cidr" => {
+                has_presets = true;
+                for (i, cidr) in [
+                    "192.168.1.0/24",
+                    "10.0.0.0/16",
+                    "172.16.0.0/12",
+                    "192.168.1.0/28",
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let s = cidr.to_string();
+                    presets = presets.child(ui::chip(("cidr-pre", i), cidr, false).on_click(
+                        cx.listener(move |this, _, w, cx| {
+                            this.set_field("input", s.clone(), w, cx);
+                            this.run(cx);
+                        }),
+                    ));
+                }
+            }
+            "radix" => {
+                has_presets = true;
+                for (i, v) in ["0xff", "0b101010", "0o755", "65535", "2147483647"]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let s = v.to_string();
+                    presets = presets.child(ui::chip(("rx-num-pre", i), v, false).on_click(
+                        cx.listener(move |this, _, w, cx| {
+                            this.set_field("input", s.clone(), w, cx);
+                            this.run(cx);
+                        }),
+                    ));
+                }
+            }
+            "rmb" | "en_amount" => {
+                has_presets = true;
+                for (i, v) in ["1234.56", "10000", "99999.99", "1000000"]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let s = v.to_string();
+                    presets = presets.child(ui::chip(("amt-pre", i), v, false).on_click(
+                        cx.listener(move |this, _, w, cx| {
+                            this.set_field("input", s.clone(), w, cx);
+                            this.run(cx);
+                        }),
+                    ));
+                }
+            }
+            _ => {}
+        }
+        let run_label = if mine {
+            t("tools.net_run_mine")
+        } else {
+            t("tools.ui_run")
+        };
+        let omnibox = sub_card()
+            .p(px(SUB_PAD))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .gap(px(ui::SP_2))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .flex_wrap()
+                    .gap(px(ui::SP_2))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(180.))
+                            .when(mine, |d| d.opacity(0.45))
+                            .child(
+                                ui::text_field(&self.texts["input"], false)
+                                    .font_family(ui::mono_family()),
+                            ),
+                    )
+                    .child(
+                        Self::action_pill("omni-paste", IconName::ClipboardPaste, t("ux.paste"))
+                            .on_click(
+                                cx.listener(|this, _, w, cx| this.paste_field("input", w, cx)),
+                            ),
+                    )
+                    .child(
+                        Self::action_pill("omni-clear", IconName::Eraser, t("tools.ui_clear"))
+                            .on_click(cx.listener(|this, _, w, cx| this.clear_input(w, cx))),
+                    )
+                    .when(!self.spec.options.is_empty(), |d| d.child(opts_inline))
+                    .when(!self.spec.live, |d| {
+                        d.child(if can_run {
+                            ui::button("tool-run", run_label, 1)
+                                .on_click(cx.listener(|this, _, _w, cx| this.run(cx)))
+                        } else {
+                            ui::button_disabled("tool-run", run_label, 1)
+                        })
+                    }),
+            )
+            .when(has_presets, |d| d.child(presets));
+        let show_out = self.has_result() || self.error.is_some() || self.busy;
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap(px(CARD_PAD))
+            .child(omnibox)
+            .when(show_out, |d| d.child(self.build_out_card(false, false, false, cx)))
+            .into_any_element()
+    }
+
+    /// 对称加解密专属工作台（AES / DES / RC4 / Rabbit）：加解密模式与算法参数置顶，密钥/IV 双栏随机生成，下方明密文互转。
+    fn render_cipher_workbench(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let th = cur();
+        let me = cx.entity().downgrade();
+        let mut bar = div().flex().items_center().flex_wrap().gap(px(ui::SP_2));
+        for f in self.spec.options.clone() {
+            bar = bar.child(self.inline_option_el(&f, &me, cx));
+        }
+        let is_dec = self.picks.get("dir").map(|s| s.as_str()) == Some("dec");
+        let cta_label = if is_dec {
+            t("tools.o_decrypt")
+        } else {
+            t("tools.o_encrypt")
+        };
+        let mode_val = self.picks.get("mode").cloned().unwrap_or_default();
+        let show_iv = self.texts.contains_key("iv") && mode_val != "ecb";
+        let key_len = match self.spec.id.as_str() {
+            "des" if self.picks.get("algo").map(|s| s.as_str()) == Some("des") => 8,
+            "des" => 24,
+            _ => 16,
+        };
+        let iv_len = if self.spec.id == "des" { 8 } else { 16 };
+        let key_row = div()
+            .flex()
+            .items_end()
+            .flex_wrap()
+            .gap(px(ui::SP_3))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(200.))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .child(div().flex_1().child(Self::field_label(t("tools.f_key"))))
+                            .child(
+                                Self::action_pill("cip-rnd-k", IconName::Dices, t("ux.gen_key"))
+                                    .on_click(cx.listener(move |this, _, w, cx| {
+                                        this.gen_random_field("key", key_len, w, cx);
+                                    })),
+                            ),
+                    )
+                    .child(
+                        ui::text_field(&self.texts["key"], false).font_family(ui::mono_family()),
+                    ),
+            )
+            .when(show_iv, |d| {
+                d.child(
+                    div()
+                        .flex_1()
+                        .min_w(px(200.))
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .child(div().flex_1().child(Self::field_label(t("tools.f_iv"))))
+                                .child(
+                                    Self::action_pill(
+                                        "cip-rnd-iv",
+                                        IconName::Dices,
+                                        t("ux.gen_key"),
+                                    )
+                                    .on_click(cx.listener(move |this, _, w, cx| {
+                                        this.gen_random_field("iv", iv_len, w, cx);
+                                    })),
+                                ),
+                        )
+                        .child(
+                            ui::text_field(&self.texts["iv"], false)
+                                .font_family(ui::mono_family()),
+                        ),
+                )
+            });
+        let top_card = sub_card()
+            .p(px(SUB_PAD))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .gap(px(ui::SP_2))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .flex_wrap()
+                    .gap(px(ui::SP_2))
+                    .child(div().flex_1().min_w_0().child(bar))
+                    .when(!self.output.text.is_empty(), |d| {
+                        d.child(
+                            ui::button("cip-swap", t("tools.ui_swap"), 0)
+                                .on_click(cx.listener(|this, _, w, cx| this.swap(w, cx))),
+                        )
+                    })
+                    .child(
+                        ui::button("tool-run", cta_label, 1)
+                            .on_click(cx.listener(|this, _, _w, cx| this.run(cx))),
+                    ),
+            )
+            .child(key_row);
+        let stat = self
+            .tareas
+            .get("input")
+            .map(|a| tools::text_stats(&a.read(cx).value()))
+            .filter(|s| s.1 > 0);
+        let in_card = sub_card()
+            .p(px(SUB_PAD))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_1().child(Self::field_label(t("tools.f_input"))))
+                    .when_some(stat, |d, (l, n)| {
+                        d.child(
+                            div()
+                                .text_size(px(ui::fs_caption()))
+                                .text_color(c(th.overlay1))
+                                .child(tf("tools.ui_stat", &[("lines", &l), ("chars", &n)])),
+                        )
+                    })
+                    .child(
+                        Self::action_pill("cip-paste", IconName::ClipboardPaste, t("ux.paste"))
+                            .on_click(
+                                cx.listener(|this, _, w, cx| this.paste_field("input", w, cx)),
+                            ),
+                    )
+                    .child(
+                        Self::action_pill("cip-clear", IconName::Eraser, t("tools.ui_clear"))
+                            .on_click(cx.listener(|this, _, w, cx| this.clear_input(w, cx))),
+                    ),
+            )
+            .child(
+                Textarea::new(&self.tareas["input"])
+                    .w_full()
+                    .font_family(ui::mono_family())
+                    .text_size(px(ui::fs_mono())),
+            );
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap(px(CARD_PAD))
+            .child(top_card)
+            .child(in_card)
+            .child(self.build_out_card(true, false, false, cx))
+            .into_any_element()
+    }
+}
+
+fn default_unit_for(kind: &str) -> &'static str {
+    match kind {
+        "length" => "m",
+        "mass" => "kg",
+        "temp" => "°C",
+        "data" => "MB",
+        "time" => "s",
+        "area" => "m²",
+        "volume" => "l",
+        "speed" => "km/h",
+        _ => "m",
+    }
+}
+
+fn unit_choices_for(kind: &str) -> &'static [&'static str] {
+    match kind {
+        "length" => &["mm", "cm", "m", "km", "in", "ft", "yd", "mi", "里", "尺"],
+        "mass" => &["mg", "g", "kg", "t", "oz", "lb", "斤", "两"],
+        "temp" => &["°C", "°F", "K"],
+        "data" => &["B", "KB", "MB", "GB", "TB", "KiB", "MiB", "GiB", "TiB"],
+        "time" => &["ms", "s", "min", "h", "d", "wk", "yr"],
+        "area" => &["cm²", "m²", "ha", "km²", "ft²", "acre", "亩"],
+        "volume" => &["ml", "l", "m³", "gal", "fl oz"],
+        "speed" => &["m/s", "km/h", "mph", "kn"],
+        _ => &[],
+    }
+}
+
+fn tool_sample(id: &str, mode: &str, dir: &str) -> Option<&'static str> {
+    Some(match id {
+        "json" | "json_ts" => {
+            r#"{"service":"shellax","port":8080,"tls":true,"nodes":["hk-01","sg-02"],"limits":{"cpu":4,"mem_mb":8192}}"#
+        }
+        "go_json" if mode == "go2json" => {
+            "type Server struct {\n\tID string `json:\"id\"`\n\tHost string `json:\"host\"`\n\tPort int `json:\"port\"`\n\tActive bool `json:\"active\"`\n}"
+        }
+        "go_json" => r#"{"id":"srv_01","host":"10.0.1.12","port":22,"active":true}"#,
+        "sql" => {
+            "select u.id, u.email, count(o.id) as orders_total from users u left join orders o on o.user_id = u.id where u.status = 'active' group by u.id, u.email order by orders_total desc limit 20;"
+        }
+        "css" => {
+            ".card{display:flex;align-items:center;gap:12px;padding:16px;border-radius:10px;background:#181825}"
+        }
+        "html" => {
+            "<section class=\"panel\"><header><h2>ShellAX</h2></header><main><p>Ready.</p></main></section>"
+        }
+        "md_html" => {
+            "# ShellAX Release Notes\n\n- **SSH & SFTP**: Zero-copy streaming\n- **Database & Redis**: Live schema inspector\n\n```bash\ncargo run --release\n```"
+        }
+        "base64" if dir == "dec" => "U2hlbGxBWCDlva/lj5Hnu4jnq6/nvo7pnaLlt6XkvZzog70=",
+        "base64" => "ShellAX 极速远程开发与运维工作台",
+        "url" if dir == "dec" => "https%3A%2F%2Fshellax.dev%2Fsearch%3Fq%3Dssh%20tunnel%26lang%3Dzh-CN",
+        "url" => "https://shellax.dev/search?q=ssh tunnel&lang=zh-CN",
+        "unicode" if dir == "dec" => "\\u7ec8\\u7aef\\u4e0e\\u6570\\u636e\\u5e93",
+        "unicode" => "终端与数据库",
+        "dedupe" => "10.0.0.1\n10.0.0.2\n10.0.0.1\n10.0.0.3\n10.0.0.2",
+        "trim" => "   host = 127.0.0.1   \n\n   port = 6379  ",
+        "case" => "shellax_connection_manager_v2",
+        "plural" => "repository\ncontainer\nindex\nleaf",
+        "cjk_space" => "使用Rust与GPUI构建macOS原生客户端2026版",
+        "sum_list" => "1280.50\n420.00\n899.90\n350.00",
+        "naming" => "user session token\nssh jump host",
+        "batch_time" => "1700000000\n1735689600\n2026-11-22 08:30:00",
+        "md5" | "sha" => "shellax-release-v0.2.0",
+        "random_group" => "Alice\nBob\nCharlie\nDiana\nEthan\nFiona",
+        _ => return None,
+    })
 }
 
 /// 选项控件需要 `&'static str` 作为元素 id 前缀：按字段 id 驻留一次（数量有限）。
@@ -1568,7 +3228,7 @@ impl Render for ToolView {
             .child(ui::icon(
                 ui::tool_icon(&self.spec),
                 ui::IC_MD,
-                c(th.overlay1),
+                c(th.accent),
             ))
             .child(
                 div()
@@ -1608,12 +3268,67 @@ impl Render for ToolView {
                 self.split = lay::clamp_split(crate::config::get().sidebar.tools_split);
             }
         }
+        let (body_w, wk) = (self.body_w.clone(), cx.entity().downgrade());
+        let probe = gpui::canvas(
+            move |b, _, cx| {
+                let w = f32::from(b.size.width);
+                let old = body_w.replace(w);
+                if lay::side_by_side(old) != lay::side_by_side(w) {
+                    let _ = wk.update(cx, |_, cx| cx.notify());
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
+
+        // 按功能形态分派专属布局，告别千篇一律的表单堆叠
+        let bespoke: Option<AnyElement> = match self.spec.id.as_str() {
+            "regex" => Some(self.render_regex_workbench(cx)),
+            "timestamp" => Some(self.render_timestamp_workbench(cx)),
+            "cron" => Some(self.render_cron_workbench(cx)),
+            "color" => Some(self.render_color_workbench(cx)),
+            "units" => Some(self.render_units_workbench(cx)),
+            "aes" | "des" | "rc4" | "rabbit" => Some(self.render_cipher_workbench(cx)),
+            "ip_lookup" | "ip_latency" | "cidr" | "ip_convert" | "radix" | "id_card"
+            | "en_amount" | "rmb" => Some(self.render_omnibox_workbench(cx)),
+            _ if self.spec.inputs.is_empty() && self.spec.pack.is_empty() => {
+                Some(self.render_generator_workbench(cx))
+            }
+            _ => None,
+        };
+        if let Some(custom) = bespoke {
+            return content_card("tool-card")
+                .p(px(CARD_PAD))
+                .child(head)
+                .child(
+                    div()
+                        .id("tool-body")
+                        .relative()
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .child(custom)
+                        .child(probe),
+                )
+                .into_any_element();
+        }
+
         let me = cx.entity().downgrade();
         let sizes: Vec<InSize> = self.spec.inputs.iter().map(|f| f.size()).collect();
         let in_fill = sizes.contains(&InSize::Fill);
         let has_inputs = !sizes.is_empty();
-        let has_opts = !self.spec.options.is_empty() || !self.spec.live;
-        // 输入有大文本框时输出一定占满剩余空间（两者共用一条分隔）；贴合内容的输出在出结果前不画卡片
+        let shown: Vec<_> = self
+            .spec
+            .options
+            .clone()
+            .into_iter()
+            .filter(|f| self.option_shown(f))
+            .collect();
+        // 实时工具没有选项时不画冗余的中间「刷新」卡片；非实时工具或有选项的工具显示紧凑工具条
+        let has_opts = !shown.is_empty() || !self.spec.live;
         let out_fill = in_fill || self.out_fill();
         let show_out = out_fill || self.has_result() || self.error.is_some();
         let both = in_fill && out_fill;
@@ -1621,11 +3336,35 @@ impl Render for ToolView {
         self.side = side;
         self.has_opts = has_opts;
         let grow = |share: f32| (share * 1000.).max(1.);
+        let mode_s = self.picks.get("mode").map(|s| s.as_str()).unwrap_or("");
+        let dir_s = self.picks.get("dir").map(|s| s.as_str()).unwrap_or("");
+        let has_sample =
+            tool_sample(&self.spec.id, mode_s, dir_s).is_some() || self.spec.id == "hmac";
+        let multi_line_horizontal = !in_fill
+            && self.spec.inputs.len() == 2
+            && self
+                .spec
+                .inputs
+                .iter()
+                .all(|f| matches!(f.size(), InSize::Line));
+
         // 输入卡片
         let mut input = sub_card().p(px(SUB_PAD)).flex().flex_col().gap_2();
-        for f in self.spec.inputs.clone() {
+        let mut line_pair = div().flex().items_end().flex_wrap().gap(px(ui::SP_3));
+        for (idx, f) in self.spec.inputs.clone().into_iter().enumerate() {
+            let fid = f.id.clone();
+            let fid_paste = fid.clone();
+            let fid_today = fid.clone();
+            let is_date = (self.spec.id == "date_calc" && (f.id == "a" || f.id == "b"))
+                || (self.spec.id == "workday" && f.id == "start");
+            let is_text_like = matches!(
+                f.kind,
+                FieldKind::Text | FieldKind::Number | FieldKind::Multiline
+            );
             let mut row = div().flex().flex_col().gap_1();
-            // 多行输入的标签行右侧显示行数与字符数
+            if multi_line_horizontal {
+                row = row.flex_1().min_w(px(200.));
+            }
             let stat = match f.kind {
                 FieldKind::Multiline => self
                     .areas
@@ -1643,13 +3382,56 @@ impl Render for ToolView {
                 div()
                     .flex()
                     .items_center()
+                    .gap(px(ui::SP_1))
                     .child(div().flex_1().child(Self::field_label(&f.label)))
                     .children(stat.map(|(l, n)| {
                         div()
                             .text_size(px(ui::fs_caption()))
                             .text_color(c(th.overlay1))
                             .child(tf("tools.ui_stat", &[("lines", &l), ("chars", &n)]))
-                    })),
+                    }))
+                    .when(is_date, |d| {
+                        d.child(
+                            Self::action_pill(
+                                SharedString::from(format!("in-today-{fid}")),
+                                IconName::Calendar,
+                                t("ux.today"),
+                            )
+                            .on_click(cx.listener(move |this, _, w, cx| {
+                                let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+                                this.set_field(&fid_today, today, w, cx);
+                                this.run(cx);
+                            })),
+                        )
+                    })
+                    .when(idx == 0 && has_sample, |d| {
+                        d.child(
+                            Self::action_pill("in-sample", IconName::Sparkles, t("ux.sample"))
+                                .on_click(cx.listener(|this, _, w, cx| this.fill_sample(w, cx))),
+                        )
+                    })
+                    .when(is_text_like, |d| {
+                        d.child(
+                            Self::action_pill(
+                                SharedString::from(format!("in-paste-{fid}")),
+                                IconName::ClipboardPaste,
+                                t("ux.paste"),
+                            )
+                            .on_click(cx.listener(move |this, _, w, cx| {
+                                this.paste_field(&fid_paste, w, cx)
+                            })),
+                        )
+                    })
+                    .when(idx == 0 && is_text_like, |d| {
+                        d.child(
+                            Self::action_pill(
+                                "in-clear",
+                                IconName::Eraser,
+                                t("tools.ui_clear"),
+                            )
+                            .on_click(cx.listener(|this, _, w, cx| this.clear_input(w, cx))),
+                        )
+                    }),
             );
             match f.size() {
                 InSize::Fill => {
@@ -1669,11 +3451,7 @@ impl Render for ToolView {
                     );
                 }
                 InSize::Line => {
-                    let unused =
-                        self.spec.id == "ip_lookup" && f.id == "input" && self.lookup_mine();
-                    row = row
-                        .when(unused, |d| d.opacity(0.4))
-                        .child(ui::text_field(&self.texts[&f.id], false));
+                    row = row.child(ui::text_field(&self.texts[&f.id], false));
                 }
                 InSize::Zone => {
                     let id = f.id.clone();
@@ -1727,9 +3505,15 @@ impl Render for ToolView {
                     );
                 }
             }
-            input = input.child(row);
+            if multi_line_horizontal {
+                line_pair = line_pair.child(row);
+            } else {
+                input = input.child(row);
+            }
         }
-        // 高度：大文本占剩余空间（与输出共用分隔）；其余按内容，不被压缩
+        if multi_line_horizontal {
+            input = input.child(line_pair);
+        }
         input = if in_fill {
             let base = input.min_h(px(lay::in_min_h(&sizes))).min_w(px(if side {
                 lay::SIDE_PANE_MIN_W
@@ -1746,38 +3530,23 @@ impl Render for ToolView {
         } else {
             input.flex_shrink_0()
         };
-        // 选项：多的时候逐行排，少的时候仍横排。平铺间距只在位置是平铺时出现。
+
         let stack = Self::opts_stacked(&self.spec);
-        let shown: Vec<_> = self
-            .spec
-            .options
-            .clone()
-            .into_iter()
-            .filter(|f| self.option_shown(f))
-            .collect();
         let mut opts = if stack {
             div().w_full().flex().flex_col().gap_3()
         } else {
-            div().flex().flex_wrap().items_end().gap_3()
+            div().flex().flex_wrap().items_center().gap_3()
         };
         for f in &shown {
-            opts = opts.child(self.option_el(f, &me, cx));
+            opts = opts.child(if stack {
+                self.option_el(f, &me, cx)
+            } else {
+                self.inline_option_el(f, &me, cx)
+            });
         }
-        let mine = self.lookup_mine();
-        let can_run = self.lookup_can_run(cx);
-        let run_label = if mine {
-            t("tools.net_run_mine")
-        } else if self.spec.live {
-            t("tools.ui_refresh")
-        } else {
-            t("tools.ui_run")
-        };
-        let run_btn = if can_run {
-            ui::button("tool-run", run_label, 1)
-                .on_click(cx.listener(|this, _, _w, cx| this.run(cx)))
-        } else {
-            ui::button_disabled("tool-run", run_label, 1)
-        };
+        let show_run_btn = !self.spec.live;
+        let run_btn = ui::button("tool-run", t("tools.ui_run"), 1)
+            .on_click(cx.listener(|this, _, _w, cx| this.run(cx)));
         let opts_h = self.opts_h.clone();
         let opts_card = if stack {
             sub_card()
@@ -1789,18 +3558,21 @@ impl Render for ToolView {
                 .gap_3()
                 .flex_shrink_0()
                 .child(opts)
-                .child(div().w_full().flex().justify_end().child(run_btn))
+                .when(show_run_btn, |d| {
+                    d.child(div().w_full().flex().justify_end().child(run_btn))
+                })
         } else {
             sub_card()
                 .w_full()
                 .relative()
-                .p(px(SUB_PAD))
+                .px(px(SUB_PAD))
+                .py(px(ui::SP_2))
                 .flex()
                 .items_center()
                 .gap_3()
                 .flex_shrink_0()
                 .child(div().flex_1().min_w_0().child(opts))
-                .child(run_btn)
+                .when(show_run_btn, |d| d.child(run_btn))
         }
         .child(
             gpui::canvas(
@@ -1810,91 +3582,8 @@ impl Render for ToolView {
             .absolute()
             .size_full(),
         );
-        // 输出卡片
-        let mut out = sub_card().flex().flex_col().child(self.out_head(true, cx));
-        if let Some(e) = &self.error {
-            out = out.child(
-                ui::notice(ui::Notice::Error, e.clone())
-                    .mx(px(SUB_PAD))
-                    .my(px(ui::SP_2)),
-            );
-        }
-        if let (Some(v), false) = (&self.output.verdict, self.error.is_some()) {
-            out = out.child(result_list::verdict_banner(v));
-        }
-        if tools::has_history(&self.spec.id) {
-            out = out.child(self.render_history(cx));
-        } else if self.output.file.is_some() {
-            out = out.child(self.render_file(out_fill, cx));
-        } else if self.spec.id == "md_html" && !self.output.text.is_empty() {
-            out = out.child(self.render_markdown(cx));
-        } else if self.output.kind == OutKind::Kv && self.output.source.is_some() {
-            out = out.child(self.render_regex(cx));
-        } else if self.output.kind == OutKind::Kv {
-            out = out.child(self.render_kv(!out_fill, cx));
-        } else {
-            if let Some([r, g, b, a]) = self.output.color {
-                out = out.child(
-                    div()
-                        .px(px(SUB_PAD))
-                        .pt(px(SUB_PAD))
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .size(px(ui::H_DEFAULT))
-                                .rounded(px(ui::R_MD))
-                                .border_1()
-                                .border_color(crate::theme::divider())
-                                .bg(gpui::Rgba {
-                                    r: r as f32 / 255.,
-                                    g: g as f32 / 255.,
-                                    b: b as f32 / 255.,
-                                    a: a as f32 / 255.,
-                                }),
-                        ),
-                );
-            }
-            out = out.child(
-                sub_card_body()
-                    .min_h(px(lay::OUT_EDITOR_MIN_H))
-                    .child(Editor::new(&self.out_ed).h_full()),
-            );
-        }
-        // 高度：占满剩余空间（有大文本输入时与输入共用分隔），或贴合内容、放不下时卡片内部滚动
-        out = if out_fill {
-            let base = out.min_h(px(lay::OUT_FILL_MIN_H)).min_w(px(if side {
-                lay::SIDE_PANE_MIN_W
-            } else {
-                0.
-            }));
-            if both {
-                base.flex_basis(px(0.))
-                    .flex_grow(grow(1. - self.split))
-                    .flex_shrink(1.)
-            } else {
-                base.flex_1()
-            }
-        } else {
-            out.flex_grow(0.)
-                .flex_shrink(1.)
-                .min_h(px(lay::fit_min_h()))
-        };
-        // 工具区：宽度测量放在画布里；放不下时整个区域滚动
-        let (body_w, wk) = (self.body_w.clone(), cx.entity().downgrade());
-        let probe = gpui::canvas(
-            move |b, _, cx| {
-                let w = f32::from(b.size.width);
-                let old = body_w.replace(w);
-                if lay::side_by_side(old) != lay::side_by_side(w) {
-                    let _ = wk.update(cx, |_, cx| cx.notify());
-                }
-            },
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .size_full();
+
+        let out = self.build_out_card(out_fill, both, side, cx);
         let body = div()
             .id("tool-body")
             .relative()
@@ -1903,58 +3592,77 @@ impl Render for ToolView {
             .overflow_y_scroll()
             .flex()
             .flex_col();
-        let body =
-            if side {
-                // 并排：选项在上通栏，下面左输入右输出，中间竖向分隔条
-                body.when(has_opts, |d| d.child(opts_card).child(lay::gap(false)))
-                    .child(
-                        div()
-                            .id("tool-split-row")
-                            .flex_1()
-                            .min_h(px(lay::OUT_FILL_MIN_H))
-                            .flex()
-                            .flex_row()
-                            .on_drag_move(cx.listener(
-                                |this, ev: &gpui::DragMoveEvent<ToolSplit>, _w, cx| {
-                                    this.drag_split(ev, cx)
-                                },
-                            ))
-                            .child(input)
-                            .child(lay::handle("tool-split", true).on_click(cx.listener(
-                                |this, ev: &gpui::ClickEvent, _w, cx| {
-                                    if ev.click_count() >= 2 {
-                                        this.split = lay::SPLIT_DEFAULT;
-                                        this.dragging = true;
-                                        cx.notify();
-                                    }
-                                },
-                            )))
-                            .child(out),
-                    )
-            } else {
-                body.on_drag_move(cx.listener(
-                    |this, ev: &gpui::DragMoveEvent<ToolSplit>, _w, cx| this.drag_split(ev, cx),
-                ))
-                .when(has_inputs, |d| d.child(input))
-                .when(has_inputs && (has_opts || show_out), |d| {
-                    d.child(if both {
-                        lay::handle("tool-split", false)
-                            .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _w, cx| {
+        // 大文本双栏工具统一把紧凑选项条置顶，无论左右并排还是窄屏上下分栏都更顺手
+        let top_opts = in_fill && has_opts;
+        let body = if side {
+            body.when(has_opts, |d| d.child(opts_card).child(lay::gap(false)))
+                .child(
+                    div()
+                        .id("tool-split-row")
+                        .flex_1()
+                        .min_h(px(lay::OUT_FILL_MIN_H))
+                        .flex()
+                        .flex_row()
+                        .on_drag_move(cx.listener(
+                            |this, ev: &gpui::DragMoveEvent<ToolSplit>, _w, cx| {
+                                this.drag_split(ev, cx)
+                            },
+                        ))
+                        .child(input)
+                        .child(lay::handle("tool-split", true).on_click(cx.listener(
+                            |this, ev: &gpui::ClickEvent, _w, cx| {
                                 if ev.click_count() >= 2 {
                                     this.split = lay::SPLIT_DEFAULT;
                                     this.dragging = true;
                                     cx.notify();
                                 }
-                            }))
-                            .into_any_element()
-                    } else {
-                        lay::gap(false).into_any_element()
-                    })
+                            },
+                        )))
+                        .child(out),
+                )
+        } else if top_opts {
+            body.on_drag_move(cx.listener(
+                |this, ev: &gpui::DragMoveEvent<ToolSplit>, _w, cx| this.drag_split(ev, cx),
+            ))
+            .child(opts_card)
+            .child(lay::gap(false))
+            .child(input)
+            .child(
+                lay::handle("tool-split", false).on_click(cx.listener(
+                    |this, ev: &gpui::ClickEvent, _w, cx| {
+                        if ev.click_count() >= 2 {
+                            this.split = lay::SPLIT_DEFAULT;
+                            this.dragging = true;
+                            cx.notify();
+                        }
+                    },
+                )),
+            )
+            .child(out)
+        } else {
+            body.on_drag_move(cx.listener(
+                |this, ev: &gpui::DragMoveEvent<ToolSplit>, _w, cx| this.drag_split(ev, cx),
+            ))
+            .when(has_inputs, |d| d.child(input))
+            .when(has_inputs && (has_opts || show_out), |d| {
+                d.child(if both {
+                    lay::handle("tool-split", false)
+                        .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _w, cx| {
+                            if ev.click_count() >= 2 {
+                                this.split = lay::SPLIT_DEFAULT;
+                                this.dragging = true;
+                                cx.notify();
+                            }
+                        }))
+                        .into_any_element()
+                } else {
+                    lay::gap(false).into_any_element()
                 })
-                .when(has_opts, |d| d.child(opts_card))
-                .when(has_opts && show_out, |d| d.child(lay::gap(false)))
-                .when(show_out, |d| d.child(out))
-            };
+            })
+            .when(has_opts, |d| d.child(opts_card))
+            .when(has_opts && show_out, |d| d.child(lay::gap(false)))
+            .when(show_out, |d| d.child(out))
+        };
         content_card("tool-card")
             .p(px(CARD_PAD))
             .child(head)

@@ -1503,6 +1503,15 @@ fn apply_runtime(s: &Settings) {
     let _ = ssh_term_proto::suggest::set_extra_filters(&s.suggest.filter_patterns);
 }
 
+/// Update in-memory settings for live drag preview without writing `config.toml` to disk.
+pub fn preview(f: impl FnOnce(&mut Settings)) {
+    let mut s = (*get()).clone();
+    f(&mut s);
+    apply_runtime(&s);
+    *CURRENT.write().unwrap() = Some(Arc::new(s));
+    GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Edit, persist and publish. Returns an error message for the UI when saving failed.
 pub fn update(f: impl FnOnce(&mut Settings)) -> Option<String> {
     let mut s = (*get()).clone();
@@ -1974,6 +1983,13 @@ mod tests {
         assert!(out.contains("language = \"zh-CN\""));
         // round-trips to the same settings
         assert_eq!(Settings::parse(&out).unwrap(), s);
+    }
+    #[test]
+    fn preview_updates_memory_and_generation_without_persisting() {
+        let before = generation();
+        preview(|s| s.appearance.opacity = 0.72);
+        assert!(generation() > before);
+        assert!((get().appearance.opacity - 0.72).abs() < 1e-5);
     }
 }
 

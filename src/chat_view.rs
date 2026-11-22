@@ -17,7 +17,7 @@ use crate::ai_mention::{self, MentionMenu};
 use crate::config;
 use crate::mcp_backend::McpBackend;
 use crate::termview::{StepOutput, TermView};
-use crate::theme::{c, cur, divider, selected_bg, sub_bg};
+use crate::theme::{c, cur, divider, sub_bg};
 use crate::ui::{self, icon, IconName};
 
 pub enum ChatEvent {
@@ -1434,12 +1434,13 @@ impl Render for ChatView {
             .flex_col()
             .gap(px(ui::SP_3));
         if self.msgs.is_empty() {
-            list = list.child(
-                div()
-                    .text_size(px(ui::fs_body()))
-                    .text_color(c(th.overlay1))
-                    .child(t("chat.empty")),
-            );
+            list = list.child(ui::empty_state(
+                IconName::Bot,
+                t("chat.empty"),
+                None,
+                vec![],
+                false,
+            ));
         }
         let n = self.msgs.len();
         let view = cx.entity();
@@ -1511,14 +1512,22 @@ impl Render for ChatView {
             let one = cmds.len() == 1;
             let only = cmds.first().cloned();
             let mut bubble = div()
-                .max_w(relative(if user { 0.72 } else { 0.92 }))
+                .max_w(relative(if user { 0.78 } else { 0.96 }))
                 .p(px(ui::SP_3))
-                .rounded(px(ui::R_XL))
+                .rounded(px(ui::R_LG))
                 .text_size(px(ui::fs_body()))
                 .text_color(c(th.text))
-                .bg(if user { selected_bg() } else { sub_bg() })
+                .bg(if user {
+                    crate::theme::accent_bg()
+                } else {
+                    sub_bg()
+                })
                 .border_1()
-                .border_color(divider());
+                .border_color(if user {
+                    crate::theme::active_border()
+                } else {
+                    divider()
+                });
             if !user {
                 bubble = bubble.w_full();
             }
@@ -1652,7 +1661,7 @@ impl Render for ChatView {
             crate::theme::hover_bg()
         };
         let send_fg = if self.busy || can_send {
-            gpui::white()
+            crate::theme::on_accent()
         } else {
             c(th.overlay0)
         };
@@ -1660,10 +1669,10 @@ impl Render for ChatView {
         let composer = div()
             .mx(px(ui::SP_3))
             .mb(px(ui::SP_3))
-            .rounded(px(ui::R_XL))
+            .rounded(px(ui::R_LG))
             .border_1()
-            .border_color(divider())
-            .bg(sub_bg())
+            .border_color(crate::theme::input_border())
+            .bg(crate::theme::input_bg())
             .flex()
             .flex_col()
             .capture_key_down(cx.listener(|v, ev: &KeyDownEvent, w, cx| {
@@ -1772,7 +1781,7 @@ impl Render for ChatView {
                     .child(
                         div()
                             .id("chat-send")
-                            .size(px(32.))
+                            .size(px(ui::H_DEFAULT))
                             .rounded_full()
                             .flex()
                             .items_center()

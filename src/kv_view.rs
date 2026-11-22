@@ -41,11 +41,16 @@ pub struct KvView {
     pub conn: RedisConn,
     pub title: String,
     production: bool,
+    password: Option<String>,
+    via: Option<(SshTarget, Prompts)>,
     kv: Option<Arc<Kv>>,
     conn_err: Option<String>,
     rt: tokio::runtime::Handle,
     log: ExecLog,
     sub: Sub,
+    db_count: u32,
+    db_keyspace: std::collections::HashMap<u32, u64>,
+    db_pick_open: bool,
     // keys
     keys: Vec<String>,
     cursor: Cursor,
@@ -66,6 +71,8 @@ pub struct KvView {
     value_ed: Entity<EditorState>,
     pending_value: Option<String>,
     binary: bool,
+    ttl_open: bool,
+    rename_open: bool,
     item_a: Entity<InputState>,
     item_b: Entity<InputState>,
     ttl_in: Entity<InputState>,
@@ -83,6 +90,7 @@ pub struct KvView {
     console_out: Vec<(String, String)>,
     // info / slowlog
     info: Vec<(String, String, String)>,
+    info_filter: Entity<InputState>,
     slow: Vec<kv::SlowEntry>,
     ask: Option<Ask>,
     _subs: Vec<gpui::Subscription>,
@@ -142,8 +150,11 @@ impl KvView {
             cx.new(|cx| InputState::new(window, cx).placeholder(t("redis.filter_placeholder")));
         let console_in =
             cx.new(|cx| InputState::new(window, cx).placeholder(t("redis.console_placeholder")));
+        let info_filter =
+            cx.new(|cx| InputState::new(window, cx).placeholder(t("ux.kv_info_filter")));
         let value_ed = cx.new(|cx| EditorState::new(window, cx).line_number(true));
         let mut subs = vec![];
+        subs.push(cx.observe(&info_filter, |_, _, cx| cx.notify()));
         subs.push(cx.subscribe_in(
             &filter_in,
             window,
@@ -164,14 +175,23 @@ impl KvView {
                 }
             },
         ));
+        let (via_opt, init_err) = match via {
+            Ok(v) => (v, None),
+            Err(e) => (None, Some(e)),
+        };
         let me = Self {
             title: conn.name.clone(),
             production,
+            password: password.clone(),
+            via: via_opt.clone(),
             kv: None,
-            conn_err: None,
+            conn_err: init_err,
             rt,
             log,
             sub: Sub::Keys,
+            db_count: 16,
+            db_keyspace: std::collections::HashMap::new(),
+            db_pick_open: false,
             keys: vec![],
             cursor: Cursor::default(),
             scanning: false,
@@ -190,6 +210,8 @@ impl KvView {
             value_ed,
             pending_value: None,
             binary: false,
+            ttl_open: false,
+            rename_open: false,
             item_a: input(&t("redis.field"), window, cx),
             item_b: input(&t("redis.value"), window, cx),
             ttl_in: input(&t("redis.ttl_placeholder"), window, cx),
@@ -203,23 +225,19 @@ impl KvView {
             console_in,
             console_out: vec![],
             info: vec![],
+            info_filter,
             slow: vec![],
             ask: None,
             _subs: subs,
             conn,
         };
-        let mut me = me;
-        let via = match via {
-            Ok(v) => v,
-            Err(e) => {
-                me.conn_err = Some(e);
-                return me;
-            }
-        };
+        if me.conn_err.is_some() {
+            return me;
+        }
         let c = me.conn.clone();
         let h = me
             .rt
-            .spawn(async move { Kv::open(&c, password, via).await.map(Arc::new) });
+            .spawn(async move { Kv::open(&c, password, via_opt).await.map(Arc::new) });
         cx.spawn(async move |this, cx| {
             let r = h.await.map_err(anyhow::Error::from).and_then(|r| r);
             let _ = this.update(cx, |v, cx| {
@@ -233,6 +251,7 @@ impl KvView {
                             kv.version.clone(),
                         );
                         v.kv = Some(kv);
+                        v.refresh_keyspace(cx);
                         v.rescan(cx);
                         if let Some(k) = select.clone() {
                             v.select(k, cx);
@@ -255,6 +274,59 @@ impl KvView {
         })
         .detach();
         me
+    }
+
+    fn refresh_keyspace(&mut self, cx: &mut Context<Self>) {
+        self.job(
+            |kv| async move { Ok((kv.database_count().await, kv.keyspace().await)) },
+            |v, r, _| {
+                if let Ok((n, ks)) = r {
+                    v.db_count = n.max(1);
+                    v.db_keyspace = ks.into_iter().collect();
+                }
+            },
+            cx,
+        );
+    }
+
+    fn switch_db(&mut self, db: u32, cx: &mut Context<Self>) {
+        self.db_pick_open = false;
+        if self.conn.db == db && self.kv.is_some() {
+            cx.notify();
+            return;
+        }
+        if let Some(old) = self.kv.take() {
+            self.rt.spawn(async move { old.close().await });
+        }
+        self.conn.db = db;
+        self.conn_err = None;
+        self.error = None;
+        self.note = None;
+        self.selected = None;
+        self.meta = None;
+        self.content = None;
+        self.keys.clear();
+        self.rows.clear();
+        let (c, pw, via) = (self.conn.clone(), self.password.clone(), self.via.clone());
+        let h = self
+            .rt
+            .spawn(async move { Kv::open(&c, pw, via).await.map(Arc::new) });
+        cx.spawn(async move |this, cx| {
+            let r = h.await.map_err(anyhow::Error::from).and_then(|r| r);
+            let _ = this.update(cx, |v, cx| {
+                match r {
+                    Ok(kv) => {
+                        v.kv = Some(kv);
+                        v.refresh_keyspace(cx);
+                        v.rescan(cx);
+                    }
+                    Err(e) => v.conn_err = Some(ssh_term_proto::kv::conn_failure(&e)),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     pub fn save(&self) -> ssh_term_proto::session_store::PaneSave {
@@ -1093,11 +1165,35 @@ impl KvView {
                 ),
             ],
         );
-        let kinds: Vec<(String, String)> =
-            std::iter::once(("*".to_string(), t("redis.all_types").to_string()))
-                .chain(KINDS.iter().map(|k| (k.to_string(), k.to_string())))
-                .collect();
-        let me = cx.entity().downgrade();
+        let mut kind_chips = div().flex().items_center().flex_wrap().gap(px(ui::SP_1));
+        kind_chips = kind_chips.child(
+            ui::chip(
+                "kv-kc-all",
+                t("redis.all_types").to_string(),
+                self.kind_filter.is_none(),
+            )
+            .on_click(cx.listener(|v, _, _w, cx| {
+                v.kind_filter = None;
+                v.rescan(cx);
+                cx.notify();
+            })),
+        );
+        for &k in &KINDS {
+            let on = self.kind_filter == Some(k);
+            kind_chips = kind_chips.child(
+                ui::chip(gpui::SharedString::from(format!("kv-kc-{k}")), k, on).on_click(
+                    cx.listener(move |v, _, _w, cx| {
+                        v.kind_filter = if v.kind_filter == Some(k) {
+                            None
+                        } else {
+                            Some(k)
+                        };
+                        v.rescan(cx);
+                        cx.notify();
+                    }),
+                ),
+            );
+        }
         div()
             .w(px(300.))
             .flex_shrink_0()
@@ -1112,40 +1208,59 @@ impl KvView {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .child(ui::search_field(&self.filter_in, false))
-                    .child(
-                        div()
-                            .id("kv-kinds")
-                            .overflow_x_scroll()
-                            .child(ui::segmented(
-                                "kv-kind",
-                                &kinds,
-                                self.kind_filter.unwrap_or("*"),
-                                move |s, _w, cx| {
-                                    let _ = me.update(cx, |v, cx| {
-                                        v.kind_filter = KINDS.iter().copied().find(|k| *k == s);
-                                        v.rescan(cx);
-                                        cx.notify();
-                                    });
-                                },
-                            )),
-                    )
                     .child(
                         div()
                             .flex()
+                            .items_center()
                             .gap_1()
-                            .child(ui::button("kv-refresh", t("redis.refresh"), 0).on_click(
-                                cx.listener(|v, _, _w, cx| {
+                            .child(div().flex_1().min_w_0().child(ui::search_field(&self.filter_in, false)))
+                            .child(
+                                ui::icon_button(
+                                    "kv-refresh",
+                                    IconName::RefreshCw,
+                                    ui::IconBtn::Md,
+                                    t("redis.refresh"),
+                                )
+                                .on_click(cx.listener(|v, _, _w, cx| {
                                     v.rescan(cx);
                                     cx.notify();
-                                }),
-                            ))
-                            .child(ui::button("kv-new", t("redis.new_key"), 0).on_click(
-                                cx.listener(|v, _, _w, cx| {
-                                    v.new_open = !v.new_open;
+                                })),
+                            )
+                            .child(
+                                ui::icon_button(
+                                    "kv-collapse-tree",
+                                    IconName::ChevronsDownUp,
+                                    ui::IconBtn::Md,
+                                    t("db.collapse_all"),
+                                )
+                                .on_click(cx.listener(|v, _, _w, cx| {
+                                    v.open.clear();
+                                    v.rebuild();
                                     cx.notify();
-                                }),
-                            )),
+                                })),
+                            ),
+                    )
+                    .child(kind_chips)
+                    .child(
+                        ui::button_sm("kv-new", t("redis.new_key"), 1)
+                            .w_full()
+                            .justify_center()
+                            .on_click(cx.listener(|v, _, win, cx| {
+                                v.new_open = !v.new_open;
+                                if v.new_open {
+                                    let sep = v.conn.sep();
+                                    if let Some(sel) = &v.selected {
+                                        if let Some((prefix, _)) = sel.rsplit_once(sep) {
+                                            if val(&v.new_key, cx).is_empty() {
+                                                let pre = format!("{prefix}{sep}");
+                                                v.new_key
+                                                    .update(cx, |s, cx| s.set_value(pre, win, cx));
+                                            }
+                                        }
+                                    }
+                                }
+                                cx.notify();
+                            })),
                     ),
             )
             .child(list)
@@ -1160,7 +1275,7 @@ impl KvView {
                     .child(div().flex_1().child(small(loaded)))
                     .when(!self.cursor.done, |d| {
                         d.child(
-                            ui::button(
+                            ui::button_sm(
                                 "kv-more",
                                 if self.scanning {
                                     t("db.loading")
@@ -1318,81 +1433,185 @@ impl KvView {
                 )
                 .into_any_element();
         };
-        // header: key, type, ttl, size
-        let info = format!(
-            "{} · TTL {} · {}{}{}",
-            m.kind,
-            ttl_text(m.ttl_ms),
-            m.len
-                .map(|l| tf("redis.len", &[("n", &l)]))
-                .unwrap_or_default(),
-            m.bytes
-                .map(|b| format!(" · {}", ssh_term_proto::dock::human_size(b as i64)))
-                .unwrap_or_default(),
-            if m.encoding.is_empty() {
-                String::new()
-            } else {
-                format!(" · {}", m.encoding)
-            }
-        );
-        col = col.child(
-            div()
-                .px_3()
-                .pt_3()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .font_family(ui::mono_family())
-                        .text_size(px(ui::fs_body()))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(c(th.text))
-                        .whitespace_normal()
-                        .child(m.key.clone()),
-                )
-                .child(small(info)),
-        );
+        let (kind_badge, kind_col) = match m.kind.as_str() {
+            "string" => ("STRING", c(th.accent)),
+            "hash" => ("HASH", c(th.info)),
+            "list" => ("LIST", c(th.success)),
+            "set" => ("SET", c(th.warning)),
+            "zset" => ("ZSET", c(th.ansi[6])),
+            "stream" => ("STREAM", c(th.error)),
+            _ => ("KEY", c(th.overlay1)),
+        };
+        let mut meta_bits = Vec::new();
+        if let Some(l) = m.len {
+            meta_bits.push(tf("redis.len", &[("n", &l)]));
+        }
+        if let Some(b) = m.bytes {
+            meta_bits.push(ssh_term_proto::dock::human_size(b as i64));
+        }
+        if !m.encoding.is_empty() {
+            meta_bits.push(m.encoding.clone());
+        }
+        let key_cp = m.key.clone();
+        let key_ren = m.key.clone();
+        let ttl_lbl = format!("TTL {}", ttl_text(m.ttl_ms));
         col = col.child(
             div()
                 .px_3()
                 .py_2()
                 .flex()
                 .items_center()
+                .flex_wrap()
                 .gap_2()
                 .border_b_1()
                 .border_color(crate::theme::divider())
-                .child(div().w(px(120.)).child(ui::text_field(&self.ttl_in, false)))
-                .child(
-                    ui::button("kv-ttl", t("redis.set_ttl"), 0)
-                        .on_click(cx.listener(|v, _, _w, cx| v.guarded_write("ttl".into(), cx))),
-                )
+                .child(ui::tag(kind_badge, kind_col))
                 .child(
                     div()
-                        .w(px(200.))
-                        .child(ui::text_field(&self.rename_in, false)),
+                        .flex_1()
+                        .min_w(px(120.))
+                        .font_family(ui::mono_family())
+                        .text_size(px(ui::fs_body()))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(c(th.text))
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(m.key.clone()),
                 )
                 .child(
-                    ui::button("kv-ren", t("redis.rename"), 0)
-                        .on_click(cx.listener(|v, _, _w, cx| v.guarded_write("rename".into(), cx))),
+                    ui::icon_button(
+                        "kv-copy-k",
+                        IconName::Copy,
+                        ui::IconBtn::Sm,
+                        t("ux.kv_copy_key"),
+                    )
+                    .on_click(cx.listener(move |v, _, _w, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(key_cp.clone()));
+                        v.note = Some(t("ux.dk_copied").into());
+                        cx.notify();
+                    })),
                 )
-                .child(div().flex_1())
+                .when(!meta_bits.is_empty(), |d| {
+                    d.child(small(meta_bits.join(" · ")))
+                })
                 .child(
-                    ui::button("kv-reload", t("redis.refresh"), 0).on_click(cx.listener(
+                    ui::chip("kv-ttl-chip", ttl_lbl, self.ttl_open).on_click(cx.listener(
                         |v, _, _w, cx| {
-                            v.reload(cx);
+                            v.ttl_open = !v.ttl_open;
+                            if v.ttl_open {
+                                v.rename_open = false;
+                            }
                             cx.notify();
                         },
                     )),
                 )
                 .child(
-                    ui::button("kv-del", t("ui.delete"), 2)
+                    ui::chip("kv-ren-chip", t("redis.rename"), self.rename_open).on_click(
+                        cx.listener(move |v, _, win, cx| {
+                            v.rename_open = !v.rename_open;
+                            if v.rename_open {
+                                v.ttl_open = false;
+                                v.rename_in
+                                    .update(cx, |s, cx| s.set_value(key_ren.clone(), win, cx));
+                            }
+                            cx.notify();
+                        }),
+                    ),
+                )
+                .child(
+                    ui::icon_button(
+                        "kv-reload",
+                        IconName::RefreshCw,
+                        ui::IconBtn::Md,
+                        t("redis.refresh"),
+                    )
+                    .on_click(cx.listener(|v, _, _w, cx| {
+                        v.reload(cx);
+                        cx.notify();
+                    })),
+                )
+                .child(
+                    ui::button_sm("kv-del", t("ui.delete"), 2)
                         .on_click(cx.listener(|v, _, _w, cx| v.ask_delete_key(cx))),
                 ),
         );
+        if self.ttl_open {
+            let mut ttl_bar = div()
+                .px_3()
+                .py_2()
+                .bg(crate::theme::sub_bg())
+                .border_b_1()
+                .border_color(crate::theme::divider())
+                .flex()
+                .items_center()
+                .flex_wrap()
+                .gap_2()
+                .child(small(t("ux.kv_edit_ttl")));
+            for (i, (lbl, secs)) in [
+                ("60s", "60"),
+                ("5m", "300"),
+                ("1h", "3600"),
+                ("24h", "86400"),
+                ("7d", "604800"),
+                (t("ux.kv_persist"), "-1"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let sc = secs.to_string();
+                ttl_bar = ttl_bar.child(ui::chip(("kv-tp", i), lbl, false).on_click(cx.listener(
+                    move |v, _, win, cx| {
+                        v.ttl_in.update(cx, |s, cx| s.set_value(sc.clone(), win, cx));
+                        v.ttl_open = false;
+                        v.guarded_write("ttl".into(), cx);
+                    },
+                )));
+            }
+            ttl_bar = ttl_bar
+                .child(div().w(px(110.)).child(ui::text_field(&self.ttl_in, false)))
+                .child(
+                    ui::button_sm("kv-ttl", t("redis.set_ttl"), 1).on_click(cx.listener(
+                        |v, _, _w, cx| {
+                            v.ttl_open = false;
+                            v.guarded_write("ttl".into(), cx);
+                        },
+                    )),
+                );
+            col = col.child(ttl_bar);
+        }
+        if self.rename_open {
+            col = col.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .bg(crate::theme::sub_bg())
+                    .border_b_1()
+                    .border_color(crate::theme::divider())
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(160.))
+                            .child(ui::text_field(&self.rename_in, false)),
+                    )
+                    .child(
+                        ui::button_sm("kv-ren", t("redis.rename"), 1).on_click(cx.listener(
+                            |v, _, _w, cx| {
+                                v.rename_open = false;
+                                v.guarded_write("rename".into(), cx);
+                            },
+                        )),
+                    ),
+            );
+        }
         let body: AnyElement = match self.content.clone() {
             Some(Content::Str { full_len, .. }) => {
                 let cut = full_len > kv::STR_MAX;
+                let cur_str = self.value_ed.read(cx).value().to_string();
+                let is_json = !self.binary && kv::pretty_json(&cur_str).is_some();
                 div()
                     .flex_1()
                     .min_h_0()
@@ -1425,8 +1644,18 @@ impl KvView {
                     .child(
                         div()
                             .flex()
+                            .items_center()
                             .gap_2()
-                            .justify_end()
+                            .when(is_json, |d| d.child(ui::tag("JSON", c(th.success))))
+                            .child(div().flex_1())
+                            .child(ui::button("kv-copy-v", t("ux.kv_copy_val"), 0).on_click(
+                                cx.listener(|v, _, _w, cx| {
+                                    let s = v.value_ed.read(cx).value().to_string();
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(s));
+                                    v.note = Some(t("ux.dk_copied").into());
+                                    cx.notify();
+                                }),
+                            ))
                             .child(ui::button("kv-json", t("redis.format_json"), 0).on_click(
                                 cx.listener(|v, _, _w, cx| {
                                     let s = v.value_ed.read(cx).value().to_string();
@@ -1437,6 +1666,23 @@ impl KvView {
                                     cx.notify();
                                 }),
                             ))
+                            .when(is_json, |d| {
+                                d.child(
+                                    ui::button("kv-json-min", t("ux.kv_minify_json"), 0).on_click(
+                                        cx.listener(|v, _, _w, cx| {
+                                            let s = v.value_ed.read(cx).value().to_string();
+                                            if let Ok(val_j) =
+                                                serde_json::from_str::<serde_json::Value>(&s)
+                                            {
+                                                if let Ok(min) = serde_json::to_string(&val_j) {
+                                                    v.pending_value = Some(min);
+                                                }
+                                            }
+                                            cx.notify();
+                                        }),
+                                    ),
+                                )
+                            })
                             .when(!cut && !self.binary, |d| {
                                 d.child(ui::button("kv-save", t("ui.save"), 1).on_click(
                                     cx.listener(|v, _, _w, cx| {
@@ -1658,8 +1904,46 @@ impl KvView {
             .into_any_element()
     }
 
-    fn console_el(&mut self, _cx: &mut Context<Self>) -> AnyElement {
+    fn console_el(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
+        let mut quick = div()
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(crate::theme::divider())
+            .flex()
+            .items_center()
+            .flex_wrap()
+            .gap(px(ui::SP_1))
+            .child(small(t("ux.kv_quick_cmd")));
+        for (i, cmd_str) in [
+            "INFO server",
+            "DBSIZE",
+            "CLIENT LIST",
+            "MEMORY STATS",
+            "SLOWLOG GET 20",
+            "CONFIG GET maxmemory*",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let c_s = cmd_str.to_string();
+            quick = quick.child(ui::chip(("kvc-q", i), cmd_str, false).on_click(cx.listener(
+                move |v, _, _w, cx| {
+                    v.console(c_s.clone(), cx);
+                },
+            )));
+        }
+        quick = quick.child(div().flex_1()).when(!self.console_out.is_empty(), |d| {
+            d.child(
+                ui::button_sm("kvc-clear", t("ux.kv_clear_console"), 0).on_click(cx.listener(
+                    |v, _, _w, cx| {
+                        v.console_out.clear();
+                        cx.notify();
+                    },
+                )),
+            )
+        });
         let mut out = div()
             .id("kv-console")
             .flex_1()
@@ -1690,13 +1974,26 @@ impl KvView {
             .min_h_0()
             .flex()
             .flex_col()
+            .child(quick)
             .child(out)
             .child(
                 div()
                     .p_2()
                     .border_t_1()
                     .border_color(crate::theme::divider())
-                    .child(ui::text_field(&self.console_in, false)),
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_1().child(ui::text_field(&self.console_in, false)))
+                    .child(
+                        ui::button("kv-con-send", t("db.run"), 1).on_click(cx.listener(
+                            |v, _, w, cx| {
+                                let line = v.console_in.read(cx).value().trim().to_string();
+                                v.console_in.update(cx, |s, cx| s.set_value("", w, cx));
+                                v.console(line, cx);
+                            },
+                        )),
+                    ),
             )
             .child(small(t("redis.console_hint")).px_3().pb_2())
             .into_any_element()
@@ -1704,6 +2001,78 @@ impl KvView {
 
     fn info_el(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
+        let find_metric = |key: &str| -> String {
+            self.info
+                .iter()
+                .find(|(_, k, _)| k == key)
+                .map(|(_, _, v)| v.clone())
+                .unwrap_or_else(|| "—".into())
+        };
+        let ver = find_metric("redis_version");
+        let mode = find_metric("redis_mode");
+        let up_d = find_metric("uptime_in_days");
+        let mem_used = find_metric("used_memory_human");
+        let mem_peak = find_metric("used_memory_peak_human");
+        let clients = find_metric("connected_clients");
+        let ops = find_metric("instantaneous_ops_per_sec");
+        let hits: f64 = find_metric("keyspace_hits").parse().unwrap_or(0.);
+        let misses: f64 = find_metric("keyspace_misses").parse().unwrap_or(0.);
+        let hit_rate = if hits + misses > 0. {
+            format!("{:.1}%", hits * 100. / (hits + misses))
+        } else {
+            "—".into()
+        };
+        let total_keys: u64 = self.db_keyspace.values().sum();
+        let kpi = |title: &str, main: String, sub_txt: String| {
+            div()
+                .flex_1()
+                .min_w(px(160.))
+                .p_3()
+                .rounded(px(ui::R_SUB))
+                .bg(crate::theme::sub_bg())
+                .border_1()
+                .border_color(crate::theme::divider())
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(small(title.to_string()))
+                .child(
+                    div()
+                        .font_family(ui::mono_family())
+                        .text_size(px(ui::fs_title()))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(c(th.text))
+                        .child(main),
+                )
+                .child(small(sub_txt))
+        };
+        let cards = div()
+            .px_3()
+            .pt_2()
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .child(kpi(
+                t("ux.kv_info_version"),
+                format!("v{ver}"),
+                format!("{mode} · {up_d}d uptime"),
+            ))
+            .child(kpi(
+                t("ux.kv_info_mem"),
+                mem_used,
+                format!("Peak {mem_peak}"),
+            ))
+            .child(kpi(
+                t("ux.kv_info_ops"),
+                format!("{ops} ops/s"),
+                format!("{clients} clients"),
+            ))
+            .child(kpi(
+                t("ux.kv_info_hit"),
+                hit_rate,
+                format!("{total_keys} keys"),
+            ));
+        let q = self.info_filter.read(cx).value().trim().to_lowercase();
         let mut list = div()
             .id("kv-info")
             .flex_1()
@@ -1714,6 +2083,13 @@ impl KvView {
             .flex_col();
         let mut last = String::new();
         for (sec, k, v) in &self.info {
+            if !q.is_empty()
+                && !sec.to_lowercase().contains(&q)
+                && !k.to_lowercase().contains(&q)
+                && !v.to_lowercase().contains(&q)
+            {
+                continue;
+            }
             if *sec != last {
                 last = sec.clone();
                 list = list.child(
@@ -1728,6 +2104,7 @@ impl KvView {
             }
             list = list.child(
                 div()
+                    .py(px(2.))
                     .flex()
                     .gap_3()
                     .child(
@@ -1750,14 +2127,29 @@ impl KvView {
             .min_h_0()
             .flex()
             .flex_col()
-            .child(div().p_2().flex().gap_2().child(
-                ui::button("kv-info-r", t("redis.refresh"), 0).on_click(cx.listener(
-                    |v, _, _w, cx| {
-                        v.load_info(cx);
-                        cx.notify();
-                    },
-                )),
-            ))
+            .child(
+                div()
+                    .px_3()
+                    .pt_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .w(px(260.))
+                            .child(ui::search_field(&self.info_filter, false)),
+                    )
+                    .child(
+                        ui::button("kv-info-r", t("redis.refresh"), 0).on_click(cx.listener(
+                            |v, _, _w, cx| {
+                                v.load_info(cx);
+                                v.refresh_keyspace(cx);
+                                cx.notify();
+                            },
+                        )),
+                    ),
+            )
+            .child(cards)
             .child(list)
             .into_any_element()
     }
@@ -1924,7 +2316,7 @@ impl Render for KvView {
             self.value_ed.update(cx, |e, cx| e.set_value(s, window, cx));
         }
         let mut head = ui::toolbar()
-            .child(icon(IconName::Database, ui::IC_SM, c(th.overlay1)))
+            .child(ui::icon_svg("shellax/db/redis.svg", ui::IC_SM, c(th.accent)))
             .child(
                 div()
                     .min_w_0()
@@ -1942,6 +2334,23 @@ impl Render for KvView {
         }
         if self.conn.read_only {
             head = head.child(ui::tag(t("db.read_only"), c(th.warning)));
+        }
+        let can_switch_db = self.conn.mode.is_empty() || self.conn.mode != "cluster";
+        if can_switch_db && self.kv.is_some() {
+            head = head.child(
+                ui::chip(
+                    "kv-db-btn",
+                    format!("db{} ▾", self.conn.db),
+                    self.db_pick_open,
+                )
+                .on_click(cx.listener(|v, _, _w, cx| {
+                    v.db_pick_open = !v.db_pick_open;
+                    if v.db_pick_open {
+                        v.refresh_keyspace(cx);
+                    }
+                    cx.notify();
+                })),
+            );
         }
         head = head.child(div().flex_1());
         let subs: Vec<(String, String)> = [
@@ -2005,15 +2414,58 @@ impl Render for KvView {
                 Sub::Slowlog => self.slow_el(cx),
             }
         };
+        let db_pop = self.db_pick_open.then(|| {
+            let mut pop = ui::popover()
+                .id("kv-db-pop")
+                .occlude()
+                .absolute()
+                .top(px(ui::H_DEFAULT + 10.))
+                .left(px(140.))
+                .w(px(220.))
+                .max_h(px(340.))
+                .overflow_y_scroll()
+                .p_1()
+                .flex()
+                .flex_col()
+                .on_mouse_down_out(cx.listener(|v, _, _w, cx| {
+                    v.db_pick_open = false;
+                    cx.notify();
+                }))
+                .child(ui::menu_label(t("ux.kv_switch_db")));
+            for n in 0..self.db_count.min(32) {
+                let cnt = self.db_keyspace.get(&n).copied().unwrap_or(0);
+                let label = if cnt > 0 {
+                    format!("db{n}  ({cnt})")
+                } else {
+                    format!("db{n}")
+                };
+                let cur_on = self.conn.db == n;
+                pop = pop.child(
+                    ui::menu_item(
+                        ("kv-db-opt", n as usize),
+                        Some(if cur_on {
+                            IconName::Check
+                        } else {
+                            IconName::Database
+                        }),
+                        label,
+                        true,
+                        false,
+                    )
+                    .on_click(cx.listener(move |v, _, _w, cx| v.switch_db(n, cx))),
+                );
+            }
+            pop
+        });
         let ask = self.ask_el(cx);
         div()
             .size_full()
             .flex()
             .flex_col()
             .relative()
-            .bg(c(th.base))
             .child(head)
             .child(body)
+            .children(db_pop)
             .children(ask)
     }
 }

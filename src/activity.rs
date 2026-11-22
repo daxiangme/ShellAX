@@ -14,7 +14,7 @@ use crate::theme::{c, cur};
 use crate::ui::{self, icon, IconName};
 use crate::{config, Root};
 
-pub const STRIP_W: f32 = 40.;
+pub const STRIP_W: f32 = 36.;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
@@ -178,6 +178,9 @@ impl Root {
             self.show_module(window, cx);
             if tool == Tool::Brew && !self.active_in_ws(cx) {
                 self.open_brew(window, cx);
+            } else if tool == Tool::Ports && !self.active_in_ws(cx) {
+                let tg = self.ssh_target_for_tools(cx);
+                self.open_ports_tab(tg, window, cx);
             }
         }
         cx.notify();
@@ -292,9 +295,15 @@ impl Root {
             .pb(px(8.))
             .pt(px(4.));
         let (att_count, att_urgent) = crate::attention::summary_and_sync_badge(self, cx);
+        let ports_on = self
+            .port_view
+            .as_ref()
+            .map(|v| v.read(cx).active_count())
+            .unwrap_or(0);
         let th = cur();
         for (i, tool) in Tool::strip().into_iter().enumerate() {
             let tip = crate::sidebar::action_tip(tool.label(), &tool.action().binding());
+            let active = open && self.tool == tool;
             let mut btn = self
                 .strip_btn_with(
                     ("act", i),
@@ -307,16 +316,24 @@ impl Root {
                     },
                     tool.icon(),
                     tip,
-                    open && self.tool == tool,
+                    active,
                     false,
                 )
                 .on_click(cx.listener(move |this, _, _w, cx| this.select_tool(tool, _w, cx)));
+            if active {
+                btn = btn.child(
+                    div()
+                        .absolute()
+                        .left(px(-2.))
+                        .top(px(8.))
+                        .bottom(px(8.))
+                        .w(px(2.))
+                        .rounded_full()
+                        .bg(c(th.accent)),
+                );
+            }
             if tool == Tool::Agents && att_count > 0 {
-                let bcol = if att_urgent {
-                    c(th.error)
-                } else {
-                    c(th.success)
-                };
+                let bhex = if att_urgent { th.error } else { th.success };
                 btn = btn.child(
                     div()
                         .absolute()
@@ -326,17 +343,41 @@ impl Root {
                         .h(px(14.))
                         .px(px(3.))
                         .rounded_full()
-                        .bg(bcol)
+                        .bg(c(bhex))
                         .flex()
                         .items_center()
                         .justify_center()
                         .text_size(px(ui::fs_caption()))
                         .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(c(th.base))
+                        .text_color(crate::theme::on_color(bhex))
                         .child(if att_count > 9 {
                             "9+".to_string()
                         } else {
                             att_count.to_string()
+                        }),
+                );
+            }
+            if tool == Tool::Ports && ports_on > 0 {
+                btn = btn.child(
+                    div()
+                        .absolute()
+                        .top(px(2.))
+                        .right(px(2.))
+                        .min_w(px(14.))
+                        .h(px(14.))
+                        .px(px(3.))
+                        .rounded_full()
+                        .bg(c(th.success))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(ui::fs_caption()))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(crate::theme::on_color(th.success))
+                        .child(if ports_on > 9 {
+                            "9+".to_string()
+                        } else {
+                            ports_on.to_string()
                         }),
                 );
             }
@@ -368,7 +409,7 @@ impl Root {
                 } else {
                     crate::kv_ui::AssetKind::Docker
                 };
-                let p = self.asset_panel(k, cx);
+                let p = self.asset_panel(k, window, cx);
                 {
                     let h = self.sb_resize_handle(cx);
                     self.sb_frame(cx).child(p).child(h).into_any_element()
@@ -388,46 +429,294 @@ impl Root {
                     self.sb_frame(cx).child(p).child(h).into_any_element()
                 }
             }
-            other => {
-                let body = self.empty_tool(other, cx);
+            Tool::Ports => {
+                let p = self.ports_panel(window, cx);
                 {
                     let h = self.sb_resize_handle(cx);
-                    self.sb_frame(cx).child(body).child(h).into_any_element()
+                    self.sb_frame(cx).child(p).child(h).into_any_element()
                 }
             }
         }
     }
 
-    /// 尚无完整窗口的模块（端口 / Docker）：标题行 + 空状态，说明用途并给出现有入口。
-    fn empty_tool(&mut self, tool: Tool, cx: &mut Context<Self>) -> AnyElement {
-        let (ic, desc, open_label, open_action, open_id) = match tool {
-            Tool::Docker => (
-                IconName::Container,
-                t("tool.docker_desc"),
-                t("tool.docker_open"),
-                Action::OpenHostTools,
-                "tool-docker-open",
-            ),
-            _ => (
-                IconName::ArrowLeftRight,
-                t("tool.ports_desc"),
-                t("tool.ports_open"),
-                Action::OpenPortForward,
-                "tool-ports-open",
-            ),
+    /// 打开或激活端口转发工作台标签页。
+    pub(crate) fn open_ports_tab(
+        &mut self,
+        tg: Option<ssh_term_proto::ssh::SshTarget>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let pv = self.port_view(window, cx);
+        pv.update(cx, |v, cx| {
+            if v.target.is_none() || tg.is_some() {
+                v.target = tg;
+            }
+            v.ensure_default_target();
+            cx.notify();
+        });
+        if let Some(i) = self.tabs.iter().position(|t| {
+            matches!(
+                &t.layout.leaves()[0].read(cx).embed,
+                Some(crate::termview::Embed::Port(_))
+            )
+        }) {
+            self.active = i;
+            self.tool = Tool::Ports;
+            self.leave_settings();
+            self.overlay = crate::Overlay::None;
+            self.focus_active(window, cx);
+            cx.notify();
+            return;
+        }
+        let pane = self.embed_pane(crate::termview::Embed::Port(pv), window, cx);
+        self.tool = Tool::Ports;
+        self.push_pane(pane, window, cx);
+    }
+
+    /// 左侧端口转发面板：按 SSH 主机分组展示已保存规则、实时运行状态及一键启停。
+    fn ports_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let th = cur();
+        let pv = self.port_view(window, cx);
+        let (items, active_n, host_filter) = {
+            let v = pv.read(cx);
+            (v.items.clone(), v.active_count(), v.host_filter.clone())
         };
-        let open = ui::button(open_id, open_label, 1)
-            .w_full()
-            .justify_center()
-            .on_click(cx.listener(move |this, _, w, cx| this.run(open_action, w, cx)))
-            .into_any_element();
+        let total_n = items.len();
+        let summary = tf(
+            "ux.pf_active_summary",
+            &[("on", &active_n), ("total", &total_n)],
+        );
+
+        let mut actions: Vec<AnyElement> = Vec::new();
+        if active_n > 0 {
+            let pv_stop = pv.clone();
+            actions.push(
+                ui::icon_button(
+                    "pf-sb-stop-all",
+                    IconName::Square,
+                    ui::IconBtn::Sm,
+                    t("ux.pf_stop_all"),
+                )
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    pv_stop.update(cx, |v, cx| v.stop_all(cx));
+                }))
+                .into_any_element(),
+            );
+        }
+        actions.push(
+            ui::icon_button(
+                "pf-sb-open",
+                IconName::Plus,
+                ui::IconBtn::Sm,
+                t("ux.pf_open_ws"),
+            )
+            .on_click(cx.listener(|this, _, w, cx| {
+                let tg = this.ssh_target_for_tools(cx);
+                this.open_ports_tab(tg, w, cx);
+            }))
+            .into_any_element(),
+        );
+
+        let head = ui::panel_header(Tool::Ports.label(), Some(summary.into()), None, actions);
+
+        if items.is_empty() {
+            let open = ui::button("tool-ports-open", t("ux.pf_open_ws"), 1)
+                .w_full()
+                .justify_center()
+                .on_click(cx.listener(|this, _, w, cx| {
+                    let tg = this.ssh_target_for_tools(cx);
+                    this.open_ports_tab(tg, w, cx);
+                }))
+                .into_any_element();
+            return div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(head)
+                .child(ui::empty_state(
+                    IconName::ArrowLeftRight,
+                    t("ui.no_port_forwards"),
+                    Some(t("tool.ports_desc").into()),
+                    vec![open],
+                    false,
+                ))
+                .into_any_element();
+        }
+
+        let mut hosts: Vec<String> = Vec::new();
+        for r in &items {
+            if !hosts.iter().any(|h| h == &r.spec.host) {
+                hosts.push(r.spec.host.clone());
+            }
+        }
+
+        let mut list = div()
+            .id("pf-sb-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .py(px(ui::SP_1))
+            .flex()
+            .flex_col()
+            .gap(px(2.));
+
+        for (hi, hname) in hosts.iter().enumerate() {
+            let host_rules: Vec<_> = items
+                .iter()
+                .filter(|r| &r.spec.host == hname)
+                .cloned()
+                .collect();
+            let host_on = host_rules.iter().filter(|r| r.is_on()).count();
+            let h_selected = host_filter.as_deref() == Some(hname.as_str());
+            let h_cl = hname.clone();
+            let pv_h = pv.clone();
+            list = list.child(
+                div()
+                    .id(("pf-sb-h", hi))
+                    .mx(px(ui::SP_1))
+                    .mt(px(if hi == 0 { 2. } else { 6. }))
+                    .px(px(ui::SP_2))
+                    .h(px(ui::SECTION_H))
+                    .rounded(px(ui::R_SM))
+                    .cursor_pointer()
+                    .bg(if h_selected {
+                        crate::theme::selected_bg()
+                    } else {
+                        gpui::transparent_black()
+                    })
+                    .hover(|s| s.bg(crate::theme::hover_bg()))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .on_click(cx.listener(move |this, _, w, cx| {
+                        let h_target = h_cl.clone();
+                        pv_h.update(cx, |v, cx| {
+                            if v.host_filter.as_deref() == Some(h_target.as_str()) {
+                                v.host_filter = None;
+                            } else {
+                                v.host_filter = Some(h_target);
+                            }
+                            cx.notify();
+                        });
+                        this.open_ports_tab(None, w, cx);
+                    }))
+                    .child(icon(IconName::Server, ui::IC_XS, c(th.overlay1)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(ui::fs_caption()))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(c(th.subtext))
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(hname.clone()),
+                    )
+                    .child(ui::tag(
+                        format!("{host_on}/{}", host_rules.len()),
+                        if host_on > 0 {
+                            c(th.success)
+                        } else {
+                            c(th.overlay1)
+                        },
+                    )),
+            );
+
+            for (ri, r) in host_rules.into_iter().enumerate() {
+                let st = r.state();
+                let on = r.is_on();
+                let dot_col = match &st {
+                    ssh_term_proto::forward::State::Running { .. } => c(th.success),
+                    ssh_term_proto::forward::State::Starting => c(th.info),
+                    ssh_term_proto::forward::State::Error(_) => c(th.error),
+                    ssh_term_proto::forward::State::Stopped => c(th.overlay0),
+                };
+                let kind_lbl = match r.spec.kind {
+                    ssh_term_proto::forward::Kind::L => "L",
+                    ssh_term_proto::forward::Kind::R => "R",
+                    ssh_term_proto::forward::Kind::D => "D",
+                };
+                let listen_addr = crate::port_view::listen_addr_of(&r, &st);
+                let title_str = match r.spec.kind {
+                    ssh_term_proto::forward::Kind::D => {
+                        format!(":{} · SOCKS5", r.spec.bind_port)
+                    }
+                    _ => format!(
+                        ":{} → {}:{}",
+                        r.spec.bind_port, r.spec.dest_host, r.spec.dest_port
+                    ),
+                };
+                let grp = gpui::SharedString::from(format!("pf-sb-r-{hi}-{ri}"));
+                let r_toggle = r.clone();
+                let pv_toggle = pv.clone();
+                let addr_copy = listen_addr.clone();
+                list = list.child(
+                    ui::list_row(grp.clone(), 0, false)
+                        .group(grp.clone())
+                        .pl(px(ui::SP_3))
+                        .on_click(cx.listener(|this, _, w, cx| {
+                            this.open_ports_tab(None, w, cx);
+                        }))
+                        .child(div().size(px(6.)).rounded_full().bg(dot_col).flex_shrink_0())
+                        .child(ui::tag(kind_lbl, c(th.accent)))
+                        .child(ui::row_title(title_str).flex_1().min_w_0())
+                        .child(
+                            ui::row_actions(grp)
+                                .child(
+                                    ui::icon_button(
+                                        gpui::SharedString::from(format!("pf-sbc-{hi}-{ri}")),
+                                        IconName::Copy,
+                                        ui::IconBtn::Sm,
+                                        t("ux.pf_copy_addr"),
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                            addr_copy.clone(),
+                                        ));
+                                        this.toast(
+                                            tf("ux.pf_copied_addr", &[("addr", &addr_copy)]),
+                                            cx,
+                                        );
+                                    })),
+                                )
+                                .child(
+                                    ui::icon_button(
+                                        gpui::SharedString::from(format!("pf-sbt-{hi}-{ri}")),
+                                        if on {
+                                            IconName::Square
+                                        } else {
+                                            IconName::Play
+                                        },
+                                        ui::IconBtn::Sm,
+                                        if on { t("pf.stop") } else { t("pf.start") },
+                                    )
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.stop_propagation();
+                                        let r_cl = r_toggle.clone();
+                                        pv_toggle.update(cx, |v, cx| {
+                                            if r_cl.is_on() {
+                                                v.stop_rule(r_cl, cx);
+                                            } else {
+                                                v.start_rule(r_cl, cx);
+                                            }
+                                        });
+                                    })),
+                                ),
+                        ),
+                );
+            }
+        }
+
         div()
             .flex_1()
             .min_h_0()
             .flex()
             .flex_col()
-            .child(ui::panel_header(tool.label(), None, None, vec![]))
-            .child(ui::empty_state(ic, desc, None, vec![open], false))
+            .child(head)
+            .child(list)
             .into_any_element()
     }
 
@@ -592,7 +881,7 @@ impl Root {
                                     .h(px(4.))
                                     .flex_shrink_0()
                                     .rounded_full()
-                                    .bg(c(th.surface1))
+                                    .bg(c(th.text).opacity(0.09))
                                     .child(
                                         div().h_full().rounded_full().bg(c(col)).w(px(120. * p)),
                                     ),
@@ -628,8 +917,10 @@ impl Root {
                             .hover(|s| s.bg(crate::theme::hover_bg()))
                             .child(
                                 div()
-                                    .w(px(56.))
+                                    .w(px(62.))
                                     .flex_shrink_0()
+                                    .font_family(ui::mono_family())
+                                    .text_size(px(ui::fs_caption()))
                                     .text_color(c(th.overlay1))
                                     .child(e.at.clone()),
                             )

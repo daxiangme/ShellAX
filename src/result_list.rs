@@ -95,6 +95,9 @@ pub fn result_row(
     } else {
         LABEL_W_LIST
     };
+    let cp = std::rc::Rc::new(on_copy);
+    let cp_row = cp.clone();
+    let cp_btn = cp.clone();
     let row = div()
         .id(id.clone())
         .group(gid.clone())
@@ -106,7 +109,10 @@ pub fn result_row(
         .flex()
         .items_center()
         .gap(px(6.))
+        .cursor_pointer()
+        .when(copied, |d| d.bg(c(th.success).opacity(0.10)))
         .hover(|s| s.bg(hover_bg()))
+        .on_click(move |ev, w, cx| cp_row(ev, w, cx))
         .when(!r.label.is_empty(), |d| {
             d.child(
                 div()
@@ -134,7 +140,7 @@ pub fn result_row(
             )
         })
         .child(
-            ui::icon_button(
+            ui::icon_button_state(
                 SharedString::from(format!("{id}-cp")),
                 if copied {
                     IconName::Check
@@ -143,8 +149,13 @@ pub fn result_row(
                 },
                 IconBtn::Sm,
                 t("tools.ui_copy"),
+                copied,
+                false,
             )
-            .on_click(on_copy),
+            .on_click(move |ev, w, cx| {
+                cx.stop_propagation();
+                cp_btn(ev, w, cx);
+            }),
         )
         .when_some(on_delete, |d, f| {
             d.child(
@@ -157,7 +168,10 @@ pub fn result_row(
                         false,
                         true,
                     )
-                    .on_click(f),
+                    .on_click(move |ev, w, cx| {
+                        cx.stop_propagation();
+                        f(ev, w, cx);
+                    }),
                 ),
             )
         });

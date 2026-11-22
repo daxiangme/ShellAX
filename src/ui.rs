@@ -337,15 +337,18 @@ pub fn icon_button_svg(
         IconBtn::Sm => (20., IC_XS, R_SM),
         IconBtn::Md => (24., IC_SM, R_MD),
         IconBtn::Lg => (28., IC_MD, R_MD),
-        IconBtn::Strip => (32., IC_LG, R_SUB),
+        IconBtn::Strip => (30., IC_LG, R_MD),
     };
     let tip: SharedString = tip.into();
     let (rest, hot) = if active {
         (c(th.accent), c(th.accent))
     } else if danger {
         (c(th.overlay1), c(th.error))
+    } else if matches!(size, IconBtn::Strip | IconBtn::Lg) {
+        // 最左/最右工具条与顶部标题栏直接叠在磨砂液态玻璃背景上，用高对比正文墨色 72% 透明度确保未选中图标始终清晰锐利
+        (c(th.text).opacity(0.72), c(th.text))
     } else {
-        (c(th.overlay1), c(th.text))
+        (c(th.subtext), c(th.text))
     };
     div()
         .id(id)
@@ -494,13 +497,21 @@ pub fn section_header(
         )
         .children(count.map(|n| {
             div()
+                .px(px(5.))
+                .h(px(16.))
+                .rounded_full()
+                .bg(hover_bg())
+                .flex()
+                .items_center()
+                .justify_center()
                 .text_size(px(fs_caption()))
-                .text_color(c(th.overlay1))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(c(th.subtext))
                 .child(n.to_string())
         }))
 }
 
-/// 列表 / 树的一行：悬停淡底、选中淡强调底；`depth` 为树层级，双行行用 `.min_h(row2_h())` 覆盖高度。
+/// 列表 / 树的一行：悬停微淡底、选中平静中性层（无框套框噪音）；`depth` 为树层级，双行行用 `.min_h(row2_h())` 覆盖高度。
 pub fn list_row(id: impl Into<ElementId>, depth: usize, selected: bool) -> Stateful<Div> {
     div()
         .id(id)
@@ -513,11 +524,11 @@ pub fn list_row(id: impl Into<ElementId>, depth: usize, selected: bool) -> State
         .items_center()
         .gap(px(6.))
         .cursor_pointer()
-        .when(selected, |d| {
-            d.bg(selected_bg())
-                .hover(|s| s.bg(c(cur().accent).opacity(0.18)))
+        .when(selected, |d| d.bg(selected_bg()))
+        .when(!selected, |d| {
+            d.hover(|s| s.bg(hover_bg()))
+                .active(|s| s.bg(selected_bg()))
         })
-        .when(!selected, |d| d.hover(|s| s.bg(hover_bg())))
 }
 
 /// 行内单行省略文本：主文本。
@@ -591,18 +602,30 @@ fn button_base(
 ) -> Stateful<Div> {
     let th = cur();
     let (bg, fg, border) = match kind {
-        1 => (c(th.accent), c(th.base), c(th.accent)),
+        1 => (
+            c(th.accent),
+            crate::theme::on_accent(),
+            gpui::white().opacity(if th.appearance == crate::theme::Appearance::Dark {
+                0.14
+            } else {
+                0.0
+            }),
+        ),
         2 => (
-            c(th.error).opacity(0.15),
+            c(th.error).opacity(0.12),
             c(th.error),
-            c(th.error).opacity(0.4),
+            c(th.error).opacity(0.28),
         ),
         3 => (
             gpui::transparent_black(),
             c(th.subtext),
             gpui::transparent_black(),
         ),
-        _ => (c(th.surface0), c(th.text), c(th.surface1)),
+        _ => (
+            crate::theme::elevated_surface(),
+            c(th.text),
+            crate::theme::control_border(),
+        ),
     };
     let mut btn = div()
         .id(id)
@@ -617,6 +640,7 @@ fn button_base(
         .text_color(fg)
         .border_1()
         .border_color(border)
+        .when(kind == 1, |d| d.shadow(crate::theme::control_shadow()))
         .text_size(px(fs))
         .font_weight(FontWeight::MEDIUM)
         .child(label.into());
@@ -624,46 +648,61 @@ fn button_base(
         btn = btn
             .cursor_pointer()
             .hover(move |s| match kind {
-                1 => s.opacity(0.90),
-                2 => s.bg(c(cur().error).opacity(0.24)).border_color(c(cur().error).opacity(0.6)),
+                1 => s.opacity(0.92),
+                2 => s
+                    .bg(c(cur().error).opacity(0.19))
+                    .border_color(c(cur().error).opacity(0.45)),
                 3 => s.bg(hover_bg()).text_color(c(cur().text)),
-                _ => s.bg(c(cur().surface1)).border_color(c(cur().surface2)),
+                _ => s
+                    .bg(hover_bg())
+                    .border_color(crate::theme::control_border()),
             })
             .active(move |s| match kind {
-                1 => s.opacity(0.78),
-                2 => s.bg(c(cur().error).opacity(0.32)),
+                1 => s.opacity(0.82),
+                2 => s.bg(c(cur().error).opacity(0.26)),
                 3 => s.bg(selected_bg()),
-                _ => s.bg(c(cur().surface2)),
+                _ => s.bg(selected_bg()),
             });
     } else {
-        btn = btn.opacity(0.4).cursor_default();
+        btn = btn.opacity(0.42).cursor_default();
     }
     btn
 }
 
-/// 筛选 chip：高 24 的胶囊；未选淡底 + 次文本，选中淡强调底 + 强调色文字。
+/// 筛选 chip：高 24 的极简胶囊；未选淡底 + 1px 发丝线，选中淡强调底 + 强调色文字。
 pub fn chip(id: impl Into<ElementId>, label: impl Into<SharedString>, on: bool) -> Stateful<Div> {
     let th = cur();
     div()
         .id(id)
         .h(px(H_COMPACT))
-        .px(px(10.))
+        .px(px(9.))
         .rounded_full()
+        .border_1()
+        .border_color(if on {
+            crate::theme::active_border()
+        } else {
+            divider()
+        })
         .flex()
         .items_center()
         .flex_shrink_0()
         .whitespace_nowrap()
         .cursor_pointer()
         .text_size(px(fs_small()))
-        .bg(if on { selected_bg() } else { hover_bg() })
+        .bg(if on {
+            crate::theme::accent_bg()
+        } else {
+            crate::theme::sub_bg()
+        })
         .text_color(if on { c(th.accent) } else { c(th.subtext) })
         .when(on, |d| d.font_weight(FontWeight::MEDIUM))
         .hover(move |s| {
             s.bg(if on {
-                c(cur().accent).opacity(0.16)
+                c(cur().accent).opacity(0.18)
             } else {
-                c(cur().text).opacity(0.10)
+                hover_bg()
             })
+            .text_color(if on { c(cur().accent) } else { c(cur().text) })
         })
         .child(label.into())
 }
@@ -697,14 +736,16 @@ fn segmented_with(
 ) -> impl IntoElement {
     let th = cur();
     let mut row = div()
-        .w_full()
+        .when(fill, |d| d.w_full())
+        .when(!fill, |d| d.max_w_full().flex_wrap())
         .flex()
-        .flex_wrap()
         .items_center()
         .p(px(2.))
         .gap(px(2.))
         .rounded(px(R_MD))
-        .bg(hover_bg());
+        .bg(crate::theme::sub_bg())
+        .border_1()
+        .border_color(divider());
     for (i, (val, label)) in options.iter().enumerate() {
         let active = val == selected;
         let v = val.clone();
@@ -714,15 +755,22 @@ fn segmented_with(
                 .id((base, i))
                 .h(px(H_COMPACT))
                 .px(px(10.))
-                .rounded(px(R_MD))
+                .rounded(px(R_SM))
+                .border_1()
+                .border_color(if active {
+                    crate::theme::control_border()
+                } else {
+                    gpui::transparent_black()
+                })
                 .flex()
                 .items_center()
+                .whitespace_nowrap()
                 .cursor_pointer()
                 .text_size(px(fs_small()))
                 .when(fill, |d| d.flex_1().justify_center())
                 .when(active, |d| {
-                    d.bg(crate::theme::solid_card_bg())
-                        .shadow_sm()
+                    d.bg(crate::theme::elevated_surface())
+                        .shadow(crate::theme::control_shadow())
                         .font_weight(FontWeight::MEDIUM)
                 })
                 .text_color(if active { c(th.text) } else { c(th.subtext) })
@@ -734,8 +782,8 @@ fn segmented_with(
     row
 }
 
-/// Grid of selectable cards for long option lists (e.g. themes) where a segmented control would
-/// overflow and squeeze the label column. Cards are fixed-width and wrap.
+/// Grid of selectable cards for multi-item option lists (e.g. UI themes & terminal color schemes).
+/// Spans the available row width and wraps cleanly into 2–3 symmetrical columns without truncating names.
 /// `swatch(value)` may return (bg, surface, text, accent) to draw a small theme thumbnail.
 pub fn choice_grid(
     base: &'static str,
@@ -746,8 +794,7 @@ pub fn choice_grid(
 ) -> impl IntoElement {
     let th = cur();
     let mut grid = div()
-        .w(px(308.))
-        .flex_shrink_0()
+        .w_full()
         .flex()
         .flex_wrap()
         .gap(px(8.));
@@ -756,35 +803,78 @@ pub fn choice_grid(
         let v = val.clone();
         let on = on.clone();
         // 36×24 thumbnail: window bg, a sidebar strip, a text line and an accent dot
-        let thumb = swatch(val).map(|[bg, surf, text, acc]| {
-            div()
-                .w(px(36.))
-                .h(px(24.))
-                .flex_shrink_0()
-                .rounded(px(R_SM))
-                .overflow_hidden()
-                .border_1()
-                .border_color(c(th.surface2))
-                .bg(c(bg))
-                .flex()
-                .child(div().w(px(10.)).h_full().bg(c(surf)))
-                .child(
-                    div()
-                        .flex_1()
-                        .p(px(3.))
-                        .flex()
-                        .flex_col()
-                        .gap(px(3.))
-                        .child(div().h(px(2.)).w(px(16.)).rounded_full().bg(c(text)))
-                        .child(div().size(px(5.)).rounded_full().bg(c(acc))),
-                )
-        });
+        // ("system" gets a crisp split Light/Dark thumbnail so all grid cards align identically)
+        let thumb = if let Some([bg, surf, text, acc]) = swatch(val) {
+            Some(
+                div()
+                    .w(px(36.))
+                    .h(px(24.))
+                    .flex_shrink_0()
+                    .rounded(px(R_SM))
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(divider())
+                    .bg(c(bg))
+                    .flex()
+                    .child(div().w(px(10.)).h_full().bg(c(surf)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .p(px(3.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(3.))
+                            .child(div().h(px(2.)).w(px(15.)).rounded_full().bg(c(text).opacity(0.8)))
+                            .child(div().size(px(5.)).rounded_full().bg(c(acc))),
+                    ),
+            )
+        } else if val == "system" {
+            Some(
+                div()
+                    .w(px(36.))
+                    .h(px(24.))
+                    .flex_shrink_0()
+                    .rounded(px(R_SM))
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(divider())
+                    .flex()
+                    .child(
+                        div()
+                            .flex_1()
+                            .h_full()
+                            .bg(c(0xffffff))
+                            .p(px(3.))
+                            .flex()
+                            .flex_col()
+                            .justify_between()
+                            .child(div().h(px(2.)).w(px(10.)).rounded_full().bg(c(0x16181d).opacity(0.75)))
+                            .child(div().size(px(4.5)).rounded_full().bg(c(0x007aff))),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .h_full()
+                            .bg(c(0x1a1c20))
+                            .p(px(3.))
+                            .flex()
+                            .flex_col()
+                            .justify_between()
+                            .child(div().h(px(2.)).w(px(10.)).rounded_full().bg(c(0xf2f4f7).opacity(0.8)))
+                            .child(div().size(px(4.5)).rounded_full().bg(c(0x0a84ff))),
+                    ),
+            )
+        } else {
+            None
+        };
         grid = grid.child(
             div()
                 .id((base, i))
-                .w(px(150.))
+                .flex_basis(px(200.))
+                .flex_grow(1.)
+                .min_w(px(180.))
                 .h(px(40.))
-                .px(px(8.))
+                .px(px(10.))
                 .rounded(px(R_MD))
                 .flex()
                 .items_center()
@@ -834,32 +924,41 @@ pub fn tag(label: impl Into<SharedString>, color: Hsla) -> impl IntoElement {
         .child(label.into())
 }
 
-/// Keyboard shortcut chip, e.g. "ctrl-shift-p" -> Ctrl Shift P.
+/// Keyboard shortcut chip (Linear/Raycast keycap style), e.g. "cmd-shift-p" -> ⌘ ⇧ P.
 pub fn kbd(binding: &str) -> AnyElement {
     let th = cur();
-    let mut row = div().flex().gap(px(3.));
+    let mac = cfg!(target_os = "macos");
+    let mut row = div().flex().items_center().gap(px(3.));
     for part in binding.split('-').filter(|p| !p.is_empty()) {
         let label = match part {
-            "ctrl" => "Ctrl".to_string(),
-            "shift" => "Shift".into(),
-            "alt" => "Alt".into(),
+            "ctrl" => if mac { "⌃" } else { "Ctrl" }.to_string(),
+            "shift" => if mac { "⇧" } else { "Shift" }.to_string(),
+            "alt" => if mac { "⌥" } else { "Alt" }.to_string(),
             "cmd" | "super" => "⌘".into(),
             "comma" | "," => ",".into(),
-            "tab" => "Tab".into(),
-            "escape" => "Esc".into(),
+            "tab" => if mac { "⇥" } else { "Tab" }.to_string(),
+            "enter" | "return" => "↵".into(),
+            "escape" | "esc" => "Esc".into(),
+            "up" => "↑".into(),
+            "down" => "↓".into(),
+            "left" => "←".into(),
+            "right" => "→".into(),
             p => p.to_uppercase(),
         };
         row = row.child(
             div()
-                .px(px(5.))
-                .h(px(18.))
+                .min_w(px(17.))
+                .px(px(4.))
+                .h(px(17.))
                 .flex()
                 .items_center()
+                .justify_center()
                 .rounded(px(R_SM))
-                .bg(c(th.surface0))
+                .bg(crate::theme::sub_bg())
                 .border_1()
-                .border_color(c(th.surface1))
+                .border_color(divider())
                 .text_size(px(fs_caption()))
+                .font_weight(FontWeight::MEDIUM)
                 .text_color(c(th.subtext))
                 .child(label),
         );
@@ -881,7 +980,7 @@ pub fn toolbar() -> Div {
         .border_color(divider())
 }
 
-/// 表头行：高 28、次要字号半粗、淡底、底部发丝线。
+/// 表头行：高 28、次要字号半粗、微弱底色、底部发丝线。
 pub fn table_header() -> Div {
     div()
         .w_full()
@@ -892,12 +991,12 @@ pub fn table_header() -> Div {
         .text_size(px(fs_small()))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(c(cur().subtext))
-        .bg(hover_bg())
+        .bg(crate::theme::sub_bg())
         .border_b_1()
         .border_color(divider())
 }
 
-/// 空状态：垂直居中的插图 + 标题 + 说明 + 按钮；`horizontal` 为真时按钮横排（宽区域），否则纵向全宽（窄面板）。
+/// 空状态：垂直居中的微抬升图标徽章 + 清晰标题 + 说明 + 按钮；`horizontal` 为真时按钮横排（宽区域），否则纵向全宽（窄面板）。
 pub fn empty_state(
     ic: IconName,
     title: impl Into<SharedString>,
@@ -917,27 +1016,40 @@ pub fn empty_state(
         .items_center()
         .justify_center()
         .gap(px(SP_2))
-        .child(icon(ic, IC_XL, c(th.overlay0)))
         .child(
             div()
-                .text_size(px(fs_body()))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(c(th.subtext))
+                .size(px(42.))
+                .rounded(px(R_LG))
+                .bg(crate::theme::sub_bg())
+                .border_1()
+                .border_color(divider())
+                .flex()
+                .items_center()
+                .justify_center()
+                .mb(px(SP_1))
+                .child(icon(ic, IC_LG + 2., c(th.overlay1))),
+        )
+        .child(
+            div()
+                .text_size(px(fs_body() + 1.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(c(th.text))
                 .text_center()
                 .child(title.into()),
         )
         .children(desc.map(|d| {
             div()
-                .max_w(px(260.))
+                .max_w(px(300.))
                 .text_size(px(fs_small()))
-                .text_color(c(th.overlay1))
+                .line_height(px(lh(fs_small()) + 2.))
+                .text_color(c(th.subtext))
                 .text_center()
                 .child(d)
         }))
         .when(!actions.is_empty(), |d| {
             d.child(
                 div()
-                    .mt(px(SP_1))
+                    .mt(px(SP_2))
                     .flex()
                     .gap(px(SP_2))
                     .when(horizontal, |r| r.items_center())
@@ -961,9 +1073,10 @@ pub fn virtual_list<R: IntoElement>(
         .track_scroll(handle)
 }
 
-/// 骨架占位行：首次扫描或异步加载时平滑占位，避免突兀纯文字切换。
+/// 骨架占位行：首次扫描或异步加载时带柔和呼吸占位，避免突兀纯文字切换。
 #[allow(dead_code)]
 pub fn skeleton_rows(n: usize) -> Div {
+    use gpui::AnimationExt as _;
     let mut col = div().flex().flex_col().gap(px(SP_1)).py(px(SP_2));
     for i in 0..n {
         let w = match i % 3 {
@@ -971,29 +1084,33 @@ pub fn skeleton_rows(n: usize) -> Div {
             1 => 0.56,
             _ => 0.64,
         };
-        col = col.child(
-            div()
-                .h(px(row_h()))
-                .mx(px(LIST_INSET))
-                .px(px(ROW_PX))
-                .rounded(px(R_MD))
-                .flex()
-                .items_center()
-                .gap(px(SP_2))
-                .child(
-                    div()
-                        .size(px(IC_MD))
-                        .rounded(px(R_SM))
-                        .bg(hover_bg()),
-                )
-                .child(
-                    div()
-                        .h(px(12.))
-                        .w(gpui::relative(w))
-                        .rounded(px(R_SM))
-                        .bg(hover_bg()),
-                ),
-        );
+        let row = div()
+            .h(px(row_h()))
+            .mx(px(LIST_INSET))
+            .px(px(ROW_PX))
+            .rounded(px(R_MD))
+            .flex()
+            .items_center()
+            .gap(px(SP_2))
+            .child(div().size(px(IC_MD)).rounded(px(R_SM)).bg(hover_bg()))
+            .child(
+                div()
+                    .h(px(10.))
+                    .w(gpui::relative(w))
+                    .rounded(px(R_SM))
+                    .bg(hover_bg()),
+            );
+        if crate::motion::reduced() {
+            col = col.child(row);
+        } else {
+            col = col.child(row.with_animation(
+                ("skel-row", i),
+                gpui::Animation::new(crate::motion::ms(crate::motion::BREATHE_MS))
+                    .repeat()
+                    .with_easing(gpui::pulsating_between(0.45, 0.95)),
+                |d, t| d.opacity(t),
+            ));
+        }
     }
     col
 }
@@ -1006,23 +1123,29 @@ pub enum Notice {
     Error,
 }
 
-/// 行内提示条：淡底色块 + 同色文字，用于提示、警告与错误。
+/// 行内提示条：淡底色块 + 语义细边框 + 语义图标与文字，用于提示、警告与错误。
 pub fn notice(kind: Notice, text: impl Into<SharedString>) -> Div {
     let th = cur();
-    let col = match kind {
-        Notice::Info => c(th.info),
-        Notice::Warn => c(th.warning),
-        Notice::Error => c(th.error),
+    let (ic, col) = match kind {
+        Notice::Info => (IconName::Info, c(th.info)),
+        Notice::Warn => (IconName::TriangleAlert, c(th.warning)),
+        Notice::Error => (IconName::CircleAlert, c(th.error)),
     };
     div()
         .mx(px(LIST_INSET))
         .px(px(ROW_PX))
         .py(px(6.))
         .rounded(px(R_MD))
-        .bg(col.opacity(0.10))
+        .bg(col.opacity(0.09))
+        .border_1()
+        .border_color(col.opacity(0.24))
+        .flex()
+        .items_center()
+        .gap(px(6.))
         .text_color(col)
         .text_size(px(fs_small()))
-        .child(text.into())
+        .child(icon(ic, IC_XS, col))
+        .child(div().flex_1().min_w_0().child(text.into()))
 }
 
 /// 次要说明文字：`fs_small` + `subtext`。
@@ -1075,7 +1198,6 @@ pub fn dialog_header(
         )
         .children(subtitle.map(|s| {
             div()
-                .flex_1()
                 .min_w_0()
                 .whitespace_nowrap()
                 .overflow_hidden()
@@ -1117,33 +1239,33 @@ pub fn modal(card: impl IntoElement + 'static) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        .bg(gpui::black().opacity(0.28))
+        .bg(crate::theme::modal_scrim_bg())
         .p(px(SP_4))
         .child(crate::chrome::pop_in("modal-pop", card))
 }
 
-/// 弹出面（菜单、命令面板）：圆角 10、发丝边框、柔和分层阴影。
+/// 弹出面（菜单、命令面板）：圆角 10、1px 锐利轮廓边框、柔和分层阴影。
 pub fn popover() -> Div {
-    let th = cur();
     div()
         .max_w(px(POPOVER_MAX_W))
         .rounded(px(R_LG))
-        .bg(c(th.base))
+        .bg(crate::theme::overlay_card_bg(1.0))
         .border_1()
-        .border_color(divider())
+        .border_color(crate::theme::overlay_border())
         .shadow(crate::chrome::soft_shadow(true))
 }
 
 pub fn card(w: f32) -> Div {
-    let th = cur();
     div()
         .w(px(w))
+        .max_w(gpui::relative(0.95))
+        .max_h(gpui::relative(0.92))
         .occlude()
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .rounded(px(R_LG))
-        .bg(c(th.base).opacity(0.97))
+        .bg(crate::theme::overlay_card_bg(1.0))
         .border_1()
-        .border_color(divider())
+        .border_color(crate::theme::overlay_border())
         .shadow(crate::chrome::soft_shadow(true))
         .flex()
         .flex_col()
@@ -1721,6 +1843,53 @@ pub fn tip(
     }
 }
 
+/// Break a long path or string across `/`, `\`, or space boundaries without dropping characters.
+pub fn wrap_path_for_tooltip(text: &str, max_cols: usize) -> String {
+    text.split('\n')
+        .map(|line| {
+            if line.chars().count() <= max_cols || max_cols == 0 {
+                return line.to_string();
+            }
+            let mut out = String::new();
+            let mut cur = String::new();
+            let mut cur_len = 0usize;
+            for seg in line.split_inclusive(['/', '\\', ' ']) {
+                let seg_len = seg.chars().count();
+                if cur_len > 0 && cur_len + seg_len > max_cols {
+                    out.push_str(cur.trim_end_matches(' '));
+                    out.push('\n');
+                    cur.clear();
+                    cur_len = 0;
+                }
+                cur.push_str(seg);
+                cur_len += seg_len;
+            }
+            out.push_str(&cur);
+            out
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Full-text tooltip for paths: wraps cleanly at separators instead of mid-ellipsizing.
+pub fn tip_full(
+    text: impl Into<SharedString>,
+) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
+    let raw: SharedString = text.into();
+    move |w, cx| {
+        let text: SharedString = wrap_path_for_tooltip(&raw, 48).into();
+        gpui_component::tooltip::Tooltip::element(move |_, _| {
+            div()
+                .max_w(px(TIP_MAX_W))
+                .min_w_0()
+                .whitespace_normal()
+                .child(text.clone())
+        })
+        .max_w(px(TIP_MAX_W + 2. * SP_3))
+        .build(w, cx)
+    }
+}
+
 /// 角落提示卡片宽度：min(TOAST_MAX_W, 窗口宽 - 2*EDGE_MARGIN - 右偏移)。
 pub fn corner_w(window: &gpui::Window, right: f32) -> f32 {
     let ww = f32::from(window.viewport_size().width);
@@ -1729,7 +1898,6 @@ pub fn corner_w(window: &gpui::Window, right: f32) -> f32 {
 
 /// 右下角浮层卡片（toast、更新提示）的统一外壳：限宽、可换行、不越出窗口。
 pub fn corner_card(window: &gpui::Window, bottom: f32, right: f32) -> Div {
-    let th = cur();
     div()
         .absolute()
         .bottom(px(bottom))
@@ -1737,9 +1905,9 @@ pub fn corner_card(window: &gpui::Window, bottom: f32, right: f32) -> Div {
         .max_w(px(corner_w(window, right)))
         .min_w_0()
         .rounded(px(R_LG))
-        .bg(c(th.base))
+        .bg(crate::theme::overlay_card_bg(1.0))
         .border_1()
-        .border_color(divider())
+        .border_color(crate::theme::overlay_border())
         .shadow(crate::chrome::soft_shadow(true))
 }
 
@@ -1753,5 +1921,16 @@ mod tip_tests {
         let r = mid_ellipsis_tokens(&format!("x {long}\ny"));
         assert!(r.contains('…') && r.starts_with("x /very") && r.ends_with("\ny"));
         assert!(r.lines().next().unwrap().chars().count() <= TIP_TOKEN_MAX + 2);
+    }
+
+    #[test]
+    fn wrap_full_path_keeps_every_character() {
+        let short = "/Users/afeng/workspace/VibeCoding/ShellAX";
+        assert_eq!(wrap_path_for_tooltip(short, 48), short);
+        let long = "/Users/afeng/workspace/enterprise-platform/microservices/payment-gateway-service";
+        let wrapped = wrap_path_for_tooltip(long, 40);
+        assert!(wrapped.contains('\n'));
+        assert!(!wrapped.contains('…'));
+        assert_eq!(wrapped.replace('\n', ""), long);
     }
 }

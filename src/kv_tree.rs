@@ -54,6 +54,9 @@ pub struct KvPanel {
     pub selected: Option<String>,
     /// Saved command being renamed: (connection id, old name, input).
     pub edit: Option<(String, String, Entity<InputState>)>,
+    pub search: Option<Entity<InputState>>,
+    pub docker_search: Option<Entity<InputState>>,
+    pub hide_empty_db: bool,
 }
 
 fn db_key(id: &str, n: u32) -> String {
@@ -306,7 +309,11 @@ impl Root {
     }
 
     /// Tree rows of all Redis connections (grouped by group path).
-    pub(crate) fn kv_tree_list(&mut self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+    pub(crate) fn kv_tree_list(
+        &mut self,
+        q: &str,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let mut conns = config::get().redis.clone();
         conns.sort_by(|a, b| {
             (a.group_path(), a.name.to_lowercase()).cmp(&(b.group_path(), b.name.to_lowercase()))
@@ -321,6 +328,18 @@ impl Root {
             .flex_col();
         let mut last: Option<String> = None;
         for conn in conns {
+            let conn_hit = q.is_empty()
+                || conn.name.to_lowercase().contains(q)
+                || conn.address().to_lowercase().contains(q)
+                || conn.group_path().to_lowercase().contains(q);
+            let key_hit = !q.is_empty()
+                && self.kvp.dbs.iter().any(|(dk, db)| {
+                    dk.starts_with(&format!("{}{SEP}", conn.id))
+                        && matches!(db, KvDb::Ready { keys, .. } if keys.iter().any(|k| k.to_lowercase().contains(q)))
+                });
+            if !conn_hit && !key_hit {
+                continue;
+            }
             let g = conn.group_path();
             if last.as_ref() != Some(&g) && !g.is_empty() {
                 list = list.child(ui::section_header(
@@ -331,7 +350,7 @@ impl Root {
                 ));
             }
             last = Some(g);
-            list = self.kv_conn_rows(list, &conn, cx);
+            list = self.kv_conn_rows(list, &conn, q, cx);
         }
         list
     }
@@ -340,6 +359,7 @@ impl Root {
         &mut self,
         mut list: gpui::Stateful<gpui::Div>,
         conn: &RedisConn,
+        q: &str,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let th = cur();
@@ -353,12 +373,48 @@ impl Root {
             _ => None,
         };
         let prod = Self::production_of(&conn.tags, &conn.group_path());
-        let (k1, k2) = (id.clone(), id.clone());
+        let (k1, k2, k_ch, k_tab, k_plug, k_ed) = (
+            id.clone(),
+            id.clone(),
+            id.clone(),
+            id.clone(),
+            id.clone(),
+            id.clone(),
+        );
+        let gid = SharedString::from(format!("kvc-g:{id}"));
+        let chev_btn = div()
+            .id(SharedString::from(format!("kvc-ch:{id}")))
+            .w(px(ui::INDENT))
+            .h_full()
+            .flex()
+            .items_center()
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _w, cx| {
+                cx.stop_propagation();
+                this.kvp.selected = Some(k_ch.clone());
+                if matches!(this.kvp.live.get(&k_ch), Some(KvLive::Ready { .. })) {
+                    this.kv_toggle(&k_ch, cx);
+                } else {
+                    this.kvp.live.remove(&k_ch);
+                    this.kv_open_conn(&k_ch, cx);
+                }
+                cx.notify();
+            }))
+            .child(icon(
+                if open && ready {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                },
+                ui::IC_XS,
+                c(cur().overlay1),
+            ));
         let mut r = row(
             SharedString::from(format!("kvc:{id}")),
             0,
             self.kvp.selected.as_deref() == Some(id.as_str()),
         )
+        .group(gid.clone())
         .on_click(cx.listener(move |this, e: &ClickEvent, _w, cx| {
             this.kvp.selected = Some(k1.clone());
             if matches!(this.kvp.live.get(&k1), Some(KvLive::Ready { .. })) {
@@ -372,7 +428,7 @@ impl Root {
             MouseButton::Right,
             cx.listener(move |this, e: &MouseDownEvent, _w, cx| this.kv_menu_to(k2.clone(), e, cx)),
         )
-        .child(chev(open && ready, true))
+        .child(chev_btn)
         .child(crate::file_icon::db_glyph(
             "redis",
             ui::IC_MD,
@@ -396,7 +452,7 @@ impl Root {
         if conn.name.trim() != addr {
             r = r.child(
                 div()
-                    .max_w(px(140.))
+                    .max_w(px(110.))
                     .min_w_0()
                     .flex_shrink(1.)
                     .overflow_hidden()
@@ -416,6 +472,63 @@ impl Root {
         if let Some(col) = dot {
             r = r.child(div().size(px(7.)).rounded_full().bg(col));
         }
+        r = r.child(
+            ui::row_actions(gid)
+                .child(
+                    ui::icon_button(
+                        SharedString::from(format!("kvc-tab:{id}")),
+                        IconName::SquareTerminal,
+                        ui::IconBtn::Sm,
+                        t("kvt.open_tab"),
+                    )
+                    .on_click(cx.listener(move |this, _, w, cx| {
+                        cx.stop_propagation();
+                        this.kv_open_tab(&k_tab, None, None, w, cx);
+                    })),
+                )
+                .child(
+                    ui::icon_button(
+                        SharedString::from(format!("kvc-plug:{id}")),
+                        if ready {
+                            IconName::Unplug
+                        } else {
+                            IconName::Plug
+                        },
+                        ui::IconBtn::Sm,
+                        if ready {
+                            t("dbt.close_conn")
+                        } else {
+                            t("dbt.open_conn")
+                        },
+                    )
+                    .on_click(cx.listener(move |this, _, _w, cx| {
+                        cx.stop_propagation();
+                        if matches!(this.kvp.live.get(&k_plug), Some(KvLive::Ready { .. })) {
+                            this.kv_close_conn(&k_plug, cx);
+                        } else {
+                            this.kvp.live.remove(&k_plug);
+                            this.kv_open_conn(&k_plug, cx);
+                        }
+                    })),
+                )
+                .child(
+                    ui::icon_button(
+                        SharedString::from(format!("kvc-ed:{id}")),
+                        IconName::Pencil,
+                        ui::IconBtn::Sm,
+                        t("db.edit"),
+                    )
+                    .on_click(cx.listener(move |this, _, w, cx| {
+                        cx.stop_propagation();
+                        this.open_asset_dialog(
+                            crate::kv_ui::AssetKind::Redis,
+                            Some(k_ed.clone()),
+                            w,
+                            cx,
+                        );
+                    })),
+                ),
+        );
         list = list.child(r);
         // Wrap: a nowrap line is clipped at the sidebar edge (`Connection ref`).
         let note = |s: String, depth: usize, err: bool| {
@@ -456,17 +569,57 @@ impl Root {
             return list;
         };
         let (dbs, counts) = (*dbs, counts.clone());
+        let hide_empty = self.kvp.hide_empty_db;
         for n in 0..dbs {
             let dk = db_key(&id, n);
+            let cnt = counts.get(&n).copied().unwrap_or(0);
             let opened = self.kvp.dbs.contains_key(&dk);
+            if hide_empty && cnt == 0 && !opened && n != conn.db {
+                continue;
+            }
             let dopen = opened && self.kvp.open.contains(&dk);
-            let (d1, d2, i1) = (dk.clone(), dk.clone(), id.clone());
+            let (d1, d2, d_ch, i1, i_ch, i_tab) = (
+                dk.clone(),
+                dk.clone(),
+                dk.clone(),
+                id.clone(),
+                id.clone(),
+                id.clone(),
+            );
+            let db_gid = SharedString::from(format!("kvd-g:{dk}"));
+            let db_chev = div()
+                .id(SharedString::from(format!("kvd-ch:{dk}")))
+                .w(px(ui::INDENT))
+                .h_full()
+                .flex()
+                .items_center()
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _w, cx| {
+                    cx.stop_propagation();
+                    this.kvp.selected = Some(d_ch.clone());
+                    if this.kvp.dbs.contains_key(&d_ch) {
+                        this.kv_toggle(&d_ch, cx);
+                    } else {
+                        this.kv_open_db(&i_ch, n, cx);
+                    }
+                    cx.notify();
+                }))
+                .child(icon(
+                    if dopen {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    },
+                    ui::IC_XS,
+                    c(cur().overlay1),
+                ));
             list = list.child(
                 row(
                     SharedString::from(format!("kvd:{dk}")),
                     1,
                     self.kvp.selected.as_deref() == Some(dk.as_str()),
                 )
+                .group(db_gid.clone())
                 .on_click(cx.listener(move |this, e: &ClickEvent, _w, cx| {
                     this.kvp.selected = Some(d1.clone());
                     if this.kvp.dbs.contains_key(&d1) {
@@ -482,23 +635,54 @@ impl Root {
                         this.kv_menu_to(d2.clone(), e, cx)
                     }),
                 )
-                .child(chev(dopen, true))
+                .child(db_chev)
                 .child(icon(
                     IconName::Database,
                     ui::IC_MD,
-                    if opened { c(th.accent) } else { c(th.overlay1) },
+                    if opened {
+                        c(th.accent)
+                    } else if cnt > 0 {
+                        c(th.text)
+                    } else {
+                        c(th.overlay1)
+                    },
                 ))
                 .child(
                     div()
                         .flex_1()
-                        .text_color(if opened { c(th.text) } else { c(th.subtext) })
+                        .text_color(if opened || cnt > 0 {
+                            c(th.text)
+                        } else {
+                            c(th.subtext)
+                        })
                         .child(format!("db{n}")),
                 )
+                .when(cnt > 0, |d| {
+                    d.child(
+                        div()
+                            .px(px(6.))
+                            .rounded_full()
+                            .bg(crate::theme::hover_bg())
+                            .text_size(px(ui::fs_caption()))
+                            .text_color(c(th.subtext))
+                            .child(cnt.to_string()),
+                    )
+                })
                 .child(
-                    div()
-                        .text_size(px(ui::fs_small()))
-                        .text_color(c(th.subtext))
-                        .child(counts.get(&n).map(|c| c.to_string()).unwrap_or_default()),
+                    ui::row_actions(db_gid).child(
+                        ui::icon_button(
+                            SharedString::from(format!("kvd-tab:{dk}")),
+                            IconName::SquareTerminal,
+                            ui::IconBtn::Sm,
+                            t("kvt.open_tab"),
+                        )
+                        .on_click(cx.listener(
+                            move |this, _, w, cx| {
+                                cx.stop_propagation();
+                                this.kv_open_tab(&i_tab, Some(n), None, w, cx);
+                            },
+                        )),
+                    ),
                 ),
             );
             if !dopen {
@@ -513,11 +697,16 @@ impl Root {
                 }
                 Some(KvDb::Ready { keys, more, .. }) => {
                     let more = *more;
-                    if keys.is_empty() {
+                    let filtered_keys: Vec<&str> = keys
+                        .iter()
+                        .map(String::as_str)
+                        .filter(|k| q.is_empty() || k.to_lowercase().contains(q))
+                        .collect();
+                    if filtered_keys.is_empty() {
                         list = list.child(note(t("db.no_objects").to_string(), 2, false));
                         continue;
                     }
-                    let root = tree::Node::build(keys.iter().map(String::as_str), conn.sep());
+                    let root = tree::Node::build(filtered_keys.into_iter(), conn.sep());
                     let pre = format!("{dk}{SEP}");
                     let open_paths: HashSet<String> = self
                         .kvp

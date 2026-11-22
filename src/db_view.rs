@@ -478,6 +478,7 @@ pub struct DbView {
 #[derive(Clone)]
 pub enum DbEvent {
     Refresh(String),
+    OpenQuery(Target, String),
 }
 impl gpui::EventEmitter<DbEvent> for DbView {}
 
@@ -2239,6 +2240,38 @@ impl DbView {
                 row = row
                     .child(
                         Self::toolbar_btn(
+                            "dbv-to-sql",
+                            IconName::SquareTerminal,
+                            Some(t("ux.db_open_sql_tab").into()),
+                            "",
+                        )
+                        .on_click(cx.listener(|v, _, _w, cx| {
+                            let Some(tb) = v.target.table.clone() else {
+                                return;
+                            };
+                            let fam = v
+                                .live
+                                .as_ref()
+                                .map(|l| l.driver.family())
+                                .unwrap_or(ssh_term_proto::assets::Family::Mysql);
+                            let q = dialect::qualified(
+                                fam,
+                                &v.target.database,
+                                v.target.schema.as_deref(),
+                                &tb,
+                            );
+                            let mut sql = format!("SELECT * FROM {q}");
+                            if !v.applied_where.trim().is_empty() {
+                                sql.push_str(&format!(" WHERE {}", v.applied_where.trim()));
+                            }
+                            sql.push_str(" LIMIT 100;");
+                            let mut tg = v.target.clone();
+                            tg.table = None;
+                            cx.emit(DbEvent::OpenQuery(tg, sql));
+                        })),
+                    )
+                    .child(
+                        Self::toolbar_btn(
                             "dbv-export",
                             IconName::ArrowDownToLine,
                             Some(t("db.export").into()),
@@ -2335,9 +2368,16 @@ impl DbView {
             row = row
                 .child(if self.busy {
                     Self::toolbar_btn("dbv-stop", IconName::Square, Some(t("db.stop").into()), "")
+                        .bg(c(th.error).opacity(0.12))
+                        .text_color(c(th.error))
                         .on_click(cx.listener(|v, _, _w, cx| v.cancel(cx)))
                 } else {
                     Self::toolbar_btn("dbv-run", IconName::Play, Some(t("db.run").into()), "")
+                        .bg(crate::theme::accent_bg())
+                        .border_1()
+                        .border_color(crate::theme::active_border())
+                        .text_color(c(th.accent))
+                        .font_weight(FontWeight::MEDIUM)
                         .on_click(cx.listener(|v, _, _w, cx| v.run_sql(false, cx)))
                 })
                 .child(
@@ -2348,6 +2388,21 @@ impl DbView {
                         "",
                     )
                     .on_click(cx.listener(|v, _, _w, cx| v.run_sql(true, cx))),
+                )
+                .child(
+                    Self::toolbar_btn(
+                        "dbv-fmt-sql",
+                        IconName::Sparkles,
+                        Some(t("ux.db_format_sql").into()),
+                        "",
+                    )
+                    .on_click(cx.listener(|v, _, window, cx| {
+                        let raw = v.editor.read(cx).value().to_string();
+                        if !raw.trim().is_empty() {
+                            let formatted = ssh_term_proto::tools::dev::sql(&raw, false, true);
+                            v.editor.update(cx, |ed, cx| ed.set_value(formatted, window, cx));
+                        }
+                    })),
                 )
                 .child(
                     Self::toolbar_btn(
@@ -2498,6 +2553,91 @@ impl DbView {
             .flex_shrink_0()
             .child(row)
             .children(note)
+    }
+
+    fn table_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let th = cur();
+        let (rows_len, has_more, sort_info, sel_val) = {
+            let d = self.grid.read(cx).delegate();
+            let sort_info = d.sort.and_then(|(col, desc)| {
+                d.cols
+                    .get(col)
+                    .map(|c| (c.name.clone(), if desc { "DESC" } else { "ASC" }))
+            });
+            let sel_val = self
+                .sel
+                .and_then(|(r, c)| d.shown(r, c).0);
+            (d.rows.len(), d.more, sort_info, sel_val)
+        };
+        let summary = if !self.status.is_empty() {
+            self.status.clone()
+        } else {
+            tf("db.loaded", &[("n", &rows_len), ("ms", &0)])
+        };
+        div()
+            .h(px(ui::H_COMPACT + 6.))
+            .px(px(ui::SP_3))
+            .flex_shrink_0()
+            .border_t_1()
+            .border_color(crate::theme::divider())
+            .flex()
+            .items_center()
+            .gap(px(ui::SP_2))
+            .child(
+                div()
+                    .text_size(px(ui::fs_small()))
+                    .text_color(c(th.subtext))
+                    .child(summary),
+            )
+            .when_some(sort_info, |d, (col, dir)| {
+                d.child(
+                    ui::chip(
+                        "dbv-clear-sort",
+                        format!("{} ×", tf("ux.db_sort_by", &[("col", &col), ("dir", &dir)])),
+                        true,
+                    )
+                    .on_click(cx.listener(|v, _, _w, cx| {
+                        v.grid.update(cx, |s, cx| {
+                            s.delegate_mut().sort = None;
+                            s.refresh(cx);
+                        });
+                        v.guarded(Next::Reload, cx);
+                    })),
+                )
+            })
+            .child(div().flex_1())
+            .when_some(sel_val, |d, val_s| {
+                d.child(
+                    Self::toolbar_btn(
+                        "dbv-copy-cell",
+                        IconName::Copy,
+                        Some(t("ux.db_copy_cell").into()),
+                        "",
+                    )
+                    .on_click(cx.listener(move |v, _, _w, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(val_s.clone()));
+                        v.flash_status(t("db.copied").into(), cx);
+                    })),
+                )
+            })
+            .when(has_more, |d| {
+                d.child(
+                    ui::button_sm(
+                        "dbv-load-more",
+                        if self.busy {
+                            t("db.loading")
+                        } else {
+                            t("ux.db_load_more")
+                        },
+                        0,
+                    )
+                    .on_click(cx.listener(|v, _, _w, cx| {
+                        if !v.busy {
+                            v.load_page(false, cx);
+                        }
+                    })),
+                )
+            })
     }
 
     fn structure_el(&self) -> gpui::AnyElement {
@@ -3553,7 +3693,6 @@ impl Render for DbView {
             .relative()
             .flex()
             .flex_col()
-            .bg(c(th.base))
             .text_color(c(th.text));
         root = root.child(self.header(cx));
         if self.table_mode() || self.creating {
@@ -3593,6 +3732,7 @@ impl Render for DbView {
                                 .min_h_0()
                                 .child(DataTable::new(&self.grid).stripe(true).bordered(false)),
                         )
+                        .child(self.table_footer(cx))
                         .into_any_element(),
                 },
             };
@@ -3628,7 +3768,17 @@ impl Render for DbView {
                 .flex_shrink_0()
                 .cursor_row_resize()
                 .rounded(px(ui::R_SM))
-                .hover(|d| d.bg(c(cur().accent).opacity(0.35)))
+                .flex()
+                .items_center()
+                .justify_center()
+                .hover(|d| d.bg(c(cur().accent).opacity(0.28)))
+                .child(
+                    div()
+                        .w(px(28.))
+                        .h(px(2.))
+                        .rounded_full()
+                        .bg(crate::theme::divider()),
+                )
                 .on_drag(EditorResize, |d: &EditorResize, _, _, cx| {
                     cx.new(|_| d.clone())
                 })

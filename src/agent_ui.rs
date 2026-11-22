@@ -347,6 +347,42 @@ fn truncate_tab_title(s: &str, max_chars: usize) -> String {
     }
 }
 
+/// Truncate a label by visual width units (ASCII = 1, non-ASCII = 2) so compact tab project
+/// badges show only a few characters without cramping the session title.
+fn compact_display_units(name: &str, max_units: usize, keep_units: usize) -> String {
+    let char_w = |ch: char| if ch.is_ascii() { 1 } else { 2 };
+    let total: usize = name.chars().map(char_w).sum();
+    if total <= max_units {
+        return name.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in name.chars() {
+        let w = char_w(ch);
+        if used + w > keep_units {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    if out.is_empty() {
+        if let Some(ch) = name.chars().next() {
+            out.push(ch);
+        }
+    }
+    out.push('…');
+    out
+}
+
+pub(crate) fn compact_project_label(dir: &str) -> String {
+    let trimmed = dir.trim();
+    if abbreviate_home(trimmed) == "~" && !Path::new(trimmed).join(".git").exists() {
+        return "~".into();
+    }
+    let name = agent_history::resolve_project_name_for_dir(trimmed);
+    compact_display_units(&name, 8, 6)
+}
+
 /// Unified context usage resolved across transcript accounting (primary) and bottom-footer
 /// terminal scraping (fallback when no transcript exists yet or over remote SSH).
 #[derive(Debug, Clone, PartialEq)]
@@ -1063,6 +1099,53 @@ impl Root {
         None
     }
 
+    /// Resolve `(short_label, full_project_dir)` for an Agent tab prefix badge and hover tooltip.
+    pub(crate) fn agent_tab_project(&self, tab: &Tab, cx: &App) -> Option<(String, String)> {
+        let panes = tab.layout.leaves();
+        let bound_cwd = |v: &TermView| -> Option<String> {
+            let sid = v.agent_session_id.as_deref()?;
+            self.agent_hub
+                .sessions
+                .iter()
+                .find(|m| m.id == sid)
+                .and_then(|m| m.cwd.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        let pane_cwd_of = |v: &TermView| -> Option<String> {
+            v.shell_cwd()
+                .or_else(|| bound_cwd(v))
+                .or_else(|| v.initial_cwd.clone())
+        };
+
+        let task_repo = tab
+            .task
+            .as_ref()
+            .map(|tk| tk.repo.display().to_string())
+            .filter(|s| !s.trim().is_empty());
+        let has_wt = tab
+            .task
+            .as_ref()
+            .and_then(|tk| tk.worktree.as_ref())
+            .is_some();
+
+        let pane_cwd = pane_cwd_of(tab.focused.read(cx))
+            .or_else(|| panes.iter().find_map(|p| pane_cwd_of(p.read(cx))));
+
+        let raw_dir = if has_wt {
+            task_repo.or(pane_cwd)
+        } else {
+            pane_cwd.or(task_repo)
+        }?;
+
+        let dir = raw_dir.trim();
+        if dir.is_empty() {
+            return None;
+        }
+        Some((compact_project_label(dir), dir.to_string()))
+    }
+
     /// Trigger a throttled background scan on agent state changes and schedule one follow-up
     /// scan so delayed AI summary titles / newly created JSONL logs appear automatically.
     pub(crate) fn maybe_auto_refresh_agent_history(
@@ -1266,14 +1349,31 @@ impl Root {
             .min()
             .unwrap_or(now_secs)
             .saturating_sub(30);
+        let content_match_scopes: Vec<(&str, Option<&str>)> = unbound
+            .iter()
+            .filter(|u| !u.osc_clean.is_empty() || !u.screen_compact.is_empty())
+            .map(|u| (u.agent_id.as_str(), u.cwd.as_deref()))
+            .collect();
 
         let mut by_key: HashMap<(String, String), Cand> = HashMap::new();
         for m in &self.agent_hub.sessions {
-            if bound_sids.contains(&m.id) || m.updated < min_pane_start {
+            if bound_sids.contains(&m.id) {
                 continue;
             }
             let aid = agent::normalize_id(&m.agent);
             let ws = m.cwd.as_deref().map(norm_cwd).filter(|s| !s.is_empty());
+            let recent = m.updated >= min_pane_start;
+            let scope_match = !recent
+                && content_match_scopes.iter().any(|(ua, uc)| {
+                    *ua == aid
+                        && match (*uc, ws.as_deref()) {
+                            (Some(pc), Some(cw)) => pc == cw,
+                            _ => true,
+                        }
+                });
+            if !recent && !scope_match {
+                continue;
+            }
             let mut hints = Vec::new();
             for cand in [
                 m.title.as_deref(),
@@ -1287,6 +1387,9 @@ impl Root {
                 if !c.is_empty() && !hints.iter().any(|x| x == c) {
                     hints.push(c.to_string());
                 }
+            }
+            if !recent && hints.is_empty() {
+                continue;
             }
             by_key.insert(
                 (aid.clone(), m.id.clone()),
@@ -1381,7 +1484,6 @@ impl Root {
             for cand in &cands {
                 if cand.agent_id != up.agent_id
                     || used.contains(&(cand.agent_id.clone(), cand.cid.clone()))
-                    || cand.last_ts < ref_ts.saturating_sub(15)
                 {
                     continue;
                 }
@@ -1390,10 +1492,14 @@ impl Root {
                         continue;
                     }
                 }
+                let recent = cand.last_ts >= ref_ts.saturating_sub(15);
+                let min_osc = if recent { 2 } else { 4 };
+                let min_prompt = if recent { 3 } else { 8 };
                 let osc_hit = !up.osc_clean.is_empty()
+                    && up.osc_clean.chars().count() >= min_osc
                     && cand.hints.iter().any(|h| {
                         let hc = compact_lower(h);
-                        hc.chars().count() >= 2
+                        hc.chars().count() >= min_osc
                             && (hc == up.osc_clean
                                 || hc.contains(&up.osc_clean)
                                 || up.osc_clean.contains(&hc))
@@ -1404,7 +1510,7 @@ impl Root {
                     .filter_map(|h| {
                         let hc = compact_lower(h);
                         let n = hc.chars().count();
-                        if n < 3 {
+                        if n < min_prompt {
                             return None;
                         }
                         if up.screen_compact.contains(&hc) {
@@ -1421,7 +1527,8 @@ impl Root {
                     2000 + up.osc_clean.chars().count() as i32
                 } else if let Some(len) = prompt_hit {
                     1000 + len
-                } else if cand.first_ts >= ref_ts.saturating_sub(25)
+                } else if recent
+                    && cand.first_ts >= ref_ts.saturating_sub(25)
                     && same_group == 1
                     && matching_cands == 1
                 {
@@ -1465,6 +1572,67 @@ impl Root {
         }
     }
 
+    /// Wake any restored local Agent panes in `tab_idx` that were queued for lazy auto-resume.
+    pub(crate) fn wake_pending_agent_resumes_in_tab(
+        &mut self,
+        tab_idx: usize,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let leaves = tab.layout.leaves();
+        let mut woke = false;
+        for pane in leaves {
+            let pending = pane.update(cx, |v, _| v.pending_agent_resume.take());
+            let Some(pending) = pending else {
+                continue;
+            };
+            let transcript = pending.transcript_path.clone().or_else(|| {
+                self.agent_hub
+                    .sessions
+                    .iter()
+                    .find(|m| m.id == pending.session_id)
+                    .map(|m| m.path.display().to_string())
+            });
+            pane.update(cx, |v, _| {
+                v.agent_session_id = Some(pending.session_id.clone());
+                if let Some(tp) = transcript {
+                    v.agent_transcript_path = Some(tp);
+                }
+                v.agent_started_unix = agent_history::now_unix_secs();
+                v.set_launched_agent(&pending.agent_id);
+                v.resume_offer = None;
+            });
+            send_when_shell_ready(pane, pending.cmd, cx);
+            woke = true;
+        }
+        if woke {
+            self.agent_hub.invalidate_sessions();
+            cx.notify();
+        }
+        woke
+    }
+
+    /// Wake the currently active Agent tab if it contains any restored panes awaiting lazy resume.
+    pub(crate) fn wake_active_agent_tab_if_needed(&mut self, cx: &mut Context<Self>) {
+        if self.settings_active()
+            || self.tool.workspace() != Tool::Agents
+            || !self.active_in_ws(cx)
+        {
+            return;
+        }
+        let has_pending = self.tabs.get(self.active).is_some_and(|t| {
+            t.layout
+                .leaves()
+                .iter()
+                .any(|p| p.read(cx).pending_agent_resume.is_some())
+        });
+        if has_pending {
+            self.wake_pending_agent_resumes_in_tab(self.active, cx);
+        }
+    }
+
     /// Resume a historical coding session (or jump to its live pane if already open).
     pub(crate) fn resume_history_session(
         &mut self,
@@ -1473,7 +1641,8 @@ impl Root {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // De-duplicate: if a running pane already owns this session ID, jump straight to it.
+        // De-duplicate: if an open pane already owns this session ID, jump straight to it
+        // (waking lazy-restored panes or re-launching exited shells in place).
         if !in_new_worktree {
             let existing = self.tabs.iter().flat_map(|t| t.layout.leaves()).find(|p| {
                 p.read(cx)
@@ -1483,6 +1652,32 @@ impl Root {
             });
             if let Some(pane) = existing {
                 self.focus_pane_anywhere(&pane, window, cx);
+                if pane.read(cx).pending_agent_resume.is_some() {
+                    self.wake_pending_agent_resumes_in_tab(self.active, cx);
+                } else {
+                    let needs_relaunch = {
+                        let v = pane.read(cx);
+                        v.agent.is_none()
+                            && v.ws == Some(Tool::Agents)
+                            && matches!(v.spec, Spec::Local)
+                    };
+                    if needs_relaunch {
+                        if let Some(cmd_line) =
+                            agent_resume::build_validated_resume_line(&meta.agent, &meta.id)
+                        {
+                            let tp = meta.path.display().to_string();
+                            let agent_name = meta.agent.clone();
+                            pane.update(cx, |v, _| {
+                                v.agent_transcript_path = Some(tp);
+                                v.agent_started_unix = agent_history::now_unix_secs();
+                                v.set_launched_agent(&agent_name);
+                                v.resume_offer = None;
+                            });
+                            send_when_shell_ready(pane, cmd_line, cx);
+                            cx.notify();
+                        }
+                    }
+                }
                 return;
             }
         }
@@ -1759,17 +1954,11 @@ impl Root {
 
         let dir_path = PathBuf::from(&raw_dir);
         if raw_dir.is_empty() || !dir_path.is_dir() {
-            if let Some(d) = self.agent_hub.new_task.as_mut() {
-                d.error = Some(t("ag.task_err_dir").into());
-            }
-            cx.notify();
+            self.toast_kind(ToastKind::Error, t("ag.task_err_dir"), cx);
             return;
         }
         if selected.is_empty() {
-            if let Some(d) = self.agent_hub.new_task.as_mut() {
-                d.error = Some(t("ag.task_err_agent").into());
-            }
-            cx.notify();
+            self.toast_kind(ToastKind::Error, t("ag.task_err_agent"), cx);
             return;
         }
 
@@ -2013,10 +2202,7 @@ impl Root {
                         );
                     }
                     Err(e) => {
-                        if let Some(f) = self.agent_hub.finish_task.as_mut() {
-                            f.error = Some(e);
-                        }
-                        cx.notify();
+                        self.toast_kind(ToastKind::Error, e, cx);
                         return;
                     }
                 }
@@ -3165,8 +3351,6 @@ fn render_project_header_card_el(
         .h(px(30.))
         .rounded(px(ui::R_MD))
         .bg(crate::theme::sub_bg())
-        .border_1()
-        .border_color(crate::theme::divider())
         .flex()
         .items_center()
         .gap(px(ui::SP_1))
@@ -3413,39 +3597,48 @@ fn render_grouped_session_row_el(
 
     let card = div()
         .id(row.row_id.clone())
+        .relative()
         .group(row.row_gid.clone())
         .w_full()
         .h_full()
         .px(px(ui::SP_2))
         .rounded(px(ui::R_MD))
-        .border_1()
         .flex()
         .items_center()
         .gap(px(ui::SP_2))
         .cursor_pointer()
-        .when(archived && !active_open, |d| d.opacity(0.76))
-        .when(active_open, |d| {
-            d.bg(crate::theme::selected_bg())
-                .border_color(c(th.accent).opacity(0.45))
-                .hover(|s| s.bg(c(cur().accent).opacity(0.18)))
-        })
-        .when(!active_open && live, |d| {
-            let tone = match row.live_state {
-                Some(AgentState::Blocked) => c(th.error),
-                Some(AgentState::Working) => c(th.accent),
-                _ => c(th.success),
-            };
-            d.bg(tone.opacity(0.08))
-                .border_color(tone.opacity(0.24))
-                .hover(|s| s.bg(crate::theme::hover_bg()))
-        })
-        .when(kbd_sel && !live && !active_open, |d| {
-            d.bg(crate::theme::hover_bg())
-                .border_color(c(th.accent).opacity(0.40))
-        })
-        .when(!active_open && !live && !kbd_sel, |d| {
-            d.border_color(gpui::transparent_black())
-                .hover(|s| s.bg(crate::theme::hover_bg()))
+        .when(archived && !active_open, |d| d.opacity(0.74))
+        .when(active_open, |d| d.bg(crate::theme::selected_bg()))
+        .when(
+            !active_open && row.live_state == Some(AgentState::Blocked),
+            |d| {
+                d.bg(c(th.error).opacity(0.07))
+                    .hover(|s| s.bg(c(cur().error).opacity(0.11)))
+            },
+        )
+        .when(
+            !active_open && row.live_state != Some(AgentState::Blocked) && kbd_sel,
+            |d| d.bg(crate::theme::hover_bg()),
+        )
+        .when(
+            !active_open && row.live_state != Some(AgentState::Blocked) && !kbd_sel,
+            |d| d.hover(|s| s.bg(crate::theme::hover_bg())),
+        )
+        .when(active_open || kbd_sel, |d| {
+            d.child(
+                div()
+                    .absolute()
+                    .left(px(0.))
+                    .top(px(6.))
+                    .bottom(px(6.))
+                    .w(px(2.))
+                    .rounded_full()
+                    .bg(if active_open {
+                        c(th.accent)
+                    } else {
+                        c(th.accent).opacity(0.55)
+                    }),
+            )
         })
         .tooltip(ui::tip(row.tip_text.clone()))
         .on_click(window.listener_for(root, move |this, _, w, cx| {
@@ -3472,7 +3665,7 @@ fn render_grouped_session_row_el(
                 .flex()
                 .flex_col()
                 .justify_center()
-                .gap(px(2.))
+                .gap(px(0.))
                 .child(
                     div()
                         .w_full()
@@ -3601,8 +3794,7 @@ fn render_grouped_session_row_el(
         .h(px(ROW_H_SESSION))
         .flex_shrink_0()
         .px(px(ui::LIST_INSET))
-        .pt(px(2.))
-        .pb(px(4.))
+        .py(px(1.))
         .child(card)
         .into_any_element()
 }
@@ -3725,11 +3917,26 @@ fn render_grouped_session_row_el(
                 .filter(|s| !s.is_empty());
             for pane in tab.layout.leaves() {
                 let v = pane.read(cx);
-                let pane_cwd = v.shell_cwd().or_else(|| task_repo.clone());
+                let pane_cwd = v
+                    .shell_cwd()
+                    .or_else(|| task_repo.clone())
+                    .or_else(|| v.initial_cwd.clone());
                 let project_name = pane_cwd
                     .as_deref()
                     .map(agent_history::resolve_project_name_for_dir);
-                let Some((agent_name, st)) = v.agent_label() else {
+                let resolved_live = v.agent_label().or_else(|| {
+                    let aid = v
+                        .pending_agent_resume
+                        .as_ref()
+                        .map(|p| p.agent_id.clone())
+                        .or_else(|| {
+                            (v.agent_session_id.is_some() && v.ws == Some(Tool::Agents))
+                                .then(|| v.resolved_agent_id())
+                                .flatten()
+                        })?;
+                    Some((agent::display_name(&aid).to_string(), AgentState::Idle))
+                });
+                let Some((agent_name, st)) = resolved_live else {
                     if v.ws != Some(Tool::Agents) {
                         continue;
                     }
@@ -3803,7 +4010,7 @@ fn render_grouped_session_row_el(
                     pane: pane.clone(),
                     tab: ti,
                     agent: agent_name,
-                    agent_id: v.agent_id(),
+                    agent_id: v.agent_id().or_else(|| v.resolved_agent_id()),
                     state: st,
                     title,
                     sub: sub_parts.join(" · "),
@@ -3889,25 +4096,34 @@ fn render_running_row_el(
 
     let card = div()
         .id(("ag-run", idx))
+        .relative()
         .group(gid.clone())
         .w_full()
         .h_full()
         .px(px(ui::SP_2))
         .rounded(px(ui::R_MD))
-        .border_1()
         .flex()
         .items_center()
         .gap(px(ui::SP_2))
         .cursor_pointer()
         .when(row.selected, |d| {
-            d.bg(crate::theme::selected_bg())
-                .border_color(c(th.accent).opacity(0.45))
-                .hover(|s| s.bg(c(cur().accent).opacity(0.18)))
+            d.bg(crate::theme::selected_bg()).child(
+                div()
+                    .absolute()
+                    .left(px(0.))
+                    .top(px(6.))
+                    .bottom(px(6.))
+                    .w(px(2.))
+                    .rounded_full()
+                    .bg(c(th.accent)),
+            )
         })
-        .when(!row.selected, |d| {
-            d.bg(tone.opacity(0.08))
-                .border_color(tone.opacity(0.24))
-                .hover(|s| s.bg(crate::theme::hover_bg()))
+        .when(!row.selected && row.state == AgentState::Blocked, |d| {
+            d.bg(c(th.error).opacity(0.07))
+                .hover(|s| s.bg(c(cur().error).opacity(0.11)))
+        })
+        .when(!row.selected && row.state != AgentState::Blocked, |d| {
+            d.hover(|s| s.bg(crate::theme::hover_bg()))
         })
         .tooltip(ui::tip(tip_text))
         .on_click(window.listener_for(root, move |this, _, w, cx| {
@@ -3937,7 +4153,7 @@ fn render_running_row_el(
                 .flex()
                 .flex_col()
                 .justify_center()
-                .gap(px(2.))
+                .gap(px(0.))
                 .child(
                     div()
                         .w_full()
@@ -4034,8 +4250,7 @@ fn render_running_row_el(
         .h(px(ROW_H_SESSION))
         .flex_shrink_0()
         .px(px(ui::LIST_INSET))
-        .pt(px(2.))
-        .pb(px(4.))
+        .py(px(1.))
         .child(card)
         .into_any_element()
 }
@@ -4213,15 +4428,13 @@ fn render_running_row_el(
                     .gap(px(ui::SP_2))
                     .child(
                         div()
-                            .size(px(48.))
+                            .size(px(44.))
                             .rounded(px(ui::R_LG))
-                            .bg(c(th.accent).opacity(0.12))
-                            .border_1()
-                            .border_color(c(th.accent).opacity(0.25))
+                            .bg(crate::theme::accent_bg())
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(ui::icon_svg("shellax/agent.svg", ui::IC_XL, c(th.accent))),
+                            .child(ui::icon_svg("shellax/agent.svg", ui::IC_LG + 4., c(th.accent))),
                     )
                     .child(
                         div()
@@ -4460,7 +4673,7 @@ fn render_running_row_el(
                             div()
                                 .size(px(10.))
                                 .flex_shrink_0()
-                                .rounded(px(3.))
+                                .rounded(px(ui::R_SM))
                                 .bg(col),
                         )
                         .child(
@@ -4521,7 +4734,7 @@ fn render_running_row_el(
                         div()
                             .size(px(10.))
                             .flex_shrink_0()
-                            .rounded(px(3.))
+                            .rounded(px(ui::R_SM))
                             .bg(c(th.accent)),
                     )
                     .child(
@@ -4579,9 +4792,9 @@ fn render_running_row_el(
             .occlude()
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .rounded(px(ui::R_LG))
-            .bg(c(th.base).opacity(0.97))
+            .bg(crate::theme::overlay_card_bg(1.0))
             .border_1()
-            .border_color(crate::theme::divider())
+            .border_color(crate::theme::overlay_border())
             .shadow(crate::chrome::soft_shadow(true))
             .p(px(14.))
             .flex()
@@ -5223,7 +5436,11 @@ fn render_running_row_el(
                 ))
                 .child(
                     div()
+                        .id("ag-nt-form")
                         .p(px(ui::SP_5))
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
                         .flex()
                         .flex_col()
                         .gap(px(ui::SP_3))
@@ -5357,7 +5574,11 @@ fn render_running_row_el(
                 ))
                 .child(
                     div()
+                        .id("ag-ft-form")
                         .p(px(ui::SP_5))
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
                         .flex()
                         .flex_col()
                         .gap(px(ui::SP_3))
@@ -5544,7 +5765,7 @@ fn render_running_row_el(
 
         div()
             .id("ag-center-bar")
-            .h(px(ui::H_DEFAULT))
+            .h(px(26.))
             .w_full()
             .flex_shrink_0()
             .px(px(ui::SP_3))
@@ -5648,7 +5869,7 @@ const ROW_H_PROJ_FIRST: f32 = 32.0;
 const ROW_H_PROJ_NEXT: f32 = 30.0 + ui::SP_2 + 2.0;
 const ROW_H_EMPTY_PROJ: f32 = ui::H_DEFAULT + 2.0;
 const ROW_H_STATUS_HDR: f32 = ui::SECTION_H + 2.0;
-const ROW_H_SESSION: f32 = 52.0;
+const ROW_H_SESSION: f32 = 42.0;
 const ROW_H_LOAD_MORE: f32 = ui::SECTION_H + 2.0;
 const VIRTUAL_OVERSCAN_PX: f32 = 220.0;
 
@@ -5987,7 +6208,7 @@ impl gpui::Render for AgentListView {
                                 .right_0()
                                 .flex()
                                 .flex_col()
-                                .bg(crate::theme::solid_card_bg())
+                                .bg(crate::theme::solid_panel_bg())
                                 .pb(px(3.))
                                 .occlude()
                                 .child(Root::render_project_header_card_el(
@@ -6249,7 +6470,7 @@ mod tests {
             assert!(s <= e && e <= 500);
             let slice_h: f32 = (s..e).map(|ix| ends[ix] - tops[ix]).sum();
             assert!((top_pad + slice_h + bot_pad - total).abs() < 0.01);
-            assert!(e - s <= 26, "rendered slice must stay small, got {}", e - s);
+            assert!(e - s <= 28, "rendered slice must stay small, got {}", e - s);
         }
     }
 
@@ -6313,5 +6534,18 @@ mod tests {
         let sum_w: f32 = widths.iter().sum();
         assert!(sum_w + 1.5 * 6.0 <= 312.1, "bar must not overflow: {sum_w}");
         assert!(widths.iter().all(|&w| w >= 2.5), "tiny segments stay visible: {widths:?}");
+    }
+
+    #[test]
+    fn compact_project_label_keeps_short_names_and_truncates_long_ones() {
+        assert_eq!(compact_display_units("ShellAX", 8, 6), "ShellAX");
+        assert_eq!(compact_display_units("frontend", 8, 6), "frontend");
+        assert_eq!(compact_display_units("测试工程", 8, 6), "测试工程");
+        assert_eq!(compact_display_units("VibeCoding", 8, 6), "VibeCo…");
+        assert_eq!(compact_display_units("企业智能运维平台", 8, 6), "企业智…");
+        assert_eq!(
+            compact_project_label("/tmp/some-nonexistent-repo-name"),
+            "some-n…"
+        );
     }
 }

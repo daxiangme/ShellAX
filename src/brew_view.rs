@@ -23,6 +23,7 @@ pub struct BrewView {
     hub: Entity<BrewHub>,
     ask: Option<Op>,
     find: Option<Entity<InputState>>,
+    inline_filter: Option<Entity<InputState>>,
     searched: bool,
     /// 0 全部，1 配方，2 应用。
     kind_filter: u8,
@@ -85,7 +86,18 @@ impl BrewView {
     ) -> Self {
         let scroll = ScrollHandle::new();
         let sub = cx.observe(&hub, move |this, hub, cx| {
-            let n = hub.read(cx).log.len();
+            let (n, active_mut_op) = {
+                let h = hub.read(cx);
+                (
+                    h.log.len(),
+                    h.current
+                        .as_ref()
+                        .is_some_and(|op| !matches!(op, Op::Refresh | Op::Search { .. })),
+                )
+            };
+            if active_mut_op && !this.log_open {
+                this.log_open = true;
+            }
             if n != this.log_seen {
                 this.log_seen = n;
                 if this.log_open {
@@ -101,6 +113,7 @@ impl BrewView {
             hub,
             ask: None,
             find,
+            inline_filter: None,
             searched: false,
             kind_filter: 0,
             log_open: false,
@@ -181,9 +194,29 @@ impl BrewView {
 }
 
 impl gpui::Render for BrewView {
-    fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.install {
             return self.install_page(cx);
+        }
+        if self.inline_filter.is_none() {
+            let q0 = self.hub.read(cx).query.clone();
+            let f = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(t("ux.brew_filter_inline"))
+                    .default_value(q0)
+            });
+            self._subs.push(cx.subscribe_in(
+                &f,
+                window,
+                |this, input, ev: &InputEvent, _, cx| {
+                    if matches!(ev, InputEvent::Change) {
+                        let q = input.read(cx).value().to_string();
+                        this.hub.update(cx, |h, cx| h.set_query(q, cx));
+                        cx.notify();
+                    }
+                },
+            ));
+            self.inline_filter = Some(f);
         }
         let th = cur();
         let (
@@ -324,7 +357,6 @@ impl gpui::Render for BrewView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(c(th.base))
             .child(bar);
         if let Some(e) = error {
             col = col.child(ui::notice(ui::Notice::Error, e).mt(px(ui::SP_2)));
@@ -432,7 +464,6 @@ impl BrewView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(c(th.base))
             .child(bar);
         if let Some(e) = search_error.or(error) {
             col = col.child(ui::notice(ui::Notice::Error, e).mt(px(ui::SP_2)));
@@ -485,9 +516,12 @@ impl BrewView {
             let mut row = div()
                 .id(SharedString::from(format!("brew-hit-{}", hit.name)))
                 .min_h(px(ui::row_h()))
+                .px(px(ui::SP_2))
+                .rounded(px(ui::R_MD))
                 .flex()
                 .items_center()
                 .gap(px(ui::SP_2))
+                .hover(|s| s.bg(crate::theme::hover_bg()))
                 .border_b_1()
                 .border_color(crate::theme::divider())
                 .child(ui::row_title(hit.name.clone()).flex_1())
@@ -576,6 +610,7 @@ impl BrewView {
             .px(px(ui::SP_3))
             .py(px(ui::SP_2))
             .flex()
+            .items_center()
             .gap(px(ui::SP_2))
             .child(chip(
                 "brew-k-all",
@@ -598,6 +633,10 @@ impl BrewView {
                 2,
                 cx,
             ))
+            .child(div().flex_1())
+            .when_some(self.inline_filter.clone(), |d, f| {
+                d.child(div().w(px(240.)).child(ui::search_field(&f, false)))
+            })
     }
 
     fn table(&self, rows: &[&Package], empty: &str, cx: &mut Context<Self>) -> gpui::Div {
@@ -652,9 +691,16 @@ impl BrewView {
                         .flex_shrink_0()
                         .child(ui::row_meta(kind.to_string())),
                 )
-                .child(div().w(px(168.)).flex_shrink_0().child(
-                    ui::row_meta(ver).text_color(if up { c(th.warning) } else { c(th.subtext) }),
-                ));
+                .child(
+                    div()
+                        .w(px(168.))
+                        .flex_shrink_0()
+                        .child(
+                            ui::row_meta(ver)
+                                .font_family(ui::mono_family())
+                                .text_color(if up { c(th.warning) } else { c(th.subtext) }),
+                        ),
+                );
             if up {
                 let bid = SharedString::from(format!("brew-up-{}", p.id));
                 row = row.child(div().w(px(76.)).flex_shrink_0().flex().justify_end().child(

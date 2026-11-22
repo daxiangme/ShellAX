@@ -200,7 +200,8 @@ pub fn entry_checked(
     let hidden = e.name.starts_with('.');
     let mut row = div()
         .id(id)
-        .h(px(26.))
+        .relative()
+        .h(px(27.))
         .flex_shrink_0()
         .px_3()
         .flex()
@@ -210,7 +211,18 @@ pub fn entry_checked(
         .text_color(c(th.text))
         .cursor_pointer()
         .when(hidden, |d| d.opacity(0.72))
-        .when(selected, |d| d.bg(c(th.accent).opacity(0.2)))
+        .when(selected, |d| {
+            d.bg(crate::theme::selected_bg()).child(
+                div()
+                    .absolute()
+                    .left(px(0.))
+                    .top(px(4.))
+                    .bottom(px(4.))
+                    .w(px(2.))
+                    .rounded_full()
+                    .bg(c(th.accent)),
+            )
+        })
         .when(!selected, |d| d.hover(|d| d.bg(crate::theme::hover_bg())));
     if let Some((cid, on, f)) = check {
         row = row.child(check_box(cid, on, f));
@@ -219,7 +231,7 @@ pub fn entry_checked(
         &e.name,
         e.is_dir,
         e.mode,
-        crate::ui::IC_LG,
+        crate::ui::IC_MD,
         dark,
     ));
     row = row.child(
@@ -229,6 +241,7 @@ pub fn entry_checked(
             .overflow_hidden()
             .whitespace_nowrap()
             .text_ellipsis()
+            .when(selected, |d| d.font_weight(gpui::FontWeight::MEDIUM))
             .child(e.name.clone()),
     );
     if let Some(w) = cols.mtime {
@@ -281,7 +294,7 @@ fn check_box(
             d.child(crate::ui::icon(
                 crate::ui::IconName::Check,
                 crate::ui::IC_XS,
-                gpui::white(),
+                crate::theme::on_accent(),
             ))
         })
 }

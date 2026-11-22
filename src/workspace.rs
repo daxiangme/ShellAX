@@ -13,12 +13,9 @@ use crate::ui::{self, icon, IconName};
 use crate::{config, Root, Tab};
 
 impl Tool {
-    /// The workspace a module shows: port forwarding works on terminal sessions.
+    /// The workspace a module shows.
     pub fn workspace(self) -> Tool {
-        match self {
-            Tool::Ports => Tool::Hosts,
-            t => t,
-        }
+        self
     }
 }
 
@@ -40,6 +37,7 @@ pub(crate) fn pane_module(v: &TermView, cx: &App) -> Tool {
         Some(Embed::Gone(g)) => g.read(cx).module,
         Some(Embed::Tool(_)) => Tool::Tools,
         Some(Embed::Brew(_)) => Tool::Brew,
+        Some(Embed::Port(_)) => Tool::Ports,
         None => Tool::Hosts,
     }
 }
@@ -48,7 +46,7 @@ impl Root {
     pub(crate) fn tab_module(tab: &Tab, cx: &App) -> Tool {
         pane_module(tab.layout.leaves()[0].read(cx), cx)
     }
-    fn tab_key(tab: &Tab) -> EntityId {
+    pub(crate) fn tab_key(tab: &Tab) -> EntityId {
         tab.layout.leaves()[0].entity_id()
     }
     /// Indexes of the current module's tabs, in order.
@@ -71,15 +69,25 @@ impl Root {
         let Some(tab) = self.tabs.get(self.active) else {
             return;
         };
-        let (key, m) = (Self::tab_key(tab), Self::tab_module(tab, cx));
+        let (mut key, mut m) = (Self::tab_key(tab), Self::tab_module(tab, cx));
         match self.ws_seen {
             None => {
                 // first frame after start / restore: show the remembered module's own tab
                 self.ws_seen = Some(key);
                 if m != self.tool.workspace() {
-                    if let Some(&i) = self.ws_tabs(cx).last() {
+                    let ws = self.tool.workspace();
+                    let mine = self.ws_tabs(cx);
+                    let last = self.ws_last.get(ws.id()).copied();
+                    let pick = mine
+                        .iter()
+                        .copied()
+                        .find(|&i| Some(Self::tab_key(&self.tabs[i])) == last)
+                        .or(mine.last().copied());
+                    if let Some(i) = pick {
                         self.active = i;
-                        self.ws_seen = Some(Self::tab_key(&self.tabs[i]));
+                        key = Self::tab_key(&self.tabs[i]);
+                        m = Self::tab_module(&self.tabs[i], cx);
+                        self.ws_seen = Some(key);
                     }
                 }
             }
@@ -95,6 +103,7 @@ impl Root {
         if m == self.tool.workspace() {
             self.ws_last.insert(m.id(), key);
         }
+        self.wake_active_agent_tab_if_needed(cx);
     }
 
     /// The module changed: show its last active tab (or its empty state).
@@ -149,6 +158,7 @@ impl Root {
                 }
             }
             Tool::Brew => self.open_brew_install(window, cx),
+            Tool::Ports => self.open_ports_tab(None, window, cx),
             Tool::Agents => self.open_new_task_dialog(window, cx),
             _ => return false,
         }
@@ -168,9 +178,10 @@ impl Root {
             }
             for key in &keys {
                 if let Some(id) = key.strip_prefix("tool:") {
+                    let was_recent = s.sidebar.tools_recent.iter().any(|x| x == id);
                     s.sidebar.tools_recent.retain(|x| x != id);
-                    // A favorite would stay in this list; hide only that pin. A recent item just leaves the record.
-                    if s.sidebar.tools_fav.iter().any(|x| x == id)
+                    // A favorite or starter item stays unless added to `empty_hide`.
+                    if (!was_recent || s.sidebar.tools_fav.iter().any(|x| x == id))
                         && !s.sidebar.empty_hide.iter().any(|k| k == key)
                     {
                         s.sidebar.empty_hide.push(key.clone());
@@ -230,28 +241,49 @@ impl Root {
                    cx: &mut Context<Self>| {
             shown.borrow_mut().push(hide.clone());
             let hide2 = hide.clone();
+            let grp = SharedString::from(format!("ws-row-{id}"));
             ui::list_row(id, 0, false)
+                .group(grp.clone())
                 .mx_0()
-                .w(px(420.))
-                .h(px(ui::H_LARGE + 4.))
-                .pl(px(ui::SP_3))
+                .w_full()
+                .h(px(ui::H_LARGE + 6.))
+                .pl(px(ui::SP_2 + 2.))
                 .pr(px(ui::SP_2))
-                .rounded(px(ui::R_SUB))
-                .bg(crate::theme::sub_bg())
-                .child(icon(ic, ui::IC_MD, c(th.overlay1)))
+                .rounded(px(ui::R_MD))
+                .gap(px(10.))
+                .child(
+                    div()
+                        .size(px(22.))
+                        .flex_shrink_0()
+                        .rounded(px(ui::R_SM))
+                        .bg(crate::theme::sub_bg())
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(icon(ic, ui::IC_SM, c(th.overlay1))),
+                )
                 .child(ui::row_title(main).flex_1())
                 .child(ui::row_meta(sub).flex_shrink_0())
                 .child(
-                    ui::icon_button(
-                        SharedString::from(format!("ws-x-{hide}")),
-                        IconName::X,
-                        ui::IconBtn::Sm,
-                        t("ws.dismiss"),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.dismiss_empty(hide2.clone(), cx);
-                    })),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .invisible()
+                        .group_hover(grp, |s| s.visible())
+                        .child(ui::kbd("enter"))
+                        .child(
+                            ui::icon_button(
+                                SharedString::from(format!("ws-x-{hide}")),
+                                IconName::X,
+                                ui::IconBtn::Sm,
+                                t("ws.dismiss"),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.dismiss_empty(hide2.clone(), cx);
+                            })),
+                        ),
                 )
         };
         let (title, hint) = match tool {
@@ -261,12 +293,14 @@ impl Root {
             Tool::Docker => (t("ws.docker_title"), t("ws.docker_hint")),
             Tool::Tools => (t("ws.tools_title"), t("ws.tools_hint")),
             Tool::Brew => (t("ws.brew_title"), t("ws.brew_hint")),
+            Tool::Ports => (t("tool.ports"), t("tool.ports_desc")),
             _ => (t("ui.no_open_terminals"), ""),
         };
         let mut list = div()
             .flex()
             .flex_col()
-            .gap_1()
+            .gap(px(2.))
+            .p(px(ui::SP_1))
             .max_h(px(320.))
             .id("ws-list")
             .overflow_y_scroll();
@@ -396,6 +430,12 @@ impl Root {
                         .on_click(cx.listener(|this, _, w, cx| this.open_brew(w, cx))),
                 );
             }
+            Tool::Ports => {
+                buttons = buttons.child(
+                    ui::button("ws-ports-open", t("ux.pf_open_ws"), 1)
+                        .on_click(cx.listener(|this, _, w, cx| this.open_ports_tab(None, w, cx))),
+                );
+            }
             Tool::Tools => {
                 let all = crate::tools_ui::all_tools();
                 let mut ids: Vec<String> = s
@@ -407,6 +447,24 @@ impl Root {
                     .collect();
                 ids.dedup();
                 ids.retain(|id| !hidden.iter().any(|k| k == &format!("tool:{id}")));
+                if ids.is_empty() {
+                    for def_id in [
+                        "json",
+                        "timestamp",
+                        "base64",
+                        "regex",
+                        "cron",
+                        "password",
+                        "uuid",
+                        "color",
+                        "url",
+                        "sha",
+                    ] {
+                        if !hidden.iter().any(|k| k == &format!("tool:{def_id}")) {
+                            ids.push(def_id.to_string());
+                        }
+                    }
+                }
                 let mut seen = std::collections::HashSet::new();
                 for (i, sp) in ids
                     .iter()
@@ -463,7 +521,10 @@ impl Root {
                 }),
             ));
         }
-        // 图标 / 标题 / 说明走 empty_state；最近项列表与按钮排在其下方
+        let has_recent = !shown.is_empty();
+        // 图标 / 标题 / 说明走 empty_state；最近项列表以 Raycast 风格卡片容器排在其下方
+        let pal_bind = Action::CommandPalette.binding();
+        let new_bind = Action::NewLocalTab.binding();
         div()
             .flex_1()
             .size_full()
@@ -471,8 +532,7 @@ impl Root {
             .flex_col()
             .items_center()
             .justify_center()
-            .gap(px(ui::SP_3))
-            .bg(c(th.base))
+            .gap(px(ui::SP_4))
             .child(
                 ui::empty_state(
                     if tool == Tool::Hosts {
@@ -488,8 +548,49 @@ impl Root {
                 .flex_none()
                 .py_0(),
             )
-            .child(list)
+            .when(has_recent, |d| {
+                d.child(
+                    div()
+                        .w(px(460.))
+                        .max_w(gpui::relative(0.9))
+                        .rounded(px(ui::R_LG))
+                        .bg(crate::theme::sub_bg())
+                        .border_1()
+                        .border_color(crate::theme::divider())
+                        .overflow_hidden()
+                        .child(list),
+                )
+            })
             .child(buttons)
+            .child(
+                div()
+                    .mt(px(ui::SP_1))
+                    .flex()
+                    .items_center()
+                    .gap(px(ui::SP_4))
+                    .text_size(px(ui::fs_caption()))
+                    .text_color(c(th.overlay1))
+                    .when(!pal_bind.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .child(ui::kbd(&pal_bind))
+                                .child(t("ui.command_palette")),
+                        )
+                    })
+                    .when(!new_bind.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .child(ui::kbd(&new_bind))
+                                .child(t("ui.new_tab")),
+                        )
+                    }),
+            )
             .into_any_element()
     }
 }

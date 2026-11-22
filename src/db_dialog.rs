@@ -12,12 +12,18 @@ use ssh_term_proto::ssh::{Prompts, SshTarget};
 
 use crate::config;
 use crate::theme::{c, cur};
-use crate::ui::{self, icon, IconName};
+use crate::ui::{self, IconName};
+use crate::ToastKind;
 
 pub enum DbDialogEvent {
     Saved(String),
     Deleted(String),
     Close,
+    Toast {
+        key: Option<&'static str>,
+        kind: ToastKind,
+        msg: String,
+    },
 }
 
 const TLS_MODES: [&str; 5] = ["prefer", "disable", "require", "verify-ca", "verify-full"];
@@ -44,9 +50,7 @@ pub struct DbDialog {
     targets: HashMap<String, SshTarget>,
     prompts: Prompts,
     rt: tokio::runtime::Handle,
-    error: Option<String>,
-    /// None = not run; Some(None) = running; Some(Some(Ok/Err)).
-    test: Option<Option<Result<String, String>>>,
+    testing: bool,
     test_gen: u64,
     test_abort: Option<tokio::task::AbortHandle>,
     _subs: Vec<gpui::Subscription>,
@@ -171,7 +175,7 @@ impl DbDialog {
         subs.push(cx.subscribe(
             &via,
             |this: &mut Self, _, _: &crate::host_picker::HostChanged, cx| {
-                this.test = None;
+                this.testing = false;
                 cx.notify();
             },
         ));
@@ -201,8 +205,7 @@ impl DbDialog {
             targets,
             prompts,
             rt,
-            error: None,
-            test: None,
+            testing: false,
             test_gen: 0,
             test_abort: None,
             editing: existing,
@@ -292,9 +295,12 @@ impl DbDialog {
         let mut d = self.editing.clone().unwrap_or_default();
         d.kind = self.kind;
         d.name = Self::v(&self.name, cx);
-        let fail = |this: &mut Self, m: String, cx: &mut Context<Self>| {
-            this.error = Some(m);
-            cx.notify();
+        let fail = |_this: &mut Self, m: String, cx: &mut Context<Self>| {
+            cx.emit(DbDialogEvent::Toast {
+                key: None,
+                kind: ToastKind::Error,
+                msg: m,
+            });
         };
         if self.kind.is_file() {
             d.file = Self::v(&self.file, cx);
@@ -382,8 +388,11 @@ impl DbDialog {
         if pw.is_empty() {
             store.delete(&d.password_secret());
         } else if let Err(e) = store.set(&d.password_secret(), &pw) {
-            self.error = Some(format!("{e:#}"));
-            cx.notify();
+            cx.emit(DbDialogEvent::Toast {
+                key: None,
+                kind: ToastKind::Error,
+                msg: format!("{e:#}"),
+            });
             return;
         }
         let id = d.id.clone();
@@ -395,8 +404,11 @@ impl DbDialog {
             assets::ensure_asset_groups(&s.db, &mut s.groups);
         });
         if let Some(e) = r {
-            self.error = Some(e);
-            cx.notify();
+            cx.emit(DbDialogEvent::Toast {
+                key: None,
+                kind: ToastKind::Error,
+                msg: e,
+            });
             return;
         }
         cx.emit(DbDialogEvent::Saved(id));
@@ -410,18 +422,21 @@ impl DbDialog {
             match self.targets.get(&d.ssh_via) {
                 Some(t) => Some((t.clone(), self.prompts.clone())),
                 None => {
-                    self.test = Some(Some(Err(tf("db.via_missing", &[("host", &d.ssh_via)]))));
-                    cx.notify();
+                    cx.emit(DbDialogEvent::Toast {
+                        key: Some("conn-test"),
+                        kind: ToastKind::Error,
+                        msg: tf("db.via_missing", &[("host", &d.ssh_via)]),
+                    });
                     return;
                 }
             }
         };
         if !d.kind.dialog_ready() {
-            self.test = Some(Some(Err(tf(
-                "db.kind_unsupported",
-                &[("kind", &d.kind.ui_name())],
-            ))));
-            cx.notify();
+            cx.emit(DbDialogEvent::Toast {
+                key: Some("conn-test"),
+                kind: ToastKind::Error,
+                msg: tf("db.kind_unsupported", &[("kind", &d.kind.ui_name())]),
+            });
             return;
         }
         if let Some(h) = self.test_abort.take() {
@@ -429,8 +444,12 @@ impl DbDialog {
         }
         self.test_gen = self.test_gen.wrapping_add(1);
         let gen = self.test_gen;
-        self.error = None;
-        self.test = Some(None);
+        self.testing = true;
+        cx.emit(DbDialogEvent::Toast {
+            key: Some("conn-test"),
+            kind: ToastKind::Loading,
+            msg: t("db.testing").to_string(),
+        });
         let me = cx.entity().downgrade();
         let pw = (!pw.is_empty()).then_some(pw);
         let started = std::time::Instant::now();
@@ -456,16 +475,30 @@ impl DbDialog {
                     return;
                 }
                 this.test_abort = None;
-                this.test = Some(Some(match r {
-                    Ok((v, via)) => Ok(match via {
-                        Some(h) => tf(
-                            "db.test_ok_via",
-                            &[("version", &v), ("ms", &ms), ("host", &h)],
-                        ),
-                        None => tf("db.test_ok", &[("version", &v), ("ms", &ms)]),
-                    }),
-                    Err(e) => Err(format!("{e:#}")),
-                }));
+                this.testing = false;
+                match r {
+                    Ok((v, via)) => {
+                        let msg = match via {
+                            Some(h) => tf(
+                                "db.test_ok_via",
+                                &[("version", &v), ("ms", &ms), ("host", &h)],
+                            ),
+                            None => tf("db.test_ok", &[("version", &v), ("ms", &ms)]),
+                        };
+                        cx.emit(DbDialogEvent::Toast {
+                            key: Some("conn-test"),
+                            kind: ToastKind::Success,
+                            msg,
+                        });
+                    }
+                    Err(e) => {
+                        cx.emit(DbDialogEvent::Toast {
+                            key: Some("conn-test"),
+                            kind: ToastKind::Error,
+                            msg: format!("{e:#}"),
+                        });
+                    }
+                }
                 cx.notify();
             });
         });
@@ -498,17 +531,75 @@ impl Render for DbDialog {
             .flex()
             .flex_col()
             .gap_3()
-            .max_h(px(600.))
+            .flex_1()
+            .min_h_0()
             .id("db-form")
             .overflow_y_scroll();
 
-        // engine
-        let kinds: Vec<(String, String)> = DbKind::ALL
+        // engine: 4-column responsive brand card grid so all engines stay 100% visible without clipping
+        let kinds: Vec<DbKind> = DbKind::ALL
             .iter()
+            .copied()
             .filter(|k| k.dialog_ready())
-            .map(|k| (k.id().to_string(), k.ui_name().to_string()))
             .collect();
-        let me = cx.entity().downgrade();
+        let mut kind_grid = div().w_full().flex().flex_wrap().gap(px(6.));
+        for (ki, k) in kinds.iter().copied().enumerate() {
+            let active = self.kind == k;
+            let tint = crate::file_icon::db_tint(k.id());
+            kind_grid = kind_grid.child(
+                div()
+                    .id(("db-kind", ki))
+                    .min_w(px(114.))
+                    .flex_1()
+                    .h(px(ui::H_DEFAULT + 4.))
+                    .px(px(10.))
+                    .rounded(px(ui::R_MD))
+                    .cursor_pointer()
+                    .border_1()
+                    .border_color(if active {
+                        c(th.accent)
+                    } else {
+                        crate::theme::control_border()
+                    })
+                    .bg(if active {
+                        crate::theme::selected_bg()
+                    } else {
+                        crate::theme::sub_bg()
+                    })
+                    .hover(|s| {
+                        if active {
+                            s
+                        } else {
+                            s.bg(crate::theme::hover_bg())
+                        }
+                    })
+                    .flex()
+                    .items_center()
+                    .gap(px(7.))
+                    .on_click(cx.listener(move |this, _, w, cx| {
+                        this.kind = k;
+                        if let Some(dp) = k.default_port() {
+                            this.port.update(cx, |s, cx| {
+                                s.set_placeholder(dp.to_string(), w, cx);
+                            });
+                        }
+                        cx.notify();
+                    }))
+                    .child(crate::file_icon::db_glyph(k.id(), ui::IC_SM, tint))
+                    .child(
+                        div()
+                            .text_size(px(ui::fs_small()))
+                            .font_weight(if active {
+                                gpui::FontWeight::SEMIBOLD
+                            } else {
+                                gpui::FontWeight::MEDIUM
+                            })
+                            .text_color(if active { c(th.text) } else { c(th.subtext) })
+                            .whitespace_nowrap()
+                            .child(k.ui_name()),
+                    ),
+            );
+        }
         form = form.child(
             div()
                 .flex()
@@ -518,23 +609,11 @@ impl Render for DbDialog {
                 .child(
                     div()
                         .flex_1()
+                        .min_w_0()
                         .flex()
                         .flex_col()
                         .gap_1()
-                        .child(ui::segmented(
-                            "db-kind",
-                            &kinds,
-                            self.kind.id(),
-                            move |v, _w, cx| {
-                                if let Some(k) = DbKind::from_id(&v) {
-                                    let _ = me.update(cx, |this, cx| {
-                                        this.kind = k;
-                                        this.test = None;
-                                        cx.notify();
-                                    });
-                                }
-                            },
-                        ))
+                        .child(kind_grid)
                         .child(
                             div()
                                 .text_size(px(ui::fs_small()))
@@ -685,10 +764,10 @@ impl Render for DbDialog {
                 form = form.child(
                     div()
                         .flex()
-                        .items_center()
+                        .items_start()
                         .gap_3()
-                        .child(label("TLS"))
-                        .child(div().flex_1().child(ui::segmented(
+                        .child(label("TLS").pt_1())
+                        .child(div().flex_1().min_w_0().child(ui::segmented(
                             "db-tls",
                             &tls,
                             &self.tls,
@@ -727,55 +806,22 @@ impl Render for DbDialog {
                         .child(t("db.read_only_hint")),
                 ),
         );
-        if let Some(r) = &self.test {
-            let (col, ic, msg) = match r {
-                None => (
-                    th.overlay1,
-                    IconName::LoaderCircle,
-                    t("db.testing").to_string(),
-                ),
-                Some(Ok(m)) => (th.success, IconName::CircleCheck, m.clone()),
-                Some(Err(e)) => (th.error, IconName::CircleX, e.clone()),
-            };
-            form = form.child(
-                div()
-                    .p_3()
-                    .rounded(px(ui::R_SUB))
-                    .bg(crate::theme::sub_bg())
-                    .border_1()
-                    .border_color(crate::theme::divider())
-                    .flex()
-                    .items_start()
-                    .gap_2()
-                    .child(icon(ic, ui::IC_SM, c(col)))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .whitespace_normal()
-                            .text_size(px(ui::fs_body()))
-                            .text_color(c(col))
-                            .child(msg),
-                    ),
-            );
-        }
-        if let Some(e) = &self.error {
-            form = form.child(
-                div()
-                    .text_size(px(ui::fs_body()))
-                    .text_color(c(th.error))
-                    .child(e.clone()),
-            );
-        }
-
-        let testing = matches!(self.test, Some(None));
-        let test_btn = ui::button("db-test", t("host.test"), 0)
-            .when(testing, |b| b.opacity(0.5))
-            .on_click(cx.listener(move |this, _, _w, cx| {
-                if !testing {
-                    this.run_test(cx)
-                }
-            }));
+        let testing = self.testing;
+        let test_btn = ui::button(
+            "db-test",
+            if testing {
+                t("db.testing")
+            } else {
+                t("host.test")
+            },
+            0,
+        )
+        .when(testing, |b| b.opacity(0.6))
+        .on_click(cx.listener(move |this, _, _w, cx| {
+            if !testing {
+                this.run_test(cx)
+            }
+        }));
         let mut btns: Vec<gpui::AnyElement> = Vec::new();
         if let Some(d) = self.editing.clone() {
             btns.push(
@@ -805,14 +851,17 @@ impl Render for DbDialog {
         } else {
             t("db.new_connection").into()
         };
+        let me_close = cx.entity().downgrade();
         ui::modal(
-            ui::card(600.)
+            ui::card(640.)
                 .child(ui::dialog_header(
                     Some(IconName::Database),
                     c(cur().accent),
                     title,
                     None,
-                    None,
+                    Some(ui::dialog_close("db-dlg-close", move |_w, cx| {
+                        let _ = me_close.update(cx, |_, cx| cx.emit(DbDialogEvent::Close));
+                    })),
                 ))
                 .child(form)
                 .child(footer),

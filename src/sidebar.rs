@@ -763,7 +763,10 @@ impl Root {
                             .flex()
                             .items_center()
                             .gap(px(4.))
-                            .child(ui::row_title(h.name.clone()))
+                            .child(
+                                ui::row_title(h.name.clone())
+                                    .when(sel, |d| d.font_weight(FontWeight::MEDIUM)),
+                            )
                             .children(h.tags.iter().take(3).map(|t| {
                                 div()
                                     .size(px(6.))
@@ -1156,7 +1159,10 @@ impl Root {
                             .flex()
                             .flex_col()
                             .overflow_hidden()
-                            .child(ui::row_title(t("ui.local_terminal")))
+                            .child(
+                                ui::row_title(t("ui.local_terminal"))
+                                    .when(local_sel, |d| d.font_weight(FontWeight::MEDIUM)),
+                            )
                             .child(ui::row_meta(sh)),
                     ),
             );
@@ -1489,16 +1495,29 @@ impl Root {
             .gap(px(4.));
         for (i, (a, label, ic)) in items.into_iter().enumerate() {
             let tip = action_tip(label, &a.binding());
-            rail = rail.child(
-                self.strip_btn(
+            let active = self.dock_is(a);
+            let mut btn = self
+                .strip_btn(
                     ("rail", i),
                     ic,
                     tip,
-                    self.dock_is(a),
+                    active,
                     (a == Action::OpenAi && n_agents > 0) || (a == Action::OpenMcp && mcp_live),
                 )
-                .on_click(cx.listener(move |this, _, w, cx| this.run(a, w, cx))),
-            );
+                .on_click(cx.listener(move |this, _, w, cx| this.run(a, w, cx)));
+            if active {
+                btn = btn.child(
+                    div()
+                        .absolute()
+                        .right(px(-2.))
+                        .top(px(8.))
+                        .bottom(px(8.))
+                        .w(px(2.))
+                        .rounded_full()
+                        .bg(c(th.accent)),
+                );
+            }
+            rail = rail.child(btn);
         }
         rail = rail.child(div().flex_1()).child(
             div()
