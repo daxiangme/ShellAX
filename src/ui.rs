@@ -1229,7 +1229,10 @@ pub fn dialog_footer(danger: Option<AnyElement>, children: Vec<AnyElement>) -> D
 
 /// Modal backdrop + centered card.
 pub fn modal(card: impl IntoElement + 'static) -> Div {
-    // occlude: the backdrop swallows mouse/scroll events so the terminal below stays inert
+    // occlude: the backdrop swallows mouse/scroll events so the terminal below stays inert.
+    // Clamp the viewport percentage on the direct flex child of the full-size backdrop; putting
+    // relative(0.95/0.92) on `card` itself causes `pop_in`'s auto-sized wrapper to clamp `card`
+    // against its own natural dimensions and clip the footer.
     div()
         .absolute()
         .top_0()
@@ -1241,7 +1244,16 @@ pub fn modal(card: impl IntoElement + 'static) -> Div {
         .justify_center()
         .bg(crate::theme::modal_scrim_bg())
         .p(px(SP_4))
-        .child(crate::chrome::pop_in("modal-pop", card))
+        .child(
+            div()
+                .max_w(gpui::relative(0.95))
+                .max_h(gpui::relative(0.92))
+                .min_w_0()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(crate::chrome::pop_in("modal-pop", card)),
+        )
 }
 
 /// 弹出面（菜单、命令面板）：圆角 10、1px 锐利轮廓边框、柔和分层阴影。
@@ -1258,8 +1270,8 @@ pub fn popover() -> Div {
 pub fn card(w: f32) -> Div {
     div()
         .w(px(w))
-        .max_w(gpui::relative(0.95))
-        .max_h(gpui::relative(0.92))
+        .max_w_full()
+        .max_h_full()
         .occlude()
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .rounded(px(R_LG))

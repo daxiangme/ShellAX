@@ -374,7 +374,15 @@ pub fn pop_in(id: impl Into<gpui::ElementId>, el: impl IntoElement + 'static) ->
     if crate::motion::reduced() {
         return el.into_any_element();
     }
+    // Forward parent size constraints to the animated child so modals/popovers keep shrinking
+    // cleanly when constrained by the viewport.
     div()
+        .max_w_full()
+        .max_h_full()
+        .min_w_0()
+        .min_h_0()
+        .flex()
+        .flex_col()
         .child(el)
         .with_animation(
             id,
