@@ -472,6 +472,43 @@ struct CtxParseState {
     saw_event: bool,
 }
 
+fn parse_claude_context_usage_markdown(raw: &str) -> Option<(Option<u64>, Option<u64>, Option<u64>)> {
+    if !raw.contains("## Context Usage") && !raw.to_ascii_lowercase().contains("## context usage") {
+        return None;
+    }
+    let mut used = None;
+    let mut parsed_win = None;
+    let mut model_win = None;
+    for line in raw.lines() {
+        let cleaned = line.trim().trim_start_matches(['-', '*', ' ']).replace("**", "");
+        let lower = cleaned.to_ascii_lowercase();
+        if let Some(rest) = lower
+            .strip_prefix("model:")
+            .and_then(|_| cleaned.split_once(':').map(|(_, v)| v.trim()))
+        {
+            if !rest.is_empty() {
+                model_win = Some(claude_model_context_window(rest));
+            }
+        } else if lower.starts_with("tokens:") {
+            if let Some((_, val)) = cleaned.split_once(':') {
+                if let Some((lhs, rhs)) = val.split_once('/') {
+                    used = lhs
+                        .split_whitespace()
+                        .next()
+                        .and_then(crate::agent::parse_scaled_number)
+                        .map(|v| v.round() as u64);
+                    parsed_win = rhs
+                        .split_whitespace()
+                        .next()
+                        .and_then(crate::agent::parse_scaled_number)
+                        .map(|v| v.round() as u64);
+                }
+            }
+        }
+    }
+    (used.is_some() || parsed_win.is_some()).then_some((used, parsed_win, model_win))
+}
+
 fn inspect_claude_ctx(v: &Value, st: &mut CtxParseState) {
     match v.get("type").and_then(Value::as_str) {
         Some("continued-in") => {
@@ -538,6 +575,18 @@ fn inspect_claude_ctx(v: &Value, st: &mut CtxParseState) {
                     st.used = None;
                     st.reset = true;
                     st.saw_event = true;
+                } else if v.get("isMeta").and_then(Value::as_bool) == Some(true) {
+                    if let Some((used, parsed_win, model_win)) =
+                        parse_claude_context_usage_markdown(&raw)
+                    {
+                        if let Some(u) = used {
+                            st.used = Some(u);
+                            st.saw_event = true;
+                        }
+                        if let Some(w) = parsed_win.filter(|&w| w > 0).or(model_win) {
+                            st.window = Some(w);
+                        }
+                    }
                 }
             }
         }
@@ -2339,7 +2388,10 @@ fn parse_claude_context_breakdown(path: &Path) -> Option<ContextBreakdown> {
                         cleared = false;
                         continue;
                     }
-                    if is_claude_local_cmd_wrapper(&raw) {
+                    if is_claude_local_cmd_wrapper(&raw)
+                        || (v.get("isMeta").and_then(Value::as_bool) == Some(true)
+                            && parse_claude_context_usage_markdown(&raw).is_some())
+                    {
                         continue;
                     }
                 }
@@ -3219,6 +3271,46 @@ mod tests {
             agy_bd.categories.iter().map(|c| c.tokens).sum::<u64>(),
             agy_bd.used_tokens
         );
+
+        // 6. Claude `/clear` + `/context` (`isMeta: true` markdown) reports context before first assistant turn,
+        // and subsequent `assistant.usage` supersedes it cleanly.
+        let ctx_cmd_file = proj.join("post-clear-context.jsonl");
+        std::fs::write(
+            &ctx_cmd_file,
+            concat!(
+                r#"{"type":"user","sessionId":"post-clear-context","cwd":"/repo","message":{"role":"user","content":"<command-name>/clear</command-name>"}}"#,
+                "\n",
+                r###"{"type":"user","isMeta":true,"sessionId":"post-clear-context","cwd":"/repo","message":{"role":"user","content":"## Context Usage\n\n**Model:** claude-opus-5-5  \n**Tokens:** 25.5k / 1m (3%)\n\n### Messages\n"}}"###,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let md = std::fs::metadata(&ctx_cmd_file).unwrap();
+        let cm = cp.parse_file(&ctx_cmd_file, 100, md.len()).unwrap();
+        assert_eq!(cm.ctx_used, Some(25_500));
+        assert_eq!(cm.ctx_window, Some(1_000_000));
+        assert!(cm.ctx_reset);
+        let cdet = cm.context_detail().expect("context command detail");
+        assert_eq!(cdet.short_label, "3%");
+        assert_eq!(cdet.used, 25_500);
+        assert_eq!(cdet.window, 1_000_000);
+
+        std::fs::write(
+            &ctx_cmd_file,
+            concat!(
+                r#"{"type":"user","sessionId":"post-clear-context","cwd":"/repo","message":{"role":"user","content":"<command-name>/clear</command-name>"}}"#,
+                "\n",
+                r###"{"type":"user","isMeta":true,"sessionId":"post-clear-context","cwd":"/repo","message":{"role":"user","content":"## Context Usage\n\n**Model:** claude-opus-5-5  \n**Tokens:** 25.5k / 1m (3%)"}}"###,
+                "\n",
+                r#"{"type":"assistant","message":{"role":"assistant","model":"claude-opus-5-5","usage":{"input_tokens":2,"cache_creation_input_tokens":22713,"cache_read_input_tokens":22933}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let md2 = std::fs::metadata(&ctx_cmd_file).unwrap();
+        let cm2 = cp.parse_file(&ctx_cmd_file, 101, md2.len()).unwrap();
+        assert_eq!(cm2.ctx_used, Some(45_648));
+        assert!(!cm2.ctx_reset);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

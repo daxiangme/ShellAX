@@ -612,7 +612,7 @@ pub fn installed_agent_clis() -> Vec<(&'static str, &'static str, &'static str)>
     found
 }
 
-fn parse_scaled_number(raw: &str) -> Option<f64> {
+pub(crate) fn parse_scaled_number(raw: &str) -> Option<f64> {
     let clean = raw.trim().replace(',', "");
     let (num_str, mult) = if let Some(s) = clean.strip_suffix(['k', 'K']) {
         (s, 1_000.0)

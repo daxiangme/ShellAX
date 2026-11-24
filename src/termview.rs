@@ -5,6 +5,7 @@
 use gpui::AnimationExt as _;
 use ssh_term_proto::i18n::{t, tf};
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -947,6 +948,11 @@ pub struct TermView {
     pub hook_state: Option<(String, AgentState, Instant)>,
     pub agent_session_id: Option<String>,
     pub agent_transcript_path: Option<String>,
+    /// Session IDs explicitly cleared in this pane (`/clear`, `/new`, `/reset`) so
+    /// live sync never re-binds to the stale pre-clear session while old scrollback remains.
+    pub agent_cleared_sids: HashSet<String>,
+    /// Unix timestamp (seconds) when this pane last cleared its agent session.
+    pub agent_cleared_at: i64,
     pub launched_agent_id: Option<String>,
     launched_agent_seen_live: bool,
     pub auto_title: bool,
@@ -1409,6 +1415,8 @@ impl TermView {
             hook_state: None,
             agent_session_id: None,
             agent_transcript_path: None,
+            agent_cleared_sids: HashSet::new(),
+            agent_cleared_at: 0,
             launched_agent_id: None,
             launched_agent_seen_live: false,
             auto_title: false,
@@ -1901,6 +1909,8 @@ impl TermView {
                     self.agent_started_unix = now_unix_secs();
                     self.agent_session_id = None;
                     self.agent_transcript_path = None;
+                    self.agent_cleared_sids.clear();
+                    self.agent_cleared_at = 0;
                     self.last_agent_sig = None;
                     if ns != AgentState::Unknown {
                         cx.emit(TermEvent::Agent(
@@ -1932,6 +1942,8 @@ impl TermView {
             }
             (Some(_), None) => {
                 self.agent_started_unix = 0;
+                self.agent_cleared_sids.clear();
+                self.agent_cleared_at = 0;
                 self.last_agent_sig = None;
             }
             (None, None) => {}
@@ -2006,6 +2018,18 @@ impl TermView {
     }
 
     /// Apply session identity and lifecycle state reported directly by an agent hook.
+    /// Drop the active session binding on `/clear`/`/new`/`/reset` and remember the cleared
+    /// session ID + timestamp so live sync never re-binds to pre-clear history.
+    fn mark_agent_cleared(&mut self) {
+        if let Some(sid) = self.agent_session_id.take() {
+            self.agent_cleared_sids.insert(sid);
+        }
+        self.agent_transcript_path = None;
+        let now = now_unix_secs();
+        self.agent_started_unix = now;
+        self.agent_cleared_at = now;
+    }
+
     pub fn apply_hook_report(
         &mut self,
         agent_id: &str,
@@ -2015,6 +2039,8 @@ impl TermView {
         cx: &mut Context<Self>,
     ) {
         if let Some(sid) = session_id.filter(|s| !s.is_empty()) {
+            self.agent_cleared_sids.remove(&sid);
+            self.agent_cleared_at = 0;
             self.agent_session_id = Some(sid);
         }
         if let Some(tp) = transcript_path.filter(|s| !s.is_empty()) {
@@ -2704,10 +2730,21 @@ fn clip_caption(s: &str) -> String {
         let Some(s) = self.session.clone() else {
             return;
         };
+        let pasted_slash = if self.agent.is_some() && (text.ends_with('\n') || text.ends_with('\r')) {
+            Self::detect_agent_context_slash_cmd(text.trim_end_matches(['\r', '\n']), None)
+        } else {
+            None
+        };
         let bytes = paste_bytes(&text, self.mode().contains(TermMode::BRACKETED_PASTE));
         self.tracker.key(Key::Other); // pasted text can't be tracked reliably
         self.scroll_to_bottom(cx);
         fanout(&s, bytes);
+        if let Some(slash) = pasted_slash {
+            if slash == "clear" {
+                self.mark_agent_cleared();
+            }
+            cx.emit(TermEvent::AgentContextChange);
+        }
     }
 
     // ---------------- keyboard
@@ -2930,9 +2967,7 @@ fn clip_caption(s: &str) -> String {
                                 if slash == "clear" {
                                     // `/clear` / `/new` / `/reset` starts a fresh agent session on disk;
                                     // drop the old binding so live sync attaches to the new session ID.
-                                    self.agent_session_id = None;
-                                    self.agent_transcript_path = None;
-                                    self.agent_started_unix = now_unix_secs();
+                                    self.mark_agent_cleared();
                                 }
                                 cx.emit(TermEvent::AgentContextChange);
                             }
@@ -2941,9 +2976,7 @@ fn clip_caption(s: &str) -> String {
                                 Self::detect_agent_context_slash_cmd(&ls.before_cursor, None)
                             {
                                 if slash == "clear" {
-                                    self.agent_session_id = None;
-                                    self.agent_transcript_path = None;
-                                    self.agent_started_unix = now_unix_secs();
+                                    self.mark_agent_cleared();
                                 }
                                 cx.emit(TermEvent::AgentContextChange);
                             }
@@ -2953,9 +2986,7 @@ fn clip_caption(s: &str) -> String {
                             Self::detect_agent_context_slash_cmd(&ls.before_cursor, None)
                         {
                             if slash == "clear" {
-                                self.agent_session_id = None;
-                                self.agent_transcript_path = None;
-                                self.agent_started_unix = now_unix_secs();
+                                self.mark_agent_cleared();
                             }
                             cx.emit(TermEvent::AgentContextChange);
                         }

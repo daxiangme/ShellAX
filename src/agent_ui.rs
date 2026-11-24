@@ -646,6 +646,289 @@ fn remember_recent_project(dir: &str) {
     });
 }
 
+fn norm_match_cwd(p: &str) -> String {
+    let t = p.trim().trim_end_matches(['/', '\\']);
+    if cfg!(windows) {
+        t.replace('/', "\\").to_ascii_lowercase()
+    } else {
+        t.to_string()
+    }
+}
+
+fn compact_match_lower(s: &str) -> String {
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn cwd_matches(pane_cwd: Option<&str>, cand_ws: Option<&str>) -> bool {
+    match (pane_cwd, cand_ws) {
+        (Some(pc), Some(cw)) => pc == cw,
+        _ => true,
+    }
+}
+
+fn session_match_hints(m: &SessionMeta) -> Vec<String> {
+    let mut hints = Vec::new();
+    for cand in [
+        m.title.as_deref(),
+        m.first_prompt.as_deref(),
+        m.last_prompt.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let c = cand.trim();
+        if !c.is_empty() && !hints.iter().any(|x| x == c) {
+            hints.push(c.to_string());
+        }
+    }
+    hints
+}
+
+#[derive(Clone, Debug)]
+struct MatchCand {
+    agent_id: String,
+    cid: String,
+    workspace: Option<String>,
+    first_ts: i64,
+    last_ts: i64,
+    ctx_reset: bool,
+    has_title: bool,
+    hints: Vec<String>,
+}
+
+struct BoundPaneSnapshot {
+    agent_id: String,
+    cwd: Option<String>,
+    cur_sid: String,
+    cur_updated: i64,
+    cur_hints: Vec<String>,
+    cleared_sids: HashSet<String>,
+    screen_compact: String,
+    osc_clean: String,
+}
+
+struct UnboundPaneSnapshot {
+    agent_id: String,
+    cwd: Option<String>,
+    started_unix: i64,
+    cleared_sids: HashSet<String>,
+    cleared_at: i64,
+    screen_compact: String,
+    osc_clean: String,
+}
+
+fn score_content_match(
+    osc_clean: &str,
+    screen_compact: &str,
+    hints: &[String],
+    recent: bool,
+) -> i32 {
+    let min_osc = if recent { 2 } else { 4 };
+    let min_prompt = if recent { 3 } else { 8 };
+    let osc_hit = !osc_clean.is_empty()
+        && osc_clean.chars().count() >= min_osc
+        && hints.iter().any(|h| {
+            let hc = compact_match_lower(h);
+            hc.chars().count() >= min_osc
+                && (hc == osc_clean || hc.contains(osc_clean) || osc_clean.contains(&hc))
+        });
+    if osc_hit {
+        return 2000 + osc_clean.chars().count() as i32;
+    }
+    let prompt_hit = hints
+        .iter()
+        .filter_map(|h| {
+            let hc = compact_match_lower(h);
+            let n = hc.chars().count();
+            if n < min_prompt {
+                return None;
+            }
+            if screen_compact.contains(&hc) {
+                Some(n as i32)
+            } else if n > 24 {
+                let head: String = hc.chars().take(24).collect();
+                screen_compact.contains(&head).then_some(24)
+            } else {
+                None
+            }
+        })
+        .max();
+    prompt_hit.map_or(0, |len| 1000 + len)
+}
+
+fn unbound_pane_rejects_cand(up: &UnboundPaneSnapshot, cand: &MatchCand) -> bool {
+    up.cleared_sids.contains(&cand.cid)
+        || (up.cleared_at > 0 && cand.last_ts < up.cleared_at.saturating_sub(2))
+}
+
+fn screen_shows_clear_context(screen_compact: &str) -> bool {
+    screen_compact.contains("/clear") || screen_compact.contains("context usage")
+}
+
+/// Detect `/clear` session replacements for panes that are still bound to a pre-clear session
+/// (needed when the agent starts a brand-new transcript file without writing `continued-in`
+/// and without hooks).
+fn plan_bound_clear_handoffs(
+    panes: &[BoundPaneSnapshot],
+    cands: &[MatchCand],
+    bound_sids: &mut HashSet<String>,
+) -> Vec<(usize, String, bool)> {
+    let mut handoffs = Vec::new();
+    let cur_scores: Vec<i32> = panes
+        .iter()
+        .map(|bp| score_content_match(&bp.osc_clean, &bp.screen_compact, &bp.cur_hints, false))
+        .collect();
+
+    for (idx, bp) in panes.iter().enumerate() {
+        // Never leave a bound session whose own title/prompts are still visible on screen.
+        if cur_scores[idx] > 0 {
+            continue;
+        }
+        let eligible = |cand: &&MatchCand| {
+            cand.agent_id == bp.agent_id
+                && !bound_sids.contains(&cand.cid)
+                && !bp.cleared_sids.contains(&cand.cid)
+                && cand.cid != bp.cur_sid
+                && cwd_matches(bp.cwd.as_deref(), cand.workspace.as_deref())
+                && (cand.first_ts >= bp.cur_updated.saturating_sub(2)
+                    || (cand.ctx_reset && cand.last_ts > bp.cur_updated))
+        };
+
+        let mut best_content: Option<(i32, i64, String, bool)> = None;
+        for cand in cands.iter().filter(eligible) {
+            let score = score_content_match(&bp.osc_clean, &bp.screen_compact, &cand.hints, true);
+            if score >= 1000
+                && best_content
+                    .as_ref()
+                    .is_none_or(|(bs, bt, _, _)| (score, cand.last_ts) > (*bs, *bt))
+            {
+                best_content = Some((score, cand.last_ts, cand.cid.clone(), cand.has_title));
+            }
+        }
+        let chosen = if let Some((_, _, cid, has_title)) = best_content {
+            Some((cid, !has_title))
+        } else if screen_shows_clear_context(&bp.screen_compact) {
+            // Immediately after `/clear` + `/context`, before user prompt #1 produces hints,
+            // allow handoff only if both the stale-screen clear pane and newly-reset disk
+            // candidate are unique within `(agent_id, cwd)`.
+            let clear_panes_in_scope = panes
+                .iter()
+                .enumerate()
+                .filter(|(j, other)| {
+                    other.agent_id == bp.agent_id
+                        && other.cwd == bp.cwd
+                        && cur_scores[*j] == 0
+                        && screen_shows_clear_context(&other.screen_compact)
+                })
+                .count();
+            let reset_cands: Vec<&MatchCand> = cands
+                .iter()
+                .filter(eligible)
+                .filter(|c| c.ctx_reset && c.last_ts > bp.cur_updated)
+                .collect();
+            if clear_panes_in_scope == 1 && reset_cands.len() == 1 {
+                Some((reset_cands[0].cid.clone(), !reset_cands[0].has_title))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some((new_sid, needs_scan)) = chosen {
+            bound_sids.insert(new_sid.clone());
+            handoffs.push((idx, new_sid, needs_scan));
+        }
+    }
+    handoffs
+}
+
+fn plan_unbound_bindings(
+    panes: &[UnboundPaneSnapshot],
+    cands: &[MatchCand],
+    bound_sids: &HashSet<String>,
+    now_secs: i64,
+) -> Vec<(usize, String, bool)> {
+    let mut group_counts: HashMap<(String, Option<String>), usize> = HashMap::new();
+    for up in panes {
+        *group_counts
+            .entry((up.agent_id.clone(), up.cwd.clone()))
+            .or_insert(0) += 1;
+    }
+
+    let mut used: HashSet<(String, String)> = HashSet::new();
+    let mut out = Vec::new();
+    for (idx, up) in panes.iter().enumerate() {
+        let ref_ts = if up.started_unix > 0 {
+            up.started_unix
+        } else {
+            now_secs
+        };
+        let same_group = group_counts
+            .get(&(up.agent_id.clone(), up.cwd.clone()))
+            .copied()
+            .unwrap_or(1);
+        let mut matching_cands = 0usize;
+        for cand in cands {
+            if cand.agent_id != up.agent_id
+                || bound_sids.contains(&cand.cid)
+                || used.contains(&(cand.agent_id.clone(), cand.cid.clone()))
+                || unbound_pane_rejects_cand(up, cand)
+                || cand.last_ts < ref_ts.saturating_sub(15)
+                || !cwd_matches(up.cwd.as_deref(), cand.workspace.as_deref())
+            {
+                continue;
+            }
+            if cand.first_ts >= ref_ts.saturating_sub(25) && (!cand.hints.is_empty() || cand.ctx_reset)
+            {
+                matching_cands += 1;
+            }
+        }
+
+        let mut best: Option<(i32, i64, String, bool)> = None;
+        for cand in cands {
+            if cand.agent_id != up.agent_id
+                || bound_sids.contains(&cand.cid)
+                || used.contains(&(cand.agent_id.clone(), cand.cid.clone()))
+                || unbound_pane_rejects_cand(up, cand)
+                || !cwd_matches(up.cwd.as_deref(), cand.workspace.as_deref())
+            {
+                continue;
+            }
+            let recent = cand.last_ts >= ref_ts.saturating_sub(15);
+            let content_score =
+                score_content_match(&up.osc_clean, &up.screen_compact, &cand.hints, recent);
+            let score = if content_score > 0 {
+                content_score
+            } else if recent
+                && cand.first_ts >= ref_ts.saturating_sub(25)
+                && same_group == 1
+                && matching_cands == 1
+                && (!cand.hints.is_empty() || cand.ctx_reset)
+            {
+                100
+            } else {
+                0
+            };
+            if score > 0
+                && best
+                    .as_ref()
+                    .is_none_or(|(bs, bt, _, _)| (score, cand.last_ts) > (*bs, *bt))
+            {
+                best = Some((score, cand.last_ts, cand.cid.clone(), cand.has_title));
+            }
+        }
+        if let Some((_, _, cid, has_title)) = best {
+            used.insert((up.agent_id.clone(), cid.clone()));
+            out.push((idx, cid, !has_title));
+        }
+    }
+    out
+}
+
 impl Root {
     pub(crate) fn ensure_agent_hub_started(&mut self, cx: &mut Context<Self>) {
         if self.agent_hub.started {
@@ -1219,52 +1502,61 @@ impl Root {
     /// history session ID so live panes merge with disk history and titles stay in sync.
     /// Returns `true` if any pane received a new session ID binding.
     pub(crate) fn sync_live_agent_sessions(&mut self, cx: &mut Context<Self>) -> bool {
-        fn norm_cwd(p: &str) -> String {
-            let t = p.trim().trim_end_matches(['/', '\\']);
-            if cfg!(windows) {
-                t.replace('/', "\\").to_ascii_lowercase()
-            } else {
-                t.to_string()
-            }
-        }
-        fn compact_lower(s: &str) -> String {
-            s.split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-                .to_lowercase()
-        }
-
-        struct UnboundPane {
-            pane: Entity<TermView>,
-            agent_id: String,
-            cwd: Option<String>,
-            started_unix: i64,
-            screen_compact: String,
-            osc_clean: String,
-        }
-        struct Cand {
-            agent_id: String,
-            cid: String,
-            workspace: Option<String>,
-            first_ts: i64,
-            last_ts: i64,
-            hints: Vec<String>,
-        }
-
         let mut bound_sids: HashSet<String> = HashSet::new();
-        let mut unbound: Vec<UnboundPane> = Vec::new();
+        let mut bound_panes: Vec<BoundPaneSnapshot> = Vec::new();
+        let mut bound_entities: Vec<Entity<TermView>> = Vec::new();
+        let mut unbound: Vec<UnboundPaneSnapshot> = Vec::new();
+        let mut unbound_entities: Vec<Entity<TermView>> = Vec::new();
         let mut rebound_count = 0usize;
+
         for tab in &self.tabs {
             let task_repo = tab
                 .task
                 .as_ref()
-                .map(|t| t.repo.display().to_string())
+                .map(|t| norm_match_cwd(&t.repo.to_string_lossy()))
                 .filter(|s| !s.is_empty());
             for pane in tab.layout.leaves() {
-                let (cur_sid, cur_tp) = {
+                let (
+                    cur_sid,
+                    cur_tp,
+                    raw_aid,
+                    shell_cwd,
+                    started_unix,
+                    cleared_sids,
+                    cleared_at,
+                    screen_compact,
+                    osc_clean,
+                ) = {
                     let v = pane.read(cx);
-                    (v.agent_session_id.clone(), v.agent_transcript_path.clone())
+                    let screen_compact = v
+                        .session
+                        .as_ref()
+                        .map(|s| compact_match_lower(&s.screen_text()))
+                        .unwrap_or_default();
+                    let osc_clean = v
+                        .session
+                        .as_ref()
+                        .map(|s| crate::termview::clean_osc_agent_title(&s.title()))
+                        .filter(|t| !crate::termview::is_generic_title(t, None))
+                        .map(|t| compact_match_lower(&t))
+                        .unwrap_or_default();
+                    (
+                        v.agent_session_id.clone(),
+                        v.agent_transcript_path.clone(),
+                        v.agent_id(),
+                        v.shell_cwd(),
+                        v.agent_started_unix,
+                        v.agent_cleared_sids.clone(),
+                        v.agent_cleared_at,
+                        screen_compact,
+                        osc_clean,
+                    )
                 };
+                let cwd = shell_cwd
+                    .or_else(|| task_repo.clone())
+                    .map(|d| norm_match_cwd(&d))
+                    .filter(|s| !s.is_empty());
+
                 if let Some(sid) = cur_sid {
                     // Follow any `continued-in` handoff chain so a pane automatically tracks the
                     // successor session after context continuation.
@@ -1281,13 +1573,10 @@ impl Root {
                             _ => break,
                         }
                     }
-                    let matched_path = self
-                        .agent_hub
-                        .sessions
-                        .iter()
-                        .find(|m| m.id == final_sid)
-                        .map(|m| m.path.display().to_string());
-                    if final_sid != sid || (cur_tp.is_none() && matched_path.is_some()) {
+                    let matched_meta = self.agent_hub.sessions.iter().find(|m| m.id == final_sid);
+                    let matched_path = matched_meta.map(|m| m.path.display().to_string());
+                    let followed_chain = final_sid != sid;
+                    if followed_chain || (cur_tp.is_none() && matched_path.is_some()) {
                         let new_sid = final_sid.clone();
                         let new_tp = matched_path;
                         pane.update(cx, |v, _| {
@@ -1296,45 +1585,47 @@ impl Root {
                                 v.agent_transcript_path = Some(tp);
                             }
                         });
-                        if final_sid != sid {
+                        if followed_chain {
                             rebound_count += 1;
                         }
                     }
-                    bound_sids.insert(final_sid);
+                    bound_sids.insert(final_sid.clone());
+                    if !followed_chain {
+                        if let Some(aid) = raw_aid.map(|a| agent::normalize_id(&a)) {
+                            let (cur_updated, cur_hints) = matched_meta
+                                .map(|m| (m.updated, session_match_hints(m)))
+                                .unwrap_or((started_unix, Vec::new()));
+                            bound_panes.push(BoundPaneSnapshot {
+                                agent_id: aid,
+                                cwd,
+                                cur_sid: final_sid,
+                                cur_updated,
+                                cur_hints,
+                                cleared_sids,
+                                screen_compact,
+                                osc_clean,
+                            });
+                            bound_entities.push(pane.clone());
+                        }
+                    }
                     continue;
                 }
-                let v = pane.read(cx);
-                if let Some(raw_aid) = v.agent_id() {
+                if let Some(raw_aid) = raw_aid {
                     let agent_id = agent::normalize_id(&raw_aid);
-                    let cwd = v
-                        .shell_cwd()
-                        .or_else(|| task_repo.clone())
-                        .map(|d| norm_cwd(&d))
-                        .filter(|s| !s.is_empty());
-                    let screen_compact = v
-                        .session
-                        .as_ref()
-                        .map(|s| compact_lower(&s.screen_text()))
-                        .unwrap_or_default();
-                    let osc_clean = v
-                        .session
-                        .as_ref()
-                        .map(|s| crate::termview::clean_osc_agent_title(&s.title()))
-                        .filter(|t| !crate::termview::is_generic_title(t, None))
-                        .map(|t| compact_lower(&t))
-                        .unwrap_or_default();
-                    unbound.push(UnboundPane {
-                        pane: pane.clone(),
+                    unbound.push(UnboundPaneSnapshot {
                         agent_id,
                         cwd,
-                        started_unix: v.agent_started_unix,
+                        started_unix,
+                        cleared_sids,
+                        cleared_at,
                         screen_compact,
                         osc_clean,
                     });
+                    unbound_entities.push(pane.clone());
                 }
             }
         }
-        if unbound.is_empty() {
+        if unbound.is_empty() && bound_panes.is_empty() {
             if rebound_count > 0 {
                 cx.notify();
                 return true;
@@ -1353,16 +1644,33 @@ impl Root {
             .iter()
             .filter(|u| !u.osc_clean.is_empty() || !u.screen_compact.is_empty())
             .map(|u| (u.agent_id.as_str(), u.cwd.as_deref()))
+            .chain(
+                bound_panes
+                    .iter()
+                    .filter(|b| !b.osc_clean.is_empty() || !b.screen_compact.is_empty())
+                    .map(|b| (b.agent_id.as_str(), b.cwd.as_deref())),
+            )
             .collect();
 
-        let mut by_key: HashMap<(String, String), Cand> = HashMap::new();
+        let mut by_key: HashMap<(String, String), MatchCand> = HashMap::new();
         for m in &self.agent_hub.sessions {
             if bound_sids.contains(&m.id) {
                 continue;
             }
             let aid = agent::normalize_id(&m.agent);
-            let ws = m.cwd.as_deref().map(norm_cwd).filter(|s| !s.is_empty());
-            let recent = m.updated >= min_pane_start;
+            let ws = m
+                .cwd
+                .as_deref()
+                .map(norm_match_cwd)
+                .filter(|s| !s.is_empty());
+            let recent_unbound = !unbound.is_empty() && m.updated >= min_pane_start;
+            let recent_handoff = bound_panes.iter().any(|bp| {
+                bp.agent_id == aid
+                    && cwd_matches(bp.cwd.as_deref(), ws.as_deref())
+                    && m.updated > bp.cur_updated
+                    && (m.started >= bp.cur_updated.saturating_sub(2) || m.ctx_reset)
+            });
+            let recent = recent_unbound || recent_handoff;
             let scope_match = !recent
                 && content_match_scopes.iter().any(|(ua, uc)| {
                     *ua == aid
@@ -1374,31 +1682,20 @@ impl Root {
             if !recent && !scope_match {
                 continue;
             }
-            let mut hints = Vec::new();
-            for cand in [
-                m.title.as_deref(),
-                m.first_prompt.as_deref(),
-                m.last_prompt.as_deref(),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                let c = cand.trim();
-                if !c.is_empty() && !hints.iter().any(|x| x == c) {
-                    hints.push(c.to_string());
-                }
-            }
+            let hints = session_match_hints(m);
             if !recent && hints.is_empty() {
                 continue;
             }
             by_key.insert(
                 (aid.clone(), m.id.clone()),
-                Cand {
+                MatchCand {
                     agent_id: aid,
                     cid: m.id.clone(),
                     workspace: ws,
                     first_ts: m.started,
                     last_ts: m.updated,
+                    ctx_reset: m.ctx_reset,
+                    has_title: m.title.is_some(),
                     hints,
                 },
             );
@@ -1411,16 +1708,18 @@ impl Root {
                 }
                 let norm_ws = workspace
                     .as_deref()
-                    .map(norm_cwd)
+                    .map(norm_match_cwd)
                     .filter(|s| !s.is_empty());
                 let entry = by_key
                     .entry(("agy".to_string(), cid.clone()))
-                    .or_insert_with(|| Cand {
+                    .or_insert_with(|| MatchCand {
                         agent_id: "agy".to_string(),
                         cid,
                         workspace: norm_ws.clone(),
                         first_ts: ts,
                         last_ts: ts,
+                        ctx_reset: false,
+                        has_title: false,
                         hints: Vec::new(),
                     });
                 entry.first_ts = entry.first_ts.min(ts);
@@ -1435,131 +1734,54 @@ impl Root {
             }
         }
 
-        let mut cands: Vec<Cand> = by_key.into_values().collect();
+        let mut cands: Vec<MatchCand> = by_key.into_values().collect();
         if cands.is_empty() {
+            if rebound_count > 0 {
+                cx.notify();
+                return true;
+            }
             return false;
         }
         cands.sort_by_key(|c| std::cmp::Reverse(c.last_ts));
 
-        let mut group_counts: HashMap<(String, Option<String>), usize> = HashMap::new();
-        for up in &unbound {
-            *group_counts
-                .entry((up.agent_id.clone(), up.cwd.clone()))
-                .or_insert(0) += 1;
+        let mut need_scan = false;
+        for (idx, new_sid, needs_title_scan) in
+            plan_bound_clear_handoffs(&bound_panes, &cands, &mut bound_sids)
+        {
+            let old_sid = bound_panes[idx].cur_sid.clone();
+            let matched_path = self
+                .agent_hub
+                .sessions
+                .iter()
+                .find(|m| m.id == new_sid)
+                .map(|m| m.path.display().to_string());
+            bound_entities[idx].update(cx, |v, _| {
+                v.agent_cleared_sids.insert(old_sid);
+                v.agent_session_id = Some(new_sid);
+                if let Some(tp) = matched_path {
+                    v.agent_transcript_path = Some(tp);
+                }
+            });
+            rebound_count += 1;
+            need_scan |= needs_title_scan;
         }
 
-        let mut used: HashSet<(String, String)> = HashSet::new();
-        let mut need_scan = false;
-        let mut bound_count = 0usize;
-
-        for up in &unbound {
-            let ref_ts = if up.started_unix > 0 {
-                up.started_unix
-            } else {
-                now_secs
-            };
-            let same_group = group_counts
-                .get(&(up.agent_id.clone(), up.cwd.clone()))
-                .copied()
-                .unwrap_or(1);
-            let mut matching_cands = 0usize;
-            for cand in &cands {
-                if cand.agent_id != up.agent_id
-                    || used.contains(&(cand.agent_id.clone(), cand.cid.clone()))
-                    || cand.last_ts < ref_ts.saturating_sub(15)
-                {
-                    continue;
+        let bindings = plan_unbound_bindings(&unbound, &cands, &bound_sids, now_secs);
+        let bound_count = bindings.len();
+        for (idx, cid, needs_title_scan) in bindings {
+            let matched_path = self
+                .agent_hub
+                .sessions
+                .iter()
+                .find(|m| m.id == cid)
+                .map(|m| m.path.display().to_string());
+            unbound_entities[idx].update(cx, |v, _| {
+                v.agent_session_id = Some(cid);
+                if let Some(tp) = matched_path {
+                    v.agent_transcript_path = Some(tp);
                 }
-                if let (Some(pc), Some(cw)) = (up.cwd.as_deref(), cand.workspace.as_deref()) {
-                    if pc != cw {
-                        continue;
-                    }
-                }
-                if cand.first_ts >= ref_ts.saturating_sub(25) && !cand.hints.is_empty() {
-                    matching_cands += 1;
-                }
-            }
-
-            let mut best: Option<(i32, i64, String)> = None;
-            for cand in &cands {
-                if cand.agent_id != up.agent_id
-                    || used.contains(&(cand.agent_id.clone(), cand.cid.clone()))
-                {
-                    continue;
-                }
-                if let (Some(pc), Some(cw)) = (up.cwd.as_deref(), cand.workspace.as_deref()) {
-                    if pc != cw {
-                        continue;
-                    }
-                }
-                let recent = cand.last_ts >= ref_ts.saturating_sub(15);
-                let min_osc = if recent { 2 } else { 4 };
-                let min_prompt = if recent { 3 } else { 8 };
-                let osc_hit = !up.osc_clean.is_empty()
-                    && up.osc_clean.chars().count() >= min_osc
-                    && cand.hints.iter().any(|h| {
-                        let hc = compact_lower(h);
-                        hc.chars().count() >= min_osc
-                            && (hc == up.osc_clean
-                                || hc.contains(&up.osc_clean)
-                                || up.osc_clean.contains(&hc))
-                    });
-                let prompt_hit = cand
-                    .hints
-                    .iter()
-                    .filter_map(|h| {
-                        let hc = compact_lower(h);
-                        let n = hc.chars().count();
-                        if n < min_prompt {
-                            return None;
-                        }
-                        if up.screen_compact.contains(&hc) {
-                            Some(n as i32)
-                        } else if n > 24 {
-                            let head: String = hc.chars().take(24).collect();
-                            up.screen_compact.contains(&head).then_some(24)
-                        } else {
-                            None
-                        }
-                    })
-                    .max();
-                let score = if osc_hit {
-                    2000 + up.osc_clean.chars().count() as i32
-                } else if let Some(len) = prompt_hit {
-                    1000 + len
-                } else if recent
-                    && cand.first_ts >= ref_ts.saturating_sub(25)
-                    && same_group == 1
-                    && matching_cands == 1
-                {
-                    100
-                } else {
-                    0
-                };
-                if score > 0
-                    && best
-                        .as_ref()
-                        .is_none_or(|(bs, bt, _)| (score, cand.last_ts) > (*bs, *bt))
-                {
-                    best = Some((score, cand.last_ts, cand.cid.clone()));
-                }
-            }
-            if let Some((_, _, cid)) = best {
-                used.insert((up.agent_id.clone(), cid.clone()));
-                bound_count += 1;
-                let matched = self.agent_hub.sessions.iter().find(|m| m.id == cid);
-                let has_titled_meta = matched.is_some_and(|m| m.title.is_some());
-                let matched_path = matched.map(|m| m.path.display().to_string());
-                if !has_titled_meta {
-                    need_scan = true;
-                }
-                up.pane.update(cx, |v, _| {
-                    v.agent_session_id = Some(cid);
-                    if let Some(tp) = matched_path {
-                        v.agent_transcript_path = Some(tp);
-                    }
-                });
-            }
+            });
+            need_scan |= needs_title_scan;
         }
         if bound_count > 0 || rebound_count > 0 {
             if need_scan {
@@ -6547,5 +6769,149 @@ mod tests {
             compact_project_label("/tmp/some-nonexistent-repo-name"),
             "some-n…"
         );
+    }
+
+    #[test]
+    fn clear_session_matching_prevents_old_rebind_and_handles_new_clear_handoff() {
+        let old_sid = "62db860d".to_string();
+        let new_sid = "da05ed3a".to_string();
+        let other_bound_sid = "other-bound".to_string();
+
+        let old_cand = MatchCand {
+            agent_id: "claude".into(),
+            cid: old_sid.clone(),
+            workspace: Some("/repo".into()),
+            first_ts: 900,
+            last_ts: 950,
+            ctx_reset: false,
+            has_title: true,
+            hints: vec!["old prompt text on scrollback".into()],
+        };
+        let empty_new_clear_cand = MatchCand {
+            agent_id: "claude".into(),
+            cid: new_sid.clone(),
+            workspace: Some("/repo".into()),
+            first_ts: 1000,
+            last_ts: 1005,
+            ctx_reset: true,
+            has_title: false,
+            hints: Vec::new(),
+        };
+
+        // 1. Cleared unbound pane rejects `cleared_sids` and pre-clear `last_ts` even when
+        // old prompts or OSC title remain visible on screen.
+        let mut cleared_set = HashSet::new();
+        cleared_set.insert(old_sid.clone());
+        let unbound_pane = UnboundPaneSnapshot {
+            agent_id: "claude".into(),
+            cwd: Some("/repo".into()),
+            started_unix: 1000,
+            cleared_sids: cleared_set.clone(),
+            cleared_at: 1000,
+            screen_compact: "old prompt text on scrollback /clear".into(),
+            osc_clean: "old prompt text on scrollback".into(),
+        };
+        let res_only_old = plan_unbound_bindings(
+            &[unbound_pane],
+            std::slice::from_ref(&old_cand),
+            &HashSet::new(),
+            1005,
+        );
+        assert!(
+            res_only_old.is_empty(),
+            "cleared pane must never rebind to pre-clear session: {res_only_old:?}"
+        );
+
+        // 2. Newly-cleared session (`ctx_reset = true`) with empty hints binds immediately.
+        let unbound_pane2 = UnboundPaneSnapshot {
+            agent_id: "claude".into(),
+            cwd: Some("/repo".into()),
+            started_unix: 1000,
+            cleared_sids: cleared_set,
+            cleared_at: 1000,
+            screen_compact: "/clear context usage 25.5k/1m".into(),
+            osc_clean: String::new(),
+        };
+        let res_new_clear = plan_unbound_bindings(
+            &[unbound_pane2],
+            &[old_cand.clone(), empty_new_clear_cand.clone()],
+            &HashSet::new(),
+            1006,
+        );
+        assert_eq!(res_new_clear.len(), 1);
+        assert_eq!(res_new_clear[0].0, 0);
+        assert_eq!(res_new_clear[0].1, new_sid);
+
+        // 3. Already-bound pane without `continued-in` rebinds to newer post-clear session when
+        // new prompts appear on its screen, while leaving a second healthy pane untouched and
+        // never stealing a session already bound to another pane.
+        let prompt_new_cand = MatchCand {
+            agent_id: "claude".into(),
+            cid: new_sid.clone(),
+            workspace: Some("/repo".into()),
+            first_ts: 1000,
+            last_ts: 1020,
+            ctx_reset: false,
+            has_title: true,
+            hints: vec!["这里需要调整一些 人机验证的弹窗".into()],
+        };
+        let already_other_cand = MatchCand {
+            agent_id: "claude".into(),
+            cid: other_bound_sid.clone(),
+            workspace: Some("/repo".into()),
+            first_ts: 1001,
+            last_ts: 1025,
+            ctx_reset: false,
+            has_title: true,
+            hints: vec!["unrelated active pane task".into()],
+        };
+        let bound_panes = vec![
+            BoundPaneSnapshot {
+                agent_id: "claude".into(),
+                cwd: Some("/repo".into()),
+                cur_sid: old_sid.clone(),
+                cur_updated: 950,
+                cur_hints: old_cand.hints.clone(),
+                cleared_sids: HashSet::new(),
+                screen_compact: "/clear context usage [image #4] 这里需要调整一些 人机验证的弹窗".into(),
+                osc_clean: String::new(),
+            },
+            BoundPaneSnapshot {
+                agent_id: "claude".into(),
+                cwd: Some("/repo".into()),
+                cur_sid: other_bound_sid.clone(),
+                cur_updated: 1025,
+                cur_hints: vec!["unrelated active pane task".into()],
+                cleared_sids: HashSet::new(),
+                screen_compact: "unrelated active pane task".into(),
+                osc_clean: String::new(),
+            },
+        ];
+        let mut bound_sids: HashSet<String> = [old_sid.clone(), other_bound_sid.clone()]
+            .into_iter()
+            .collect();
+        let handoffs = plan_bound_clear_handoffs(
+            &bound_panes,
+            &[prompt_new_cand, already_other_cand],
+            &mut bound_sids,
+        );
+        assert_eq!(handoffs, vec![(0, new_sid.clone(), false)]);
+        assert!(bound_sids.contains(&new_sid));
+
+        // 4. Unique `/clear` + `Context Usage` bound handoff even before turn-1 prompt exists.
+        let bound_pre_turn = vec![BoundPaneSnapshot {
+            agent_id: "claude".into(),
+            cwd: Some("/repo".into()),
+            cur_sid: old_sid.clone(),
+            cur_updated: 950,
+            cur_hints: old_cand.hints.clone(),
+            cleared_sids: HashSet::new(),
+            screen_compact: "/clear /context context usage 25.5k/1m".into(),
+            osc_clean: String::new(),
+        }];
+        let mut bound_sids2: HashSet<String> = [old_sid].into_iter().collect();
+        let pre_handoffs =
+            plan_bound_clear_handoffs(&bound_pre_turn, &[empty_new_clear_cand], &mut bound_sids2);
+        assert_eq!(pre_handoffs, vec![(0, new_sid, true)]);
     }
 }

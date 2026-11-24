@@ -4,6 +4,15 @@
 
 新版本加在最上方。节标题与 `Cargo.toml` 的版本号相同，写成 `## 1.3.7`；Git 标签在版本号前加 `v`，写成 `v1.3.7`。条目有对应的 GitHub issue 时，在末尾写上编号，例如 `#12`。
 
+## 1.3.16
+
+### 修复
+
+- **修复 Claude Code 执行 `/clear` 与 `/context` 后底部上下文（`ctx`）未同步切换而停留在旧会话的问题**：
+  - 在终端视图记录显式清屏（`/clear`、`/new`、`/reset` 按键或粘贴提交）的旧 `session_id` 与清屏时间戳，阻止实时会话同步在磁盘新会话尚未生成时因旧屏幕/OSC 标题残留而回绑到清屏前的旧会话；对刚完成 `/clear`、带有 `ctx_reset` 标记但尚无提示词的新会话也支持即时绑定。
+  - 支持在未触发 hooks 且旧会话无 `continued-in` 指针的情况下，识别同工作区内旧屏幕特征已清除的已绑定窗格，并依据屏幕新提示词或唯一匹配的 `/clear + Context Usage` 切换至新会话。
+  - 补充解析 Claude Code `/context` 生成的 `isMeta: true` Markdown 摘要（`## Context Usage` 中的 `Model` 与 `Tokens`），在首轮 assistant 回复完成前即可准确更新上下文用量，并避免把 `/context` 输出计入对话正文估算。
+
 ## 1.3.15
 
 ### 修复
