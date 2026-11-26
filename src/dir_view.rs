@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::{div, prelude::*, px, AnyElement, Context, Focusable, Window};
+use gpui::{div, prelude::*, px, AnyElement, Context, ExternalPaths, Focusable, Window};
 use gpui_component::input::{Editor, EditorState, InputEvent, InputState};
 use russh_sftp::client::SftpSession;
 use ssh_term_proto::ctxmenu::{self, archive_commands, archive_kind, targz_command, zip_command};
@@ -133,11 +133,20 @@ enum Sheet {
         clip: Clip,
         alt: String,
         same: bool,
+        target_dir: String,
+        from_drop: bool,
     },
     Cmd {
         title: String,
         cmd: String,
     },
+}
+
+struct DropBatch {
+    target_dir: String,
+    items: std::collections::VecDeque<Clip>,
+    rest: Option<sftp::WhenExists>,
+    done: usize,
 }
 
 struct OpenDoc {
@@ -185,6 +194,8 @@ pub struct DirView {
     sheet: Option<Sheet>,
     open: Option<OpenDoc>,
     clip: Option<Clip>,
+    drop_batch: Option<DropBatch>,
+    drop_rest: bool,
     busy: bool,
     status: String,
     status_err: bool,
@@ -252,6 +263,8 @@ impl DirView {
             sheet: None,
             open: None,
             clip: None,
+            drop_batch: None,
+            drop_rest: false,
             busy: false,
             status: String::new(),
             status_err: false,
@@ -322,6 +335,8 @@ impl DirView {
         self.open = None;
         self.sheet = None;
         self.ops = None;
+        self.drop_batch = None;
+        self.drop_rest = false;
     }
 
     /// 先写好身份和要列出的目录，再发起连接 / 列表，最后才改输入框。
@@ -348,6 +363,8 @@ impl DirView {
         self.entries.clear();
         self.back.clear();
         self.sel = None;
+        self.drop_batch = None;
+        self.drop_rest = false;
         self.follow.set(true);
         self.home.clear();
         let fallback = if feed.remote {
@@ -958,26 +975,36 @@ impl DirView {
                 break;
             }
             let selected = self.sel == Some(i);
-            list = list.child(
-                filelist::entry_row(("dir-row", i), e, selected, dark, cols)
-                    .on_mouse_down(
-                        gpui::MouseButton::Right,
-                        cx.listener(move |v, ev: &gpui::MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            v.sel = Some(i);
-                            v.ops = Some((ev.position, std::time::Instant::now(), Some(i)));
-                            cx.notify();
-                        }),
-                    )
-                    .on_click(cx.listener(move |v, ev: &gpui::ClickEvent, window, cx| {
-                        if ev.click_count() >= 2 {
-                            v.open_entry(i, window, cx);
-                        } else {
-                            v.sel = Some(i);
-                        }
+            let row_el = filelist::entry_row(("dir-row", i), e, selected, dark, cols)
+                .on_mouse_down(
+                    gpui::MouseButton::Right,
+                    cx.listener(move |v, ev: &gpui::MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        v.sel = Some(i);
+                        v.ops = Some((ev.position, std::time::Instant::now(), Some(i)));
                         cx.notify();
-                    })),
-            );
+                    }),
+                )
+                .on_click(cx.listener(move |v, ev: &gpui::ClickEvent, window, cx| {
+                    if ev.click_count() >= 2 {
+                        v.open_entry(i, window, cx);
+                    } else {
+                        v.sel = Some(i);
+                    }
+                    cx.notify();
+                }));
+            let row_el = if e.is_dir {
+                let target_dir = self.path_of(&e.name);
+                row_el
+                    .drag_over::<ExternalPaths>(|st, _, _, _| st.bg(crate::theme::accent_bg()))
+                    .on_drop(cx.listener(move |v, ps: &ExternalPaths, _, cx| {
+                        cx.stop_propagation();
+                        v.accept_drop(ps, target_dir.clone(), cx);
+                    }))
+            } else {
+                row_el
+            };
+            list = list.child(row_el);
         }
         if shown == 0 && !q.is_empty() {
             list = list.child(
@@ -1428,9 +1455,16 @@ impl DirView {
                 v.busy = false;
                 if !exists && !same {
                     let name = clip.name.clone();
-                    v.run_paste(clip, name, false, cx);
+                    let dir = v.dir.clone();
+                    v.run_paste(clip, name, dir, false, false, cx);
                 } else {
-                    v.sheet = Some(Sheet::Conflict { clip, alt, same });
+                    v.sheet = Some(Sheet::Conflict {
+                        clip,
+                        alt,
+                        same,
+                        target_dir: v.dir.clone(),
+                        from_drop: false,
+                    });
                     v.note(String::new(), false);
                     cx.notify();
                 }
@@ -1440,17 +1474,213 @@ impl DirView {
         cx.notify();
     }
 
-    fn run_paste(&mut self, clip: Clip, name: String, overwrite: bool, cx: &mut Context<Self>) {
-        self.sheet = None;
-        let dest = self.path_of(&name);
-        if clip.is_dir && nested(&clip.path, &dest) {
-            self.busy = false;
-            self.note(t("dir.same_place").into(), true);
+    pub fn refresh_if_remote(&mut self, host_key: &str, cx: &mut Context<Self>) {
+        if self.remote && self.host_key == host_key && !self.connecting {
+            self.list(cx);
+        }
+    }
+
+    fn accept_drop(&mut self, ps: &ExternalPaths, target_dir: String, cx: &mut Context<Self>) {
+        if self.choices.is_empty() || self.open.is_some() || self.connecting {
+            return;
+        }
+        if self.remote && self.session().is_none() {
+            self.note(t("dir.not_connected").into(), true);
             cx.notify();
             return;
         }
+        if target_dir.is_empty() {
+            self.note(t("sftp.no_target_dir").into(), true);
+            cx.notify();
+            return;
+        }
+        if self.drop_batch.is_some() || self.busy {
+            self.note(t("sftp.busy_conflict").into(), true);
+            cx.notify();
+            return;
+        }
+        let mut items = std::collections::VecDeque::new();
+        for p in ps.paths() {
+            let Some(name) = p.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            if name.is_empty() {
+                continue;
+            }
+            items.push_back(Clip {
+                remote: false,
+                host_key: String::new(),
+                ssh: None,
+                path: p.to_string_lossy().into_owned(),
+                name,
+                is_dir: p.is_dir(),
+            });
+        }
+        if items.is_empty() {
+            return;
+        }
+        self.ops = None;
+        self.sheet = None;
+        self.drop_rest = false;
+        self.drop_batch = Some(DropBatch {
+            target_dir,
+            items,
+            rest: None,
+            done: 0,
+        });
+        self.pump_drop(cx);
+    }
+
+    fn pump_drop(&mut self, cx: &mut Context<Self>) {
+        let Some(b) = self.drop_batch.as_ref() else {
+            return;
+        };
+        let Some(clip) = b.items.front().cloned() else {
+            let done = b.done;
+            self.drop_batch = None;
+            self.drop_rest = false;
+            self.busy = false;
+            if done > 0 {
+                self.flash(tf("dir.drop_done", &[("n", &done)]), cx);
+                self.list(cx);
+            } else {
+                self.flash(t("sftp.all_skipped").into(), cx);
+            }
+            cx.notify();
+            return;
+        };
+        let target_dir = b.target_dir.clone();
+        let rest = b.rest;
+        let remote = self.remote;
+        let sess = self.session();
+        self.busy = true;
+        self.note(t("dir.busy").into(), false);
+        let (tx, rx) = flume::bounded(1);
+        self.rt.spawn(async move {
+            let dest = filelist::child_path(&target_dir, &clip.name, remote);
+            let same = paths_equal(&clip.path, &dest);
+            let exists = if same {
+                true
+            } else {
+                path_exists(remote, sess.as_deref(), &dest).await
+            };
+            let alt = if exists || same {
+                next_free(remote, sess.as_deref(), &target_dir, &clip.name).await
+            } else {
+                String::new()
+            };
+            let _ = tx.send((clip, target_dir, exists, same, alt));
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok((clip, target_dir, exists, same, alt)) = rx.recv_async().await else {
+                return;
+            };
+            let _ = this.update(cx, |v, cx| {
+                if !exists && !same {
+                    if let Some(b) = v.drop_batch.as_mut() {
+                        b.items.pop_front();
+                    }
+                    let name = clip.name.clone();
+                    v.run_paste(clip, name, target_dir, false, true, cx);
+                    return;
+                }
+                match rest {
+                    Some(sftp::WhenExists::Skip) => {
+                        if let Some(b) = v.drop_batch.as_mut() {
+                            b.items.pop_front();
+                        }
+                        v.pump_drop(cx);
+                    }
+                    Some(sftp::WhenExists::Overwrite) if !same => {
+                        if let Some(b) = v.drop_batch.as_mut() {
+                            b.items.pop_front();
+                        }
+                        let name = clip.name.clone();
+                        v.run_paste(clip, name, target_dir, true, true, cx);
+                    }
+                    Some(sftp::WhenExists::KeepBoth) => {
+                        if let Some(b) = v.drop_batch.as_mut() {
+                            b.items.pop_front();
+                        }
+                        v.run_paste(clip, alt, target_dir, false, true, cx);
+                    }
+                    _ => {
+                        v.busy = false;
+                        v.sheet = Some(Sheet::Conflict {
+                            clip,
+                            alt,
+                            same,
+                            target_dir,
+                            from_drop: true,
+                        });
+                        v.note(String::new(), false);
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn apply_drop_conflict(&mut self, choice: sftp::WhenExists, alt: String, cx: &mut Context<Self>) {
+        self.sheet = None;
+        if self.drop_rest {
+            if let Some(b) = self.drop_batch.as_mut() {
+                b.rest = Some(choice);
+            }
+        }
+        let Some(b) = self.drop_batch.as_mut() else {
+            return;
+        };
+        let Some(clip) = b.items.pop_front() else {
+            self.pump_drop(cx);
+            return;
+        };
+        let target_dir = b.target_dir.clone();
+        match choice {
+            sftp::WhenExists::Skip => self.pump_drop(cx),
+            sftp::WhenExists::Overwrite => {
+                let name = clip.name.clone();
+                self.run_paste(clip, name, target_dir, true, true, cx);
+            }
+            sftp::WhenExists::KeepBoth => {
+                self.run_paste(clip, alt, target_dir, false, true, cx);
+            }
+        }
+    }
+
+    fn run_paste(
+        &mut self,
+        clip: Clip,
+        name: String,
+        target_dir: String,
+        overwrite: bool,
+        from_drop: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.sheet = None;
+        let dest = filelist::child_path(&target_dir, &name, self.remote);
+        if clip.is_dir && nested(&clip.path, &dest) {
+            self.busy = false;
+            self.note(t("dir.same_place").into(), true);
+            if from_drop {
+                self.pump_drop(cx);
+            } else {
+                cx.notify();
+            }
+            return;
+        }
         self.audit(
-            "dir.paste",
+            if from_drop {
+                if self.remote {
+                    "dir.drop_upload"
+                } else {
+                    "dir.drop_copy"
+                }
+            } else {
+                "dir.paste"
+            },
             &format!("from={:?} to={dest:?} overwrite={overwrite}", clip.path),
         );
         self.busy = true;
@@ -1485,10 +1715,23 @@ impl DirView {
                 v.busy = false;
                 match r {
                     Ok(()) => {
-                        v.flash(ok, cx);
-                        v.list(cx);
+                        if from_drop {
+                            if let Some(b) = v.drop_batch.as_mut() {
+                                b.done += 1;
+                            }
+                            v.pump_drop(cx);
+                        } else {
+                            v.flash(ok, cx);
+                            v.list(cx);
+                        }
                     }
-                    Err(e) => v.note(format!("{e:#}"), true),
+                    Err(e) => {
+                        v.note(format!("{e:#}"), true);
+                        if from_drop {
+                            v.drop_batch = None;
+                            v.drop_rest = false;
+                        }
+                    }
                 }
                 cx.notify();
             });
@@ -1781,37 +2024,114 @@ impl DirView {
                     )
                     .into_any_element(),
             ),
-            Sheet::Conflict { clip, alt, same } => {
+            Sheet::Conflict {
+                clip,
+                alt,
+                same,
+                target_dir,
+                from_drop,
+            } => {
                 let msg = if *same {
                     tf("dir.dup_here", &[("name", alt)])
                 } else {
                     tf("dir.exists", &[("name", &clip.name)])
                 };
-                let alt_label = tf("dir.paste_as", &[("name", alt)]);
-                let (clip_ow, name_ow) = (clip.clone(), clip.name.clone());
-                let (clip_alt, alt_name) = (clip.clone(), alt.clone());
+                let (clip_ow, name_ow, dir_ow) =
+                    (clip.clone(), clip.name.clone(), target_dir.clone());
+                let (clip_alt, alt_name, dir_alt) =
+                    (clip.clone(), alt.clone(), target_dir.clone());
+                let drop_mode = *from_drop;
+                let rest_on = self.drop_rest;
+                let more_in_batch = drop_mode
+                    && self
+                        .drop_batch
+                        .as_ref()
+                        .is_some_and(|b| b.items.len() > 1);
                 let mut row = div().flex().gap_2().flex_wrap();
                 if !same {
-                    row = row.child(ui::button("dir-ow", t("dir.overwrite"), 2).on_click(
-                        cx.listener(move |v, _, _, cx| {
-                            v.run_paste(clip_ow.clone(), name_ow.clone(), true, cx)
+                    row = row.child(
+                        ui::button(
+                            "dir-ow",
+                            if drop_mode {
+                                t("sftp.overwrite")
+                            } else {
+                                t("dir.overwrite")
+                            },
+                            2,
+                        )
+                        .on_click(cx.listener(move |v, _, _, cx| {
+                            if drop_mode {
+                                v.apply_drop_conflict(
+                                    sftp::WhenExists::Overwrite,
+                                    String::new(),
+                                    cx,
+                                );
+                            } else {
+                                v.run_paste(
+                                    clip_ow.clone(),
+                                    name_ow.clone(),
+                                    dir_ow.clone(),
+                                    true,
+                                    false,
+                                    cx,
+                                );
+                            }
+                        })),
+                    );
+                }
+                if drop_mode {
+                    row = row.child(ui::button("dir-skip", t("sftp.skip"), 3).on_click(
+                        cx.listener(|v, _, _, cx| {
+                            v.apply_drop_conflict(sftp::WhenExists::Skip, String::new(), cx)
                         }),
                     ));
                 }
-                row = row
-                    .child(ui::button("dir-alt", alt_label, 1).on_click(cx.listener(
-                        move |v, _, _, cx| {
-                            v.run_paste(clip_alt.clone(), alt_name.clone(), false, cx)
-                        },
-                    )))
-                    .child(
-                        ui::button("dir-cxl", t("ui.cancel"), 0).on_click(cx.listener(
-                            |v, _, _, cx| {
-                                v.sheet = None;
-                                cx.notify();
-                            },
-                        )),
+                let alt_label = if drop_mode {
+                    t("sftp.keep_both").to_string()
+                } else {
+                    tf("dir.paste_as", &[("name", alt)])
+                };
+                row = row.child(ui::button("dir-alt", alt_label, 1).on_click(cx.listener(
+                    move |v, _, _, cx| {
+                        if drop_mode {
+                            v.apply_drop_conflict(
+                                sftp::WhenExists::KeepBoth,
+                                alt_name.clone(),
+                                cx,
+                            );
+                        } else {
+                            v.run_paste(
+                                clip_alt.clone(),
+                                alt_name.clone(),
+                                dir_alt.clone(),
+                                false,
+                                false,
+                                cx,
+                            );
+                        }
+                    },
+                )));
+                if more_in_batch {
+                    row = row.child(
+                        ui::button(
+                            "dir-rest",
+                            t("sftp.apply_rest"),
+                            if rest_on { 1 } else { 3 },
+                        )
+                        .on_click(cx.listener(|v, _, _, cx| {
+                            v.drop_rest = !v.drop_rest;
+                            cx.notify();
+                        })),
                     );
+                }
+                row = row.child(ui::button("dir-cxl", t("ui.cancel"), 0).on_click(cx.listener(
+                    |v, _, _, cx| {
+                        v.sheet = None;
+                        v.drop_batch = None;
+                        v.drop_rest = false;
+                        cx.notify();
+                    },
+                )));
                 Some(bar(false).child(msg).child(row).into_any_element())
             }
             Sheet::Cmd { title, cmd } => {
@@ -1960,10 +2280,22 @@ impl gpui::Render for DirView {
         let hard_err =
             self.error.is_some() && self.entries.is_empty() && !self.connecting && !self.loading;
         let mut col = div()
+            .id("dir-drop-zone")
             .size_full()
             .min_h_0()
             .flex()
             .flex_col()
+            .border_1()
+            .border_color(gpui::transparent_black())
+            .rounded(px(ui::R_MD))
+            .drag_over::<ExternalPaths>(|st, _, _, _| {
+                st.border_color(c(cur().accent))
+                    .bg(c(cur().accent).opacity(0.03))
+            })
+            .on_drop(cx.listener(|v, ps: &ExternalPaths, _, cx| {
+                let dir = v.dir.clone();
+                v.accept_drop(ps, dir, cx);
+            }))
             .child(self.target_btn(cx))
             .child(self.toolbar(cx))
             .child(

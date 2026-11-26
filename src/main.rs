@@ -1513,6 +1513,14 @@ impl Root {
                         this.open_settings(Cat::Terminal, w, cx);
                         return;
                     }
+                    termview::TermEvent::UploadDrop {
+                        target,
+                        dest_dir,
+                        paths,
+                    } => {
+                        this.upload_dropped_files(target.clone(), dest_dir.clone(), paths.clone(), cx);
+                        return;
+                    }
                 }
                 let fc = pane.update(cx, |p, cx| {
                     let f = p.failure_context();
@@ -3940,6 +3948,103 @@ impl Root {
         }
         cx.notify();
     }
+    fn upload_dropped_files(
+        &mut self,
+        target: SshTarget,
+        dest_dir: String,
+        paths: Vec<std::path::PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        if paths.is_empty() {
+            return;
+        }
+        let host_label = target.host.clone();
+        let host_key = target.pool_key();
+        let count = paths.len();
+        self.toast_kind(
+            ToastKind::Info,
+            tf("term.drop_uploading", &[("n", &count), ("dir", &dest_dir)]),
+            cx,
+        );
+        let rt = self.rt.handle().clone();
+        let prompts = self.prompts.clone();
+        let (tx, rx) = flume::bounded(1);
+        rt.spawn(async move {
+            let res: anyhow::Result<(String, usize)> = async move {
+                use ssh_term_proto::sftp::{self, Queue, Side, WhenExists};
+                let (conn, _) = ssh::connect_shared(&target, &prompts).await?;
+                let s = conn.sftp().await?;
+                let home = s.canonicalize(".".to_string()).await.unwrap_or_else(|_| "/".into());
+                let resolved_dir = if dest_dir.is_empty() || dest_dir == "~" {
+                    home
+                } else if let Some(rest) = dest_dir.strip_prefix("~/") {
+                    sftp::join(&home, rest)
+                } else {
+                    dest_dir
+                };
+                let q = Queue::default();
+                let mut total_files = 0usize;
+                for p in &paths {
+                    let Some(name) = p.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                        continue;
+                    };
+                    if name.is_empty() {
+                        continue;
+                    }
+                    let final_name = sftp::resolve_name(
+                        Some(&s),
+                        Side::Remote,
+                        &resolved_dir,
+                        &name,
+                        WhenExists::KeepBoth,
+                    )
+                    .await
+                    .unwrap_or(name);
+                    let remote = sftp::join(&resolved_dir, &final_name);
+                    total_files += q.push_upload_tree(&s, p, &remote).await?;
+                }
+                q.drain(&s).await;
+                if let Some(err) = q.failure_summary() {
+                    anyhow::bail!(err);
+                }
+                Ok((resolved_dir, total_files))
+            }
+            .await;
+            let _ = tx.send(res);
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(r) = rx.recv_async().await else { return };
+            let _ = this.update(cx, |root, cx| {
+                match r {
+                    Ok((dir, files)) => {
+                        let _ = crate::audit_log().append(
+                            "sftp.drop_upload",
+                            "user",
+                            &format!("host={host_label} dir={dir:?} items={count} files={files}"),
+                        );
+                        root.toast_kind(
+                            ToastKind::Success,
+                            tf("term.drop_uploaded", &[("n", &files.max(count)), ("dir", &dir)]),
+                            cx,
+                        );
+                        if let Some(dv) = &root.dir_view {
+                            dv.update(cx, |d, cx| d.refresh_if_remote(&host_key, cx));
+                        }
+                    }
+                    Err(e) => {
+                        root.toast_kind(
+                            ToastKind::Error,
+                            tf("term.drop_upload_fail", &[("e", &format!("{e:#}"))]),
+                            cx,
+                        );
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(crate) fn open_settings(&mut self, cat: Cat, window: &mut Window, cx: &mut Context<Self>) {
         // Already a tab: bring it to the front and switch category, keeping search and edits.
         if let Some((v, on)) = &mut self.settings {

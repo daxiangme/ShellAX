@@ -190,11 +190,24 @@ impl Pane {
             self.rdir.clone()
         }
     }
+    fn dir_with(&self, override_dir: Option<&str>) -> String {
+        match override_dir {
+            Some(d) => d.to_string(),
+            None => self.dir(),
+        }
+    }
     fn path_of(&self, name: &str) -> String {
         if self.is_local() {
             self.ldir.join(name).to_string_lossy().into_owned()
         } else {
             sftp::join(&self.rdir, name)
+        }
+    }
+    fn path_with(&self, override_dir: Option<&str>, name: &str) -> String {
+        match override_dir {
+            Some(d) if self.is_local() => Path::new(d).join(name).to_string_lossy().into_owned(),
+            Some(d) => sftp::join(d, name),
+            None => self.path_of(name),
         }
     }
     fn label(&self) -> String {
@@ -312,10 +325,29 @@ struct XItem {
     is_dir: bool,
 }
 
+fn external_drop_items(ps: &ExternalPaths) -> Vec<XItem> {
+    ps.paths()
+        .iter()
+        .filter_map(|f| {
+            let name = f.file_name().map(|n| n.to_string_lossy().into_owned())?;
+            if name.is_empty() {
+                return None;
+            }
+            Some(XItem {
+                src: f.to_string_lossy().into_owned(),
+                name,
+                is_dir: f.is_dir(),
+            })
+        })
+        .collect()
+}
+
 struct Batch {
     /// None means the files come from outside this window (a system file drop).
     from: Option<usize>,
     to: usize,
+    /// Optional target directory (when dropped onto a subfolder row rather than the pane background).
+    dest_dir: Option<String>,
     items: Vec<XItem>,
     index: usize,
     rest: Option<WhenExists>,
@@ -1148,6 +1180,26 @@ impl SftpView {
         items: Vec<(String, String)>,
         cx: &mut Context<Self>,
     ) {
+        self.send_inner(from, to, None, items, cx);
+    }
+    fn send_to_dir(
+        &mut self,
+        from: usize,
+        to: usize,
+        dest_dir: String,
+        items: Vec<(String, String)>,
+        cx: &mut Context<Self>,
+    ) {
+        self.send_inner(from, to, Some(dest_dir), items, cx);
+    }
+    fn send_inner(
+        &mut self,
+        from: usize,
+        to: usize,
+        dest_dir: Option<String>,
+        items: Vec<(String, String)>,
+        cx: &mut Context<Self>,
+    ) {
         if items.is_empty() {
             return self.set_status(t("sftp.select_first").into(), true);
         }
@@ -1157,7 +1209,10 @@ impl SftpView {
         if !self.panes[to].ready() || !self.panes[from].ready() {
             return self.set_status(t("sftp.not_connected").into(), true);
         }
-        if self.panes[to].is_local() && self.panes[to].ldir.as_os_str().is_empty() {
+        if dest_dir.is_none()
+            && self.panes[to].is_local()
+            && self.panes[to].ldir.as_os_str().is_empty()
+        {
             return self.set_status(t("sftp.no_target_dir").into(), true);
         }
         let xitems = items
@@ -1171,7 +1226,7 @@ impl SftpView {
                 XItem { src, name, is_dir }
             })
             .collect();
-        self.begin_batch(Some(from), to, xitems, false, cx);
+        self.begin_batch_in(Some(from), to, dest_dir, xitems, false, cx);
     }
     fn begin_batch(
         &mut self,
@@ -1181,7 +1236,23 @@ impl SftpView {
         cut: bool,
         cx: &mut Context<Self>,
     ) {
+        self.begin_batch_in(from, to, None, items, cut, cx);
+    }
+    fn begin_batch_in(
+        &mut self,
+        from: Option<usize>,
+        to: usize,
+        dest_dir: Option<String>,
+        items: Vec<XItem>,
+        cut: bool,
+        cx: &mut Context<Self>,
+    ) {
         if items.is_empty() {
+            return;
+        }
+        if !self.panes[to].ready() {
+            self.set_status(t("sftp.not_connected").into(), true);
+            cx.notify();
             return;
         }
         if self.batch.is_some() {
@@ -1189,7 +1260,10 @@ impl SftpView {
             cx.notify();
             return;
         }
-        if self.panes[to].is_local() && self.panes[to].ldir.as_os_str().is_empty() {
+        if dest_dir.is_none()
+            && self.panes[to].is_local()
+            && self.panes[to].ldir.as_os_str().is_empty()
+        {
             self.set_status(t("sftp.no_target_dir").into(), true);
             cx.notify();
             return;
@@ -1198,6 +1272,7 @@ impl SftpView {
         self.batch = Some(Batch {
             from,
             to,
+            dest_dir,
             items,
             index: 0,
             rest: None,
@@ -1216,7 +1291,7 @@ impl SftpView {
         }
         let name = b.items[b.index].name.clone();
         let to = b.to;
-        let dest = self.panes[to].path_of(&name);
+        let dest = self.panes[to].path_with(b.dest_dir.as_deref(), &name);
         let side = self.panes[to].side();
         let sess = self.panes[to].sess();
         self.remote_op(
@@ -1257,7 +1332,7 @@ impl SftpView {
         let Some(b) = &self.batch else { return };
         let name = b.items[b.index].name.clone();
         let to = b.to;
-        let dir = self.panes[to].dir();
+        let dir = self.panes[to].dir_with(b.dest_dir.as_deref());
         let side = self.panes[to].side();
         let sess = self.panes[to].sess();
         self.remote_op(
@@ -1308,23 +1383,37 @@ impl SftpView {
     }
     fn enqueue(&mut self, item: &XItem, dest_name: &str, cx: &mut Context<Self>) {
         let Some(b) = &self.batch else { return };
-        let (from, to, cut) = (b.from, b.to, b.cut);
+        let (from, to, cut, dest_dir) = (b.from, b.to, b.cut, b.dest_dir.clone());
         let from_local = from
             .map(|i| self.panes[i].is_local())
             .unwrap_or(true);
         let to_local = self.panes[to].is_local();
         let src = item.src.clone();
-        let dest_path = self.panes[to].path_of(dest_name);
+        let dest_path = self.panes[to].path_with(dest_dir.as_deref(), dest_name);
         if src == dest_path {
             self.set_status(tf("sftp.same_place", &[("p", &src)]), true);
             self.pump(cx);
             return;
         }
         match (from_local, to_local) {
-            (true, false) => self.queue_upload(to, PathBuf::from(&src), dest_name, src, cx),
-            (false, true) => self.queue_download(from.unwrap_or(0), src, dest_name, to, cx),
-            (true, true) => self.queue_local(src, dest_name, to, cut, item.is_dir, cx),
-            (false, false) => self.queue_relay(from.unwrap_or(0), src, dest_name, to, cx),
+            (true, false) => {
+                self.queue_upload(to, dest_dir.as_deref(), PathBuf::from(&src), dest_name, src, cx)
+            }
+            (false, true) => {
+                self.queue_download(from.unwrap_or(0), src, dest_name, to, dest_dir.as_deref(), cx)
+            }
+            (true, true) => self.queue_local(
+                src,
+                dest_name,
+                to,
+                dest_dir.as_deref(),
+                cut,
+                item.is_dir,
+                cx,
+            ),
+            (false, false) => {
+                self.queue_relay(from.unwrap_or(0), src, dest_name, to, dest_dir.as_deref(), cx)
+            }
         }
     }
     fn note_queued(&mut self, ids: Vec<u64>, src: String, cx: &mut Context<Self>) {
@@ -1341,6 +1430,7 @@ impl SftpView {
     fn queue_upload(
         &mut self,
         to: usize,
+        dest_dir: Option<&str>,
         local: PathBuf,
         dest_name: &str,
         src: String,
@@ -1351,7 +1441,8 @@ impl SftpView {
             self.asking = false;
             return self.set_status(t("sftp.not_connected").into(), true);
         };
-        let remote = sftp::join(&self.panes[to].rdir, dest_name);
+        let base = dest_dir.unwrap_or(&self.panes[to].rdir);
+        let remote = sftp::join(base, dest_name);
         let Some(q) = self.panes[to].remote().map(|r| r.queue.clone()) else {
             self.batch = None;
             self.asking = false;
@@ -1383,6 +1474,7 @@ impl SftpView {
         remote: String,
         dest_name: &str,
         to: usize,
+        dest_dir: Option<&str>,
         cx: &mut Context<Self>,
     ) {
         let Some(s) = self.panes[from].sess() else {
@@ -1390,7 +1482,10 @@ impl SftpView {
             self.asking = false;
             return self.set_status(t("sftp.not_connected").into(), true);
         };
-        let local = self.panes[to].ldir.join(dest_name);
+        let local = dest_dir
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.panes[to].ldir.clone())
+            .join(dest_name);
         let Some(q) = self.panes[from].remote().map(|r| r.queue.clone()) else {
             self.batch = None;
             self.asking = false;
@@ -1422,11 +1517,15 @@ impl SftpView {
         src: String,
         dest_name: &str,
         to: usize,
+        dest_dir: Option<&str>,
         cut: bool,
         is_dir: bool,
         cx: &mut Context<Self>,
     ) {
-        let dst = self.panes[to].ldir.join(dest_name);
+        let dst = dest_dir
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.panes[to].ldir.clone())
+            .join(dest_name);
         let src_path = src.clone();
         self.remote_op(
             cx,
@@ -1465,6 +1564,7 @@ impl SftpView {
         path: String,
         dest_name: &str,
         to: usize,
+        dest_dir: Option<&str>,
         cx: &mut Context<Self>,
     ) {
         let (Some(sa), Some(sb)) = (self.panes[from].sess(), self.panes[to].sess()) else {
@@ -1483,7 +1583,7 @@ impl SftpView {
             .unwrap_or(0);
         let tmp_root = std::env::temp_dir().join(format!("shellax-relay-{stamp}"));
         let tmp = tmp_root.join(dest_name);
-        let dest = sftp::join(&self.panes[to].rdir, dest_name);
+        let dest = sftp::join(dest_dir.unwrap_or(&self.panes[to].rdir), dest_name);
         let src = path.clone();
         self.remote_op(
             cx,
@@ -2675,27 +2775,59 @@ impl SftpView {
                     }));
                 (("sftp-ck", row_id).into(), on, f)
             });
-            list = list.child(
-                filelist::entry_checked(("sftp-row", row_id), e, selected, dark, cols, check)
-                    .on_click(cx.listener(move |v, ev: &gpui::ClickEvent, _, cx| {
-                        if ev.click_count() >= 2 {
-                            v.open(pi, i, cx)
+            let row_el = filelist::entry_checked(("sftp-row", row_id), e, selected, dark, cols, check)
+                .on_click(cx.listener(move |v, ev: &gpui::ClickEvent, _, cx| {
+                    if ev.click_count() >= 2 {
+                        v.open(pi, i, cx)
+                    } else {
+                        v.select(pi, i, ev.modifiers());
+                        cx.notify()
+                    }
+                }))
+                .on_mouse_down(
+                    gpui::MouseButton::Right,
+                    cx.listener(move |v, ev: &gpui::MouseDownEvent, _, cx| {
+                        v.open_ctx_menu(pi, i, ev.position, cx);
+                        cx.stop_propagation();
+                    }),
+                )
+                .on_drag(drag, |d: &DragFile, _, _, cx| {
+                    cx.new(|_| DragPreview(d.name.clone()))
+                });
+            let row_el = if e.is_dir && p.ready() {
+                let sub_dir = p.path_of(&e.name);
+                let sub_dir_ext = sub_dir.clone();
+                row_el
+                    .drag_over::<DragFile>(move |st, d, _, _| {
+                        if d.pane != pi {
+                            st.bg(crate::theme::accent_bg())
                         } else {
-                            v.select(pi, i, ev.modifiers());
-                            cx.notify()
+                            st
+                        }
+                    })
+                    .drag_over::<ExternalPaths>(|st, _, _, _| st.bg(crate::theme::accent_bg()))
+                    .on_drop(cx.listener(move |v, d: &DragFile, _, cx| {
+                        cx.stop_propagation();
+                        if d.pane != pi {
+                            v.send_to_dir(
+                                d.pane,
+                                pi,
+                                sub_dir.clone(),
+                                vec![(d.path.clone(), d.name.clone())],
+                                cx,
+                            );
                         }
                     }))
-                    .on_mouse_down(
-                        gpui::MouseButton::Right,
-                        cx.listener(move |v, ev: &gpui::MouseDownEvent, _, cx| {
-                            v.open_ctx_menu(pi, i, ev.position, cx);
-                            cx.stop_propagation();
-                        }),
-                    )
-                    .on_drag(drag, |d: &DragFile, _, _, cx| {
-                        cx.new(|_| DragPreview(d.name.clone()))
-                    }),
-            );
+                    .on_drop(cx.listener(move |v, ps: &ExternalPaths, _, cx| {
+                        cx.stop_propagation();
+                        let items = external_drop_items(ps);
+                        v.begin_batch_in(None, pi, Some(sub_dir_ext.clone()), items, false, cx);
+                        cx.notify();
+                    }))
+            } else {
+                row_el
+            };
+            list = list.child(row_el);
         }
         list = list.on_mouse_down(
             gpui::MouseButton::Right,
@@ -3006,6 +3138,7 @@ impl SftpView {
             .drag_over::<DragFile>(move |st, d, _, _| {
                 if d.pane != pi && ready {
                     st.border_color(c(cur().accent))
+                        .bg(c(cur().accent).opacity(0.03))
                 } else {
                     st
                 }
@@ -3013,6 +3146,7 @@ impl SftpView {
             .drag_over::<ExternalPaths>(move |st, _, _, _| {
                 if ready {
                     st.border_color(c(cur().accent))
+                        .bg(c(cur().accent).opacity(0.03))
                 } else {
                     st
                 }
@@ -3023,18 +3157,12 @@ impl SftpView {
                 }
             }))
             .on_drop(cx.listener(move |v, ps: &ExternalPaths, _, cx| {
-                let items = ps
-                    .paths()
-                    .iter()
-                    .map(|f| XItem {
-                        src: f.to_string_lossy().into_owned(),
-                        name: f
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default(),
-                        is_dir: f.is_dir(),
-                    })
-                    .collect();
+                if !v.panes[pi].ready() {
+                    v.set_status(t("sftp.not_connected").into(), true);
+                    cx.notify();
+                    return;
+                }
+                let items = external_drop_items(ps);
                 v.begin_batch(None, pi, items, false, cx);
                 cx.notify();
             }))

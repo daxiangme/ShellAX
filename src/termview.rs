@@ -17,8 +17,8 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::TermMode;
 use gpui::{
     canvas, div, fill, point, prelude::*, px, size, Bounds, ClipboardItem, Context, Entity,
-    FocusHandle, Font, FontWeight, Hsla, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, ScrollDelta, ScrollWheelEvent, ShapedLine, SharedString,
+    ExternalPaths, FocusHandle, Font, FontWeight, Hsla, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, ScrollDelta, ScrollWheelEvent, ShapedLine, SharedString,
     StrikethroughStyle, StyleRefinement, Subscription, TextAlign, TextRun, UnderlineStyle, Window,
 };
 use ssh_term_proto::agent::{self, AgentState, DetectionInput, Manifest};
@@ -1016,9 +1016,18 @@ pub struct TermView {
     pub ctx_confirm: Option<(String, String)>,
     /// Context-menu command refused by the permission engine (shown until dismissed).
     pub ctx_denied: Option<String>,
+    /// System files dropped onto a remote SSH terminal pane waiting for upload vs insert choice.
+    pub pending_drop: Option<PendingDrop>,
     /// One-time suggestion banner shown on local shells when no prompt theme is configured.
     prompt_banner: bool,
     _subs: Vec<Subscription>,
+}
+
+#[derive(Clone)]
+pub struct PendingDrop {
+    pub target: SshTarget,
+    pub dest_dir: String,
+    pub paths: Vec<std::path::PathBuf>,
 }
 
 /// Natural-language → command card (built-in AI). Accepting inserts text only; executing goes
@@ -1099,6 +1108,11 @@ pub enum TermEvent {
     EditHost,
     RefreshDb(String),
     OpenPromptSettings,
+    UploadDrop {
+        target: SshTarget,
+        dest_dir: String,
+        paths: Vec<std::path::PathBuf>,
+    },
 }
 
 /// IME support (PRD 3.3: IME must work for agents too). Committed text goes to the PTY like typing;
@@ -1471,6 +1485,7 @@ impl TermView {
             ctx_pending: None,
             ctx_confirm: None,
             ctx_denied: None,
+            pending_drop: None,
             sftp: None,
             db: None,
             embed: None,
@@ -2723,6 +2738,29 @@ fn clip_caption(s: &str) -> String {
             return Some(ssh_term_proto::clipfiles::format(&paths, win_shell));
         }
         cx.read_from_clipboard().and_then(|i| i.text())
+    }
+
+    fn handle_external_drop(&mut self, ps: &ExternalPaths, cx: &mut Context<Self>) {
+        if self.embedded() || self.session.is_none() || ps.paths().is_empty() {
+            return;
+        }
+        match &self.spec {
+            Spec::Local => {
+                let text = ssh_term_proto::clipfiles::format(ps.paths(), cfg!(windows));
+                if !text.is_empty() {
+                    self.paste_text(text, cx);
+                }
+            }
+            Spec::Ssh(target) => {
+                let dest_dir = self.shell_cwd().unwrap_or_else(|| "~".into());
+                self.pending_drop = Some(PendingDrop {
+                    target: target.clone(),
+                    dest_dir,
+                    paths: ps.paths().to_vec(),
+                });
+                cx.notify();
+            }
+        }
     }
 
     pub fn paste(&mut self, cx: &mut Context<Self>) {
@@ -5095,7 +5133,8 @@ impl Render for TermView {
                 .flex()
                 .flex_col()
                 .overflow_hidden()
-                .child(e.view());
+                .child(e.view())
+                .into_any_element();
         }
         if let Some(v) = self.db.clone() {
             return div()
@@ -5105,7 +5144,8 @@ impl Render for TermView {
                 .flex()
                 .flex_col()
                 .overflow_hidden()
-                .child(v);
+                .child(v)
+                .into_any_element();
         }
         if let Some(v) = self.sftp.clone() {
             return div()
@@ -5115,7 +5155,8 @@ impl Render for TermView {
                 .flex()
                 .flex_col()
                 .overflow_hidden()
-                .child(v);
+                .child(v)
+                .into_any_element();
         }
         let mut body = div()
             .flex_1()
@@ -5331,6 +5372,97 @@ impl Render for TermView {
                             )
                             .child(actions),
                     ),
+            );
+        }
+        if let Some(drop) = self.pending_drop.clone() {
+            let names: Vec<String> = drop
+                .paths
+                .iter()
+                .take(3)
+                .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .collect();
+            let mut summary = names.join(", ");
+            if drop.paths.len() > 3 {
+                summary.push_str(&format!(" … (+{})", drop.paths.len() - 3));
+            }
+            body = body.child(
+                div()
+                    .absolute()
+                    .bottom(px(12.))
+                    .left(px(12.))
+                    .right(px(12.))
+                    .p_3()
+                    .rounded(px(ui::R_LG))
+                    .bg(crate::theme::overlay_card_bg(1.0))
+                    .border_1()
+                    .border_color(crate::theme::overlay_border())
+                    .shadow(crate::chrome::soft_shadow(true))
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .text_size(px(ui::fs_small()))
+                    .text_color(c(th.text))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(crate::ui::icon(
+                        crate::ui::IconName::Upload,
+                        ui::IC_SM,
+                        c(th.accent),
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(tf(
+                                        "term.drop_upload_ask",
+                                        &[("n", &drop.paths.len()), ("dir", &drop.dest_dir)],
+                                    )),
+                            )
+                            .when(!summary.is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .text_color(c(th.overlay1))
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .child(summary),
+                                )
+                            }),
+                    )
+                    .child(ui::button_sm("drop-cancel", t("ui.cancel"), 0).on_click(
+                        cx.listener(|v, _, _w, cx| {
+                            v.pending_drop = None;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(ui::button_sm("drop-insert", t("term.drop_insert"), 0).on_click(
+                        cx.listener(|v, _, _w, cx| {
+                            if let Some(d) = v.pending_drop.take() {
+                                let txt = ssh_term_proto::clipfiles::format(&d.paths, false);
+                                if !txt.is_empty() {
+                                    v.paste_text(txt, cx);
+                                }
+                            }
+                            cx.notify();
+                        }),
+                    ))
+                    .child(ui::button_sm("drop-upload", t("term.drop_upload"), 1).on_click(
+                        cx.listener(|v, _, _w, cx| {
+                            if let Some(d) = v.pending_drop.take() {
+                                cx.emit(TermEvent::UploadDrop {
+                                    target: d.target,
+                                    dest_dir: d.dest_dir,
+                                    paths: d.paths,
+                                });
+                            }
+                            cx.notify();
+                        }),
+                    )),
             );
         }
         if let Some(text) = &self.pending_paste {
@@ -5945,7 +6077,12 @@ impl Render for TermView {
                 )
         });
         div()
+            .id(("term-pane-drop", cx.entity_id().as_u64()))
             .track_focus(&self.focus)
+            .drag_over::<ExternalPaths>(|st, _, _, _| st.border_1().border_color(c(cur().accent)))
+            .on_drop(cx.listener(|v, ps: &ExternalPaths, _w, cx| {
+                v.handle_external_drop(ps, cx);
+            }))
             .capture_key_down(cx.listener(|v, ev: &KeyDownEvent, w, cx| {
                 let k = &ev.keystroke;
                 if k.key == "tab"
@@ -5992,6 +6129,7 @@ impl Render for TermView {
             .overflow_hidden()
             .children(prompt_banner_el)
             .child(body)
+            .into_any_element()
     }
 }
 
