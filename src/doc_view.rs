@@ -1213,11 +1213,7 @@ impl DocView {
                         .children(prod),
                     )
                     .child(
-                        div()
-                            .p(px(ui::SP_5))
-                            .flex()
-                            .flex_col()
-                            .gap(px(ui::SP_3))
+                        ui::dialog_body("doc-cf-body")
                             .child(small(msg))
                             .when(!pre.is_empty(), |d| {
                                 d.child(

@@ -1729,11 +1729,7 @@ impl DockView {
                         }),
                     )
                     .child(
-                        div()
-                            .p(px(ui::SP_5))
-                            .flex()
-                            .flex_col()
-                            .gap(px(ui::SP_3))
+                        ui::dialog_body("dk-ex-body")
                             .child(
                                 div()
                                     .flex()
@@ -1814,11 +1810,7 @@ impl DockView {
                         .children(prod),
                     )
                     .child(
-                        div()
-                            .p(px(ui::SP_5))
-                            .flex()
-                            .flex_col()
-                            .gap(px(ui::SP_3))
+                        ui::dialog_body("dk-cf-body")
                             .child(small(msg)),
                     )
                     .child(

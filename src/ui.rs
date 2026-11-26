@@ -1210,6 +1210,21 @@ pub fn dialog_header(
         .children(close)
 }
 
+/// 弹窗主体容器：视口受限时纵向收缩并滚动，保证底栏按钮始终完整可见。
+pub fn dialog_body(id: impl Into<ElementId>) -> Stateful<Div> {
+    div()
+        .id(id)
+        .w_full()
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+        .overflow_y_scroll()
+        .p(px(SP_5))
+        .flex()
+        .flex_col()
+        .gap(px(SP_3))
+}
+
 /// 弹窗底栏：顶部发丝线、无底色；按钮右对齐，危险按钮（如有）靠左。
 pub fn dialog_footer(danger: Option<AnyElement>, children: Vec<AnyElement>) -> Div {
     div()
@@ -1272,6 +1287,8 @@ pub fn card(w: f32) -> Div {
         .w(px(w))
         .max_w_full()
         .max_h_full()
+        .min_w_0()
+        .min_h_0()
         .occlude()
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .rounded(px(R_LG))

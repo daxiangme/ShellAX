@@ -2147,7 +2147,7 @@ impl Root {
                 this.focus_active(w, cx);
                 cx.notify();
             }));
-        let mut body = div().p(px(ui::SP_5)).flex().flex_col().gap(px(ui::SP_3));
+        let mut body = ui::dialog_body("sb-modal-body");
         let hdr: (IconName, gpui::Hsla, String);
         let mut foot = ui::dialog_footer(None, vec![]);
         match m {

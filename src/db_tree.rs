@@ -1069,11 +1069,7 @@ impl Root {
             .map(|c| c.collations.clone())
             .unwrap_or_default();
         let name = form.name.clone();
-        let mut form_el = div()
-            .p(px(ui::SP_5))
-            .flex()
-            .flex_col()
-            .gap(px(ui::SP_3))
+        let mut form_el = ui::dialog_body("newdb-form")
             .child(
                 div()
                     .flex()

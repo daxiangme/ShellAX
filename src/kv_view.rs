@@ -2264,11 +2264,7 @@ impl KvView {
                         prod.map(|p| p.into_any_element()),
                     ))
                     .child(
-                        div()
-                            .p(px(ui::SP_5))
-                            .flex()
-                            .flex_col()
-                            .gap(px(ui::SP_3))
+                        ui::dialog_body("kv-cf-body")
                             .child(small(msg))
                             .child(
                                 div()

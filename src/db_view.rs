@@ -3484,11 +3484,7 @@ impl DbView {
                     None,
                 ))
                 .child(
-                    div()
-                        .p(px(ui::SP_5))
-                        .flex()
-                        .flex_col()
-                        .gap(px(ui::SP_3))
+                    ui::dialog_body("dbv-cf-body")
                         .child(
                             div()
                                 .text_size(px(ui::fs_body()))

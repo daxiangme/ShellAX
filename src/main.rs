@@ -2609,7 +2609,7 @@ impl Root {
                 cx.notify();
             },
         ));
-        let mut body = div().p(px(ui::SP_5)).flex().flex_col().gap(px(ui::SP_3));
+        let mut body = ui::dialog_body("root-modal-body");
         let hdr: (IconName, gpui::Hsla, String);
         let mut foot = ui::dialog_footer(None, vec![]);
         match m {
@@ -5889,11 +5889,7 @@ impl Render for Root {
                         None,
                     ))
                     .child(
-                        div()
-                            .p(px(ui::SP_5))
-                            .flex()
-                            .flex_col()
-                            .gap(px(ui::SP_3))
+                        ui::dialog_body("hk-modal-body")
                             .child(
                                 div()
                                     .text_size(px(ui::fs_body()))
@@ -6010,11 +6006,7 @@ impl Render for Root {
                         None,
                     ))
                     .child(
-                        div()
-                            .p(px(ui::SP_5))
-                            .flex()
-                            .flex_col()
-                            .gap(px(ui::SP_3))
+                        ui::dialog_body("auth-modal-body")
                             .child(
                                 div()
                                     .text_size(px(ui::fs_body()))
@@ -6090,11 +6082,7 @@ impl Render for Root {
                             ),
                         )
                         .child(
-                            div()
-                                .p(px(ui::SP_5))
-                                .flex()
-                                .flex_col()
-                                .gap(px(ui::SP_3))
+                            ui::dialog_body("approval-modal-body")
                                 .child(
                                     div()
                                         .text_size(px(ui::fs_body()))
@@ -6249,11 +6237,7 @@ impl Render for Root {
                         None,
                     ))
                     .child(
-                        div()
-                            .p(px(ui::SP_5))
-                            .flex()
-                            .flex_col()
-                            .gap(px(ui::SP_3))
+                        ui::dialog_body("quit-modal-body")
                             .child(
                                 div()
                                     .text_size(px(ui::fs_body()))
@@ -6308,11 +6292,7 @@ impl Render for Root {
                         None,
                     ))
                     .child(
-                        div()
-                            .p(px(ui::SP_5))
-                            .flex()
-                            .flex_col()
-                            .gap(px(ui::SP_3))
+                        ui::dialog_body("upd-modal-body")
                             .child(
                                 div()
                                     .text_size(px(ui::fs_body()))

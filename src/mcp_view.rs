@@ -1287,11 +1287,7 @@ impl Root {
                         ),
                     )
                     .child(
-                        div()
-                            .p(px(ui::SP_5))
-                            .flex()
-                            .flex_col()
-                            .gap(px(ui::SP_3))
+                        ui::dialog_body("mcp-cf-body")
                             .child(
                                 div()
                                     .text_size(px(ui::fs_body()))

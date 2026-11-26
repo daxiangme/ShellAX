@@ -178,12 +178,7 @@ impl Root {
         } else {
             t("dbt.run_sql")
         };
-        let mut body = div()
-            .p(px(ui::SP_5))
-            .flex()
-            .flex_col()
-            .gap(px(ui::SP_3))
-            .max_h(px(520.));
+        let mut body = ui::dialog_body("dbt-modal-body").max_h(px(520.));
         if export {
             body = body
                 .child(
