@@ -1016,6 +1016,8 @@ pub struct TermView {
     pub ctx_confirm: Option<(String, String)>,
     /// Context-menu command refused by the permission engine (shown until dismissed).
     pub ctx_denied: Option<String>,
+    /// One-time suggestion banner shown on local shells when no prompt theme is configured.
+    prompt_banner: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -1096,6 +1098,7 @@ pub enum TermEvent {
     RetryConnect,
     EditHost,
     RefreshDb(String),
+    OpenPromptSettings,
 }
 
 /// IME support (PRD 3.3: IME must work for agents too). Committed text goes to the PTY like typing;
@@ -1388,6 +1391,17 @@ impl TermView {
                 cx.notify();
             }),
         ];
+        let prompt_banner = matches!(spec, Spec::Local) && session.is_some() && {
+            let cfg = config::get();
+            cfg.terminal.prompt_style == "system"
+                && !cfg.terminal.prompt_recommend_dismissed
+                && {
+                    let det = ssh_term_proto::prompt::detect_default_shell(&cfg.terminal.shell);
+                    det.detected.is_none()
+                        && det.capability
+                            != ssh_term_proto::prompt::PromptCapability::Unsupported
+                }
+        };
         Self {
             title: title.to_string().into(),
             spec,
@@ -1461,6 +1475,7 @@ impl TermView {
             db: None,
             embed: None,
             ws: None,
+            prompt_banner,
             _subs: subs,
         }
     }
@@ -5859,6 +5874,76 @@ impl Render for TermView {
                     ),
             );
         }
+        let show_prompt_banner = self.prompt_banner
+            && !self.embedded()
+            && self.agent.is_none()
+            && self.ws.is_none()
+            && {
+                let cfg = config::get();
+                cfg.terminal.prompt_style == "system" && !cfg.terminal.prompt_recommend_dismissed
+            };
+        let prompt_banner_el = show_prompt_banner.then(|| {
+            div()
+                .h(px(32.))
+                .px(px(12.))
+                .flex_shrink_0()
+                .bg(crate::theme::sub_bg())
+                .border_b_1()
+                .border_color(crate::theme::divider())
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(crate::ui::icon(
+                            crate::ui::IconName::Sparkles,
+                            ui::IC_SM,
+                            c(th.accent),
+                        ))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(px(ui::fs_small()))
+                                .text_color(c(th.text))
+                                .child(t("prompt.banner.text")),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(
+                            ui::button_sm("prompt-banner-pick", t("prompt.banner.pick"), 1)
+                                .on_click(cx.listener(|_, _, _, cx| {
+                                    cx.stop_propagation();
+                                    cx.emit(TermEvent::OpenPromptSettings);
+                                })),
+                        )
+                        .child(
+                            ui::button_sm("prompt-banner-dismiss", t("prompt.banner.dismiss"), 3)
+                                .on_click(cx.listener(|v, _, _, cx| {
+                                    cx.stop_propagation();
+                                    let _ = config::update(|s| {
+                                        s.terminal.prompt_recommend_dismissed = true;
+                                    });
+                                    v.prompt_banner = false;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+        });
         div()
             .track_focus(&self.focus)
             .capture_key_down(cx.listener(|v, ev: &KeyDownEvent, w, cx| {
@@ -5905,6 +5990,7 @@ impl Render for TermView {
             .flex()
             .flex_col()
             .overflow_hidden()
+            .children(prompt_banner_el)
             .child(body)
     }
 }

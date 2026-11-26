@@ -1509,6 +1509,10 @@ impl Root {
                     termview::TermEvent::RefreshDb(k) => {
                         this.db_refresh(k, cx);
                     }
+                    termview::TermEvent::OpenPromptSettings => {
+                        this.open_settings(Cat::Terminal, w, cx);
+                        return;
+                    }
                 }
                 let fc = pane.update(cx, |p, cx| {
                     let f = p.failure_context();

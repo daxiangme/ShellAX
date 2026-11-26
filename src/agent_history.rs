@@ -299,27 +299,140 @@ pub fn scan_all(cache_path: &Path, providers: &[Box<dyn HistoryProvider>]) -> Ve
     out
 }
 
-fn claude_model_context_window(model: &str) -> u64 {
+/// Parse an optional bracketed context-window suffix such as `"claude-fable-5-2[1M]"`
+/// or `"my-model[512k]"` into `(base_model_lower, window_tokens)`.
+fn parse_bracket_window(raw: &str) -> Option<(String, u64)> {
+    let start = raw.rfind('[')?;
+    let rest = &raw[start + 1..];
+    let end = rest.find(']')?;
+    let inner = rest[..end].trim();
+    let tokens = crate::agent::parse_scaled_number(inner)?.round() as u64;
+    if tokens < 10_000 {
+        return None;
+    }
+    let base = format!("{}{}", &raw[..start], &rest[end + 1..])
+        .trim()
+        .to_ascii_lowercase();
+    Some((base, tokens))
+}
+
+fn extract_claude_settings_model_windows(v: &Value, out: &mut HashMap<String, u64>) {
+    if let Some(m) = v.get("model").and_then(Value::as_str) {
+        if let Some((base, win)) = parse_bracket_window(m) {
+            if !base.is_empty() {
+                out.insert(base, win);
+            }
+        }
+    }
+    if let Some(env) = v.get("env").and_then(Value::as_object) {
+        for (k, val) in env {
+            if !k.to_ascii_uppercase().contains("MODEL") {
+                continue;
+            }
+            if let Some(s) = val.as_str() {
+                if let Some((base, win)) = parse_bracket_window(s) {
+                    if !base.is_empty() {
+                        out.insert(base, win);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn load_claude_settings_model_windows() -> HashMap<String, u64> {
+    use std::sync::{Mutex, OnceLock};
+    type Stamp = Option<(i64, u64)>;
+    type Cache = ((Stamp, Stamp), HashMap<String, u64>);
+    static CACHE: OnceLock<Mutex<Option<Cache>>> = OnceLock::new();
+
+    let Some(home) = home_dir() else {
+        return HashMap::new();
+    };
+    let p1 = home.join(".claude").join("settings.json");
+    let p2 = home.join(".claude").join("settings.local.json");
+    let stamps = (file_stamp(&p1), file_stamp(&p2));
+
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(g) = cache.lock() {
+        if let Some((cs, map)) = g.as_ref() {
+            if *cs == stamps {
+                return map.clone();
+            }
+        }
+    }
+
+    let mut out = HashMap::new();
+    for (k, v) in std::env::vars() {
+        if !k.to_ascii_uppercase().contains("MODEL") {
+            continue;
+        }
+        if let Some((base, win)) = parse_bracket_window(&v) {
+            if !base.is_empty() {
+                out.insert(base, win);
+            }
+        }
+    }
+    for p in [&p1, &p2] {
+        if let Ok(text) = std::fs::read_to_string(p) {
+            if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                extract_claude_settings_model_windows(&v, &mut out);
+            }
+        }
+    }
+    if let Ok(mut g) = cache.lock() {
+        *g = Some((stamps, out.clone()));
+    }
+    out
+}
+
+fn claude_model_context_window_with_overrides(
+    model: &str,
+    overrides: &HashMap<String, u64>,
+) -> u64 {
+    if let Some((_, w)) = parse_bracket_window(model) {
+        return w;
+    }
     let ml = model.to_ascii_lowercase();
+    if let Some(&w) = overrides.get(&ml) {
+        return w;
+    }
+    if let Some((_, &w)) = overrides
+        .iter()
+        .find(|(k, _)| !k.is_empty() && ml.starts_with(k.as_str()))
+    {
+        return w;
+    }
     if ml.contains("[2m]") || ml.contains("2m") {
         2_000_000
     } else if ml.contains("[1m]")
         || ml.contains("1m")
+        || ml.contains("opus-4-7")
+        || ml.contains("opus-4.7")
         || ml.contains("opus-4-6")
         || ml.contains("opus-4.6")
         || ml.contains("opus-4-5")
         || ml.contains("opus-4.5")
         || ml.contains("opus-5")
+        || ml.contains("sonnet-4-7")
+        || ml.contains("sonnet-4.7")
         || ml.contains("sonnet-4-6")
         || ml.contains("sonnet-4.6")
         || ml.contains("sonnet-4-5")
         || ml.contains("sonnet-4.5")
         || ml.contains("sonnet-5")
+        || ml.contains("fable-5")
+        || ml.contains("haiku-5")
     {
         1_000_000
     } else {
         200_000
     }
+}
+
+fn claude_model_context_window(model: &str) -> u64 {
+    let overrides = load_claude_settings_model_windows();
+    claude_model_context_window_with_overrides(model, &overrides)
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -467,18 +580,29 @@ fn parse_iso_secs(ts: &str) -> Option<i64> {
 struct CtxParseState {
     used: Option<u64>,
     window: Option<u64>,
+    /// Explicit context window observed from `/context` markdown `(model_lower, window)` so
+    /// subsequent assistant turns for the same API model do not downgrade it back to 200k.
+    explicit_window: Option<(Option<String>, u64)>,
     reset: bool,
     continued_in: Option<String>,
     saw_event: bool,
 }
 
-fn parse_claude_context_usage_markdown(raw: &str) -> Option<(Option<u64>, Option<u64>, Option<u64>)> {
+struct ClaudeContextMarkdown {
+    used: Option<u64>,
+    parsed_win: Option<u64>,
+    model_win: Option<u64>,
+    model_name: Option<String>,
+}
+
+fn parse_claude_context_usage_markdown(raw: &str) -> Option<ClaudeContextMarkdown> {
     if !raw.contains("## Context Usage") && !raw.to_ascii_lowercase().contains("## context usage") {
         return None;
     }
     let mut used = None;
     let mut parsed_win = None;
     let mut model_win = None;
+    let mut model_name = None;
     for line in raw.lines() {
         let cleaned = line.trim().trim_start_matches(['-', '*', ' ']).replace("**", "");
         let lower = cleaned.to_ascii_lowercase();
@@ -487,6 +611,7 @@ fn parse_claude_context_usage_markdown(raw: &str) -> Option<(Option<u64>, Option
             .and_then(|_| cleaned.split_once(':').map(|(_, v)| v.trim()))
         {
             if !rest.is_empty() {
+                model_name = Some(rest.to_string());
                 model_win = Some(claude_model_context_window(rest));
             }
         } else if lower.starts_with("tokens:") {
@@ -506,7 +631,12 @@ fn parse_claude_context_usage_markdown(raw: &str) -> Option<(Option<u64>, Option
             }
         }
     }
-    (used.is_some() || parsed_win.is_some()).then_some((used, parsed_win, model_win))
+    (used.is_some() || parsed_win.is_some()).then_some(ClaudeContextMarkdown {
+        used,
+        parsed_win,
+        model_win,
+        model_name,
+    })
 }
 
 fn inspect_claude_ctx(v: &Value, st: &mut CtxParseState) {
@@ -576,15 +706,17 @@ fn inspect_claude_ctx(v: &Value, st: &mut CtxParseState) {
                     st.reset = true;
                     st.saw_event = true;
                 } else if v.get("isMeta").and_then(Value::as_bool) == Some(true) {
-                    if let Some((used, parsed_win, model_win)) =
-                        parse_claude_context_usage_markdown(&raw)
-                    {
-                        if let Some(u) = used {
+                    if let Some(cm) = parse_claude_context_usage_markdown(&raw) {
+                        if let Some(u) = cm.used {
                             st.used = Some(u);
                             st.saw_event = true;
                         }
-                        if let Some(w) = parsed_win.filter(|&w| w > 0).or(model_win) {
-                            st.window = Some(w);
+                        if let Some(pw) = cm.parsed_win.filter(|&w| w > 0) {
+                            st.window = Some(pw);
+                            st.explicit_window =
+                                Some((cm.model_name.map(|s| s.to_ascii_lowercase()), pw));
+                        } else if let Some(mw) = cm.model_win {
+                            st.window = Some(mw);
                         }
                     }
                 }
@@ -597,7 +729,19 @@ fn inspect_claude_ctx(v: &Value, st: &mut CtxParseState) {
                     return;
                 }
                 if let Some(model) = model.filter(|s| !s.is_empty()) {
-                    st.window = Some(claude_model_context_window(model));
+                    let inferred = claude_model_context_window(model);
+                    let ml = model.to_ascii_lowercase();
+                    let kept_explicit = st.explicit_window.as_ref().and_then(|(em, ew)| {
+                        em.as_deref()
+                            .is_none_or(|m| m == ml)
+                            .then_some((*ew).max(inferred))
+                    });
+                    if let Some(w) = kept_explicit {
+                        st.window = Some(w);
+                    } else {
+                        st.explicit_window = None;
+                        st.window = Some(inferred);
+                    }
                 }
                 if let Some(u) = msg.get("usage").or_else(|| v.get("usage")) {
                     let input = u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
@@ -963,6 +1107,7 @@ impl HistoryProvider for ClaudeProvider {
                 };
                 let mut probe = CtxParseState {
                     window: ctx_st.window,
+                    explicit_window: ctx_st.explicit_window.clone(),
                     continued_in: ctx_st.continued_in.clone(),
                     ..Default::default()
                 };
@@ -2162,6 +2307,7 @@ fn parse_claude_context_breakdown(path: &Path) -> Option<ContextBreakdown> {
 
     let mut last_model: Option<String> = None;
     let mut last_window: Option<u64> = None;
+    let mut explicit_window: Option<(Option<String>, u64)> = None;
     let mut last_used: Option<u64> = None;
     let mut cleared = false;
     let mut compacted_only = false;
@@ -2388,10 +2534,25 @@ fn parse_claude_context_breakdown(path: &Path) -> Option<ContextBreakdown> {
                         cleared = false;
                         continue;
                     }
-                    if is_claude_local_cmd_wrapper(&raw)
-                        || (v.get("isMeta").and_then(Value::as_bool) == Some(true)
-                            && parse_claude_context_usage_markdown(&raw).is_some())
-                    {
+                    if v.get("isMeta").and_then(Value::as_bool) == Some(true) {
+                        if let Some(cm) = parse_claude_context_usage_markdown(&raw) {
+                            if let Some(u) = cm.used {
+                                last_used = Some(u);
+                            }
+                            if let Some(m) = cm.model_name.as_ref() {
+                                last_model = Some(m.clone());
+                            }
+                            if let Some(pw) = cm.parsed_win.filter(|&w| w > 0) {
+                                last_window = Some(pw);
+                                explicit_window =
+                                    Some((cm.model_name.map(|s| s.to_ascii_lowercase()), pw));
+                            } else if let Some(mw) = cm.model_win {
+                                last_window = Some(mw);
+                            }
+                            continue;
+                        }
+                    }
+                    if is_claude_local_cmd_wrapper(&raw) {
                         continue;
                     }
                 }
@@ -2435,7 +2596,19 @@ fn parse_claude_context_breakdown(path: &Path) -> Option<ContextBreakdown> {
                 }
                 if let Some(m) = model.filter(|s| !s.is_empty()) {
                     last_model = Some(m.to_string());
-                    last_window = Some(claude_model_context_window(m));
+                    let inferred = claude_model_context_window(m);
+                    let ml = m.to_ascii_lowercase();
+                    let kept_explicit = explicit_window.as_ref().and_then(|(em, ew)| {
+                        em.as_deref()
+                            .is_none_or(|em| em == ml)
+                            .then_some((*ew).max(inferred))
+                    });
+                    if let Some(w) = kept_explicit {
+                        last_window = Some(w);
+                    } else {
+                        explicit_window = None;
+                        last_window = Some(inferred);
+                    }
                 }
                 if let Some(c) = msg.get("content") {
                     match c {
@@ -3311,6 +3484,58 @@ mod tests {
         let cm2 = cp.parse_file(&ctx_cmd_file, 101, md2.len()).unwrap();
         assert_eq!(cm2.ctx_used, Some(45_648));
         assert!(!cm2.ctx_reset);
+
+        // 7. Claude API settings `[1M]` / `[2M]` overrides resolve without running `/context`,
+        // and explicit `/context` 1M window is preserved across subsequent assistant turns for
+        // unknown custom API models.
+        let settings_val: Value = serde_json::from_str(
+            r#"{
+                "model": "custom-top[2M]",
+                "env": {
+                    "ANTHROPIC_DEFAULT_FABLE_MODEL": "claude-fable-5-2[1M]",
+                    "ANTHROPIC_MODEL": "my-api-proxy[1M]"
+                }
+            }"#,
+        )
+        .unwrap();
+        let mut overrides = HashMap::new();
+        extract_claude_settings_model_windows(&settings_val, &mut overrides);
+        assert_eq!(
+            claude_model_context_window_with_overrides("claude-fable-5-2", &overrides),
+            1_000_000
+        );
+        assert_eq!(
+            claude_model_context_window_with_overrides("my-api-proxy-20260501", &overrides),
+            1_000_000
+        );
+        assert_eq!(
+            claude_model_context_window_with_overrides("custom-top", &overrides),
+            2_000_000
+        );
+        assert_eq!(
+            claude_model_context_window_with_overrides("claude-fable-5-2", &HashMap::new()),
+            1_000_000
+        );
+
+        let api_file = proj.join("api-custom-model.jsonl");
+        std::fs::write(
+            &api_file,
+            concat!(
+                r#"{"type":"user","sessionId":"api-custom-model","cwd":"/repo","message":{"role":"user","content":"hi"}}"#,
+                "\n",
+                r###"{"type":"user","isMeta":true,"sessionId":"api-custom-model","cwd":"/repo","message":{"role":"user","content":"## Context Usage\n\n**Model:** custom-proxy-v1  \n**Tokens:** 25.5k / 1m (3%)"}}"###,
+                "\n",
+                r#"{"type":"assistant","message":{"role":"assistant","model":"custom-proxy-v1","usage":{"input_tokens":10000,"cache_read_input_tokens":35000}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let md3 = std::fs::metadata(&api_file).unwrap();
+        let cm3 = cp.parse_file(&api_file, 102, md3.len()).unwrap();
+        assert_eq!(cm3.ctx_used, Some(45_000));
+        assert_eq!(cm3.ctx_window, Some(1_000_000));
+        let bd3 = analyze_context_breakdown("claude", &api_file).expect("api bd");
+        assert_eq!(bd3.window_tokens, 1_000_000);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

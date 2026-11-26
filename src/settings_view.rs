@@ -338,6 +338,7 @@ pub struct SettingsView {
     ai_advanced: bool,
     /// 扩展管理（由主窗口创建后注入，与工具面板共用）。
     pub ext: Option<Entity<crate::ext_ui::ExtManager>>,
+    prompt_detection: ssh_term_proto::prompt::PromptDetection,
     _subs: Vec<Subscription>,
 }
 
@@ -417,6 +418,8 @@ impl SettingsView {
         let installed_fonts = cx.text_system().all_font_names();
         let system_term_font =
             ssh_term_proto::platform::detect_system_terminal_font(&installed_fonts);
+        let prompt_detection =
+            ssh_term_proto::prompt::detect_default_shell(&config::get().terminal.shell);
         let saved = ssh_term_proto::proxy::parse(config::get().ssh.proxy.trim()).ok();
         let proxy_http = matches!(
             saved.as_ref().map(|p| &p.kind),
@@ -524,6 +527,7 @@ impl SettingsView {
             ai_menu_at: None,
             ai_advanced: false,
             ext: None,
+            prompt_detection,
             _subs: subs,
         };
         if let Some(id) = me.ai_sel.clone() {
@@ -741,6 +745,27 @@ impl SettingsView {
                 t("ui.style_optimize"),
                 t("ui.style_optimize_desc"),
                 Ctl::Toggle("terminal.style"),
+            ),
+            r(
+                Terminal,
+                t("prompt.title"),
+                t("prompt.desc"),
+                Ctl::Choice(
+                    "terminal.prompt_style",
+                    opts(&[
+                        ("system", t("prompt.style.system")),
+                        ("pure", t("prompt.style.pure")),
+                        ("capsule", t("prompt.style.capsule")),
+                        ("devops", t("prompt.style.devops")),
+                        ("classic", t("prompt.style.classic")),
+                    ]),
+                ),
+            ),
+            r(
+                Terminal,
+                t("prompt.override"),
+                t("prompt.override.desc"),
+                Ctl::Toggle("terminal.prompt_override"),
             ),
             r(
                 Terminal,
@@ -1271,6 +1296,13 @@ impl SettingsView {
         }
         if p == "general.language" {
             self.inputs.clear();
+        }
+        if p == "terminal.shell" {
+            self.prompt_detection =
+                ssh_term_proto::prompt::detect_default_shell(&config::get().terminal.shell);
+        }
+        if p == "terminal.prompt_style" {
+            let _ = config::update(|s| s.terminal.prompt_recommend_dismissed = true);
         }
         cx.emit(SettingsEvent::Changed(p));
         cx.notify();
@@ -3970,6 +4002,181 @@ impl SettingsView {
             .into_any_element()
     }
 
+    fn terminal_extra(&self, cx: &mut Context<Self>) -> AnyElement {
+        use ssh_term_proto::prompt::{external_tool_commands, PromptCapability, PromptStyle};
+        let th = cur();
+        let sc = crate::theme::scheme();
+        let s = config::get();
+        let style = PromptStyle::parse(&s.terminal.prompt_style);
+        let det = &self.prompt_detection;
+
+        let status = if det.capability == PromptCapability::Unsupported {
+            t("prompt.status.unsupported").to_string()
+        } else if let Some(d) = &det.detected {
+            let base = tf(
+                "prompt.status.detected",
+                &[("name", &d.name), ("path", &d.source_file.display())],
+            );
+            if style != PromptStyle::System && !s.terminal.prompt_override {
+                format!("{base} · {}", t("prompt.status.yielded"))
+            } else {
+                base
+            }
+        } else {
+            t("prompt.status.none").to_string()
+        };
+
+        let preview_card = div()
+            .w_full()
+            .p_4()
+            .rounded(px(ui::R_LG))
+            .bg(crate::theme::settings_group_bg())
+            .border_1()
+            .border_color(crate::theme::divider())
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(ui::fs_body()))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(c(th.text))
+                            .child(t("prompt.preview")),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(ui::fs_small()))
+                            .text_color(c(th.overlay1))
+                            .child(ui::prompt_style_desc(style)),
+                    ),
+            )
+            .child(
+                div()
+                    .px_3()
+                    .py(px(10.))
+                    .rounded(px(ui::R_MD))
+                    .bg(c(sc.bg))
+                    .border_1()
+                    .border_color(crate::theme::divider())
+                    .child(ui::prompt_preview_lines(
+                        style,
+                        det.shell,
+                        &s.font.family,
+                        s.font.size,
+                    )),
+            )
+            .child(
+                div()
+                    .text_size(px(ui::fs_small()))
+                    .text_color(c(th.subtext))
+                    .whitespace_normal()
+                    .child(status),
+            );
+
+        let mut ext_rows = div()
+            .mt_1()
+            .rounded(px(ui::R_MD))
+            .border_1()
+            .border_color(crate::theme::divider())
+            .bg(crate::theme::sub_bg())
+            .flex()
+            .flex_col()
+            .overflow_hidden();
+        let cmds = external_tool_commands();
+        for (i, (name, cmd)) in cmds.iter().enumerate() {
+            let cmd_s = (*cmd).to_string();
+            ext_rows = ext_rows.child(
+                div()
+                    .px_3()
+                    .py(px(8.))
+                    .when(i > 0, |d| d.border_t_1().border_color(crate::theme::divider()))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .text_size(px(ui::fs_body()))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(c(th.text))
+                                    .child(*name),
+                            )
+                            .child(
+                                div()
+                                    .font_family(ui::mono_family())
+                                    .text_size(px(ui::fs_small()))
+                                    .text_color(c(th.subtext))
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .child(*cmd),
+                            ),
+                    )
+                    .child(
+                        ui::button_sm(("prompt-ext-copy", i), t("prompt.external.copy"), 0)
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    cmd_s.clone(),
+                                ));
+                                cx.emit(SettingsEvent::Toast {
+                                    key: None,
+                                    kind: crate::ToastKind::Success,
+                                    msg: tf("prompt.external.copied", &[("cmd", &cmd_s)]),
+                                });
+                            })),
+                    ),
+            );
+        }
+
+        let ext_card = div()
+            .w_full()
+            .p_4()
+            .rounded(px(ui::R_LG))
+            .bg(crate::theme::settings_group_bg())
+            .border_1()
+            .border_color(crate::theme::divider())
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_size(px(ui::fs_body()))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(c(th.text))
+                    .child(t("prompt.external.title")),
+            )
+            .child(
+                div()
+                    .text_size(px(ui::fs_small()))
+                    .text_color(c(th.subtext))
+                    .whitespace_normal()
+                    .child(t("prompt.external.desc")),
+            )
+            .child(ext_rows);
+
+        div()
+            .mt_3()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(preview_card)
+            .child(ext_card)
+            .into_any_element()
+    }
+
     fn appearance_extra(&self, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
         div()
@@ -4664,6 +4871,7 @@ impl Render for SettingsView {
                         .clone()
                         .map(|e| div().mt_2().child(e).into_any_element()),
                     Cat::Appearance => Some(self.appearance_extra(cx)),
+                    Cat::Terminal => Some(self.terminal_extra(cx)),
                     Cat::General => Some(self.general_extra(cx)),
                     Cat::Ai => Some(self.ai_extra(window, cx)),
                     _ => None,

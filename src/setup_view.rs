@@ -40,6 +40,10 @@ pub struct SetupView {
     font_picking: bool,
     /// The search field stays hidden until its icon is clicked.
     font_search_open: bool,
+    /// Built-in prompt style recommended when no existing terminal theme is detected.
+    prompt_style: ssh_term_proto::prompt::PromptStyle,
+    /// Cached detection result for the default local shell.
+    prompt_detection: ssh_term_proto::prompt::PromptDetection,
     /// Which way the last step change went, so the new page slides in from that side.
     forward: bool,
     font_search: Entity<InputState>,
@@ -65,6 +69,14 @@ impl SetupView {
         font_search: Entity<InputState>,
     ) -> Self {
         let (family, size, source, fonts) = terminal_fonts(installed);
+        let prompt_detection = ssh_term_proto::prompt::detect_default_shell("");
+        let prompt_style = if prompt_detection.detected.is_none()
+            && prompt_detection.capability != ssh_term_proto::prompt::PromptCapability::Unsupported
+        {
+            ssh_term_proto::prompt::PromptStyle::Pure
+        } else {
+            ssh_term_proto::prompt::PromptStyle::System
+        };
         Self {
             step: 0,
             language: suggested_language(),
@@ -75,6 +87,8 @@ impl SetupView {
             fonts,
             font_picking: false,
             font_search_open: false,
+            prompt_style,
+            prompt_detection,
             forward: true,
             font_search,
             themes,
@@ -103,6 +117,17 @@ impl SetupView {
         cx.notify();
     }
 
+    fn choose_prompt_style(
+        &mut self,
+        style: ssh_term_proto::prompt::PromptStyle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.prompt_style = style;
+        self.apply(window, cx);
+        cx.notify();
+    }
+
     /// Restyle the window from the choices so far, without writing config.toml. Skipping or
     /// closing therefore leaves nothing behind; only finishing persists them.
     fn apply(&self, window: &mut Window, cx: &mut App) {
@@ -112,6 +137,7 @@ impl SetupView {
         s.appearance.theme = self.theme.clone();
         s.font.family = self.font_family.clone();
         s.font.size = self.font_size;
+        s.terminal.prompt_style = self.prompt_style.as_str().into();
         crate::config::install(s);
         let th = resolve_theme(&self.themes, &self.theme, window);
         crate::theme::set_current(th.clone());
@@ -125,11 +151,14 @@ impl SetupView {
             let theme = self.theme.clone();
             let family = self.font_family.clone();
             let size = self.font_size;
+            let prompt_style = self.prompt_style.as_str().to_string();
             crate::config::update(|s| {
                 s.general.language = language;
                 s.appearance.theme = theme;
                 s.font.family = family;
                 s.font.size = size;
+                s.terminal.prompt_style = prompt_style;
+                s.terminal.prompt_recommend_dismissed = true;
             });
         }
         mark_done();
@@ -447,17 +476,36 @@ impl SetupView {
 
     fn terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let th = cur();
+        let sc = crate::theme::scheme();
         let family = self.font_family.clone();
+        let show_prompt_picker = self.prompt_detection.detected.is_none()
+            && self.prompt_detection.capability
+                != ssh_term_proto::prompt::PromptCapability::Unsupported;
         let sample = div()
-            .p(px(14.))
+            .px(px(14.))
+            .py(px(11.))
             .rounded(px(ui::R_LG))
-            .bg(c(th.crust))
+            .bg(c(sc.bg))
             .border_1()
             .border_color(crate::theme::divider())
-            .font_family(gpui::SharedString::from(family.clone()))
-            .text_size(px(self.font_size))
-            .text_color(c(th.text))
-            .child(format!("ls  cd  git status   {}", t("setup.sample_cjk")));
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .when(show_prompt_picker, |d| {
+                d.child(ui::prompt_preview_lines(
+                    self.prompt_style,
+                    self.prompt_detection.shell,
+                    &family,
+                    self.font_size,
+                ))
+            })
+            .child(
+                div()
+                    .font_family(gpui::SharedString::from(family.clone()))
+                    .text_size(px(self.font_size))
+                    .text_color(c(sc.fg))
+                    .child(format!("ls  cd  git status   {}", t("setup.sample_cjk"))),
+            );
 
         // The sample is drawn with the same cell-width assumption the terminal makes, so a family
         // that is not actually monospaced shows itself here instead of only after setup.
@@ -665,6 +713,63 @@ impl SetupView {
                         ),
                     ),
             );
+            if show_prompt_picker {
+                use ssh_term_proto::prompt::{PromptStyle, ShellKind};
+                let note = if self.prompt_detection.shell == ShellKind::Cmd {
+                    t("prompt.cmd_note")
+                } else {
+                    t("prompt.setup_hint")
+                };
+                let mut chips = div().flex().flex_wrap().items_center().gap(px(6.));
+                for (i, st) in PromptStyle::ALL.into_iter().enumerate() {
+                    let active = self.prompt_style == st;
+                    chips = chips.child(
+                        ui::chip(("setup-prompt", i), ui::prompt_style_label(st), active)
+                            .on_click(cx.listener(move |this, _, w, cx| {
+                                this.choose_prompt_style(st, w, cx);
+                            })),
+                    );
+                }
+                page = page.child(
+                    div()
+                        .px(px(14.))
+                        .py(px(10.))
+                        .rounded(px(ui::R_LG))
+                        .bg(crate::theme::sub_bg())
+                        .border_1()
+                        .border_color(crate::theme::divider())
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap(px(8.))
+                                .child(
+                                    div()
+                                        .text_size(px(ui::fs_body()))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(c(th.text))
+                                        .child(t("prompt.setup_label")),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(ui::fs_small()))
+                                        .text_color(c(th.overlay1))
+                                        .child(note),
+                                ),
+                        )
+                        .child(chips)
+                        .child(
+                            div()
+                                .text_size(px(ui::fs_small()))
+                                .text_color(c(th.subtext))
+                                .child(ui::prompt_style_desc(self.prompt_style)),
+                        ),
+                );
+            }
         }
         page.into_any_element()
     }
@@ -681,7 +786,7 @@ impl SetupView {
         } else {
             t("setup.lang_en")
         };
-        let rows = [
+        let mut rows = vec![
             (
                 IconName::Languages,
                 t("setup.summary_language"),
@@ -694,6 +799,16 @@ impl SetupView {
                 self.font_family.clone(),
             ),
         ];
+        if self.prompt_detection.detected.is_none()
+            && self.prompt_detection.capability
+                != ssh_term_proto::prompt::PromptCapability::Unsupported
+        {
+            rows.push((
+                IconName::Sparkles,
+                t("prompt.setup_label"),
+                ui::prompt_style_label(self.prompt_style).to_string(),
+            ));
+        }
         let mut card = div()
             .rounded(px(ui::R_LG))
             .bg(crate::theme::sub_bg())

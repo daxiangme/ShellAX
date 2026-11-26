@@ -210,6 +210,15 @@ pub struct Terminal {
     /// On connect, turn on ls/grep colors for this session only. Does not edit remote shell rc files.
     #[serde(default = "t")]
     pub style: bool,
+    /// Built-in local shell prompt theme: system | pure | capsule | devops | classic.
+    #[serde(default = "s_system")]
+    pub prompt_style: String,
+    /// When false, built-in prompt yields if the user already configured a prompt theme.
+    #[serde(default)]
+    pub prompt_override: bool,
+    /// Whether the one-time "no terminal prompt theme detected" banner was dismissed.
+    #[serde(default)]
+    pub prompt_recommend_dismissed: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
@@ -235,6 +244,9 @@ impl Default for Terminal {
             show_cwd: t(),
             show_host_stats: t(),
             style: t(),
+            prompt_style: s_system(),
+            prompt_override: false,
+            prompt_recommend_dismissed: false,
             keyword_highlight: t(),
             highlights: default_highlights(),
             shell: String::new(),
@@ -1500,6 +1512,10 @@ fn apply_runtime(s: &Settings) {
         Relaxed,
     );
     ssh_term_proto::ssh::STYLE.store(s.terminal.style, Relaxed);
+    ssh_term_proto::prompt::set_runtime(
+        ssh_term_proto::prompt::PromptStyle::parse(&s.terminal.prompt_style),
+        s.terminal.prompt_override,
+    );
     let _ = ssh_term_proto::suggest::set_extra_filters(&s.suggest.filter_patterns);
 }
 

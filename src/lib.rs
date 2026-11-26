@@ -45,6 +45,7 @@ pub mod platform;
 pub mod policy;
 pub mod policy_server;
 pub mod proc_info;
+pub mod prompt;
 pub mod proxy;
 pub mod secrets;
 pub mod session_store;

@@ -781,11 +781,17 @@ pub fn screen_context_usage(screen: &str) -> Option<ScreenContextUsage> {
     let mut est_window = if lower_screen.contains("[1m]")
         || lower_screen.contains("gemini")
         || lower_screen.contains("opus-5")
+        || lower_screen.contains("opus-4.7")
+        || lower_screen.contains("opus-4-7")
         || lower_screen.contains("opus-4.6")
         || lower_screen.contains("opus-4-6")
         || lower_screen.contains("sonnet-5")
+        || lower_screen.contains("sonnet-4.7")
+        || lower_screen.contains("sonnet-4-7")
         || lower_screen.contains("sonnet-4.6")
         || lower_screen.contains("sonnet-4-6")
+        || lower_screen.contains("fable-5")
+        || lower_screen.contains("haiku-5")
     {
         1_000_000.0
     } else {

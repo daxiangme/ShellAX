@@ -53,10 +53,7 @@ pub const PWSH_INTEGRATION: &str = concat!(
 
 /// cmd.exe 集成：`PROMPT` 里用 `$E]9;9;$P$E\` 输出 OSC 9;9，后面保留用户原来的提示符（默认 `$P$G`）。
 pub fn cmd_prompt(existing: Option<&str>) -> String {
-    format!(
-        "$E]9;9;$P$E\\{}",
-        existing.filter(|s| !s.is_empty()).unwrap_or("$P$G")
-    )
+    crate::prompt::cmd_prompt(existing, true, crate::prompt::PromptStyle::System)
 }
 
 /// 本地 shell 进程的当前工作目录：使用 `proc_info::process_cwd`（Linux `/proc`、Mac `proc_pidinfo`、Windows `sysinfo`），
@@ -232,30 +229,30 @@ pub fn spawn_local_with_pane(
         _ => shell.is_none() || std::env::var("SHELLAX_INTEGRATE").is_ok(),
     };
     let style = crate::ssh::STYLE.load(std::sync::atomic::Ordering::Relaxed);
+    let prompt_style = crate::prompt::resolve_effective_style(&sh);
     let mut cmd = CommandBuilder::new(&sh);
     let mut hist_file = ".bash_history";
-    if (integrate || style) && sh.ends_with("bash") {
-        let mut body = if integrate {
-            BASH_INTEGRATION.to_string()
-        } else {
-            "[ -f ~/.bashrc ] && . ~/.bashrc\n".into()
-        };
-        if style {
-            body.push_str(COLOR_ALIASES);
-        }
+    if (integrate || style || prompt_style != crate::prompt::PromptStyle::System)
+        && sh.ends_with("bash")
+    {
+        let body = crate::prompt::bash_rc(integrate, style, prompt_style, COLOR_ALIASES);
         // one file per variant: sessions starting at the same time must not overwrite each other's rc
         let rc = std::env::temp_dir().join(format!(
-            "shellax-bash-{}{}.sh",
+            "shellax-bash-{}{}-{}.sh",
             if integrate { "i" } else { "n" },
-            if style { "s" } else { "p" }
+            if style { "s" } else { "p" },
+            prompt_style.as_str(),
         ));
         let _ = std::fs::write(&rc, body);
         cmd.args(["--rcfile", rc.to_str().unwrap_or_default()]);
-    } else if (integrate || style) && sh.ends_with("zsh") {
+    } else if (integrate || style || prompt_style != crate::prompt::PromptStyle::System)
+        && sh.ends_with("zsh")
+    {
         let dir = std::env::temp_dir().join(format!(
-            "shellax-zsh-{}{}",
+            "shellax-zsh-{}{}-{}",
             if integrate { "i" } else { "n" },
-            if style { "s" } else { "p" }
+            if style { "s" } else { "p" },
+            prompt_style.as_str(),
         ));
         let _ = std::fs::create_dir_all(&dir);
         let zshenv = if integrate {
@@ -263,14 +260,7 @@ pub fn spawn_local_with_pane(
         } else {
             "[ -f \"$HOME/.zshenv\" ] && . \"$HOME/.zshenv\"\n".into()
         };
-        let mut zshrc = if integrate {
-            ZSH_ZSHRC.to_string()
-        } else {
-            "[ -f \"$HOME/.zshrc\" ] && . \"$HOME/.zshrc\"\n".into()
-        };
-        if style {
-            zshrc.push_str(COLOR_ALIASES);
-        }
+        let zshrc = crate::prompt::zsh_zshrc(integrate, style, prompt_style, COLOR_ALIASES);
         let _ = std::fs::write(dir.join(".zshenv"), zshenv);
         let _ = std::fs::write(dir.join(".zshrc"), zshrc);
         if let Ok(z) = std::env::var("ZDOTDIR") {
@@ -283,12 +273,18 @@ pub fn spawn_local_with_pane(
         .file_stem()
         .map(|s| s.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
-    if integrate && (stem == "pwsh" || stem == "powershell") {
-        cmd.args(["-NoLogo", "-NoExit", "-Command", PWSH_INTEGRATION]);
-    } else if integrate && stem == "cmd" {
+    if stem == "pwsh" || stem == "powershell" {
+        if let Some(script) = crate::prompt::pwsh_script(integrate, prompt_style) {
+            cmd.args(["-NoLogo", "-NoExit", "-Command", &script]);
+        }
+    } else if (integrate || prompt_style != crate::prompt::PromptStyle::System) && stem == "cmd" {
         cmd.env(
             "PROMPT",
-            cmd_prompt(std::env::var("PROMPT").ok().as_deref()),
+            crate::prompt::cmd_prompt(
+                std::env::var("PROMPT").ok().as_deref(),
+                integrate,
+                prompt_style,
+            ),
         );
     }
     if sh.ends_with("zsh") {

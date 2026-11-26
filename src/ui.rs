@@ -1940,6 +1940,69 @@ pub fn corner_card(window: &gpui::Window, bottom: f32, right: f32) -> Div {
         .shadow(crate::chrome::soft_shadow(true))
 }
 
+pub fn prompt_style_label(style: ssh_term_proto::prompt::PromptStyle) -> &'static str {
+    use ssh_term_proto::prompt::PromptStyle;
+    match style {
+        PromptStyle::System => ssh_term_proto::i18n::t("prompt.style.system"),
+        PromptStyle::Pure => ssh_term_proto::i18n::t("prompt.style.pure"),
+        PromptStyle::Capsule => ssh_term_proto::i18n::t("prompt.style.capsule"),
+        PromptStyle::DevOps => ssh_term_proto::i18n::t("prompt.style.devops"),
+        PromptStyle::Classic => ssh_term_proto::i18n::t("prompt.style.classic"),
+    }
+}
+
+pub fn prompt_style_desc(style: ssh_term_proto::prompt::PromptStyle) -> &'static str {
+    use ssh_term_proto::prompt::PromptStyle;
+    match style {
+        PromptStyle::System => ssh_term_proto::i18n::t("prompt.style.system.d"),
+        PromptStyle::Pure => ssh_term_proto::i18n::t("prompt.style.pure.d"),
+        PromptStyle::Capsule => ssh_term_proto::i18n::t("prompt.style.capsule.d"),
+        PromptStyle::DevOps => ssh_term_proto::i18n::t("prompt.style.devops.d"),
+        PromptStyle::Classic => ssh_term_proto::i18n::t("prompt.style.classic.d"),
+    }
+}
+
+/// Renders a live prompt preview using the active terminal palette (`scheme().ansi`) and font fallback chain.
+pub fn prompt_preview_lines(
+    style: ssh_term_proto::prompt::PromptStyle,
+    shell: ssh_term_proto::prompt::ShellKind,
+    font_family: &str,
+    font_size: f32,
+) -> Div {
+    use ssh_term_proto::prompt::{preview_lines, AnsiColor};
+    let sc = crate::theme::scheme();
+    let mut f = gpui::font(SharedString::from(font_family.to_string()));
+    f.fallbacks = Some(gpui::FontFallbacks(std::sync::Arc::new(
+        crate::config::get().font.fallbacks.clone(),
+    )));
+    let mut out = div()
+        .font(f)
+        .text_size(px(font_size))
+        .text_color(c(sc.fg))
+        .flex()
+        .flex_col()
+        .gap(px(2.));
+    for line in preview_lines(style, shell) {
+        let mut row = div().flex().flex_wrap().items_center();
+        for span in line {
+            let fg = match span.fg {
+                AnsiColor::DefaultFg => c(sc.fg),
+                AnsiColor::Palette(idx) => c(sc.ansi[idx as usize]),
+            };
+            let mut seg = div()
+                .text_color(fg)
+                .when(span.bold, |d| d.font_weight(FontWeight::BOLD))
+                .child(span.text);
+            if let Some(bg_idx) = span.bg {
+                seg = seg.bg(c(sc.ansi[bg_idx as usize]));
+            }
+            row = row.child(seg);
+        }
+        out = out.child(row);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tip_tests {
     use super::*;

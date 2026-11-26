@@ -4,6 +4,17 @@
 
 新版本加在最上方。节标题与 `Cargo.toml` 的版本号相同，写成 `## 1.3.7`；Git 标签在版本号前加 `v`，写成 `v1.3.7`。条目有对应的 GitHub issue 时，在末尾写上编号，例如 `#12`。
 
+## 1.3.18
+
+### 新增与优化
+
+- **本地终端提示符主题检测与 4 套零依赖内置样式**：
+  - 启动本地终端、首次引导向导及设置页时，纯只读检测默认 Shell（`zsh` / `bash` / `pwsh` / Windows PowerShell 5.1 / `cmd.exe`）是否已配置 `Starship`、`Oh My Posh`、`Oh My Zsh`、`Powerlevel10k`、`posh-git`、`Clink` 或自定义 `PS1`/`PROMPT`；若已配置则默认自动让位，不覆盖用户原有环境。
+  - 针对未配置提示符主题的旧版 Windows 与新装 macOS，内置 **Pure 极简**、**Capsule 胶囊**、**DevOps 工程**、**Classic 经典** 4 套 ANSI 16 色预设（随深浅主题自动适配，通过纯文件读取 `.git/HEAD` 展示分支并兼容 Git worktree，无需拉起外部 `git` 进程、无需修改本机配置文件）。
+  - 在首次启动向导与「设置 › 终端」提供实时终端效果预览、覆盖已有主题开关以及 `Starship` / `Oh My Posh` 安装命令快捷复制；老用户打开无主题的本地终端时会在顶部显示一次性可关闭的推荐提示条。
+- **Agent 上下文窗口识别扩展**：
+  - 支持识别 Claude `opus-4.7`、`sonnet-4.7`、`fable-5`、`haiku-5` 与 `[1M]` / `[512k]` 括号后缀上下文规格，并从 `~/.claude/settings.json`、`settings.local.json` 与环境变量动态读取模型窗口大小。
+
 ## 1.3.17
 
 ### 修复

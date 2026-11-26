@@ -25,6 +25,8 @@ jobs:
           ref: ${{ env.TAG }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
       - name: Install NSIS
         shell: pwsh
         run: |
@@ -47,6 +49,8 @@ jobs:
           ref: ${{ env.TAG }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
       - name: Build
         run: cargo build --profile dist --bin shellax --bin shellax-cli
       - name: Package .app and .dmg (unsigned)
