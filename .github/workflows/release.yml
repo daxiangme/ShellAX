@@ -135,6 +135,14 @@ jobs:
         with:
           path: out
           merge-multiple: true
+      - name: Legacy unversioned aliases (<= v1.3.18 auto-update compatibility)
+        run: |
+          set -euo pipefail
+          cd out
+          for suffix in Setup-x64.exe portable-x64.zip macos-aarch64.dmg macos-aarch64.zip; do
+            src=$(ls -1 ShellAX-v*-"${suffix}" | head -n1)
+            cp -f "$src" "ShellAX-${suffix}"
+          done
       - name: Checksums
         run: cd out && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
       - name: Release notes from CHANGELOG.md
