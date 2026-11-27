@@ -1,7 +1,7 @@
 #!/bin/sh
 # Build the release binary, wrap it as ShellAX.app, and make a drag-install disk image.
 #   dist/ShellAX.app
-#   dist/ShellAX-<version>-macos-<arch>.dmg   (open it, drag ShellAX onto Applications)
+#   dist/ShellAX-v<version>-macos-<arch>.dmg   (open it, drag ShellAX onto Applications)
 # shellax-cli sits next to the GUI binary: the app looks for it in the same directory.
 set -e
 cd "$(dirname "$0")/.."
@@ -72,7 +72,7 @@ codesign --force -s - "$APP/Contents/MacOS/shellax-cli"
 codesign --force --deep -s - "$APP"
 codesign --verify --deep --strict "$APP"
 
-DMG="$OUT/ShellAX-${VER}-macos-${ARCH}.dmg"
+DMG="$OUT/ShellAX-v${VER}-macos-${ARCH}.dmg"
 STAGE=$(mktemp -d)
 ditto "$APP" "$STAGE/ShellAX.app"
 ln -s /Applications "$STAGE/Applications"

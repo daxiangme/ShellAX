@@ -747,15 +747,15 @@ mod tests {
     }
     #[test]
     fn sums_and_urls() {
-        let s = "abc  x\n0123456789abcdef0123456789abcdef0123456789abcdef0123456789ABCDEF  ShellAX-Setup-x64.exe\n";
+        let s = "abc  x\n0123456789abcdef0123456789abcdef0123456789abcdef0123456789ABCDEF  ShellAX-v1.3.20-Setup-x64.exe\n";
         assert_eq!(
-            sum_for(s, "ShellAX-Setup-x64.exe").unwrap(),
+            sum_for(s, "ShellAX-v1.3.20-Setup-x64.exe").unwrap(),
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         );
         assert!(sum_for(s, "x").is_none());
         assert_eq!(
-            sums_url("https://github.com/a/b/releases/download/v1/ShellAX-Setup-x64.exe").unwrap(),
-            "https://github.com/a/b/releases/download/v1/SHA256SUMS.txt"
+            sums_url("https://github.com/a/b/releases/download/v1.3.20/ShellAX-v1.3.20-Setup-x64.exe").unwrap(),
+            "https://github.com/a/b/releases/download/v1.3.20/SHA256SUMS.txt"
         );
         assert!(sums_url("https://example.com/x.exe").is_none());
     }

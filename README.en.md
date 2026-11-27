@@ -117,10 +117,10 @@ Screenshots will be added later.
 ## Install
 
 ### Windows
-Download `ShellAX-Setup-x64.exe` (installer) or `ShellAX-portable-x64.zip` (portable) from the releases page. The installer is unsigned. SmartScreen may say it protected your PC; choose More info → Run anyway.
+Download `ShellAX-v<version>-Setup-x64.exe` (installer) or `ShellAX-v<version>-portable-x64.zip` (portable) from the releases page. The installer is unsigned. SmartScreen may say it protected your PC; choose More info → Run anyway.
 
 ### Mac
-Open `ShellAX-macos-aarch64.dmg` (or the `.zip` of the same name) and drag ShellAX to Applications. The app is ad-hoc signed and not notarized. If the first launch says the developer cannot be verified:
+Open `ShellAX-v<version>-macos-aarch64.dmg` (or the `.zip` of the same name) and drag ShellAX to Applications. The app is ad-hoc signed and not notarized. If the first launch says the developer cannot be verified:
 - In Applications, right-click ShellAX → Open; or
 - System Settings → Privacy & Security → Open Anyway; or
 - In a terminal: `xattr -dr com.apple.quarantine /Applications/ShellAX.app`.

@@ -3909,29 +3909,7 @@ impl SettingsView {
             _ => None,
         };
 
-        let repo_url = format!("https://github.com/{}", ssh_term_proto::update::REPO);
-        let github_card = card()
-            .child(
-                div()
-                    .text_size(px(ui::fs_body()))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(c(th.text))
-                    .child(t("settings.github_title")),
-            )
-            .child(muted(repo_url.clone()))
-            .child(
-                div()
-                    .text_size(px(ui::fs_small()))
-                    .text_color(c(th.subtext))
-                    .whitespace_normal()
-                    .child(t("settings.github_star")),
-            )
-            .child(
-                div().pt_1().child(
-                    ui::button("open-github", t("settings.github_open"), 0)
-                        .on_click(move |_, _w, cx| cx.open_url(&repo_url)),
-                ),
-            );
+        let github_card = Self::github_about_card("general-github");
 
         let mut col = div()
             .mt_4()
@@ -3945,6 +3923,158 @@ impl SettingsView {
             col = col.child(div().mt_3().child(h));
         }
         col.into_any_element()
+    }
+
+    fn github_about_card(id_prefix: &'static str) -> AnyElement {
+        let th = cur();
+        let repo_display = format!("github.com/{}", ssh_term_proto::update::REPO);
+        let repo_url = format!("https://{repo_display}");
+        let repo_url_star = repo_url.clone();
+        let issues_url = format!("{repo_url}/issues");
+        let warn = c(th.warning);
+        div()
+            .w_full()
+            .p_4()
+            .rounded(px(ui::R_LG))
+            .bg(crate::theme::settings_group_bg())
+            .border_1()
+            .border_color(crate::theme::divider())
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .size(px(28.))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(crate::file_icon::brand_icon(28.)),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_size(px(ui::fs_body()))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(c(th.text))
+                                            .child(t("settings.github_title")),
+                                    )
+                                    .child(
+                                        div()
+                                            .px(px(6.))
+                                            .py(px(1.))
+                                            .rounded(px(ui::R_SM))
+                                            .bg(crate::theme::elevated_surface())
+                                            .border_1()
+                                            .border_color(crate::theme::divider())
+                                            .font_family(ui::mono_family())
+                                            .text_size(px(ui::fs_caption()))
+                                            .text_color(c(th.overlay1))
+                                            .child("AGPL-3.0"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id((id_prefix, 1usize))
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .font_family(ui::mono_family())
+                                            .text_size(px(ui::fs_small()))
+                                            .text_color(c(th.accent))
+                                            .cursor_pointer()
+                                            .hover(|s| s.underline())
+                                            .child(repo_display)
+                                            .child(icon(
+                                                IconName::ExternalLink,
+                                                ui::IC_XS,
+                                                c(th.accent),
+                                            ))
+                                            .on_click(move |_, _w, cx| cx.open_url(&repo_url)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(ui::fs_small()))
+                                    .text_color(c(th.subtext))
+                                    .whitespace_normal()
+                                    .child(t("settings.github_star")),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id((id_prefix, 2usize))
+                            .h(px(ui::H_DEFAULT))
+                            .px(px(ui::SP_3))
+                            .rounded(px(ui::R_MD))
+                            .bg(crate::theme::elevated_surface())
+                            .border_1()
+                            .border_color(crate::theme::control_border())
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .text_size(px(ui::fs_body()))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(c(th.text))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(crate::theme::hover_bg()))
+                            .active(|s| s.bg(crate::theme::selected_bg()))
+                            .child(icon(IconName::MessageSquare, ui::IC_SM, c(th.subtext)))
+                            .child(t("settings.github_feedback"))
+                            .on_click(move |_, _w, cx| cx.open_url(&issues_url)),
+                    )
+                    .child(
+                        div()
+                            .id((id_prefix, 3usize))
+                            .h(px(ui::H_DEFAULT))
+                            .px(px(ui::SP_3))
+                            .rounded(px(ui::R_MD))
+                            .bg(warn.opacity(0.14))
+                            .border_1()
+                            .border_color(warn.opacity(0.38))
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .text_size(px(ui::fs_body()))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(warn)
+                            .cursor_pointer()
+                            .hover(move |s| {
+                                s.bg(warn.opacity(0.22)).border_color(warn.opacity(0.55))
+                            })
+                            .active(move |s| s.bg(warn.opacity(0.28)))
+                            .child(icon(IconName::StarFill, ui::IC_SM, warn))
+                            .child(t("settings.github_star_cta"))
+                            .on_click(move |_, _w, cx| cx.open_url(&repo_url_star)),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn scheme_preview(&self) -> AnyElement {
@@ -4580,6 +4710,7 @@ impl SettingsView {
                             ),
                     ),
             )
+            .child(div().pb_2().child(Self::github_about_card("about-github")))
             .child(Self::section_title(t("settings.about_drivers")))
             .child(
                 div()

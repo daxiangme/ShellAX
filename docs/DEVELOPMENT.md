@@ -122,12 +122,12 @@ cargo build --profile dist --bin shellax --bin shellax-cli   # 发布构建，�
    ```
    标签含 `-beta` / `-rc`（如 `v0.2.0-beta.1`）时发布为预发布版本，只有“测试版”更新通道的用户会收到。
 4. GitHub Actions（`.github/workflows/release.yml`）会在 Windows 和 macOS（Apple Silicon）上构建，并把以下文件上传到对应的 Release：
-   `ShellAX-Setup-x64.exe`、`ShellAX-portable-x64.zip`、`ShellAX-macos-aarch64.dmg`、`ShellAX-macos-aarch64.zip`、`SHA256SUMS.txt`。
+   `ShellAX-v<版本>-Setup-x64.exe`、`ShellAX-v<版本>-portable-x64.zip`、`ShellAX-v<版本>-macos-aarch64.dmg`、`ShellAX-v<版本>-macos-aarch64.zip`、`SHA256SUMS.txt`。
    也可以在 Actions 页面手动运行（workflow_dispatch），填一个已存在的标签。
 5. 应用内“检查更新”读取 GitHub Releases：正式版通道读 `releases/latest`，测试版通道读最新一条（含预发布）。
 6. 应用内下载并更新（`src/updater.rs`、`src/update_ui.rs`）依赖上面这些文件名，改名时要同步修改代码：
    - 发现新版本后，设置 > 更新里点“下载更新”（或开启“自动下载更新”），后台经 `proxy::ureq_builder` 下载到
-     `<数据目录>/updates/<版本号>/`：Windows 下载 `ShellAX-Setup-x64.exe`，macOS 下载 `ShellAX-macos-aarch64.zip`
+     `<数据目录>/updates/<版本号>/`：Windows 下载 `ShellAX-v<版本>-Setup-x64.exe`，macOS 下载 `ShellAX-v<版本>-macos-aarch64.zip`
      （release 地址里的 `.dmg` 自动换成 `.zip`，便于直接替换 .app）。
    - 下载完成后用同一个 release 的 `SHA256SUMS.txt` 校验；自定义 `update_url` 的 manifest 带 `sha256` 字段时用该字段。
      不一致会删除文件并提示原因。所以 **`SHA256SUMS.txt` 必须和安装包一起上传**。

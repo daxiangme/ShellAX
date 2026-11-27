@@ -117,10 +117,10 @@ SFTP 在独立标签页中打开，两侧各自选择“本机”或任一已保
 ## 安装
 
 ### Windows
-从发布页下载 `ShellAX-Setup-x64.exe`（安装包）或 `ShellAX-portable-x64.zip`（便携版）。安装包未做代码签名，SmartScreen 可能提示“已保护你的电脑”，点“更多信息 → 仍要运行”。
+从发布页下载 `ShellAX-v<版本>-Setup-x64.exe`（安装包）或 `ShellAX-v<版本>-portable-x64.zip`（便携版）。安装包未做代码签名，SmartScreen 可能提示“已保护你的电脑”，点“更多信息 → 仍要运行”。
 
 ### Mac
-打开 `ShellAX-macos-aarch64.dmg`（或使用同名 `.zip`），把 ShellAX 拖到 Applications。应用仅做 ad-hoc 签名、未经公证，首次打开若提示“无法验证开发者”：
+打开 `ShellAX-v<版本>-macos-aarch64.dmg`（或使用同名 `.zip`），把 ShellAX 拖到 Applications。应用仅做 ad-hoc 签名、未经公证，首次打开若提示“无法验证开发者”：
 - 在“应用程序”中右键 ShellAX →“打开”；或
 - “系统设置 → 隐私与安全性”中点击“仍要打开”；或
 - 终端执行 `xattr -dr com.apple.quarantine /Applications/ShellAX.app`。

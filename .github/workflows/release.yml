@@ -38,8 +38,8 @@ jobs:
         with:
           name: windows
           path: |
-            dist/ShellAX-Setup-x64.exe
-            dist/ShellAX-portable-x64.zip
+            dist/ShellAX-*-Setup-x64.exe
+            dist/ShellAX-*-portable-x64.zip
 
   macos:
     runs-on: macos-15
@@ -85,7 +85,9 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$APP"
           # 拖拽安装布局：ShellAX.app + Applications 快捷方式
           brew install create-dmg || true
-          DMG=dist/ShellAX-macos-aarch64.dmg
+          VER_TAG="v${VER}"
+          DMG="dist/ShellAX-${VER_TAG}-macos-aarch64.dmg"
+          ZIP="ShellAX-${VER_TAG}-macos-aarch64.zip"
           STAGE=$(mktemp -d); ditto "$APP" "$STAGE/ShellAX.app"
           ok=0
           for i in 1 2 3 4 5; do
@@ -114,13 +116,13 @@ jobs:
           test -d "$MNT/ShellAX.app" && test -L "$MNT/Applications"
           codesign --verify --deep --strict "$MNT/ShellAX.app"
           for i in 1 2 3 4 5; do hdiutil detach "$MNT" && break || sleep 5; done
-          (cd dist && ditto -c -k --keepParent ShellAX.app ShellAX-macos-aarch64.zip)
+          (cd dist && ditto -c -k --keepParent ShellAX.app "$ZIP")
       - uses: actions/upload-artifact@v4
         with:
           name: macos
           path: |
-            dist/ShellAX-macos-aarch64.dmg
-            dist/ShellAX-macos-aarch64.zip
+            dist/ShellAX-*-macos-aarch64.dmg
+            dist/ShellAX-*-macos-aarch64.zip
 
   publish:
     needs: [windows, macos]
@@ -140,9 +142,9 @@ jobs:
           set -euo pipefail
           python3 tools/release_notes.py "$TAG" changelog.md
           {
-            echo "### 下载 / Downloads"
-            echo "- Windows x64：\`ShellAX-Setup-x64.exe\`（安装包）或 \`ShellAX-portable-x64.zip\`（便携版）"
-            echo "- macOS Apple Silicon：\`ShellAX-macos-aarch64.dmg\` 或 \`.zip\`"
+            echo "### 下载 / Downloads（${TAG}）"
+            echo "- Windows x64：\`ShellAX-${TAG}-Setup-x64.exe\`（安装包）或 \`ShellAX-${TAG}-portable-x64.zip\`（便携版）"
+            echo "- macOS Apple Silicon：\`ShellAX-${TAG}-macos-aarch64.dmg\` 或 \`ShellAX-${TAG}-macos-aarch64.zip\`"
             echo
             echo "### 注意 / Notes"
             echo "- macOS：打开 dmg 后把 ShellAX 拖到 Applications。应用仅做 ad-hoc 签名、未公证，首次打开若提示“无法验证”，请在“应用程序”里右键 ShellAX →“打开”，或到“系统设置 → 隐私与安全性”点“仍要打开”，或执行 \`xattr -dr com.apple.quarantine /Applications/ShellAX.app\`。"

@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Package the native Windows x64 build of ShellAX into an NSIS installer plus a portable zip.
 
@@ -113,7 +113,10 @@ try {
     Copy-Item (Join-Path $root 'docs\WINDOWS_TEST.md') $stage
 
     # ---- installer -------------------------------------------------------------------------------------
-    $setup = Join-Path $Out 'ShellAX-Setup-x64.exe'
+    $verTag = "v$version"
+    $setupName = "ShellAX-$verTag-Setup-x64.exe"
+    $zipName = "ShellAX-$verTag-portable-x64.zip"
+    $setup = Join-Path $Out $setupName
     Remove-Item $setup -ErrorAction SilentlyContinue
     Step "makensis -> $setup"
     # NSIS resolves shellax.ico relative to the working directory, so run it from packaging\windows.
@@ -127,7 +130,7 @@ try {
     if ($rc -ne 0) { Fail "makensis failed with exit code $rc" }
 
     # ---- portable zip ----------------------------------------------------------------------------------
-    $zip = Join-Path $Out 'ShellAX-portable-x64.zip'
+    $zip = Join-Path $Out $zipName
     Remove-Item $zip -ErrorAction SilentlyContinue
     $bundle = Join-Path $stage 'ShellAX'
     New-Item -ItemType Directory -Path $bundle | Out-Null
@@ -146,7 +149,7 @@ Copy-Item (Join-Path $root 'docs\WINDOWS_TEST.md') $Out -Force
 
 # ---- checksums -----------------------------------------------------------------------------------------
 Step 'writing SHA256SUMS.txt'
-$lines = foreach ($name in 'ShellAX-Setup-x64.exe', 'ShellAX-portable-x64.zip') {
+$lines = foreach ($name in $setupName, $zipName) {
     $h = (Get-FileHash (Join-Path $Out $name) -Algorithm SHA256).Hash.ToLower()
     "$h  $name"
 }

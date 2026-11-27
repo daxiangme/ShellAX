@@ -1,0 +1,62 @@
+name: ✨ 功能建议
+description: 为 ShellAX 提出新能力、交互优化或平台适配建议
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        欢迎提出改进建议！ShellAX 是一款用 Rust + GPUI 编写的跨平台终端 / SSH 与开发运维工作台。
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 涉及平台
+      options:
+        - 全平台（macOS & Windows & Linux）
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+
+  - type: dropdown
+    id: module
+    attributes:
+      label: 涉及模块
+      options:
+        - 终端 / SSH / 主机管理
+        - SFTP 文件管理
+        - 数据库 / 数据库 MCP
+        - Redis / Docker / 端口转发 / Homebrew
+        - 内置小工具 / 扩展包
+        - AI 助手 / 外部 Agent / 权限与审计
+        - 界面 / 主题 / 设置 / 体验优化
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 使用场景与需求描述
+      description: 你在什么场景下遇到了不便？希望 ShellAX 提供什么能力？
+      placeholder: 请清晰描述使用场景与期望效果...
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: 期望的交互或实现思路（可选）
+      description: 如有参考产品、交互草图或实现想法，欢迎补充
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已确认暂无重复的功能建议 Issue
+          required: true

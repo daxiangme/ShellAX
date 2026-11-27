@@ -170,11 +170,17 @@ pub fn check_github(channel: &str) -> anyhow::Result<Option<Manifest>> {
     ))
 }
 
-/// 本平台安装包的固定文件名（与 pick_asset 的优先项一致）。
-fn asset_name(os: &str, arch: &str) -> Option<&'static str> {
+/// 本平台安装包的带版本号文件名（与 pick_asset 的优先项一致）。
+fn asset_name(tag: &str, os: &str, arch: &str) -> Option<String> {
+    let tag = tag.trim();
+    let ver_tag = if tag.starts_with('v') {
+        tag.to_string()
+    } else {
+        format!("v{tag}")
+    };
     match (os, arch) {
-        ("windows", _) => Some("ShellAX-Setup-x64.exe"),
-        ("macos", "aarch64") => Some("ShellAX-macos-aarch64.dmg"),
+        ("windows", _) => Some(format!("ShellAX-{ver_tag}-Setup-x64.exe")),
+        ("macos", "aarch64") => Some(format!("ShellAX-{ver_tag}-macos-aarch64.dmg")),
         _ => None,
     }
 }
@@ -195,7 +201,7 @@ fn manifest_from_tag(tag: &str, os: &str, arch: &str) -> Option<Manifest> {
         return None;
     }
     let page = format!("https://github.com/{REPO}/releases/tag/{tag}");
-    let url = asset_name(os, arch)
+    let url = asset_name(tag, os, arch)
         .map(|n| format!("https://github.com/{REPO}/releases/download/{tag}/{n}"))
         .unwrap_or_else(|| page.clone());
     Some(Manifest {
@@ -358,6 +364,32 @@ mod tests {
         assert_eq!(
             pick_asset(&assets, "macos", "aarch64").unwrap().name,
             "ShellAX-macos-aarch64.dmg"
+        );
+        let versioned = vec![
+            a("ShellAX-v1.3.20-macos-aarch64.dmg"),
+            a("ShellAX-v1.3.20-portable-x64.zip"),
+            a("ShellAX-v1.3.20-Setup-x64.exe"),
+        ];
+        assert_eq!(
+            pick_asset(&versioned, "windows", "x86_64").unwrap().name,
+            "ShellAX-v1.3.20-Setup-x64.exe"
+        );
+        assert_eq!(
+            pick_asset(&versioned, "macos", "aarch64").unwrap().name,
+            "ShellAX-v1.3.20-macos-aarch64.dmg"
+        );
+        assert_eq!(
+            asset_name("v1.3.20", "windows", "x86_64").as_deref(),
+            Some("ShellAX-v1.3.20-Setup-x64.exe")
+        );
+        assert_eq!(
+            asset_name("1.3.20", "macos", "aarch64").as_deref(),
+            Some("ShellAX-v1.3.20-macos-aarch64.dmg")
+        );
+        let m = manifest_from_tag("v99.0.0", "macos", "aarch64").unwrap();
+        assert_eq!(
+            m.url,
+            format!("https://github.com/{REPO}/releases/download/v99.0.0/ShellAX-v99.0.0-macos-aarch64.dmg")
         );
         assert!(pick_asset(&assets, "linux", "x86_64").is_none());
         assert_eq!(url_for("x/{channel}", "weird"), "x/stable");

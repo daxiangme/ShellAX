@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 📦 下载最新版本 / 查看更新日志
+    url: https://github.com/daxiangme/ShellAX/releases
+    about: 提交问题前，请先确认是否已升级至 GitHub Releases 最新版本

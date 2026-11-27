@@ -1,0 +1,84 @@
+name: 🐛 Bug 反馈
+description: 反馈 ShellAX 运行异常、崩溃、终端/SSH、SFTP、数据库、Redis、Docker 或界面展示问题
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！请按以下格式补充信息以便快速定位问题。
+        > **隐私提醒**：提交日志或截图前，请务必隐去真实主机 IP、SSH 密钥、数据库账号密码、API Key 及 Token 等敏感信息（Windows 日志位于 `%LOCALAPPDATA%\shellax\logs\shellax.log`）。
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统
+      description: 请选择出现问题的系统环境
+      options:
+        - Windows 11 (x64)
+        - Windows 10 (x64)
+        - macOS (Apple Silicon)
+        - Linux（源码构建）
+        - 其他（请在下方说明）
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: ShellAX 版本
+      description: 可在「设置 → 通用 → 更新」或「设置 → 关于」查看
+      placeholder: 例如：v1.3.19
+    validations:
+      required: true
+
+  - type: dropdown
+    id: module
+    attributes:
+      label: 涉及模块
+      description: 出现问题时正在使用的功能模块
+      options:
+        - 终端 / SSH / 命令建议
+        - SFTP 文件管理 / 目录同步
+        - 数据库 / 数据库 MCP
+        - Redis
+        - Docker
+        - Homebrew (macOS)
+        - 端口转发
+        - 内置小工具 / 扩展包
+        - AI 助手 / 外部 Agent / 权限与审计
+        - 界面 / 主题 / 设置 / 自动更新
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述与复现步骤
+      description: 请描述实际表现、预期行为以及稳定复现的步骤
+      placeholder: |
+        1. 点击了「...」
+        2. 出现异常表现：「...」
+        3. 预期行为：「...」
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 报错信息 / 脱敏日志 / 截图（可选）
+      description: 可直接粘贴完整报错文案、脱敏后的日志片段或拖入截图
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已确认在最新发行版中仍存在该问题，且已搜索过历史 Issues
+          required: true
+        - label: 我已确认内容与截图中不包含真实主机密码、SSH 私钥、API Key 等隐私信息
+          required: true
