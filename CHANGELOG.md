@@ -4,6 +4,21 @@
 
 新版本加在最上方。节标题与 `Cargo.toml` 的版本号相同，写成 `## 1.3.7`；Git 标签在版本号前加 `v`，写成 `v1.3.7`。条目有对应的 GitHub issue 时，在末尾写上编号，例如 `#12`。
 
+## 1.3.20
+
+### 新增与优化
+
+- **Agent 工作台底部状态栏与会话列表全面重构**：
+  - **上下文去圆环化**：将底部状态栏与左侧会话列表中的迷你圆环替换为纯 `div` 绘制的**水平微进度条**（`ui::micro_bar`），视觉辨识度更高并与「上下文构成」弹窗分段条风格统一；会话列表中的上下文条移至第二行右侧（对齐时间下方），为会话标题留出更宽裕空间。
+  - **订阅额度与 5h 用量展示（优先 Antigravity，兼容 Claude Code / Codex）**：
+    - 接入 Antigravity 官方只读命令 `agy -p "/usage" --output-format json`，后台异步获取 `Gemini Models` 与 `Claude and GPT models` 分组的 **5h / Weekly 剩余百分比与重置倒计时**，底栏自动匹配当前模型分组展示剩余微进度条，点击弹出「订阅额度与用量」卡片（支持手动刷新与近 5h/24h 本地 Token 汇总）。
+    - 原生解析 Codex JSONL `rate_limits`（5h / 7d），并支持 Claude Code `/usage` 终端状态抓取。
+    - **自动区分订阅与 API 模式**：检测 Claude（`ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` / `apiKeyHelper`）、Codex（`OPENAI_API_KEY` / 自定义 `base_url`）及 Antigravity（`GEMINI_API_KEY` / `authMethod`）的 API 调用配置；API 模式下自动隐藏订阅额度条并跳过配额轮询。
+  - **模型、速度与服务商合一弹窗**：将原底部栏分散的模型名、输出速率与服务商状态合并为一个紧凑可点击的模型徽标（运行中显示旋转态），点击弹出模型详情卡，集中展示服务商、计费方式（订阅 / API）、模型 ID、上下文窗口、输出速度（`tok/s` 及上轮输出 token/耗时）与模型简介。
+  - **底部栏 Git 分支提交记录弹窗**：点击底部栏分支名可弹出当前仓库的 Git 提交记录卡片，展示工作区未提交文件数与最近 20 条 commit（短哈希、标题、作者、引用标签、相对时间），支持手动刷新及点击复制 commit hash。
+- **修复 `/clear` 后上下文默认窗口回落 200K 的问题**：
+  - 当会话刚执行 `/clear` 尚未产生新回复且无明确窗口元数据时，上下文默认窗口调整为 `1M`（有明确窗口大小的模型仍按实际窗口显示）。
+
 ## 1.3.19
 
 ### 新增与优化

@@ -126,6 +126,80 @@ pub fn git_current_branch(dir: &Path) -> Option<String> {
     }
 }
 
+/// One commit row for the Agent bottom-bar Git log popover.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitCommitEntry {
+    pub short_hash: String,
+    pub full_hash: String,
+    pub subject: String,
+    pub author: String,
+    pub timestamp: i64,
+    pub refs: String,
+}
+
+/// Snapshot of recent commits and working-tree dirty count for a git directory.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GitLogSnapshot {
+    pub branch: String,
+    pub dirty_count: usize,
+    pub commits: Vec<GitCommitEntry>,
+}
+
+/// Fetch up to `limit` recent commits and dirty file count for `dir`.
+pub fn git_recent_commits(dir: &Path, limit: usize) -> Option<GitLogSnapshot> {
+    let branch = git_current_branch(dir)?;
+    let lim = limit.clamp(1, 50).to_string();
+    let out = git_cmd(dir, false)
+        .args([
+            "log",
+            "-n",
+            &lim,
+            "--pretty=format:%h%x1f%H%x1f%s%x1f%an%x1f%ct%x1f%D",
+        ])
+        .output()
+        .ok()?;
+    let mut commits = Vec::new();
+    if out.status.success() {
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            let mut parts = line.split('\x1f');
+            let Some(short_hash) = parts.next().filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            let full_hash = parts.next().unwrap_or(short_hash);
+            let subject = parts.next().unwrap_or("");
+            let author = parts.next().unwrap_or("");
+            let timestamp = parts.next().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+            let refs = parts.next().unwrap_or("").trim();
+            commits.push(GitCommitEntry {
+                short_hash: short_hash.to_string(),
+                full_hash: full_hash.to_string(),
+                subject: subject.to_string(),
+                author: author.to_string(),
+                timestamp,
+                refs: refs.to_string(),
+            });
+        }
+    }
+    let dirty_count = git_cmd(dir, false)
+        .args(["status", "--porcelain"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .count()
+        })
+        .unwrap_or(0);
+    Some(GitLogSnapshot {
+        branch,
+        dirty_count,
+        commits,
+    })
+}
+
 /// Zero-subprocess git toplevel lookup for UI render paths (walks `.git` ancestors + 10s TTL cache).
 /// Avoids `CreateProcessW("git.exe")` stalls on Windows during scrolling/rendering.
 pub fn fast_git_toplevel(dir: &Path) -> Option<PathBuf> {

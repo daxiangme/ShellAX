@@ -16,7 +16,386 @@ use serde_json::Value;
 const HEAD_BYTES: u64 = 64 * 1024;
 const TAIL_BYTES: u64 = 128 * 1024;
 const TAIL_EXPAND_BYTES: [u64; 2] = [512 * 1024, 2 * 1024 * 1024];
-const CACHE_VERSION: u32 = 4;
+const CACHE_VERSION: u32 = 5;
+
+/// One subscription quota window (e.g. 5-hour rolling window or 7-day weekly window).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QuotaWindow {
+    /// Short window label (`"5h"`, `"7d"`, `"quota"`).
+    pub label: String,
+    /// Used percentage (`0..=100`).
+    pub used_pct: u8,
+    /// Optional unix timestamp (seconds) when this window resets.
+    #[serde(default)]
+    pub resets_at: Option<i64>,
+}
+
+impl QuotaWindow {
+    pub fn frac(&self) -> f32 {
+        (self.used_pct.min(100) as f32) / 100.0
+    }
+}
+
+/// One model-group quota breakdown (e.g. Antigravity "Gemini Models" vs "Claude and GPT models").
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QuotaGroup {
+    pub name: String,
+    pub windows: Vec<QuotaWindow>,
+}
+
+/// Structured subscription quota snapshot (e.g. Antigravity `/usage`, Codex `rate_limits`, or screen-scraped quota).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubscriptionQuota {
+    #[serde(default)]
+    pub plan: Option<String>,
+    pub primary: QuotaWindow,
+    #[serde(default)]
+    pub secondary: Option<QuotaWindow>,
+    #[serde(default)]
+    pub groups: Vec<QuotaGroup>,
+    #[serde(default)]
+    pub updated_at: i64,
+}
+
+/// Aggregated local token usage over a rolling time window (fallback when CLI has no quota API).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LocalUsageWindow {
+    pub input_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub output_tokens: u64,
+    pub turns: u32,
+    pub sessions: u32,
+}
+
+impl LocalUsageWindow {
+    pub fn total_tokens(&self) -> u64 {
+        self.input_tokens
+            .saturating_add(self.cache_read_tokens)
+            .saturating_add(self.output_tokens)
+    }
+}
+
+/// Billing / auth mode detected for a coding-agent CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BillingMode {
+    /// Consumer subscription plan (e.g. Antigravity consumer OAuth, Claude Pro/Max, Codex Plus/Pro).
+    Subscription,
+    /// Direct API key / custom base URL / third-party proxy (no subscription quota).
+    Api,
+    /// Unknown (only display quota if explicitly reported).
+    Unknown,
+}
+
+fn has_non_empty_env(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .is_some_and(|v| !v.trim().is_empty())
+}
+
+fn claude_settings_uses_api(v: &Value) -> bool {
+    if v.get("apiKeyHelper")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.trim().is_empty())
+    {
+        return true;
+    }
+    if let Some(env) = v.get("env").and_then(Value::as_object) {
+        for key in [
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+        ] {
+            if env
+                .get(key)
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.trim().is_empty())
+            {
+                return true;
+            }
+        }
+        for flag in [
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+            "CLAUDE_CODE_USE_FOUNDRY",
+        ] {
+            if env
+                .get(flag)
+                .and_then(Value::as_str)
+                .is_some_and(|s| matches!(s.trim(), "1" | "true" | "TRUE"))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn parse_codex_toml_uses_api(src: &str) -> bool {
+    for line in src.lines() {
+        let t = line.split('#').next().unwrap_or("").trim();
+        if let Some((k, v)) = t.split_once('=') {
+            let key = k.trim();
+            let val = v.trim().trim_matches(['"', '\'']).trim();
+            if key == "model_provider" && !val.is_empty() && !val.eq_ignore_ascii_case("openai") {
+                return true;
+            }
+            if key == "base_url" && !val.is_empty() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn parse_codex_toml_model(src: &str) -> Option<String> {
+    let mut in_table = false;
+    for line in src.lines() {
+        let t = line.split('#').next().unwrap_or("").trim();
+        if t.starts_with('[') {
+            in_table = true;
+            continue;
+        }
+        if in_table {
+            continue;
+        }
+        if let Some((k, v)) = t.split_once('=') {
+            if k.trim() == "model" {
+                let val = v.trim().trim_matches(['"', '\'']).trim();
+                if !val.is_empty() {
+                    return Some(val.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Detect whether `agent` is currently configured for subscription or direct API / proxy usage.
+/// Cached by config file `(mtime, size)` so UI renders incur zero redundant disk I/O.
+pub fn detect_billing_mode(agent: &str) -> BillingMode {
+    use std::sync::{Mutex, OnceLock};
+    type Stamp = Option<(i64, u64)>;
+    static CACHE: OnceLock<Mutex<HashMap<String, ((Stamp, Stamp), BillingMode)>>> = OnceLock::new();
+
+    let aid = crate::agent::normalize_id(agent);
+    match aid.as_str() {
+        "claude" => {
+            if has_non_empty_env("ANTHROPIC_API_KEY")
+                || has_non_empty_env("ANTHROPIC_AUTH_TOKEN")
+                || has_non_empty_env("ANTHROPIC_BASE_URL")
+                || has_non_empty_env("CLAUDE_CODE_USE_BEDROCK")
+                || has_non_empty_env("CLAUDE_CODE_USE_VERTEX")
+            {
+                return BillingMode::Api;
+            }
+            let Some(home) = home_dir() else {
+                return BillingMode::Subscription;
+            };
+            let base = std::env::var_os("CLAUDE_CONFIG_DIR")
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(".claude"));
+            let p1 = base.join("settings.json");
+            let p2 = base.join("settings.local.json");
+            let stamps = (file_stamp(&p1), file_stamp(&p2));
+            let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+            if let Ok(g) = cache.lock() {
+                if let Some((cs, mode)) = g.get(&aid) {
+                    if *cs == stamps {
+                        return *mode;
+                    }
+                }
+            }
+            let mut is_api = false;
+            for p in [&p1, &p2] {
+                if let Ok(text) = std::fs::read_to_string(p) {
+                    if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                        if claude_settings_uses_api(&v) {
+                            is_api = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            let mode = if is_api {
+                BillingMode::Api
+            } else {
+                BillingMode::Subscription
+            };
+            if let Ok(mut g) = cache.lock() {
+                g.insert(aid, (stamps, mode));
+            }
+            mode
+        }
+        "agy" => {
+            if has_non_empty_env("GEMINI_API_KEY") || has_non_empty_env("GOOGLE_API_KEY") {
+                return BillingMode::Api;
+            }
+            let Some(home) = AntigravityProvider::default().agy_home() else {
+                return BillingMode::Subscription;
+            };
+            let p1 = home.join("settings.json");
+            let stamps = (file_stamp(&p1), None);
+            let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+            if let Ok(g) = cache.lock() {
+                if let Some((cs, mode)) = g.get(&aid) {
+                    if *cs == stamps {
+                        return *mode;
+                    }
+                }
+            }
+            let is_api = std::fs::read_to_string(&p1)
+                .ok()
+                .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                .and_then(|v| {
+                    v.get("authMethod")
+                        .and_then(Value::as_str)
+                        .map(|m| m.to_ascii_lowercase())
+                })
+                .is_some_and(|m| m.contains("api") || m.contains("vertex"));
+            let mode = if is_api {
+                BillingMode::Api
+            } else {
+                BillingMode::Subscription
+            };
+            if let Ok(mut g) = cache.lock() {
+                g.insert(aid, (stamps, mode));
+            }
+            mode
+        }
+        "codex" => {
+            if has_non_empty_env("OPENAI_API_KEY") || has_non_empty_env("OPENAI_BASE_URL") {
+                return BillingMode::Api;
+            }
+            let Some(home) = CodexProvider::default().codex_home() else {
+                return BillingMode::Subscription;
+            };
+            let p1 = home.join("config.toml");
+            let stamps = (file_stamp(&p1), None);
+            let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+            if let Ok(g) = cache.lock() {
+                if let Some((cs, mode)) = g.get(&aid) {
+                    if *cs == stamps {
+                        return *mode;
+                    }
+                }
+            }
+            let is_api = std::fs::read_to_string(&p1)
+                .ok()
+                .is_some_and(|s| parse_codex_toml_uses_api(&s));
+            let mode = if is_api {
+                BillingMode::Api
+            } else {
+                BillingMode::Subscription
+            };
+            if let Ok(mut g) = cache.lock() {
+                g.insert(aid, (stamps, mode));
+            }
+            mode
+        }
+        _ => BillingMode::Unknown,
+    }
+}
+
+/// Read default model from `~/.claude/settings.json` / `settings.local.json` (cached by mtime/size)
+/// so fresh Claude Code sessions before turn 1 display the configured model.
+pub fn load_claude_settings_model() -> Option<String> {
+    use std::sync::{Mutex, OnceLock};
+    type Stamp = Option<(i64, u64)>;
+    static CACHE: OnceLock<Mutex<Option<((Stamp, Stamp), Option<String>)>>> = OnceLock::new();
+
+    let home = home_dir()?;
+    let base = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".claude"));
+    let p1 = base.join("settings.json");
+    let p2 = base.join("settings.local.json");
+    let stamps = (file_stamp(&p1), file_stamp(&p2));
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(g) = cache.lock() {
+        if let Some((cs, m)) = g.as_ref() {
+            if *cs == stamps {
+                return m.clone();
+            }
+        }
+    }
+    let mut model: Option<String> = None;
+    for p in [&p2, &p1] {
+        if let Ok(text) = std::fs::read_to_string(p) {
+            if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                if let Some(m) = v
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    model = Some(m.to_string());
+                    break;
+                }
+                if let Some(env) = v.get("env").and_then(Value::as_object) {
+                    for k in [
+                        "ANTHROPIC_MODEL",
+                        "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+                        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                        "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+                        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                    ] {
+                        if let Some(m) = env
+                            .get(k)
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                        {
+                            model = Some(m.to_string());
+                            break;
+                        }
+                    }
+                    if model.is_some() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(mut g) = cache.lock() {
+        *g = Some((stamps, model.clone()));
+    }
+    model
+}
+
+/// Read default model from `~/.codex/config.toml` (cached by mtime/size).
+pub fn load_codex_config_model() -> Option<String> {
+    use std::sync::{Mutex, OnceLock};
+    type Stamp = Option<(i64, u64)>;
+    static CACHE: OnceLock<Mutex<Option<(Stamp, Option<String>)>>> = OnceLock::new();
+
+    let home = CodexProvider::default().codex_home()?;
+    let p1 = home.join("config.toml");
+    let stamp = file_stamp(&p1);
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(g) = cache.lock() {
+        if let Some((cs, m)) = g.as_ref() {
+            if *cs == stamp {
+                return m.clone();
+            }
+        }
+    }
+    let model = std::fs::read_to_string(&p1)
+        .ok()
+        .and_then(|s| parse_codex_toml_model(&s));
+    if let Ok(mut g) = cache.lock() {
+        *g = Some((stamp, model.clone()));
+    }
+    model
+}
+
+/// Rolling 5h and 24h local usage summary aggregated from an agent's local transcripts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LocalUsageSummary {
+    pub win_5h: LocalUsageWindow,
+    pub win_24h: LocalUsageWindow,
+}
 
 /// Structured context-window usage derived from a session transcript.
 #[derive(Debug, Clone, PartialEq)]
@@ -63,9 +442,30 @@ pub struct SessionMeta {
     /// Target session ID if the transcript ended with a `continued-in` handoff.
     #[serde(default)]
     pub continued_in: Option<String>,
+    /// Latest model identifier observed in the transcript (e.g. `"gemini-4-neon-high"`).
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Latest turn output throughput in tenths of tokens/sec (`645` = `64.5 tok/s`).
+    #[serde(default)]
+    pub last_speed_tps_x10: Option<u32>,
+    /// Output token count of the turn used to compute `last_speed_tps_x10`.
+    #[serde(default)]
+    pub last_output_tokens: Option<u64>,
+    /// Elapsed milliseconds of the turn used to compute `last_speed_tps_x10`.
+    #[serde(default)]
+    pub last_turn_ms: Option<u64>,
+    /// Latest subscription quota snapshot observed in the transcript (e.g. Codex `rate_limits`).
+    #[serde(default)]
+    pub quota: Option<SubscriptionQuota>,
 }
 
 impl SessionMeta {
+    /// Latest turn output throughput in tokens/sec, if available.
+    pub fn speed_tps(&self) -> Option<f32> {
+        self.last_speed_tps_x10
+            .filter(|&v| v > 0)
+            .map(|v| v as f32 / 10.0)
+    }
     /// Rich context-window usage detail derived from transcript token accounting.
     pub fn context_detail(&self) -> Option<ContextDetail> {
         let used = self.ctx_used?;
@@ -73,12 +473,8 @@ impl SessionMeta {
             if !self.ctx_reset {
                 return None;
             }
-            let win = self.ctx_window.unwrap_or(200_000).max(1);
-            let tooltip = if let Some(w) = self.ctx_window.filter(|&w| w > 0) {
-                format!("ctx 0% (0 / {} tokens)", crate::agent::format_tokens(w))
-            } else {
-                "ctx 0%".to_string()
-            };
+            let win = self.ctx_window.unwrap_or(1_000_000).max(1);
+            let tooltip = format!("ctx 0% (0 / {} tokens)", crate::agent::format_tokens(win));
             return Some(ContextDetail {
                 frac: 0.0,
                 used: 0,
@@ -88,7 +484,7 @@ impl SessionMeta {
                 tooltip,
             });
         }
-        let mut win = self.ctx_window.unwrap_or(200_000).max(1);
+        let mut win = self.ctx_window.unwrap_or(1_000_000).max(1);
         while used > win {
             win = if win < 1_000_000 {
                 1_000_000
@@ -576,6 +972,130 @@ fn parse_iso_secs(ts: &str) -> Option<i64> {
         .map(|dt| dt.timestamp())
 }
 
+fn parse_iso_ms(ts: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .ok()
+        .map(|dt| dt.timestamp_millis())
+}
+
+fn compute_tps_x10(output_tokens: u64, elapsed_ms: u64) -> Option<u32> {
+    if output_tokens == 0 || !(200..=600_000).contains(&elapsed_ms) {
+        return None;
+    }
+    let tps_x10 = ((output_tokens as f64) * 10_000.0 / (elapsed_ms as f64)).round();
+    if !tps_x10.is_finite() || tps_x10 < 1.0 || tps_x10 > 50_000.0 {
+        return None;
+    }
+    Some(tps_x10 as u32)
+}
+
+/// Format a raw model identifier into a compact, readable label for the bottom status bar.
+///
+/// Examples:
+/// - `"gemini-4-neon-high"` -> `"Gemini 4 Neon (High)"`
+/// - `"claude-opus-5-5-high"` -> `"Opus 5.5 (High)"`
+/// - `"claude-sonnet-4-6-20251022"` -> `"Sonnet 4.6"`
+/// - `"gpt-5.3-codex"` -> `"GPT-5.3 Codex"`
+pub fn format_model_short(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    // Strip optional bracketed context window suffix like `[1M]`.
+    let clean = match trimmed.find('[') {
+        Some(i) => trimmed[..i].trim(),
+        None => trimmed,
+    };
+    // Already human-formatted (contains space, e.g. `"Gemini 4 Neon (High)"`).
+    if clean.contains(' ') {
+        return clean.to_string();
+    }
+    let lower = clean.to_ascii_lowercase();
+    let cap_effort = |tok: &str| -> Option<&'static str> {
+        match tok {
+            "low" => Some("Low"),
+            "medium" | "med" => Some("Med"),
+            "high" => Some("High"),
+            "xhigh" => Some("XHigh"),
+            "max" => Some("Max"),
+            _ => None,
+        }
+    };
+    let title_word = |w: &str| -> String {
+        let mut ch = w.chars();
+        match ch.next() {
+            None => String::new(),
+            Some(first) => first.to_uppercase().collect::<String>() + ch.as_str(),
+        }
+    };
+
+    // Strip trailing YYYYMMDD date tag (e.g. `-20251022`).
+    let mut parts: Vec<&str> = lower.split('-').filter(|s| !s.is_empty()).collect();
+    if parts.len() > 2
+        && parts
+            .last()
+            .is_some_and(|p| p.len() == 8 && p.chars().all(|c| c.is_ascii_digit()))
+    {
+        parts.pop();
+    }
+    let effort = parts.last().and_then(|p| cap_effort(p));
+    if effort.is_some() && parts.len() > 1 {
+        parts.pop();
+    }
+
+    let base = if parts.first() == Some(&"claude") && parts.len() >= 2 {
+        // claude-opus-5-5 -> Opus 5.5
+        let family = title_word(parts[1]);
+        let ver_parts = &parts[2..];
+        let ver = if ver_parts.len() == 2
+            && ver_parts.iter().all(|s| s.chars().all(|c| c.is_ascii_digit()))
+        {
+            format!("{}.{}", ver_parts[0], ver_parts[1])
+        } else {
+            ver_parts.join(".")
+        };
+        if ver.is_empty() {
+            family
+        } else {
+            format!("{family} {ver}")
+        }
+    } else if parts.first() == Some(&"gemini") {
+        // gemini-4-neon -> Gemini 4 Neon, gemini-pro-orchestrator-neon -> Orchestrator (Neon)
+        if parts.get(1) == Some(&"pro") && parts.get(2) == Some(&"orchestrator") {
+            if let Some(sub) = parts.get(3) {
+                format!("Orchestrator ({})", title_word(sub))
+            } else {
+                "Orchestrator".to_string()
+            }
+        } else {
+            parts.iter().map(|p| title_word(p)).collect::<Vec<_>>().join(" ")
+        }
+    } else if parts.first() == Some(&"gpt") && parts.len() >= 2 {
+        let rest = parts[1..]
+            .iter()
+            .map(|p| {
+                if p.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                    (*p).to_string()
+                } else {
+                    title_word(p)
+                }
+            })
+            .collect::<Vec<_>>();
+        if rest.len() >= 2 {
+            format!("GPT-{} {}", rest[0], rest[1..].join(" "))
+        } else {
+            format!("GPT-{}", rest[0])
+        }
+    } else {
+        clean.to_string()
+    };
+
+    match effort {
+        Some(ef) => format!("{base} ({ef})"),
+        None => base,
+    }
+}
+
 #[derive(Default, Clone)]
 struct CtxParseState {
     used: Option<u64>,
@@ -586,6 +1106,12 @@ struct CtxParseState {
     reset: bool,
     continued_in: Option<String>,
     saw_event: bool,
+    model: Option<String>,
+    last_speed_tps_x10: Option<u32>,
+    last_output_tokens: Option<u64>,
+    last_turn_ms: Option<u64>,
+    prev_ts_ms: Option<i64>,
+    quota: Option<SubscriptionQuota>,
 }
 
 struct ClaudeContextMarkdown {
@@ -729,6 +1255,7 @@ fn inspect_claude_ctx(v: &Value, st: &mut CtxParseState) {
                     return;
                 }
                 if let Some(model) = model.filter(|s| !s.is_empty()) {
+                    st.model = Some(model.to_string());
                     let inferred = claude_model_context_window(model);
                     let ml = model.to_ascii_lowercase();
                     let kept_explicit = st.explicit_window.as_ref().and_then(|(em, ew)| {
@@ -759,19 +1286,81 @@ fn inspect_claude_ctx(v: &Value, st: &mut CtxParseState) {
                         st.reset = false;
                         st.saw_event = true;
                     }
+                    let out_tok = u.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
+                    if out_tok > 0 {
+                        if let (Some(cur_ms), Some(prev_ms)) = (
+                            v.get("timestamp").and_then(Value::as_str).and_then(parse_iso_ms),
+                            st.prev_ts_ms,
+                        ) {
+                            if cur_ms > prev_ms {
+                                let dt_ms = (cur_ms - prev_ms) as u64;
+                                if let Some(tps_x10) = compute_tps_x10(out_tok, dt_ms) {
+                                    st.last_speed_tps_x10 = Some(tps_x10);
+                                    st.last_output_tokens = Some(out_tok);
+                                    st.last_turn_ms = Some(dt_ms);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
         _ => {}
     }
+    if let Some(ts_ms) = v
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(parse_iso_ms)
+    {
+        st.prev_ts_ms = Some(ts_ms);
+    }
+}
+
+fn parse_codex_quota_window(v: &Value, default_label: &str) -> Option<QuotaWindow> {
+    let pct_raw = v.get("used_percent").and_then(Value::as_f64)?;
+    if !pct_raw.is_finite() {
+        return None;
+    }
+    let used_pct = pct_raw.round().clamp(0.0, 100.0) as u8;
+    let label = match v.get("window_minutes").and_then(Value::as_u64) {
+        Some(m) if m >= 24 * 60 => format!("{}d", (m + 720) / (24 * 60)),
+        Some(m) if m >= 60 => format!("{}h", (m + 30) / 60),
+        Some(m) if m > 0 => format!("{m}m"),
+        _ => default_label.to_string(),
+    };
+    let resets_at = v
+        .get("resets_at")
+        .and_then(|r| {
+            r.as_i64()
+                .or_else(|| r.as_str().and_then(parse_iso_secs))
+        });
+    Some(QuotaWindow {
+        label,
+        used_pct,
+        resets_at,
+    })
 }
 
 fn inspect_codex_ctx(v: &Value, st: &mut CtxParseState) {
+    let cur_ts_ms = v
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(parse_iso_ms);
     match v.get("type").and_then(Value::as_str) {
         Some("compacted") => {
             st.used = None;
             st.reset = true;
             st.saw_event = true;
+        }
+        Some("turn_context") => {
+            if let Some(m) = v
+                .get("payload")
+                .and_then(|p| p.get("model"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                st.model = Some(m.to_string());
+            }
         }
         Some("event_msg") => {
             if let Some(p) = v.get("payload") {
@@ -790,18 +1379,55 @@ fn inspect_codex_ctx(v: &Value, st: &mut CtxParseState) {
                             {
                                 st.window = Some(win);
                             }
-                            if let Some(u) = info
-                                .get("last_token_usage")
-                                .and_then(|t| {
-                                    t.get("input_tokens")
-                                        .or_else(|| t.get("total_tokens"))
-                                        .and_then(Value::as_u64)
-                                })
-                                .filter(|&n| n > 0)
-                            {
-                                st.used = Some(u);
-                                st.reset = false;
-                                st.saw_event = true;
+                            if let Some(last_u) = info.get("last_token_usage") {
+                                if let Some(u) = last_u
+                                    .get("input_tokens")
+                                    .or_else(|| last_u.get("total_tokens"))
+                                    .and_then(Value::as_u64)
+                                    .filter(|&n| n > 0)
+                                {
+                                    st.used = Some(u);
+                                    st.reset = false;
+                                    st.saw_event = true;
+                                }
+                                let out_tok = last_u
+                                    .get("output_tokens")
+                                    .and_then(Value::as_u64)
+                                    .unwrap_or(0);
+                                if out_tok > 0 {
+                                    if let (Some(c_ms), Some(p_ms)) = (cur_ts_ms, st.prev_ts_ms) {
+                                        if c_ms > p_ms {
+                                            let dt_ms = (c_ms - p_ms) as u64;
+                                            if let Some(tps_x10) = compute_tps_x10(out_tok, dt_ms) {
+                                                st.last_speed_tps_x10 = Some(tps_x10);
+                                                st.last_output_tokens = Some(out_tok);
+                                                st.last_turn_ms = Some(dt_ms);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(rl) = p.get("rate_limits").filter(|x| x.is_object()) {
+                            let primary = rl
+                                .get("primary")
+                                .and_then(|w| parse_codex_quota_window(w, "5h"));
+                            let secondary = rl
+                                .get("secondary")
+                                .and_then(|w| parse_codex_quota_window(w, "7d"));
+                            if let Some(prim) = primary {
+                                let plan = rl
+                                    .get("plan_type")
+                                    .and_then(Value::as_str)
+                                    .filter(|s| !s.is_empty())
+                                    .map(str::to_string);
+                                st.quota = Some(SubscriptionQuota {
+                                    plan,
+                                    primary: prim,
+                                    secondary,
+                                    groups: Vec::new(),
+                                    updated_at: cur_ts_ms.map(|ms| ms / 1000).unwrap_or_else(now_unix_secs),
+                                });
                             }
                         }
                     }
@@ -810,6 +1436,9 @@ fn inspect_codex_ctx(v: &Value, st: &mut CtxParseState) {
             }
         }
         _ => {}
+    }
+    if let Some(ts_ms) = cur_ts_ms {
+        st.prev_ts_ms = Some(ts_ms);
     }
 }
 
@@ -1168,6 +1797,11 @@ impl HistoryProvider for ClaudeProvider {
             ctx_window: ctx_st.window,
             ctx_reset: ctx_st.reset,
             continued_in: ctx_st.continued_in,
+            model: ctx_st.model,
+            last_speed_tps_x10: ctx_st.last_speed_tps_x10,
+            last_output_tokens: ctx_st.last_output_tokens,
+            last_turn_ms: ctx_st.last_turn_ms,
+            quota: ctx_st.quota,
         })
     }
 }
@@ -1514,6 +2148,11 @@ impl HistoryProvider for CodexProvider {
             ctx_window: ctx_st.window,
             ctx_reset: ctx_st.reset,
             continued_in: None,
+            model: ctx_st.model,
+            last_speed_tps_x10: ctx_st.last_speed_tps_x10,
+            last_output_tokens: ctx_st.last_output_tokens,
+            last_turn_ms: ctx_st.last_turn_ms,
+            quota: ctx_st.quota,
         })
     }
 }
@@ -1650,19 +2289,262 @@ fn agy_transcript_path(home: &Path, id: &str) -> PathBuf {
         .join("transcript.jsonl")
 }
 
-/// Parse context usage `(ctx_used, ctx_window, ctx_reset)` from an Antigravity CLI transcript.
-/// Cached by `(mtime, size)` so repeated history scans incur zero redundant I/O.
-fn parse_antigravity_transcript_ctx(path: &Path) -> (Option<u64>, Option<u64>, bool) {
+/// Telemetry parsed from an Antigravity CLI `transcript.jsonl` tail.
+#[derive(Debug, Clone, Default)]
+struct AgyTranscriptTelemetry {
+    ctx_used: Option<u64>,
+    ctx_window: Option<u64>,
+    ctx_reset: bool,
+    model: Option<String>,
+    last_speed_tps_x10: Option<u32>,
+    last_output_tokens: Option<u64>,
+    last_turn_ms: Option<u64>,
+}
+
+/// Read default model from `~/.gemini/antigravity-cli/settings.json` (cached by mtime/size)
+/// so fresh Antigravity sessions before turn 1 still display the configured model.
+pub fn load_antigravity_settings_model() -> Option<String> {
     use std::sync::{Mutex, OnceLock};
-    type Entry = (i64, u64, Option<u64>, Option<u64>, bool);
+    type Cache = (Option<(i64, u64)>, Option<String>);
+    static CACHE: OnceLock<Mutex<Option<Cache>>> = OnceLock::new();
+
+    let home = std::env::var_os("ANTIGRAVITY_CLI_HOME")
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home_dir().map(|h| h.join(".gemini").join("antigravity-cli")))?;
+    let path = home.join("settings.json");
+    let stamp = file_stamp(&path);
+
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(g) = cache.lock() {
+        if let Some((cs, m)) = g.as_ref() {
+            if *cs == stamp {
+                return m.clone();
+            }
+        }
+    }
+
+    let model = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| {
+            v.get("model")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        });
+    if let Ok(mut g) = cache.lock() {
+        *g = Some((stamp, model.clone()));
+    }
+    model
+}
+
+fn pick_antigravity_group_idx(groups: &[QuotaGroup], active_model: Option<&str>) -> usize {
+    if groups.len() <= 1 {
+        return 0;
+    }
+    let ml = active_model.unwrap_or("").to_ascii_lowercase();
+    let want_3p = ml.contains("claude") || ml.contains("gpt") || ml.contains("opus") || ml.contains("sonnet");
+    groups
+        .iter()
+        .position(|g| {
+            let gl = g.name.to_ascii_lowercase();
+            if want_3p {
+                gl.contains("claude") || gl.contains("gpt")
+            } else {
+                gl.contains("gemini")
+            }
+        })
+        .unwrap_or(0)
+}
+
+/// Re-select `primary` (5h) and `secondary` (7d) from `q.groups` for `active_model`.
+pub fn select_antigravity_quota_for_model(
+    q: &SubscriptionQuota,
+    active_model: Option<&str>,
+) -> SubscriptionQuota {
+    if q.groups.is_empty() {
+        return q.clone();
+    }
+    let idx = pick_antigravity_group_idx(&q.groups, active_model);
+    let grp = &q.groups[idx];
+    let primary = grp
+        .windows
+        .iter()
+        .find(|w| w.label == "5h")
+        .or_else(|| grp.windows.first())
+        .cloned()
+        .unwrap_or_else(|| q.primary.clone());
+    let secondary = grp
+        .windows
+        .iter()
+        .find(|w| w.label != primary.label)
+        .cloned();
+    SubscriptionQuota {
+        plan: Some(grp.name.clone()),
+        primary,
+        secondary,
+        groups: q.groups.clone(),
+        updated_at: q.updated_at,
+    }
+}
+
+/// Parse the structured JSON output of `agy -p "/usage" --output-format json`.
+pub fn parse_antigravity_usage_json(
+    raw: &str,
+    active_model: Option<&str>,
+) -> Option<SubscriptionQuota> {
+    let v: Value = serde_json::from_str(raw.trim()).ok()?;
+    let arr = v
+        .pointer("/command/data/groups")
+        .and_then(Value::as_array)?;
+    let mut groups = Vec::new();
+    for g in arr {
+        let name = g
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("Models")
+            .to_string();
+        let Some(buckets) = g.get("buckets").and_then(Value::as_array) else {
+            continue;
+        };
+        let mut windows = Vec::new();
+        for b in buckets {
+            let Some(rem) = b.get("remaining_fraction").and_then(Value::as_f64) else {
+                continue;
+            };
+            if !rem.is_finite() {
+                continue;
+            }
+            let used_pct = ((1.0 - rem.clamp(0.0, 1.0)) * 100.0).round().clamp(0.0, 100.0) as u8;
+            let raw_win = b
+                .get("window")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let label = match raw_win.as_str() {
+                "5h" | "five_hour" => "5h".to_string(),
+                "weekly" | "7d" => "7d".to_string(),
+                other if !other.is_empty() => other.to_string(),
+                _ => b
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("quota")
+                    .to_string(),
+            };
+            let resets_at = b
+                .get("reset_time")
+                .and_then(Value::as_str)
+                .and_then(parse_iso_secs);
+            windows.push(QuotaWindow {
+                label,
+                used_pct,
+                resets_at,
+            });
+        }
+        // Order 5h first, then 7d/weekly so callers have a predictable layout.
+        windows.sort_by_key(|w| match w.label.as_str() {
+            "5h" => 0,
+            "7d" => 1,
+            _ => 2,
+        });
+        if !windows.is_empty() {
+            groups.push(QuotaGroup { name, windows });
+        }
+    }
+    if groups.is_empty() {
+        return None;
+    }
+    let idx = pick_antigravity_group_idx(&groups, active_model);
+    let grp = &groups[idx];
+    let primary = grp
+        .windows
+        .iter()
+        .find(|w| w.label == "5h")
+        .or_else(|| grp.windows.first())?
+        .clone();
+    let secondary = grp
+        .windows
+        .iter()
+        .find(|w| w.label != primary.label)
+        .cloned();
+    Some(SubscriptionQuota {
+        plan: Some(grp.name.clone()),
+        primary,
+        secondary,
+        groups,
+        updated_at: now_unix_secs(),
+    })
+}
+
+fn find_agy_binary() -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    if let Some(h) = home_dir() {
+        dirs.push(h.join(".local/bin"));
+        dirs.push(h.join(".cargo/bin"));
+        dirs.push(h.join(".npm-global/bin"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        dirs.push(PathBuf::from("/opt/homebrew/bin"));
+        dirs.push(PathBuf::from("/usr/local/bin"));
+    }
+    for d in dirs {
+        let p = d.join("agy");
+        if p.is_file() {
+            return Some(p);
+        }
+        #[cfg(windows)]
+        for ext in ["exe", "cmd", "bat"] {
+            let pw = d.join(format!("agy.{ext}"));
+            if pw.is_file() {
+                return Some(pw);
+            }
+        }
+    }
+    None
+}
+
+/// Query live Antigravity subscription quota via the documented read-only print-mode slash command
+/// `agy -p "/usage" --output-format json` (zero turns, zero quota spend, no conversation created).
+pub fn fetch_antigravity_quota(active_model: Option<&str>) -> Option<SubscriptionQuota> {
+    use std::process::{Command, Stdio};
+    let bin = find_agy_binary()?;
+    let mut cmd = Command::new(bin);
+    cmd.args(["-p", "/usage", "--output-format", "json"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let out = cmd.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    parse_antigravity_usage_json(&text, active_model)
+}
+
+/// Parse context usage, active model, and turn speed from an Antigravity CLI transcript.
+/// Cached by `(mtime, size)` so repeated history scans incur zero redundant I/O.
+fn parse_antigravity_transcript_telemetry(path: &Path) -> AgyTranscriptTelemetry {
+    use std::sync::{Mutex, OnceLock};
+    type Entry = (i64, u64, AgyTranscriptTelemetry);
     static CACHE: OnceLock<Mutex<HashMap<PathBuf, Entry>>> = OnceLock::new();
 
     let Ok(md) = std::fs::metadata(path) else {
-        return (None, None, false);
+        return AgyTranscriptTelemetry::default();
     };
     let size = md.len();
     if size == 0 {
-        return (None, None, false);
+        return AgyTranscriptTelemetry::default();
     }
     let mtime = md
         .modified()
@@ -1673,16 +2555,14 @@ fn parse_antigravity_transcript_ctx(path: &Path) -> (Option<u64>, Option<u64>, b
 
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Ok(g) = cache.lock() {
-        if let Some(&(cm, cs, cu, cw, cr)) = g.get(path) {
-            if cm == mtime && cs == size {
-                return (cu, cw, cr);
+        if let Some((cm, cs, tel)) = g.get(path) {
+            if *cm == mtime && *cs == size {
+                return tel.clone();
             }
         }
     }
 
-    let mut ctx_used: Option<u64> = None;
-    let mut ctx_window: Option<u64> = None;
-    let mut ctx_reset = false;
+    let mut out = AgyTranscriptTelemetry::default();
 
     for &win_bytes in &[TAIL_BYTES, TAIL_EXPAND_BYTES[0], TAIL_EXPAND_BYTES[1]] {
         let Some(lines) = read_tail_lines(path, size, win_bytes) else {
@@ -1692,13 +2572,42 @@ fn parse_antigravity_transcript_ctx(path: &Path) -> (Option<u64>, Option<u64>, b
         let mut u_cur: Option<u64> = None;
         let mut w_cur: Option<u64> = None;
         let mut r_cur = false;
+        let mut m_cur: Option<String> = None;
+
+        // Track latest PLANNER_RESPONSE with output_tokens > 0 and its following step timestamp.
+        let mut pending_pr: Option<(i64, u64, bool)> = None; // (created_ms, out_tok, is_done)
+        let mut best_speed: Option<(u32, u64, u64)> = None; // (tps_x10, out_tok, elapsed_ms)
+
         for line in &lines {
             let Ok(v) = serde_json::from_str::<Value>(line) else {
                 continue;
             };
+            let step_ts_ms = v
+                .get("created_at")
+                .or_else(|| v.get("timestamp"))
+                .and_then(Value::as_str)
+                .and_then(parse_iso_ms);
+
+            // If we have a pending PLANNER_RESPONSE and this subsequent step has a later timestamp,
+            // compute throughput for that planner step.
+            if let (Some((pr_ms, pr_out, _)), Some(next_ms)) = (pending_pr, step_ts_ms) {
+                if next_ms > pr_ms {
+                    let dt_ms = (next_ms - pr_ms) as u64;
+                    if let Some(tps_x10) = compute_tps_x10(pr_out, dt_ms) {
+                        best_speed = Some((tps_x10, pr_out, dt_ms));
+                    }
+                    pending_pr = None;
+                }
+            }
+
             match v.get("type").and_then(Value::as_str) {
                 Some("PLANNER_RESPONSE") => {
-                    if let Some(m) = v.get("model").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                    if let Some(m) = v
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                    {
+                        m_cur = Some(m.to_string());
                         w_cur = Some(agy_model_context_window(m));
                     }
                     let input = v.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
@@ -1712,6 +2621,16 @@ fn parse_antigravity_transcript_ctx(path: &Path) -> (Option<u64>, Option<u64>, b
                         r_cur = false;
                         saw = true;
                     }
+                    let out_tok = v.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
+                    if out_tok > 0 {
+                        if let Some(ts_ms) = step_ts_ms {
+                            let is_done = v
+                                .get("status")
+                                .and_then(Value::as_str)
+                                .is_none_or(|s| s.eq_ignore_ascii_case("DONE"));
+                            pending_pr = Some((ts_ms, out_tok, is_done));
+                        }
+                    }
                 }
                 Some("CHECKPOINT") => {
                     // Compaction checkpoint: discard pre-compact prompt tokens and keep the
@@ -1723,14 +2642,34 @@ fn parse_antigravity_transcript_ctx(path: &Path) -> (Option<u64>, Option<u64>, b
                     u_cur = out;
                     r_cur = true;
                     saw = true;
+                    pending_pr = None;
                 }
                 _ => {}
             }
         }
+
+        // Fallback for the final PLANNER_RESPONSE at the end of a turn (no subsequent GENERIC step):
+        // use transcript file mtime when the step is marked DONE.
+        if let Some((pr_ms, pr_out, true)) = pending_pr {
+            let mtime_ms = mtime.saturating_mul(1000);
+            if mtime_ms > pr_ms {
+                let dt_ms = (mtime_ms - pr_ms) as u64;
+                if let Some(tps_x10) = compute_tps_x10(pr_out, dt_ms) {
+                    best_speed = Some((tps_x10, pr_out, dt_ms));
+                }
+            }
+        }
+
         if saw || win_bytes >= size {
-            ctx_used = u_cur;
-            ctx_window = w_cur;
-            ctx_reset = r_cur;
+            out.ctx_used = u_cur;
+            out.ctx_window = w_cur;
+            out.ctx_reset = r_cur;
+            out.model = m_cur;
+            if let Some((tps_x10, out_tok, dt_ms)) = best_speed {
+                out.last_speed_tps_x10 = Some(tps_x10);
+                out.last_output_tokens = Some(out_tok);
+                out.last_turn_ms = Some(dt_ms);
+            }
             break;
         }
     }
@@ -1739,9 +2678,9 @@ fn parse_antigravity_transcript_ctx(path: &Path) -> (Option<u64>, Option<u64>, b
         if g.len() > 1024 {
             g.clear();
         }
-        g.insert(path.to_path_buf(), (mtime, size, ctx_used, ctx_window, ctx_reset));
+        g.insert(path.to_path_buf(), (mtime, size, out.clone()));
     }
-    (ctx_used, ctx_window, ctx_reset)
+    out
 }
 
 fn build_antigravity_meta(
@@ -1767,10 +2706,10 @@ fn build_antigravity_meta(
         return None;
     }
     let transcript = agy_transcript_path(home, &id);
-    let (ctx_used, ctx_window, ctx_reset) = if transcript.is_file() {
-        parse_antigravity_transcript_ctx(&transcript)
+    let tel = if transcript.is_file() {
+        parse_antigravity_transcript_telemetry(&transcript)
     } else {
-        (None, None, false)
+        AgyTranscriptTelemetry::default()
     };
     let pb_path = home.join("conversations").join(format!("{id}.pb"));
     let path = if transcript.is_file() {
@@ -1801,10 +2740,15 @@ fn build_antigravity_meta(
         started,
         updated,
         messages: (step_count.max(1)) as u32,
-        ctx_used,
-        ctx_window,
-        ctx_reset,
+        ctx_used: tel.ctx_used,
+        ctx_window: tel.ctx_window,
+        ctx_reset: tel.ctx_reset,
         continued_in: None,
+        model: tel.model,
+        last_speed_tps_x10: tel.last_speed_tps_x10,
+        last_output_tokens: tel.last_output_tokens,
+        last_turn_ms: tel.last_turn_ms,
+        quota: None,
     })
 }
 
@@ -2061,15 +3005,203 @@ pub fn refresh_single_session(
         }
         "agy" => {
             let mut m = existing?.clone();
-            let (cu, cw, cr) = parse_antigravity_transcript_ctx(path);
-            m.ctx_used = cu;
-            m.ctx_window = cw;
-            m.ctx_reset = cr;
+            let tel = parse_antigravity_transcript_telemetry(path);
+            m.ctx_used = tel.ctx_used;
+            m.ctx_window = tel.ctx_window;
+            m.ctx_reset = tel.ctx_reset;
+            if tel.model.is_some() {
+                m.model = tel.model;
+            }
+            if tel.last_speed_tps_x10.is_some() {
+                m.last_speed_tps_x10 = tel.last_speed_tps_x10;
+                m.last_output_tokens = tel.last_output_tokens;
+                m.last_turn_ms = tel.last_turn_ms;
+            }
             m.updated = m.updated.max(mtime);
             Some(m)
         }
         _ => None,
     }
+}
+
+/// Summarize local token usage over the rolling 5-hour and 24-hour windows for `agent`.
+/// Cached for 30s per agent so bottom-bar renders stay O(1).
+pub fn summarize_recent_usage(agent: &str, now_secs: i64) -> Option<LocalUsageSummary> {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, (i64, LocalUsageSummary)>>> = OnceLock::new();
+
+    let aid = crate::agent::normalize_id(agent);
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(g) = cache.lock() {
+        if let Some((at, sum)) = g.get(&aid) {
+            if now_secs.saturating_sub(*at) < 30 {
+                return (sum.win_24h.turns > 0).then(|| sum.clone());
+            }
+        }
+    }
+
+    let files: Vec<PathBuf> = match aid.as_str() {
+        "agy" => {
+            let Some(home) = AntigravityProvider::default().agy_home() else {
+                return None;
+            };
+            let brain = home.join("brain");
+            let Ok(rd) = std::fs::read_dir(&brain) else {
+                return None;
+            };
+            rd.flatten()
+                .map(|e| {
+                    e.path()
+                        .join(".system_generated")
+                        .join("logs")
+                        .join("transcript.jsonl")
+                })
+                .filter(|p| p.is_file())
+                .collect()
+        }
+        "claude" => ClaudeProvider::default().list_files(),
+        "codex" => CodexProvider::default().list_files(),
+        _ => return None,
+    };
+
+    let sum = summarize_usage_files(&aid, &files, now_secs);
+    if let Ok(mut g) = cache.lock() {
+        g.insert(aid, (now_secs, sum.clone()));
+    }
+    (sum.win_24h.turns > 0).then_some(sum)
+}
+
+fn summarize_usage_files(agent: &str, files: &[PathBuf], now_secs: i64) -> LocalUsageSummary {
+    let cutoff_5h = now_secs.saturating_sub(5 * 3600);
+    let cutoff_24h = now_secs.saturating_sub(24 * 3600);
+    let mut sum = LocalUsageSummary::default();
+
+    for path in files {
+        let Some((mtime, size)) = file_stamp(path) else {
+            continue;
+        };
+        if size == 0 || mtime < cutoff_24h {
+            continue;
+        }
+        // Bounded tail read (512 KB) keeps aggregation fast even for huge sessions.
+        let Some(lines) = read_tail_lines(path, size, 512 * 1024) else {
+            continue;
+        };
+        let mut hit_5h = false;
+        let mut hit_24h = false;
+
+        for line in &lines {
+            let Ok(v) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            let (ts_opt, inp, cache_r, out) = match agent {
+                "agy" => {
+                    if v.get("type").and_then(Value::as_str) != Some("PLANNER_RESPONSE") {
+                        continue;
+                    }
+                    let ts = v
+                        .get("created_at")
+                        .or_else(|| v.get("timestamp"))
+                        .and_then(Value::as_str)
+                        .and_then(parse_iso_secs);
+                    let i = v.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                    let c = v
+                        .get("cache_read_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    let o = v.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
+                    (ts, i, c, o)
+                }
+                "claude" => {
+                    if v.get("type").and_then(Value::as_str) != Some("assistant") {
+                        continue;
+                    }
+                    let Some(msg) = v.get("message") else {
+                        continue;
+                    };
+                    if msg.get("model").and_then(Value::as_str) == Some("<synthetic>") {
+                        continue;
+                    }
+                    let Some(u) = msg.get("usage").or_else(|| v.get("usage")) else {
+                        continue;
+                    };
+                    let ts = v
+                        .get("timestamp")
+                        .and_then(Value::as_str)
+                        .and_then(parse_iso_secs);
+                    let i = u
+                        .get("input_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0)
+                        .saturating_add(
+                            u.get("cache_creation_input_tokens")
+                                .and_then(Value::as_u64)
+                                .unwrap_or(0),
+                        );
+                    let c = u
+                        .get("cache_read_input_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    let o = u.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
+                    (ts, i, c, o)
+                }
+                "codex" => {
+                    if v.get("type").and_then(Value::as_str) != Some("event_msg") {
+                        continue;
+                    }
+                    let Some(p) = v.get("payload") else {
+                        continue;
+                    };
+                    if p.get("type").and_then(Value::as_str) != Some("token_count") {
+                        continue;
+                    }
+                    let Some(u) = p
+                        .get("info")
+                        .and_then(|inf| inf.get("last_token_usage"))
+                    else {
+                        continue;
+                    };
+                    let ts = v
+                        .get("timestamp")
+                        .and_then(Value::as_str)
+                        .and_then(parse_iso_secs);
+                    let i = u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                    let c = u
+                        .get("cached_input_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    let o = u.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
+                    (ts, i, c, o)
+                }
+                _ => continue,
+            };
+            if inp == 0 && cache_r == 0 && out == 0 {
+                continue;
+            }
+            let ts = ts_opt.unwrap_or(mtime);
+            if ts >= cutoff_24h {
+                sum.win_24h.input_tokens = sum.win_24h.input_tokens.saturating_add(inp);
+                sum.win_24h.cache_read_tokens = sum.win_24h.cache_read_tokens.saturating_add(cache_r);
+                sum.win_24h.output_tokens = sum.win_24h.output_tokens.saturating_add(out);
+                sum.win_24h.turns = sum.win_24h.turns.saturating_add(1);
+                hit_24h = true;
+            }
+            if ts >= cutoff_5h {
+                sum.win_5h.input_tokens = sum.win_5h.input_tokens.saturating_add(inp);
+                sum.win_5h.cache_read_tokens = sum.win_5h.cache_read_tokens.saturating_add(cache_r);
+                sum.win_5h.output_tokens = sum.win_5h.output_tokens.saturating_add(out);
+                sum.win_5h.turns = sum.win_5h.turns.saturating_add(1);
+                hit_5h = true;
+            }
+        }
+        if hit_5h {
+            sum.win_5h.sessions = sum.win_5h.sessions.saturating_add(1);
+        }
+        if hit_24h {
+            sum.win_24h.sessions = sum.win_24h.sessions.saturating_add(1);
+        }
+    }
+    sum
 }
 
 /// Semantic category inside a session's context window (for segmented bar & breakdown popover).
@@ -2217,7 +3349,7 @@ fn format_conv_detail(turns: u32, tool_io_share: u64) -> Option<String> {
 }
 
 fn normalize_window_for_used(used: u64, win_opt: Option<u64>) -> u64 {
-    let mut win = win_opt.unwrap_or(200_000).max(1);
+    let mut win = win_opt.unwrap_or(1_000_000).max(1);
     while used > win {
         win = if win < 1_000_000 {
             1_000_000
@@ -3536,6 +4668,132 @@ mod tests {
         assert_eq!(cm3.ctx_window, Some(1_000_000));
         let bd3 = analyze_context_breakdown("claude", &api_file).expect("api bd");
         assert_eq!(bd3.window_tokens, 1_000_000);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn telemetry_model_speed_quota_and_local_usage() {
+        assert_eq!(
+            format_model_short("gemini-4-neon-high"),
+            "Gemini 4 Neon (High)"
+        );
+        assert_eq!(
+            format_model_short("gemini-4-neon-medium"),
+            "Gemini 4 Neon (Med)"
+        );
+        assert_eq!(
+            format_model_short("claude-opus-5-5-high"),
+            "Opus 5.5 (High)"
+        );
+        assert_eq!(
+            format_model_short("claude-sonnet-4-6-20251022"),
+            "Sonnet 4.6"
+        );
+        assert_eq!(format_model_short("gpt-5.3-codex"), "GPT-5.3 Codex");
+        assert_eq!(
+            format_model_short("Gemini 4 Neon (High)"),
+            "Gemini 4 Neon (High)"
+        );
+
+        let tmp = std::env::temp_dir().join(format!(
+            "shellax_tel_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let agy_dir = tmp.join("agy/brain/s1/.system_generated/logs");
+        std::fs::create_dir_all(&agy_dir).unwrap();
+        let agy_tr = agy_dir.join("transcript.jsonl");
+        std::fs::write(
+            &agy_tr,
+            concat!(
+                r#"{"step_index":0,"type":"USER_INPUT","created_at":"2026-11-27T09:59:19Z","content":"hi"}"#,
+                "\n",
+                r#"{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-11-27T09:59:19Z","model":"gemini-4-neon-high","input_tokens":20000,"cache_read_tokens":5000,"output_tokens":529,"status":"DONE"}"#,
+                "\n",
+                r#"{"step_index":2,"type":"GENERIC","created_at":"2026-11-27T09:59:27Z","status":"DONE"}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let tel = parse_antigravity_transcript_telemetry(&agy_tr);
+        assert_eq!(tel.model.as_deref(), Some("gemini-4-neon-high"));
+        assert_eq!(tel.ctx_used, Some(25_000));
+        assert_eq!(tel.ctx_window, Some(1_000_000));
+        assert_eq!(tel.last_output_tokens, Some(529));
+        assert_eq!(tel.last_turn_ms, Some(8_000));
+        // 529 / 8.0 = 66.125 -> 661 tenths
+        assert_eq!(tel.last_speed_tps_x10, Some(661));
+
+        // Local 5h / 24h aggregation
+        let now_secs = parse_iso_secs("2026-11-27T10:00:00Z").unwrap();
+        let sum = summarize_usage_files("agy", std::slice::from_ref(&agy_tr), now_secs);
+        assert_eq!(sum.win_5h.turns, 1);
+        assert_eq!(sum.win_5h.sessions, 1);
+        assert_eq!(sum.win_5h.total_tokens(), 25_529);
+        assert_eq!(sum.win_24h.total_tokens(), 25_529);
+
+        // Codex rate_limits + model + speed
+        let codex_home = tmp.join("codex");
+        let codex_file = codex_home.join("sessions/2026/11/27/rollout-test.jsonl");
+        std::fs::create_dir_all(codex_file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &codex_file,
+            concat!(
+                r#"{"timestamp":"2026-11-27T09:59:00Z","type":"session_meta","payload":{"id":"cx-q1","cwd":"/repo"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-11-27T09:59:01Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-11-27T09:59:01Z","type":"event_msg","payload":{"type":"user_message","message":"analyze"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-11-27T09:59:11Z","type":"event_msg","payload":{"type":"token_count","info":{"model_context_window":256000,"last_token_usage":{"input_tokens":30000,"output_tokens":500}},"rate_limits":{"plan_type":"plus","primary":{"used_percent":38.4,"window_minutes":300,"resets_at":1795780000},"secondary":{"used_percent":14.0,"window_minutes":10080,"resets_at":1796300000}}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let cp = CodexProvider::with_home(codex_home);
+        let md = std::fs::metadata(&codex_file).unwrap();
+        let cm = cp.parse_file(&codex_file, 100, md.len()).unwrap();
+        assert_eq!(cm.model.as_deref(), Some("gpt-5.3-codex"));
+        assert_eq!(cm.last_speed_tps_x10, Some(500)); // 500 tok / 10s = 50.0 tok/s
+        let q = cm.quota.expect("codex quota");
+        assert_eq!(q.plan.as_deref(), Some("plus"));
+        assert_eq!(q.primary.label, "5h");
+        assert_eq!(q.primary.used_pct, 38);
+        assert_eq!(q.primary.resets_at, Some(1795780000));
+        let sec = q.secondary.expect("codex 7d quota");
+        assert_eq!(sec.label, "7d");
+        assert_eq!(sec.used_pct, 14);
+
+        // Antigravity `agy -p "/usage" --output-format json` parsing + model-group selection
+        let agy_usage_json = r#"{"conversation_id":"","status":"SUCCESS","command":{"name":"usage","data":{"groups":[{"name":"Gemini Models","buckets":[{"id":"gemini-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":0.5801,"reset_time":"2026-12-03T07:01:59Z"},{"id":"gemini-5h","name":"Five Hour Limit Remaining","window":"5h","remaining_fraction":0.8221,"reset_time":"2026-11-27T14:35:09Z"}]},{"name":"Claude and GPT models","buckets":[{"id":"3p-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":0.4761,"reset_time":"2026-12-03T01:57:30Z"},{"id":"3p-5h","name":"Five Hour Limit Remaining","window":"5h","remaining_fraction":0.9927,"reset_time":"2026-11-27T14:31:21Z"}]}]}}}"#;
+        let aq_gem = parse_antigravity_usage_json(agy_usage_json, Some("gemini-4-neon-high"))
+            .expect("agy gemini quota");
+        assert_eq!(aq_gem.groups.len(), 2);
+        assert_eq!(aq_gem.plan.as_deref(), Some("Gemini Models"));
+        assert_eq!(aq_gem.primary.label, "5h");
+        assert_eq!(aq_gem.primary.used_pct, 18); // 82% left
+        assert_eq!(aq_gem.secondary.as_ref().unwrap().label, "7d");
+        assert_eq!(aq_gem.secondary.as_ref().unwrap().used_pct, 42); // 58% left
+
+        let aq_claude = select_antigravity_quota_for_model(&aq_gem, Some("claude-opus-5-5-high"));
+        assert_eq!(aq_claude.plan.as_deref(), Some("Claude and GPT models"));
+        assert_eq!(aq_claude.primary.used_pct, 1); // 99% left
+        assert_eq!(aq_claude.secondary.as_ref().unwrap().used_pct, 52); // 48% left
+
+        // BillingMode detection helpers (API vs Subscription)
+        let claude_api: Value = serde_json::json!({
+            "env": { "ANTHROPIC_BASE_URL": "https://proxy.example.com", "ANTHROPIC_AUTH_TOKEN": "tok" }
+        });
+        assert!(claude_settings_uses_api(&claude_api));
+        let claude_sub: Value = serde_json::json!({ "model": "claude-opus-5-5" });
+        assert!(!claude_settings_uses_api(&claude_sub));
+        assert!(parse_codex_toml_uses_api("model = \"gpt-5.3-codex\"\nbase_url = \"https://custom.api\"\n"));
+        assert!(!parse_codex_toml_uses_api("model = \"gpt-5.3-codex\"\n"));
+        assert_eq!(
+            parse_codex_toml_model("model = \"gpt-5.3-codex\"\n[mcp]\nmodel = \"other\"\n").as_deref(),
+            Some("gpt-5.3-codex")
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

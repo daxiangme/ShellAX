@@ -5743,6 +5743,9 @@ impl Render for Root {
                 if ev.keystroke.key == "escape" {
                     let closed_agent_menu = std::mem::take(&mut this.agent_hub.agent_menu);
                     if this.agent_hub.ctx_popover.take().is_some()
+                        || this.agent_hub.quota_popover.take().is_some()
+                        || this.agent_hub.model_popover.take().is_some()
+                        || this.agent_hub.git_popover.take().is_some()
                         || this.agent_hub.menu.take().is_some()
                         || closed_agent_menu
                         || this.agent_hub.finish_task.take().is_some()

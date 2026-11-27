@@ -844,6 +844,111 @@ pub fn context_usage(screen: &str) -> Option<String> {
     context_usage_info(screen).map(|(_, label)| label)
 }
 
+/// Structured subscription quota scraped from a terminal status footer or `/quota` readout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenQuotaUsage {
+    pub label: String,
+    pub used_pct: u8,
+    pub resets_hint: Option<String>,
+}
+
+/// Scrape subscription quota / rate-limit percentage from the bottom lines of a terminal screen.
+///
+/// Only inspects the last 10 non-empty lines and requires an explicit quota/limit/window keyword
+/// (`quota`, `rate limit`, `usage limit`, `5h`, `7d`, `credits`) so context percentages are never
+/// misread as subscription quota. Converts `"remaining"` / `"left"` phrases to USED percentage.
+pub fn screen_quota_usage(screen: &str) -> Option<ScreenQuotaUsage> {
+    static RE_PCT: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    static RE_RESET: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+
+    let re_pct = RE_PCT.get_or_init(|| Regex::new(r"(?i)\b(\d{1,3})(?:\.\d+)?%").unwrap());
+    let re_reset = RE_RESET.get_or_init(|| {
+        Regex::new(r"(?i)(?:resets?\s+in\s+|resets?\s+at\s+)([0-9a-zA-Z: ]{2,20})").unwrap()
+    });
+
+    let tail: Vec<&str> = screen
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(10)
+        .collect();
+
+    for &line in &tail {
+        let lower = line.to_lowercase();
+        if lower.contains("context") || lower.contains("ctx") || lower.contains("auto-compact") {
+            continue;
+        }
+        let label = if lower.contains("5h")
+            || lower.contains("5-hour")
+            || lower.contains("5 hour")
+            || lower.contains("current session")
+        {
+            "5h"
+        } else if lower.contains("7d")
+            || lower.contains("7-day")
+            || lower.contains("weekly")
+            || lower.contains("current week")
+        {
+            "7d"
+        } else if lower.contains("quota")
+            || lower.contains("rate limit")
+            || lower.contains("usage limit")
+            || lower.contains("credits")
+        {
+            "quota"
+        } else {
+            continue;
+        };
+        if let Some(cap) = re_pct.captures(line) {
+            if let Ok(n) = cap[1].parse::<u8>() {
+                if n <= 100 {
+                    let used_pct = if is_remaining_context_phrase(&lower) {
+                        100u8.saturating_sub(n)
+                    } else {
+                        n
+                    };
+                    let resets_hint = re_reset
+                        .captures(line)
+                        .map(|c| c[1].trim().to_string())
+                        .filter(|s| !s.is_empty());
+                    return Some(ScreenQuotaUsage {
+                        label: label.to_string(),
+                        used_pct,
+                        resets_hint,
+                    });
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Scrape the active model name from the bottom status footer of a terminal screen (fallback when
+/// no local transcript is bound, e.g. fresh session or remote SSH).
+pub fn screen_model_name(screen: &str) -> Option<String> {
+    static RE_MODEL: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let re = RE_MODEL.get_or_init(|| {
+        Regex::new(
+            r"(?i)\b(?:(?:gemini[\s-][0-9]+(?:\.[0-9]+)?(?:[\s-][a-z]+){0,2}(?:\s*\((?:low|medium|high|xhigh|max)\))?)|(?:claude[\s-](?:opus|sonnet|haiku|fable)[\s-][0-9]+(?:[.\-][0-9]+)?(?:[\s-](?:low|medium|high))?(?:\s*\((?:low|medium|high)\))?)|(?:(?:opus|sonnet|haiku)[\s-][0-9]+(?:[.\-][0-9]+)?\b)|(?:gpt-[0-9]+(?:\.[0-9]+)?(?:-[a-z0-9]+){0,2}\b)|(?:o[134](?:-mini|-pro)?\b))",
+        )
+        .unwrap()
+    });
+    for line in screen
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(8)
+    {
+        if let Some(m) = re.find(line) {
+            let s = m.as_str().trim();
+            if !s.is_empty() {
+                return Some(s.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Identify which agent (manifest index) is running. Original shellax logic:
 /// 1) local PTY foreground process name (e.g. "claude", "codex", "grok");
 /// 2) first word of the last command the user submitted (works over SSH);
@@ -2013,5 +2118,33 @@ Completed
         let ctx_tok = screen_context_usage("ctx: 45k tokens").expect("ctx tok");
         assert_eq!(ctx_tok.short_label, "45k");
         assert_eq!(ctx_tok.bar_label, "45k tok");
+    }
+
+    #[test]
+    fn screen_model_and_quota_scraping() {
+        assert_eq!(
+            screen_model_name("Gemini 4 Neon (High) · ? for shortcuts").as_deref(),
+            Some("Gemini 4 Neon (High)")
+        );
+        assert_eq!(
+            screen_model_name("claude-opus-5-5-high · 42% context").as_deref(),
+            Some("claude-opus-5-5-high")
+        );
+        assert_eq!(
+            screen_model_name("gpt-5.3-codex · 20% context left").as_deref(),
+            Some("gpt-5.3-codex")
+        );
+
+        let q1 = screen_quota_usage("Quota: 75% remaining · resets in 2h 10m").expect("q1");
+        assert_eq!(q1.label, "quota");
+        assert_eq!(q1.used_pct, 25);
+        assert_eq!(q1.resets_hint.as_deref(), Some("2h 10m"));
+
+        let q2 = screen_quota_usage("5h usage: 38%").expect("q2");
+        assert_eq!(q2.label, "5h");
+        assert_eq!(q2.used_pct, 38);
+
+        // Context lines must not be misread as quota.
+        assert_eq!(screen_quota_usage("context: 42% · 5h ago"), None);
     }
 }

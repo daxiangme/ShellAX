@@ -231,6 +231,31 @@ pub fn ring(frac: f32, color: Hsla) -> impl IntoElement {
         })
 }
 
+/// 紧凑水平微进度条：用于 26px 底部状态栏与会话列表行，纯 div 绘制，与弹窗分段条视觉统一。
+pub fn micro_bar(frac: f32, width: f32, height: f32, color: Hsla) -> impl IntoElement {
+    let frac = if frac.is_finite() {
+        frac.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let fill_w = if frac > 0.004 {
+        (width * frac).max(2.0).min(width)
+    } else {
+        0.0
+    };
+    let track = c(cur().text).opacity(0.14);
+    div()
+        .w(px(width))
+        .h(px(height))
+        .flex_shrink_0()
+        .rounded_full()
+        .bg(track)
+        .overflow_hidden()
+        .when(fill_w > 0.0, |d| {
+            d.child(div().h_full().w(px(fill_w)).rounded_full().bg(color))
+        })
+}
+
 /// 按 Lucide 文件名（如 `qr-code`）找内置图标；找不到返回 `None`。
 pub fn icon_by_name(name: &str) -> Option<IconName> {
     let path = format!("icons/{name}.svg");

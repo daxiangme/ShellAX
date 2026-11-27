@@ -14,7 +14,8 @@ use gpui::{
 use gpui_component::input::{InputEvent, InputState};
 use ssh_term_proto::agent::{self, AgentState};
 use ssh_term_proto::agent_history::{
-    self, ContextBreakdown, ContextCategoryKind, SessionMeta,
+    self, BillingMode, ContextBreakdown, ContextCategoryKind, LocalUsageSummary, QuotaWindow,
+    SessionMeta, SubscriptionQuota,
 };
 use ssh_term_proto::agent_resume::{self, AgentSessionRef};
 use ssh_term_proto::i18n::{t, tf};
@@ -82,6 +83,41 @@ pub(crate) struct ContextPopover {
     pub breakdown: Option<ContextBreakdown>,
 }
 
+#[derive(Clone)]
+pub(crate) struct QuotaPopover {
+    pub pos: Point<Pixels>,
+    pub agent: String,
+    pub model: Option<String>,
+    pub quota: Option<SubscriptionQuota>,
+    pub resets_hint: Option<String>,
+    pub local_usage: Option<LocalUsageSummary>,
+    pub loading: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct ModelPopover {
+    pub pos: Point<Pixels>,
+    pub agent: String,
+    pub billing: BillingMode,
+    pub state: Option<AgentState>,
+    pub model_short: String,
+    pub model_raw: Option<String>,
+    pub window_tokens: Option<u64>,
+    pub working_secs: Option<u64>,
+    pub speed_tps: Option<f32>,
+    pub last_output_tokens: Option<u64>,
+    pub last_turn_ms: Option<u64>,
+}
+
+#[derive(Clone)]
+pub(crate) struct GitLogPopover {
+    pub pos: Point<Pixels>,
+    pub dir: PathBuf,
+    pub branch_label: String,
+    pub loading: bool,
+    pub snapshot: Option<worktree::GitLogSnapshot>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum SessionGroupStatus {
     NeedsAttention,
@@ -147,6 +183,14 @@ pub(crate) struct AgentHub {
     pub new_task: Option<NewTaskDialog>,
     pub finish_task: Option<FinishTaskDialog>,
     pub ctx_popover: Option<ContextPopover>,
+    pub quota_popover: Option<QuotaPopover>,
+    pub model_popover: Option<ModelPopover>,
+    pub git_popover: Option<GitLogPopover>,
+    pub local_usage: HashMap<String, LocalUsageSummary>,
+    pub local_usage_at: HashMap<String, std::time::Instant>,
+    pub live_quota: HashMap<String, SubscriptionQuota>,
+    pub live_quota_at: HashMap<String, std::time::Instant>,
+    pub live_quota_fetching: HashSet<String>,
     pub last_auto_scan: Option<std::time::Instant>,
     pub follow_up_scan_scheduled: bool,
     pub active_file_stamps: HashMap<PathBuf, (i64, u64)>,
@@ -217,6 +261,14 @@ impl Default for AgentHub {
             new_task: None,
             finish_task: None,
             ctx_popover: None,
+            quota_popover: None,
+            model_popover: None,
+            git_popover: None,
+            local_usage: HashMap::new(),
+            local_usage_at: HashMap::new(),
+            live_quota: HashMap::new(),
+            live_quota_at: HashMap::new(),
+            live_quota_fetching: HashSet::new(),
             last_auto_scan: None,
             follow_up_scan_scheduled: false,
             active_file_stamps: HashMap::new(),
@@ -480,7 +532,7 @@ fn segmented_bar_widths(tokens: &[u64], window: u64, bar_w: f32, gap: f32) -> Ve
     widths
 }
 
-fn render_ctx_ring(ctx_frac: Option<f32>, ctx_label: &str, in_bar: bool) -> AnyElement {
+fn render_ctx_bar(ctx_frac: Option<f32>, ctx_label: &str, in_bar: bool) -> AnyElement {
     let th = cur();
     let raw = ctx_frac.unwrap_or(0.0);
     let frac = if !raw.is_finite() || raw <= 0.0 {
@@ -498,7 +550,7 @@ fn render_ctx_ring(ctx_frac: Option<f32>, ctx_label: &str, in_bar: bool) -> AnyE
         c(th.accent)
     };
     let short_lbl = if in_bar {
-        format!("ctx {ctx_label}")
+        ctx_label.to_string()
     } else {
         ctx_label.strip_suffix(" tok").unwrap_or(ctx_label).to_string()
     };
@@ -506,16 +558,176 @@ fn render_ctx_ring(ctx_frac: Option<f32>, ctx_label: &str, in_bar: bool) -> AnyE
         .flex_shrink_0()
         .flex()
         .items_center()
-        .gap(px(if in_bar { ui::SP_1 } else { 3. }))
-        .child(ui::ring(frac, tone))
+        .gap(px(if in_bar { ui::SP_1 + 1. } else { 4. }))
+        .when(in_bar, |d| {
+            d.child(
+                div()
+                    .text_size(px(ui::fs_caption()))
+                    .text_color(c(th.overlay1))
+                    .child("ctx"),
+            )
+        })
+        .child(ui::micro_bar(
+            frac,
+            if in_bar { 44. } else { 22. },
+            if in_bar { 5. } else { 4. },
+            tone,
+        ))
         .child(
             div()
                 .text_size(px(ui::fs_caption()))
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(tone)
+                .text_color(if in_bar && frac < 0.65 {
+                    c(th.subtext)
+                } else {
+                    tone
+                })
                 .child(short_lbl),
         )
         .into_any_element()
+}
+
+fn model_brief_description(raw: Option<&str>, provider: &str) -> Option<String> {
+    let m = raw?.trim().to_ascii_lowercase();
+    if m.is_empty() {
+        return None;
+    }
+    let zh = t("ag.model_provider") == "服务商";
+    let effort_note = if m.contains("xhigh") {
+        if zh { "（极高思考深度）" } else { " (extra-high reasoning)" }
+    } else if m.contains("high") {
+        if zh { "（高思考深度）" } else { " (high reasoning)" }
+    } else if m.contains("medium") || m.contains("(med)") {
+        if zh { "（均衡思考深度）" } else { " (medium reasoning)" }
+    } else if m.contains("low") {
+        if zh { "（低延迟快速响应）" } else { " (low-latency fast mode)" }
+    } else {
+        ""
+    };
+    let core = if m.contains("gemini-4-neon") || m.contains("gemini 4 neon") {
+        if zh {
+            "Google Gemini 4 Neon 旗舰推理与代码模型，适合复杂架构分析与多步任务"
+        } else {
+            "Google Gemini 4 Neon flagship reasoning & coding model for complex tasks"
+        }
+    } else if m.contains("gemini-4-carbon") || m.contains("gemini 4 carbon") {
+        if zh {
+            "Google Gemini 4 Carbon 均衡型代码与通用模型"
+        } else {
+            "Google Gemini 4 Carbon balanced coding & general model"
+        }
+    } else if m.contains("gemini-4-argon") || m.contains("gemini 4 argon") {
+        if zh {
+            "Google Gemini 4 Argon 高效代码模型"
+        } else {
+            "Google Gemini 4 Argon efficient coding model"
+        }
+    } else if m.contains("gemini-4-hydrogen") || m.contains("gemini 4 hydrogen") {
+        if zh {
+            "Google Gemini 4 Hydrogen 轻量高速模型"
+        } else {
+            "Google Gemini 4 Hydrogen fast lightweight model"
+        }
+    } else if m.contains("orchestrator") {
+        if zh {
+            "多步骤任务编排与代理协作模型"
+        } else {
+            "Multi-step orchestration & agent coordination model"
+        }
+    } else if m.contains("flash") {
+        if zh {
+            "Google Gemini Flash 极速低延迟模型，适合高频轻量任务"
+        } else {
+            "Google Gemini Flash ultra-fast model for lightweight tasks"
+        }
+    } else if m.contains("opus") {
+        if zh {
+            "Anthropic Claude Opus 深度推理与复杂软件工程旗舰模型"
+        } else {
+            "Anthropic Claude Opus flagship model for deep reasoning & software engineering"
+        }
+    } else if m.contains("sonnet") {
+        if zh {
+            "Anthropic Claude Sonnet 均衡高速代码与日常开发主力模型"
+        } else {
+            "Anthropic Claude Sonnet balanced high-speed model for daily engineering"
+        }
+    } else if m.contains("haiku") {
+        if zh {
+            "Anthropic Claude Haiku 极速轻量模型"
+        } else {
+            "Anthropic Claude Haiku ultra-fast lightweight model"
+        }
+    } else if m.contains("codex") || m.contains("gpt-5") || m.contains("gpt-4") {
+        if zh {
+            "OpenAI 代码生成与通用推理模型"
+        } else {
+            "OpenAI coding & general reasoning model"
+        }
+    } else {
+        return Some(if zh {
+            format!("当前通过 {provider} 运行的模型会话")
+        } else {
+            format!("Active model session running via {provider}")
+        });
+    };
+    Some(format!("{core}{effort_note}"))
+}
+
+fn default_model_for_agent(aid: &str) -> Option<String> {
+    match aid {
+        "agy" => agent_history::load_antigravity_settings_model(),
+        "claude" => agent_history::load_claude_settings_model(),
+        "codex" => agent_history::load_codex_config_model(),
+        _ => None,
+    }
+}
+
+fn bar_sep() -> AnyElement {
+    div()
+        .w(px(1.))
+        .h(px(12.))
+        .flex_shrink_0()
+        .bg(crate::theme::divider())
+        .into_any_element()
+}
+
+fn quota_left_tone(left_pct: u8) -> Hsla {
+    let th = cur();
+    if left_pct <= 5 {
+        c(th.error)
+    } else if left_pct <= 20 {
+        c(th.warning)
+    } else {
+        c(th.success)
+    }
+}
+
+fn format_reset_countdown(resets_at: i64, now_secs: i64) -> Option<String> {
+    let diff = resets_at.saturating_sub(now_secs);
+    if diff <= 0 {
+        return None;
+    }
+    let hours = diff / 3600;
+    let mins = (diff % 3600) / 60;
+    let s = if hours >= 24 {
+        let days = hours / 24;
+        let rem_h = hours % 24;
+        if rem_h > 0 {
+            format!("{days}d {rem_h}h")
+        } else {
+            format!("{days}d")
+        }
+    } else if hours > 0 {
+        if mins > 0 {
+            format!("{hours}h {mins}m")
+        } else {
+            format!("{hours}h")
+        }
+    } else {
+        format!("{}m", mins.max(1))
+    };
+    Some(tf("ag.quota_reset_in", &[("t", &s)]))
 }
 
 fn working_pulse_dot(id: impl Into<gpui::ElementId>, color: Hsla) -> AnyElement {
@@ -1076,11 +1288,12 @@ impl Root {
                 jobs.push((aid, path, stamp, existing));
             }
         }
-        if jobs.is_empty() {
-            return;
-        }
         if self.agent_hub.active_file_stamps.len() > 256 {
             self.agent_hub.active_file_stamps.clear();
+        }
+        self.maybe_refresh_local_usage(cx);
+        if jobs.is_empty() {
+            return;
         }
         cx.spawn(async move |this, cx| {
             let updated: Vec<SessionMeta> = cx
@@ -1172,6 +1385,9 @@ impl Root {
     ) {
         self.agent_hub.menu = None;
         self.agent_hub.agent_menu = false;
+        self.agent_hub.quota_popover = None;
+        self.agent_hub.model_popover = None;
+        self.agent_hub.git_popover = None;
         let has_path = path.is_some();
         self.agent_hub.ctx_popover = Some(ContextPopover {
             pos,
@@ -1267,6 +1483,392 @@ impl Root {
             fl,
             cx,
         );
+    }
+
+    fn maybe_refresh_local_usage(&mut self, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        let v = tab.focused.read(cx);
+        let Some(raw_aid) = v.resolved_agent_id() else {
+            return;
+        };
+        let aid = agent::normalize_id(&raw_aid);
+        if !matches!(aid.as_str(), "agy" | "claude" | "codex") {
+            return;
+        }
+        let billing = agent_history::detect_billing_mode(&aid);
+        if billing == BillingMode::Api {
+            return;
+        }
+        if aid == "agy" {
+            self.maybe_refresh_live_quota(false, cx);
+        }
+        if let Some(at) = self.agent_hub.local_usage_at.get(&aid) {
+            if at.elapsed() < Duration::from_secs(30) {
+                return;
+            }
+        }
+        self.agent_hub
+            .local_usage_at
+            .insert(aid.clone(), std::time::Instant::now());
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        cx.spawn(async move |this, cx| {
+            let aid_bg = aid.clone();
+            let sum = cx
+                .background_executor()
+                .spawn(async move { agent_history::summarize_recent_usage(&aid_bg, now_secs) })
+                .await;
+            let _ = this.update(cx, |r, cx| {
+                let changed = match sum {
+                    Some(s) => {
+                        let same = r.agent_hub.local_usage.get(&aid) == Some(&s);
+                        if !same {
+                            r.agent_hub.local_usage.insert(aid.clone(), s.clone());
+                        }
+                        if let Some(ref mut qp) = r.agent_hub.quota_popover {
+                            if qp.agent == aid {
+                                qp.local_usage = Some(s);
+                                qp.loading = false;
+                            }
+                        }
+                        !same
+                    }
+                    None => {
+                        if let Some(ref mut qp) = r.agent_hub.quota_popover {
+                            if qp.agent == aid {
+                                qp.loading = false;
+                            }
+                        }
+                        false
+                    }
+                };
+                if changed || r.agent_hub.quota_popover.is_some() {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn maybe_refresh_live_quota(&mut self, force: bool, cx: &mut Context<Self>) {
+        let aid = "agy".to_string();
+        if self.agent_hub.live_quota_fetching.contains(&aid) {
+            return;
+        }
+        if !force {
+            if let Some(at) = self.agent_hub.live_quota_at.get(&aid) {
+                if at.elapsed() < Duration::from_secs(120) {
+                    return;
+                }
+            }
+        }
+        let active_model = self.tabs.get(self.active).and_then(|tab| {
+            let v = tab.focused.read(cx);
+            v.agent_session_id
+                .as_deref()
+                .and_then(|sid| self.agent_hub.sessions.iter().find(|m| m.id == sid))
+                .and_then(|m| m.model.clone())
+        });
+        self.agent_hub.live_quota_fetching.insert(aid.clone());
+        self.agent_hub
+            .live_quota_at
+            .insert(aid.clone(), std::time::Instant::now());
+        if let Some(ref mut qp) = self.agent_hub.quota_popover {
+            if qp.agent == aid && qp.quota.is_none() {
+                qp.loading = true;
+            }
+        }
+        cx.spawn(async move |this, cx| {
+            let fetched = cx
+                .background_executor()
+                .spawn(async move { agent_history::fetch_antigravity_quota(active_model.as_deref()) })
+                .await;
+            let _ = this.update(cx, |r, cx| {
+                r.agent_hub.live_quota_fetching.remove(&aid);
+                if let Some(q) = fetched {
+                    r.agent_hub.live_quota.insert(aid.clone(), q.clone());
+                    if let Some(ref mut qp) = r.agent_hub.quota_popover {
+                        if qp.agent == aid {
+                            qp.quota = Some(agent_history::select_antigravity_quota_for_model(
+                                &q,
+                                qp.model.as_deref(),
+                            ));
+                            qp.loading = false;
+                        }
+                    }
+                    cx.notify();
+                } else if let Some(ref mut qp) = r.agent_hub.quota_popover {
+                    if qp.agent == aid {
+                        qp.loading = false;
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn toggle_quota_popover_from_bar(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.agent_hub.quota_popover.is_some() {
+            self.agent_hub.quota_popover = None;
+            cx.notify();
+            return;
+        }
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        let v = tab.focused.read(cx);
+        let sid = v.agent_session_id.clone();
+        let bound_meta = sid
+            .as_deref()
+            .and_then(|id| self.agent_hub.sessions.iter().find(|m| m.id == id))
+            .cloned();
+        let aid = bound_meta
+            .as_ref()
+            .map(|m| m.agent.clone())
+            .or_else(|| v.resolved_agent_id().map(|a| agent::normalize_id(&a)))
+            .unwrap_or_else(|| "agy".into());
+        let screen_txt = v
+            .session
+            .as_ref()
+            .map(|s| s.screen_text())
+            .unwrap_or_default();
+        let model_raw = bound_meta
+            .as_ref()
+            .and_then(|m| m.model.clone())
+            .or_else(|| agent::screen_model_name(&screen_txt))
+            .or_else(|| {
+                (aid == "agy")
+                    .then(agent_history::load_antigravity_settings_model)
+                    .flatten()
+            });
+        let model = model_raw
+            .as_deref()
+            .map(agent_history::format_model_short);
+        let screen_q = agent::screen_quota_usage(&screen_txt);
+        let (quota, resets_hint) = if let Some(q) = bound_meta.as_ref().and_then(|m| m.quota.clone())
+        {
+            (Some(q), None)
+        } else if let Some(lq) = self.agent_hub.live_quota.get(&aid) {
+            (
+                Some(agent_history::select_antigravity_quota_for_model(
+                    lq,
+                    model_raw.as_deref(),
+                )),
+                None,
+            )
+        } else if let Some(sq) = screen_q {
+            (
+                Some(SubscriptionQuota {
+                    plan: None,
+                    primary: QuotaWindow {
+                        label: sq.label,
+                        used_pct: sq.used_pct,
+                        resets_at: None,
+                    },
+                    secondary: None,
+                    groups: Vec::new(),
+                    updated_at: 0,
+                }),
+                sq.resets_hint,
+            )
+        } else {
+            (None, None)
+        };
+        let cached_local = self.agent_hub.local_usage.get(&aid).cloned();
+        let need_fetch = matches!(aid.as_str(), "agy" | "claude" | "codex");
+
+        self.agent_hub.menu = None;
+        self.agent_hub.agent_menu = false;
+        self.agent_hub.ctx_popover = None;
+        self.agent_hub.model_popover = None;
+        self.agent_hub.git_popover = None;
+        self.agent_hub.quota_popover = Some(QuotaPopover {
+            pos: gpui::point(pos.x, pos.y - px(12.)),
+            agent: aid.clone(),
+            model,
+            quota: quota.clone(),
+            resets_hint,
+            local_usage: cached_local.clone(),
+            loading: (aid == "agy" && quota.is_none()) || (need_fetch && cached_local.is_none()),
+        });
+        cx.notify();
+
+        if aid == "agy" {
+            self.maybe_refresh_live_quota(quota.is_none(), cx);
+        }
+        if need_fetch {
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            cx.spawn(async move |this, cx| {
+                let aid_bg = aid.clone();
+                let sum = cx
+                    .background_executor()
+                    .spawn(async move { agent_history::summarize_recent_usage(&aid_bg, now_secs) })
+                    .await;
+                let _ = this.update(cx, |r, cx| {
+                    if let Some(ref s) = sum {
+                        r.agent_hub.local_usage.insert(aid.clone(), s.clone());
+                        r.agent_hub
+                            .local_usage_at
+                            .insert(aid.clone(), std::time::Instant::now());
+                    }
+                    if let Some(ref mut qp) = r.agent_hub.quota_popover {
+                        if qp.agent == aid {
+                            qp.local_usage = sum;
+                            qp.loading = false;
+                            cx.notify();
+                        }
+                    }
+                });
+            })
+            .detach();
+        }
+    }
+
+    fn toggle_model_popover_from_bar(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.agent_hub.model_popover.is_some() {
+            self.agent_hub.model_popover = None;
+            cx.notify();
+            return;
+        }
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        let v = tab.focused.read(cx);
+        let ag_lbl = v.agent_label();
+        let state = ag_lbl.as_ref().map(|(_, st)| *st);
+        let working = state == Some(AgentState::Working);
+        let bound_meta = v
+            .agent_session_id
+            .as_deref()
+            .and_then(|sid| self.agent_hub.sessions.iter().find(|m| m.id == sid));
+        let aid = bound_meta
+            .map(|m| m.agent.clone())
+            .or_else(|| v.resolved_agent_id().map(|a| agent::normalize_id(&a)))
+            .unwrap_or_else(|| "agy".into());
+        let screen_txt = v
+            .session
+            .as_ref()
+            .map(|s| s.screen_text())
+            .unwrap_or_default();
+        let screen_ctx = (!screen_txt.is_empty())
+            .then(|| agent::screen_context_usage(&screen_txt))
+            .flatten();
+        let ctx_info = resolve_context(bound_meta, screen_ctx.as_ref());
+        let model_raw = bound_meta
+            .and_then(|m| m.model.clone())
+            .or_else(|| {
+                (!screen_txt.is_empty())
+                    .then(|| agent::screen_model_name(&screen_txt))
+                    .flatten()
+            })
+            .or_else(|| default_model_for_agent(&aid));
+        let billing = if bound_meta.and_then(|m| m.quota.as_ref()).is_some() {
+            BillingMode::Subscription
+        } else {
+            agent_history::detect_billing_mode(&aid)
+        };
+        let model_short = model_raw
+            .as_deref()
+            .map(agent_history::format_model_short)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| agent::display_name(&aid).to_string());
+
+        self.agent_hub.menu = None;
+        self.agent_hub.agent_menu = false;
+        self.agent_hub.ctx_popover = None;
+        self.agent_hub.quota_popover = None;
+        self.agent_hub.git_popover = None;
+        self.agent_hub.model_popover = Some(ModelPopover {
+            pos: gpui::point(pos.x, pos.y - px(12.)),
+            agent: aid,
+            billing,
+            state,
+            model_short,
+            model_raw,
+            window_tokens: ctx_info.and_then(|c| c.window_tokens),
+            working_secs: working.then(|| v.agent_state_since.elapsed().as_secs()),
+            speed_tps: bound_meta.and_then(|m| m.speed_tps()),
+            last_output_tokens: bound_meta.and_then(|m| m.last_output_tokens),
+            last_turn_ms: bound_meta.and_then(|m| m.last_turn_ms),
+        });
+        cx.notify();
+    }
+
+    fn toggle_git_popover_from_bar(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.agent_hub.git_popover.is_some() {
+            self.agent_hub.git_popover = None;
+            cx.notify();
+            return;
+        }
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        let v = tab.focused.read(cx);
+        let bound_meta = v
+            .agent_session_id
+            .as_deref()
+            .and_then(|sid| self.agent_hub.sessions.iter().find(|m| m.id == sid));
+        let dir = tab
+            .task
+            .as_ref()
+            .and_then(|t| t.worktree.clone())
+            .or_else(|| v.shell_cwd().map(PathBuf::from))
+            .or_else(|| bound_meta.and_then(|m| m.cwd.as_deref()).map(PathBuf::from));
+        let Some(dir) = dir.filter(|p| p.is_dir()) else {
+            return;
+        };
+        let branch_label = tab
+            .task
+            .as_ref()
+            .and_then(|t| t.branch.clone())
+            .or_else(|| worktree::fast_git_branch(&dir))
+            .unwrap_or_else(|| "HEAD".into());
+
+        self.agent_hub.menu = None;
+        self.agent_hub.agent_menu = false;
+        self.agent_hub.ctx_popover = None;
+        self.agent_hub.quota_popover = None;
+        self.agent_hub.model_popover = None;
+        self.agent_hub.git_popover = Some(GitLogPopover {
+            pos: gpui::point(pos.x, pos.y - px(12.)),
+            dir: dir.clone(),
+            branch_label,
+            loading: true,
+            snapshot: None,
+        });
+        cx.notify();
+        self.load_git_popover_commits(dir, cx);
+    }
+
+    fn load_git_popover_commits(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        let dir_bg = dir.clone();
+        cx.spawn(async move |this, cx| {
+            let snap = cx
+                .background_executor()
+                .spawn(async move { worktree::git_recent_commits(&dir_bg, 20) })
+                .await;
+            let _ = this.update(cx, |r, cx| {
+                if let Some(ref mut gp) = r.agent_hub.git_popover {
+                    if gp.dir == dir {
+                        if let Some(ref s) = snap {
+                            gp.branch_label = s.branch.clone();
+                        }
+                        gp.snapshot = snap;
+                        gp.loading = false;
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
     }
 
     fn open_context_popover_for_meta(
@@ -3912,34 +4514,6 @@ fn render_grouped_session_row_el(
                                 .child(row.title.clone()),
                         )
                         .children(status_badge)
-                        .when_some(row.eff_ctx_label.as_ref(), |d, lbl| {
-                            let mr = meta_ring.clone();
-                            let frac = row.eff_ctx_frac;
-                            d.child(
-                                div()
-                                    .id(("ag-s-ctx", nav_idx))
-                                    .px(px(3.))
-                                    .py(px(1.))
-                                    .rounded(px(ui::R_SM))
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(crate::theme::hover_bg()))
-                                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation();
-                                    })
-                                    .on_click(window.listener_for(
-                                        root,
-                                        move |this, ev: &gpui::ClickEvent, _, cx| {
-                                            cx.stop_propagation();
-                                            this.open_context_popover_for_meta(
-                                                &mr,
-                                                ev.position(),
-                                                cx,
-                                            );
-                                        },
-                                    ))
-                                    .child(render_ctx_ring(frac, lbl.as_ref(), false)),
-                            )
-                        })
                         .child(
                             div()
                                 .flex_shrink_0()
@@ -4007,7 +4581,35 @@ fn render_grouped_session_row_el(
                                         this.resume_history_session(&meta_wt, true, w, cx);
                                     })),
                                 ),
-                        ),
+                        )
+                        .when_some(row.eff_ctx_label.as_ref(), |d, lbl| {
+                            let mr = meta_ring.clone();
+                            let frac = row.eff_ctx_frac;
+                            d.child(
+                                div()
+                                    .id(("ag-s-ctx", nav_idx))
+                                    .px(px(2.))
+                                    .py(px(1.))
+                                    .rounded(px(ui::R_SM))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(crate::theme::hover_bg()))
+                                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation();
+                                    })
+                                    .on_click(window.listener_for(
+                                        root,
+                                        move |this, ev: &gpui::ClickEvent, _, cx| {
+                                            cx.stop_propagation();
+                                            this.open_context_popover_for_meta(
+                                                &mr,
+                                                ev.position(),
+                                                cx,
+                                            );
+                                        },
+                                    ))
+                                    .child(render_ctx_bar(frac, lbl.as_ref(), false)),
+                            )
+                        }),
                 ),
         );
 
@@ -4399,35 +5001,7 @@ fn render_running_row_el(
                                 .text_color(c(th.text))
                                 .child(row.title),
                         )
-                        .child(status_badge)
-                        .when_some(row.ctx_label.as_ref(), |d, lbl| {
-                            let pr = pane_ring.clone();
-                            let frac = row.ctx_frac;
-                            d.child(
-                                div()
-                                    .id(("ag-r-ctx", idx))
-                                    .px(px(3.))
-                                    .py(px(1.))
-                                    .rounded(px(ui::R_SM))
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(crate::theme::hover_bg()))
-                                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation();
-                                    })
-                                    .on_click(window.listener_for(
-                                        root,
-                                        move |this, ev: &gpui::ClickEvent, _, cx| {
-                                            cx.stop_propagation();
-                                            this.open_context_popover_for_running_pane(
-                                                &pr,
-                                                ev.position(),
-                                                cx,
-                                            );
-                                        },
-                                    ))
-                                    .child(render_ctx_ring(frac, lbl, false)),
-                            )
-                        }),
+                        .child(status_badge),
                 )
                 .child(
                     div()
@@ -4463,7 +5037,35 @@ fn render_running_row_el(
                                     this.close_pane_entity(&pane_close, w, cx);
                                 })),
                             ),
-                        ),
+                        )
+                        .when_some(row.ctx_label.as_ref(), |d, lbl| {
+                            let pr = pane_ring.clone();
+                            let frac = row.ctx_frac;
+                            d.child(
+                                div()
+                                    .id(("ag-r-ctx", idx))
+                                    .px(px(2.))
+                                    .py(px(1.))
+                                    .rounded(px(ui::R_SM))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(crate::theme::hover_bg()))
+                                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation();
+                                    })
+                                    .on_click(window.listener_for(
+                                        root,
+                                        move |this, ev: &gpui::ClickEvent, _, cx| {
+                                            cx.stop_propagation();
+                                            this.open_context_popover_for_running_pane(
+                                                &pr,
+                                                ev.position(),
+                                                cx,
+                                            );
+                                        },
+                                    ))
+                                    .child(render_ctx_bar(frac, lbl, false)),
+                            )
+                        }),
                 ),
         );
 
@@ -4730,7 +5332,872 @@ fn render_running_row_el(
         if self.agent_hub.ctx_popover.is_some() {
             out.push(self.render_context_popover(cx));
         }
+        if self.agent_hub.quota_popover.is_some() {
+            out.push(self.render_quota_popover(cx));
+        }
+        if self.agent_hub.model_popover.is_some() {
+            out.push(self.render_model_popover(cx));
+        }
+        if self.agent_hub.git_popover.is_some() {
+            out.push(self.render_git_popover(cx));
+        }
         out
+    }
+
+    fn render_git_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let th = cur();
+        let pop = self.agent_hub.git_popover.clone().unwrap();
+        let card_w = 396.0_f32;
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let dir_ref = pop.dir.clone();
+
+        let status_badge = pop.snapshot.as_ref().map(|s| {
+            if s.dirty_count > 0 {
+                let txt = tf("ag.git_dirty_n", &[("n", &s.dirty_count)]);
+                div()
+                    .px(px(5.))
+                    .py(px(1.))
+                    .rounded(px(ui::R_SM))
+                    .bg(c(th.warning).opacity(0.15))
+                    .text_size(px(ui::fs_caption()))
+                    .text_color(c(th.warning))
+                    .child(txt)
+                    .into_any_element()
+            } else {
+                div()
+                    .px(px(5.))
+                    .py(px(1.))
+                    .rounded(px(ui::R_SM))
+                    .bg(c(th.success).opacity(0.13))
+                    .text_size(px(ui::fs_caption()))
+                    .text_color(c(th.success))
+                    .child(t("ag.git_clean"))
+                    .into_any_element()
+            }
+        });
+
+        let commits_el: AnyElement = if pop.loading && pop.snapshot.is_none() {
+            div()
+                .py(px(12.))
+                .text_size(px(ui::fs_small()))
+                .text_color(c(th.overlay1))
+                .child(t("ui.loading"))
+                .into_any_element()
+        } else if let Some(ref snap) = pop.snapshot {
+            if snap.commits.is_empty() {
+                div()
+                    .py(px(12.))
+                    .text_size(px(ui::fs_small()))
+                    .text_color(c(th.overlay1))
+                    .child(t("ag.git_empty"))
+                    .into_any_element()
+            } else {
+                let mut list = div()
+                    .id("ag-git-pop-list")
+                    .w_full()
+                    .max_h(px(290.))
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.));
+                for (i, cm) in snap.commits.iter().enumerate() {
+                    let age = if cm.timestamp > 0 {
+                        agent_history::relative_time_short(cm.timestamp, now_secs)
+                    } else {
+                        String::new()
+                    };
+                    let copy_hash = cm.short_hash.clone();
+                    let tip = format!("{} · {}\n{}", cm.full_hash, cm.author, cm.subject);
+                    let mut sub_parts = vec![cm.author.clone()];
+                    if !cm.refs.is_empty() {
+                        sub_parts.push(cm.refs.clone());
+                    }
+                    let sub_line = sub_parts.join(" · ");
+                    list = list.child(
+                        div()
+                            .id(("ag-git-cm", i))
+                            .w_full()
+                            .px(px(6.))
+                            .py(px(5.))
+                            .rounded(px(ui::R_SM))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(crate::theme::hover_bg()))
+                            .tooltip(ui::tip(tip))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(copy_hash.clone()));
+                                this.toast(tf("ag.git_copied", &[("h", &copy_hash)]), cx);
+                            }))
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.))
+                            .child(
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_size(px(ui::fs_caption()))
+                                            .font_family(ui::mono_family())
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(c(th.accent))
+                                            .child(cm.short_hash.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .whitespace_nowrap()
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .text_size(px(ui::fs_small()))
+                                            .text_color(c(th.text))
+                                            .child(cm.subject.clone()),
+                                    )
+                                    .when(!age.is_empty(), |d| {
+                                        d.child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .text_size(px(ui::fs_caption()))
+                                                .text_color(c(th.overlay0))
+                                                .child(age),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .text_size(px(ui::fs_caption()))
+                                    .text_color(c(th.overlay1))
+                                    .child(sub_line),
+                            ),
+                    );
+                }
+                list.into_any_element()
+            }
+        } else {
+            div()
+                .py(px(12.))
+                .text_size(px(ui::fs_small()))
+                .text_color(c(th.overlay1))
+                .child(t("ag.git_empty"))
+                .into_any_element()
+        };
+
+        let card = div()
+            .id("ag-git-pop-card")
+            .w(px(card_w))
+            .occlude()
+            .p(px(14.))
+            .rounded(px(ui::R_LG))
+            .bg(crate::theme::overlay_card_bg(1.0))
+            .border_1()
+            .border_color(crate::theme::overlay_border())
+            .shadow(crate::chrome::soft_shadow(true))
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(gpui::MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(ui::SP_2))
+                    .child(icon(IconName::GitBranch, ui::IC_SM, c(th.accent)))
+                    .child(
+                        div()
+                            .text_size(px(ui::fs_body()))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(c(th.text))
+                            .child(pop.branch_label.clone()),
+                    )
+                    .children(status_badge)
+                    .child(div().flex_1())
+                    .child(
+                        ui::icon_button(
+                            "ag-git-pop-ref",
+                            IconName::RefreshCw,
+                            ui::IconBtn::Sm,
+                            t("ag.git_refresh"),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(ref mut gp) = this.agent_hub.git_popover {
+                                gp.loading = true;
+                            }
+                            cx.notify();
+                            this.load_git_popover_commits(dir_ref.clone(), cx);
+                        })),
+                    )
+                    .child(
+                        ui::icon_button(
+                            "ag-git-pop-x",
+                            IconName::X,
+                            ui::IconBtn::Sm,
+                            t("ui.cancel"),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.agent_hub.git_popover = None;
+                            cx.notify();
+                        })),
+                    ),
+            )
+            .child(commits_el);
+
+        div()
+            .id("ag-git-pop-backdrop")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .occlude()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.agent_hub.git_popover = None;
+                    cx.notify();
+                }),
+            )
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(|this, _, _, cx| {
+                    this.agent_hub.git_popover = None;
+                    cx.notify();
+                }),
+            )
+            .child(
+                gpui::deferred(
+                    gpui::anchored()
+                        .anchor(gpui::Anchor::BottomRight)
+                        .position(pop.pos)
+                        .snap_to_window_with_margin(px(ui::EDGE_MARGIN))
+                        .child(crate::chrome::pop_in("ag-git-pop-anim", card)),
+                )
+                .with_priority(4),
+            )
+            .into_any_element()
+    }
+
+    fn render_model_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let th = cur();
+        let pop = self.agent_hub.model_popover.clone().unwrap();
+        let card_w = 304.0_f32;
+        let provider_name = agent::display_name(&pop.agent).to_string();
+        let provider_col = agent_badge_color(&pop.agent);
+
+        let desc = model_brief_description(pop.model_raw.as_deref(), &provider_name);
+
+        let speed_val = if let Some(secs) = pop.working_secs {
+            tf("ag.speed_working", &[("sec", &secs)])
+        } else if let Some(tps) = pop.speed_tps {
+            if tps >= 10.0 {
+                format!("{tps:.0} tok/s")
+            } else {
+                format!("{tps:.1} tok/s")
+            }
+        } else {
+            t("ag.model_speed_na").to_string()
+        };
+        let speed_sub = if pop.working_secs.is_none() {
+            match (pop.last_output_tokens, pop.last_turn_ms) {
+                (Some(out), Some(ms)) => {
+                    let sec_s = format!("{:.1}", ms as f64 / 1000.0);
+                    let out_s = agent::format_tokens_precise(out);
+                    Some(tf("ag.speed_tip", &[("out", &out_s), ("sec", &sec_s)]))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        let kv_row = |label: &'static str, val: AnyElement| -> AnyElement {
+            div()
+                .w_full()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(ui::SP_2))
+                .child(
+                    div()
+                        .text_size(px(ui::fs_caption()))
+                        .text_color(c(th.overlay1))
+                        .child(label),
+                )
+                .child(val)
+                .into_any_element()
+        };
+
+        let glyph: AnyElement = match crate::file_icon::agent_glyph_path(&pop.agent) {
+            Some(path) => ui::icon_svg(path, ui::IC_SM, provider_col).into_any_element(),
+            None => icon(IconName::Cpu, ui::IC_SM, provider_col).into_any_element(),
+        };
+
+        let card = div()
+            .id("ag-model-pop-card")
+            .w(px(card_w))
+            .occlude()
+            .p(px(14.))
+            .rounded(px(ui::R_LG))
+            .bg(crate::theme::overlay_card_bg(1.0))
+            .border_1()
+            .border_color(crate::theme::overlay_border())
+            .shadow(crate::chrome::soft_shadow(true))
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(gpui::MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(ui::SP_2))
+                    .child(glyph)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .text_size(px(ui::fs_body()))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(c(th.text))
+                            .child(pop.model_short.clone()),
+                    )
+                    .when_some(pop.state, |d, st| {
+                        let (_, st_col) = state_icon_and_color(st);
+                        d.child(
+                            div()
+                                .px(px(5.))
+                                .py(px(1.))
+                                .rounded(px(ui::R_SM))
+                                .bg(st_col.opacity(0.14))
+                                .text_size(px(ui::fs_caption()))
+                                .text_color(st_col)
+                                .child(st.label()),
+                        )
+                    })
+                    .child(
+                        ui::icon_button(
+                            "ag-model-pop-x",
+                            IconName::X,
+                            ui::IconBtn::Sm,
+                            t("ui.cancel"),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.agent_hub.model_popover = None;
+                            cx.notify();
+                        })),
+                    ),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(kv_row(
+                        t("ag.model_provider"),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(5.))
+                            .child(div().size(px(6.)).rounded_full().bg(provider_col))
+                            .child(
+                                div()
+                                    .text_size(px(ui::fs_small()))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(c(th.text))
+                                    .child(provider_name),
+                            )
+                            .into_any_element(),
+                    ))
+                    .when(pop.billing != BillingMode::Unknown, |d| {
+                        let (lbl, col) = match pop.billing {
+                            BillingMode::Subscription => (t("ag.billing_sub"), c(th.accent)),
+                            BillingMode::Api => (t("ag.billing_api"), c(th.overlay1)),
+                            BillingMode::Unknown => ("", c(th.overlay1)),
+                        };
+                        d.child(kv_row(
+                            t("ag.model_billing"),
+                            div()
+                                .px(px(6.))
+                                .py(px(1.))
+                                .rounded(px(ui::R_SM))
+                                .bg(col.opacity(0.14))
+                                .text_size(px(ui::fs_caption()))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(col)
+                                .child(lbl)
+                                .into_any_element(),
+                        ))
+                    })
+                    .when_some(pop.model_raw.clone(), |d, raw| {
+                        d.child(kv_row(
+                            t("ag.model_id"),
+                            div()
+                                .text_size(px(ui::fs_caption()))
+                                .font_family(ui::mono_family())
+                                .text_color(c(th.subtext))
+                                .child(raw)
+                                .into_any_element(),
+                        ))
+                    })
+                    .when_some(pop.window_tokens, |d, win| {
+                        d.child(kv_row(
+                            t("ag.model_window"),
+                            div()
+                                .text_size(px(ui::fs_small()))
+                                .text_color(c(th.subtext))
+                                .child(format!("{} tokens", agent::format_tokens(win)))
+                                .into_any_element(),
+                        ))
+                    })
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(kv_row(
+                                t("ag.model_speed"),
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(4.))
+                                    .child(icon(
+                                        IconName::Zap,
+                                        ui::IC_XS,
+                                        if pop.working_secs.is_some() || pop.speed_tps.is_some() {
+                                            c(th.accent)
+                                        } else {
+                                            c(th.overlay0)
+                                        },
+                                    ))
+                                    .child(
+                                        div()
+                                            .text_size(px(ui::fs_small()))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(
+                                                if pop.working_secs.is_some()
+                                                    || pop.speed_tps.is_some()
+                                                {
+                                                    c(th.text)
+                                                } else {
+                                                    c(th.overlay1)
+                                                },
+                                            )
+                                            .child(speed_val),
+                                    )
+                                    .into_any_element(),
+                            ))
+                            .when_some(speed_sub, |d, sub| {
+                                d.child(
+                                    div()
+                                        .w_full()
+                                        .flex()
+                                        .justify_end()
+                                        .text_size(px(ui::fs_caption()))
+                                        .text_color(c(th.overlay0))
+                                        .child(sub),
+                                )
+                            }),
+                    ),
+            )
+            .when_some(desc, |d, txt| {
+                d.child(
+                    div()
+                        .w_full()
+                        .pt(px(8.))
+                        .border_t_1()
+                        .border_color(crate::theme::divider())
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.))
+                        .child(
+                            div()
+                                .text_size(px(ui::fs_caption()))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(c(th.overlay1))
+                                .child(t("ag.model_desc_title")),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(ui::fs_caption()))
+                                .text_color(c(th.subtext))
+                                .child(txt),
+                        ),
+                )
+            });
+
+        div()
+            .id("ag-model-pop-backdrop")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .occlude()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.agent_hub.model_popover = None;
+                    cx.notify();
+                }),
+            )
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(|this, _, _, cx| {
+                    this.agent_hub.model_popover = None;
+                    cx.notify();
+                }),
+            )
+            .child(
+                gpui::deferred(
+                    gpui::anchored()
+                        .anchor(gpui::Anchor::BottomRight)
+                        .position(pop.pos)
+                        .snap_to_window_with_margin(px(ui::EDGE_MARGIN))
+                        .child(crate::chrome::pop_in("ag-model-pop-anim", card)),
+                )
+                .with_priority(4),
+            )
+            .into_any_element()
+    }
+
+    fn render_quota_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let th = cur();
+        let pop = self.agent_hub.quota_popover.clone().unwrap();
+        let card_w = 316.0_f32;
+        let bar_w = card_w - 28.0;
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        let badge_lbl = match pop.quota.as_ref().and_then(|q| q.plan.as_deref()) {
+            Some(plan) => format!("{} · {plan}", agent::display_name(&pop.agent)),
+            None => agent::display_name(&pop.agent).to_string(),
+        };
+
+        let render_window_row = |w: &QuotaWindow, hint: Option<&str>| -> AnyElement {
+            let left_pct = 100u8.saturating_sub(w.used_pct.min(100));
+            let tone = quota_left_tone(left_pct);
+            let reset_txt = w
+                .resets_at
+                .and_then(|ts| format_reset_countdown(ts, now_secs))
+                .or_else(|| hint.map(str::to_string));
+            let win_title = match w.label.as_str() {
+                "5h" => "5h limit".to_string(),
+                "7d" => "Weekly limit".to_string(),
+                other => other.to_string(),
+            };
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_baseline()
+                        .justify_between()
+                        .gap(px(ui::SP_2))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(ui::SP_1 + 2.))
+                                .child(
+                                    div()
+                                        .text_size(px(ui::fs_small()))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(c(th.text))
+                                        .child(win_title),
+                                )
+                                .when_some(reset_txt, |d, rt| {
+                                    d.child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(3.))
+                                            .text_size(px(ui::fs_caption()))
+                                            .text_color(c(th.overlay1))
+                                            .child(icon(IconName::Clock, ui::IC_XS, c(th.overlay0)))
+                                            .child(rt),
+                                    )
+                                }),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(ui::fs_small()))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(tone)
+                                .child(tf("ag.quota_left", &[("p", &left_pct)])),
+                        ),
+                )
+                .child(ui::micro_bar((left_pct as f32) / 100.0, bar_w, 5., tone))
+                .into_any_element()
+        };
+
+        let mut quota_rows: Vec<AnyElement> = Vec::new();
+        if let Some(ref q) = pop.quota {
+            if !q.groups.is_empty() {
+                for (gi, grp) in q.groups.iter().enumerate() {
+                    let mut grp_col = div()
+                        .w_full()
+                        .when(gi > 0, |d| {
+                            d.pt(px(6.)).border_t_1().border_color(crate::theme::divider())
+                        })
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.))
+                        .child(
+                            div()
+                                .text_size(px(ui::fs_caption()))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(c(th.subtext))
+                                .child(grp.name.clone()),
+                        );
+                    for w in &grp.windows {
+                        grp_col = grp_col.child(render_window_row(w, None));
+                    }
+                    quota_rows.push(grp_col.into_any_element());
+                }
+            } else {
+                quota_rows.push(render_window_row(&q.primary, pop.resets_hint.as_deref()));
+                if let Some(ref sec) = q.secondary {
+                    quota_rows.push(render_window_row(sec, None));
+                }
+            }
+        }
+
+        let render_local_row = |title: &'static str, w: &agent_history::LocalUsageWindow| -> AnyElement {
+            let total_s = agent::format_tokens_precise(w.total_tokens());
+            let in_s = agent::format_tokens(w.input_tokens);
+            let cache_s = agent::format_tokens(w.cache_read_tokens);
+            let out_s = agent::format_tokens(w.output_tokens);
+            let detail = tf(
+                "ag.quota_tok_detail",
+                &[
+                    ("in", &in_s),
+                    ("cache", &cache_s),
+                    ("out", &out_s),
+                    ("n", &w.turns),
+                ],
+            );
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_baseline()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_size(px(ui::fs_small()))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(c(th.text))
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(ui::fs_small()))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(c(th.accent))
+                                .child(format!("{total_s} tok")),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(px(ui::fs_caption()))
+                        .text_color(c(th.overlay1))
+                        .child(detail),
+                )
+                .into_any_element()
+        };
+
+        let card = div()
+            .id("ag-quota-pop-card")
+            .w(px(card_w))
+            .occlude()
+            .p(px(14.))
+            .rounded(px(ui::R_LG))
+            .bg(crate::theme::overlay_card_bg(1.0))
+            .border_1()
+            .border_color(crate::theme::overlay_border())
+            .shadow(crate::chrome::soft_shadow(true))
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(gpui::MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .gap(px(ui::SP_2))
+                            .child(icon(IconName::Gauge, ui::IC_SM, c(th.accent)))
+                            .child(
+                                div()
+                                    .text_size(px(ui::fs_body()))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(c(th.text))
+                                    .child(t("ag.quota_title")),
+                            )
+                            .child(
+                                div()
+                                    .px(px(5.))
+                                    .py(px(1.))
+                                    .rounded(px(ui::R_SM))
+                                    .bg(crate::theme::sub_bg())
+                                    .border_1()
+                                    .border_color(crate::theme::divider())
+                                    .text_size(px(ui::fs_caption()))
+                                    .text_color(c(th.overlay1))
+                                    .child(badge_lbl),
+                            )
+                            .child(div().flex_1())
+                            .when(pop.agent == "agy", |d| {
+                                d.child(
+                                    ui::icon_button(
+                                        "ag-quota-pop-ref",
+                                        IconName::RefreshCw,
+                                        ui::IconBtn::Sm,
+                                        t("ag.quota_refresh"),
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.maybe_refresh_live_quota(true, cx);
+                                    })),
+                                )
+                            })
+                            .child(
+                                ui::icon_button(
+                                    "ag-quota-pop-x",
+                                    IconName::X,
+                                    ui::IconBtn::Sm,
+                                    t("ui.cancel"),
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.agent_hub.quota_popover = None;
+                                    cx.notify();
+                                })),
+                            ),
+                    )
+                    .when_some(pop.model.clone(), |d, m| {
+                        d.child(
+                            div()
+                                .text_size(px(ui::fs_caption()))
+                                .text_color(c(th.overlay1))
+                                .child(tf("ag.model_tip", &[("m", &m)])),
+                        )
+                    }),
+            )
+            .when(!quota_rows.is_empty(), |d| {
+                d.child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
+                        .children(quota_rows),
+                )
+            })
+            .when_some(pop.local_usage.as_ref(), |d, sum| {
+                d.child(
+                    div()
+                        .w_full()
+                        .when(pop.quota.is_some(), |el| {
+                            el.pt(px(8.)).border_t_1().border_color(crate::theme::divider())
+                        })
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
+                        .child(render_local_row(t("ag.quota_local_5h"), &sum.win_5h))
+                        .child(render_local_row(t("ag.quota_local_24h"), &sum.win_24h)),
+                )
+            })
+            .when(pop.quota.is_none() && pop.local_usage.is_none(), |d| {
+                d.child(
+                    div()
+                        .text_size(px(ui::fs_small()))
+                        .text_color(c(th.overlay1))
+                        .child(if pop.loading {
+                            t("ui.loading")
+                        } else {
+                            t("ag.quota_empty")
+                        }),
+                )
+            })
+            .when(pop.quota.is_none(), |d| {
+                d.child(
+                    div()
+                        .w_full()
+                        .pt(px(6.))
+                        .border_t_1()
+                        .border_color(crate::theme::divider())
+                        .text_size(px(ui::fs_caption()))
+                        .text_color(c(th.overlay0))
+                        .child(t("ag.quota_no_pct_note")),
+                )
+            });
+
+        div()
+            .id("ag-quota-pop-backdrop")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .occlude()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.agent_hub.quota_popover = None;
+                    cx.notify();
+                }),
+            )
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(|this, _, _, cx| {
+                    this.agent_hub.quota_popover = None;
+                    cx.notify();
+                }),
+            )
+            .child(
+                gpui::deferred(
+                    gpui::anchored()
+                        .anchor(gpui::Anchor::BottomRight)
+                        .position(pop.pos)
+                        .snap_to_window_with_margin(px(ui::EDGE_MARGIN))
+                        .child(crate::chrome::pop_in("ag-quota-pop-anim", card)),
+                )
+                .with_priority(4),
+            )
+            .into_any_element()
     }
 
     fn render_context_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -5941,15 +7408,29 @@ fn render_running_row_el(
         let run_count = self.count_running_agent_panes(cx);
         let total_hist = self.agent_hub.sessions.len();
 
-        let (focus_label, focus_working, branch_label, ctx_info, has_wt_tab, active_tab_idx) = self
+        struct BarTelemetry {
+            agent_id: Option<String>,
+            focus_label: String,
+            focus_state: Option<AgentState>,
+            focus_working: bool,
+            branch_label: String,
+            ctx_info: Option<ResolvedContext>,
+            model_short: Option<String>,
+            quota_pct: Option<(String, u8, String)>, // (window_label, left_pct, tooltip)
+            local_5h_label: Option<String>,
+            speed_label: Option<String>,
+            has_wt_tab: bool,
+            active_tab_idx: usize,
+        }
+
+        let bar = self
             .tabs
             .get(self.active)
             .map(|tab| {
                 let v = tab.focused.read(cx);
                 let ag_lbl = v.agent_label();
-                let working = ag_lbl
-                    .as_ref()
-                    .is_some_and(|(_, st)| *st == AgentState::Working);
+                let focus_state = ag_lbl.as_ref().map(|(_, st)| *st);
+                let working = focus_state == Some(AgentState::Working);
                 let ag = ag_lbl
                     .map(|(n, st)| format!("{n} · {}", st.label()))
                     .unwrap_or_default();
@@ -5975,15 +7456,159 @@ fn render_running_row_el(
                     .agent_session_id
                     .as_deref()
                     .and_then(|sid| self.agent_hub.sessions.iter().find(|m| m.id == sid));
-                let screen_ctx = v
+                let aid = bound_meta
+                    .map(|m| m.agent.clone())
+                    .or_else(|| v.resolved_agent_id().map(|a| agent::normalize_id(&a)));
+                let screen_txt = v
                     .session
                     .as_ref()
-                    .and_then(|s| agent::screen_context_usage(&s.screen_text()));
+                    .map(|s| s.screen_text())
+                    .unwrap_or_default();
+                let screen_ctx = (!screen_txt.is_empty())
+                    .then(|| agent::screen_context_usage(&screen_txt))
+                    .flatten();
                 let ctx_info = resolve_context(bound_meta, screen_ctx.as_ref());
+
+                let model_raw = bound_meta
+                    .and_then(|m| m.model.clone())
+                    .or_else(|| {
+                        (!screen_txt.is_empty())
+                            .then(|| agent::screen_model_name(&screen_txt))
+                            .flatten()
+                    })
+                    .or_else(|| aid.as_deref().and_then(default_model_for_agent));
+                let model_short = model_raw
+                    .as_deref()
+                    .map(agent_history::format_model_short)
+                    .filter(|s| !s.is_empty());
+
+                let billing = if bound_meta.and_then(|m| m.quota.as_ref()).is_some() {
+                    BillingMode::Subscription
+                } else {
+                    aid.as_deref()
+                        .map(agent_history::detect_billing_mode)
+                        .unwrap_or(BillingMode::Unknown)
+                };
+
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                let resolved_quota = if billing == BillingMode::Api {
+                    None
+                } else {
+                    bound_meta
+                        .and_then(|m| m.quota.clone())
+                        .or_else(|| {
+                            aid.as_deref()
+                                .and_then(|a| self.agent_hub.live_quota.get(a))
+                                .map(|lq| {
+                                    agent_history::select_antigravity_quota_for_model(
+                                        lq,
+                                        model_raw.as_deref(),
+                                    )
+                                })
+                        })
+                };
+
+                let quota_pct = if billing == BillingMode::Api {
+                    None
+                } else if let Some(q) = resolved_quota {
+                    let left_pct = 100u8.saturating_sub(q.primary.used_pct.min(100));
+                    let mut tip_parts = vec![format!(
+                        "{} {}",
+                        q.primary.label,
+                        tf("ag.quota_left", &[("p", &left_pct)])
+                    )];
+                    if let Some(rt) = q
+                        .primary
+                        .resets_at
+                        .and_then(|ts| format_reset_countdown(ts, now_secs))
+                    {
+                        tip_parts.push(rt);
+                    }
+                    if let Some(ref sec) = q.secondary {
+                        let sec_left = 100u8.saturating_sub(sec.used_pct.min(100));
+                        tip_parts.push(format!(
+                            "{} {}",
+                            sec.label,
+                            tf("ag.quota_left", &[("p", &sec_left)])
+                        ));
+                    }
+                    tip_parts.push(t("ag.quota_view").to_string());
+                    Some((q.primary.label, left_pct, tip_parts.join(" · ")))
+                } else if let Some(sq) = (!screen_txt.is_empty())
+                    .then(|| agent::screen_quota_usage(&screen_txt))
+                    .flatten()
+                {
+                    let left_pct = 100u8.saturating_sub(sq.used_pct.min(100));
+                    let tip = format!(
+                        "{} {} · {}",
+                        sq.label,
+                        tf("ag.quota_left", &[("p", &left_pct)]),
+                        t("ag.quota_view")
+                    );
+                    Some((sq.label, left_pct, tip))
+                } else {
+                    None
+                };
+
+                let local_5h_label = if billing == BillingMode::Subscription && quota_pct.is_none()
+                {
+                    aid.as_deref()
+                        .and_then(|a| self.agent_hub.local_usage.get(a))
+                        .filter(|u| u.win_5h.total_tokens() > 0)
+                        .map(|u| format!("5h {}", agent::format_tokens(u.win_5h.total_tokens())))
+                } else {
+                    None
+                };
+
+                let speed_label = if working {
+                    Some(format_wait(v.agent_state_since.elapsed().as_secs()))
+                } else {
+                    bound_meta.and_then(|m| m.speed_tps()).map(|tps| {
+                        if tps >= 10.0 {
+                            format!("{tps:.0} tok/s")
+                        } else {
+                            format!("{tps:.1} tok/s")
+                        }
+                    })
+                };
+
                 let wt = tab.task.as_ref().and_then(|t| t.worktree.as_ref()).is_some();
-                (ag, working, br, ctx_info, wt, self.active)
+                BarTelemetry {
+                    agent_id: aid,
+                    focus_label: ag,
+                    focus_state,
+                    focus_working: working,
+                    branch_label: br,
+                    ctx_info,
+                    model_short,
+                    quota_pct,
+                    local_5h_label,
+                    speed_label,
+                    has_wt_tab: wt,
+                    active_tab_idx: self.active,
+                }
             })
-            .unwrap_or_default();
+            .unwrap_or(BarTelemetry {
+                agent_id: None,
+                focus_label: String::new(),
+                focus_state: None,
+                focus_working: false,
+                branch_label: String::new(),
+                ctx_info: None,
+                model_short: None,
+                quota_pct: None,
+                local_5h_label: None,
+                speed_label: None,
+                has_wt_tab: false,
+                active_tab_idx: 0,
+            });
+
+        let has_quota_item = bar.quota_pct.is_some() || bar.local_5h_label.is_some();
+        let has_model_pill = bar.model_short.is_some() || !bar.focus_label.is_empty();
+        let active_tab_idx = bar.active_tab_idx;
 
         div()
             .id("ag-center-bar")
@@ -6035,21 +7660,94 @@ fn render_running_row_el(
                     )),
             )
             .child(div().flex_1())
-            .when(!branch_label.is_empty(), |d| {
+            .when(!bar.branch_label.is_empty(), |d| {
                 d.child(
                     div()
+                        .id("ag-bar-git")
+                        .cursor_pointer()
+                        .px(px(ui::SP_1 + 2.))
+                        .py(px(2.))
+                        .rounded(px(ui::R_SM))
+                        .hover(|s| s.bg(crate::theme::hover_bg()))
+                        .tooltip(ui::tip(t("ag.git_view")))
+                        .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _, cx| {
+                            this.toggle_git_popover_from_bar(ev.position(), cx);
+                        }))
                         .flex()
                         .items_center()
                         .gap(px(ui::SP_1))
                         .child(icon(IconName::FolderGit, ui::IC_XS, c(th.overlay1)))
-                        .child(ui::mono(branch_label)),
+                        .child(ui::mono(bar.branch_label.clone())),
                 )
             })
-            .when_some(ctx_info.as_ref(), |d, rc| {
+            .when_some(bar.ctx_info.as_ref(), |d, rc| {
                 let tip = format!("{} · {}", rc.tooltip, t("ag.ctx_view"));
-                d.child(
+                d.when(!bar.branch_label.is_empty(), |el| el.child(bar_sep()))
+                    .child(
+                        div()
+                            .id("ag-bar-ctx")
+                            .cursor_pointer()
+                            .px(px(ui::SP_1 + 2.))
+                            .py(px(2.))
+                            .rounded(px(ui::R_SM))
+                            .hover(|s| s.bg(crate::theme::hover_bg()))
+                            .tooltip(ui::tip(tip))
+                            .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _, cx| {
+                                this.toggle_context_popover_from_bar(ev.position(), cx);
+                            }))
+                            .child(render_ctx_bar(Some(rc.frac), &rc.bar_label, true)),
+                    )
+            })
+            .when(has_quota_item, |d| {
+                let has_prev = bar.ctx_info.is_some() || !bar.branch_label.is_empty();
+                let (tip, inner): (String, AnyElement) = if let Some((lbl, left_pct, tip)) =
+                    bar.quota_pct.as_ref()
+                {
+                    let tone = quota_left_tone(*left_pct);
+                    let el = div()
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(ui::SP_1 + 1.))
+                        .child(icon(IconName::Gauge, ui::IC_XS, c(th.overlay1)))
+                        .child(
+                            div()
+                                .text_size(px(ui::fs_caption()))
+                                .text_color(c(th.overlay1))
+                                .child(lbl.clone()),
+                        )
+                        .child(ui::micro_bar((*left_pct as f32) / 100.0, 32., 5., tone))
+                        .child(
+                            div()
+                                .text_size(px(ui::fs_caption()))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(if *left_pct <= 20 { tone } else { c(th.subtext) })
+                                .child(format!("{left_pct}%")),
+                        )
+                        .into_any_element();
+                    (tip.clone(), el)
+                } else {
+                    let lbl = bar.local_5h_label.clone().unwrap_or_default();
+                    let tip = t("ag.quota_view").to_string();
+                    let el = div()
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .child(icon(IconName::Gauge, ui::IC_XS, c(th.overlay1)))
+                        .child(
+                            div()
+                                .text_size(px(ui::fs_caption()))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(c(th.subtext))
+                                .child(lbl),
+                        )
+                        .into_any_element();
+                    (tip, el)
+                };
+                d.when(has_prev, |el| el.child(bar_sep())).child(
                     div()
-                        .id("ag-bar-ctx")
+                        .id("ag-bar-quota")
                         .cursor_pointer()
                         .px(px(ui::SP_1 + 2.))
                         .py(px(2.))
@@ -6057,21 +7755,77 @@ fn render_running_row_el(
                         .hover(|s| s.bg(crate::theme::hover_bg()))
                         .tooltip(ui::tip(tip))
                         .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _, cx| {
-                            this.toggle_context_popover_from_bar(ev.position(), cx);
+                            this.toggle_quota_popover_from_bar(ev.position(), cx);
                         }))
-                        .child(render_ctx_ring(Some(rc.frac), &rc.bar_label, true)),
+                        .child(inner),
                 )
             })
-            .when(focus_working, |d| {
-                d.child(ui::spinning_icon(
-                    "ag-bar-spin",
-                    IconName::LoaderCircle,
-                    ui::IC_XS,
-                    c(th.accent),
-                ))
+            .when(has_model_pill, |d| {
+                let has_prev =
+                    has_quota_item || bar.ctx_info.is_some() || !bar.branch_label.is_empty();
+                let pill_label = bar
+                    .model_short
+                    .clone()
+                    .unwrap_or_else(|| bar.focus_label.clone());
+                let mut tip_parts: Vec<String> = Vec::new();
+                if !bar.focus_label.is_empty() {
+                    tip_parts.push(bar.focus_label.clone());
+                }
+                if let Some(ref sp) = bar.speed_label {
+                    tip_parts.push(sp.clone());
+                }
+                tip_parts.push(t("ag.model_view").to_string());
+                let tip = tip_parts.join(" · ");
+
+                let lead_icon: AnyElement = if bar.focus_working {
+                    ui::spinning_icon(
+                        "ag-bar-spin",
+                        IconName::LoaderCircle,
+                        ui::IC_XS,
+                        c(th.accent),
+                    )
+                    .into_any_element()
+                } else if let Some(aid) = bar.agent_id.as_deref() {
+                    let col = match bar.focus_state {
+                        Some(AgentState::Blocked) => c(th.error),
+                        Some(AgentState::Done) => c(th.success),
+                        _ => agent_badge_color(aid),
+                    };
+                    match crate::file_icon::agent_glyph_path(aid) {
+                        Some(path) => ui::icon_svg(path, ui::IC_XS, col).into_any_element(),
+                        None => icon(IconName::Cpu, ui::IC_XS, col).into_any_element(),
+                    }
+                } else {
+                    icon(IconName::Cpu, ui::IC_XS, c(th.overlay1)).into_any_element()
+                };
+
+                d.when(has_prev, |el| el.child(bar_sep())).child(
+                    div()
+                        .id("ag-bar-model")
+                        .cursor_pointer()
+                        .flex_shrink_0()
+                        .px(px(ui::SP_1 + 2.))
+                        .py(px(2.))
+                        .rounded(px(ui::R_SM))
+                        .hover(|s| s.bg(crate::theme::hover_bg()))
+                        .tooltip(ui::tip(tip))
+                        .on_click(cx.listener(|this, ev: &gpui::ClickEvent, _, cx| {
+                            this.toggle_model_popover_from_bar(ev.position(), cx);
+                        }))
+                        .flex()
+                        .items_center()
+                        .gap(px(5.))
+                        .child(lead_icon)
+                        .child(
+                            div()
+                                .text_size(px(ui::fs_caption()))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(c(th.text))
+                                .child(pill_label),
+                        ),
+                )
             })
-            .when(!focus_label.is_empty(), |d| d.child(focus_label))
-            .when(has_wt_tab, |d| {
+            .when(bar.has_wt_tab, |d| {
                 d.child(
                     ui::button_sm("ag-bar-finish", t("ag.finish_short"), 0)
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -6715,6 +8469,11 @@ mod tests {
             ctx_window: Some(1_000_000),
             ctx_reset: false,
             continued_in: None,
+            model: None,
+            last_speed_tps_x10: None,
+            last_output_tokens: None,
+            last_turn_ms: None,
+            quota: None,
         };
         let noisy_screen = agent::ScreenContextUsage {
             frac: 0.15,
